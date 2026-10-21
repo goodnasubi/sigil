@@ -1,0 +1,76 @@
+// 例 03: 所有権と借用（ADR 0003）
+// 受け取る（T）・読む（&T）・書き換える（&mut T）の 3 種類と、
+// 参照を二級に限る規則（構造体に参照を持てない、参照の返却は借用の引数が 1 つのときだけ）を示す。
+
+struct Account {
+  owner: String,
+  balance: Int,
+}
+
+// 読む: 共有借用。呼び出し後も呼び出し側で account を使える。
+fn balance_of(account: &Account) -> Int
+  intent "口座の残高を返す"
+  requires none
+  ensures result == account.balance
+  effects none
+{
+  return account.balance;
+}
+
+// 書き換える: 排他借用。呼び出しの間、account への他の借用は許されない。
+// ensures の old(x) は、呼び出し前の x の値を表す（表記は未決。仮のもの）。
+fn deposit(account: &mut Account, amount: Int)
+  intent "口座に入金する"
+  requires amount > 0
+  ensures account.balance == old(account.balance) + amount
+  effects none
+{
+  account.balance = account.balance + amount;
+}
+
+// 受け取る: 所有権の移動。呼び出し後、呼び出し側では account を使えない。
+fn close(account: Account) -> Int
+  intent "口座を閉じ、払い戻す金額を返す"
+  requires account.balance >= 0
+  ensures result == account.balance
+  effects none
+{
+  return account.balance;
+  // account はここで破棄される
+}
+
+// 参照の返却: 借用の引数がちょうど 1 つなので許される。
+// 返した参照は accounts から借りたものとみなす。
+fn richest(accounts: &List<Account>) -> Option<&Account>
+  intent "残高が最大の口座を返す。口座がなければ none を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return accounts.max_by(|a| a.balance);
+}
+
+fn main()
+  intent "所有権と借用の使い方を示す"
+  requires none
+  ensures none
+  effects io.print
+{
+  let mut a = Account { owner: "alice", balance: 100 };
+
+  deposit(&mut a, 50);            // 書き換える
+  let b = balance_of(&a);         // 読む（Int は暗黙に複製される）
+  io.print(b);
+
+  let refund = close(a);          // 受け取る: a はここで移動する
+  // balance_of(&a);              // コンパイルエラー: 移動した後の a は使えない
+  io.print(refund);
+}
+
+// 以下はコンパイルエラーになる例（ADR 0003 の規則 3）。
+//
+// struct View {
+//   account: &Account,           // エラー: 構造体に参照は入れられない
+// }
+//
+// fn pick(x: &Account, y: &Account) -> &Account   // エラー: 借用の引数が 2 つあるので参照を返せない

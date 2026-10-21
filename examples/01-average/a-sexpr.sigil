@@ -1,0 +1,12 @@
+;; 例 01: 平均値（候補 A: S 式）
+;; 純粋関数。意図・契約・効果をすべて fn の属性として書く。
+
+(fn average
+  (intent "数値列の算術平均を返す")
+  (params (xs (List Float)))
+  (returns Float)
+  (requires (> (len xs) 0))
+  (ensures (<= (min xs) result (max xs)))
+  (effects)
+  (body
+    (/ (sum xs) (to-float (len xs)))))

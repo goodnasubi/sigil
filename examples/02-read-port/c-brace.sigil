@@ -14,7 +14,7 @@ fn read_port(path: Path) -> Result<Port, ConfigError>
   intent "設定ファイルの内容を整数として読み、ポート番号として返す"
   requires !empty(path)
   ensures none
-  effects fs.read(path)
+  effects fs.read
 {
   let text = fs.read(path).map_err(ConfigError.Io)?;
   return match parse_int(trim(text)) {

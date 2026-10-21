@@ -1,0 +1,9 @@
+# OS / エディタ
+.DS_Store
+.vscode/
+.idea/
+
+# ビルド成果物
+build/
+dist/
+*.out

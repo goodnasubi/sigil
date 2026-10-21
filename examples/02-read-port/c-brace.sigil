@@ -1,4 +1,4 @@
-// 例 02: 設定ファイルからポート番号を読む（候補 C: 波括弧 + 契約節）
+// 例 02: 設定ファイルからポート番号を読む（候補 C: 波括弧 + 契約節）※ ADR 0002 で採用
 // 副作用（ファイル読み込み）と失敗（Result）を含む関数。
 // 値の範囲は篩型（refinement type）で表し、事後条件を型に寄せる。
 
@@ -13,7 +13,8 @@ enum ConfigError {
 fn read_port(path: Path) -> Result<Port, ConfigError>
   intent "設定ファイルの内容を整数として読み、ポート番号として返す"
   requires !empty(path)
-  effects { fs.read(path) }
+  ensures none
+  effects fs.read(path)
 {
   let text = fs.read(path).map_err(ConfigError.Io)?;
   return match parse_int(trim(text)) {

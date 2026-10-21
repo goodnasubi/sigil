@@ -4,7 +4,7 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 
 ## 命名規則
 
-`NNNN-短い題名.md`（例: `0001-syntax-family.md`）
+`NNNN-短い題名.md`（例: `0001-vision-and-scope.md`）
 
 ## 各 ADR の構成
 

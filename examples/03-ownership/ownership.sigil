@@ -54,17 +54,17 @@ fn main()
   intent "所有権と借用の使い方を示す"
   requires none
   ensures none
-  effects io.print
+  effects console
 {
   let mut a = Account { owner: "alice", balance: 100 };
 
   deposit(&mut a, 50);            // 書き換える
   let b = balance_of(&a);         // 読む（Int は暗黙に複製される）
-  io.print(b);
+  console.log(b);
 
   let refund = close(a);          // 受け取る: a はここで移動する
   // balance_of(&a);              // コンパイルエラー: 移動した後の a は使えない
-  io.print(refund);
+  console.log(refund);
 }
 
 // 以下はコンパイルエラーになる例（ADR 0003 の規則 3）。

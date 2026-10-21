@@ -19,6 +19,7 @@
 | [01-average](01-average/) | 数値列の平均値（純粋関数） | 意図・事前条件・事後条件・効果なしの書き方 |
 | [02-read-port](02-read-port/) | 設定ファイルからポート番号を読む | 副作用の宣言、`Result` による失敗、篩型（値の範囲を型に含める） |
 | [03-ownership](03-ownership/) | 口座の入金・照会・解約 | 所有権と借用（受け取る / 読む / 書き換える）、参照を二級に限る規則（[ADR 0003](../docs/decisions/0003-ownership-and-borrowing.md)） |
+| [04-effects](04-effects/) | 税込み価格の計算・価格ファイルの読み込み | 効果の宣言と一致検査、`of(f)` による引き継ぎ、`state` 効果（[ADR 0004](../docs/decisions/0004-effects.md)） |
 
 ## 採用した構文（候補 C）の約束
 

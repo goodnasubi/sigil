@@ -1,0 +1,12 @@
+# 例 01: 平均値（候補 B: インデント + キーワード）
+# 純粋関数。各属性は固定順のキーワード行で書く。
+
+fn average
+  intent   "数値列の算術平均を返す"
+  params   xs: List[Float]
+  returns  Float
+  requires len(xs) > 0
+  ensures  min(xs) <= result and result <= max(xs)
+  effects  none
+  body
+    sum(xs) / to_float(len(xs))

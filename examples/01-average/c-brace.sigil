@@ -1,0 +1,11 @@
+// 例 01: 平均値（候補 C: 波括弧 + 契約節）
+// 純粋関数。シグネチャの後に契約節を並べ、本体を波括弧で囲む。
+
+fn average(xs: List<Float>) -> Float
+  intent "数値列の算術平均を返す"
+  requires len(xs) > 0
+  ensures min(xs) <= result && result <= max(xs)
+  effects {}
+{
+  return sum(xs) / to_float(len(xs));
+}

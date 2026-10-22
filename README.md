@@ -1,6 +1,11 @@
-# 🌸 Sigil Programming Language ✨
-
 <div align="center">
+  <!-- 💚 お手持ちのロゴ画像をリポジトリにアップロード後、srcのパスを書き換えてください -->
+  <img src="https://githubusercontent.com" alt="Sigil Logo" width="220">
+
+  <h1>💚 Sigil Programming Language ✨</h1>
+
+  <p><i>"Powered by Mint, Sweetening Code."</i></p>
+
   <img src="https://shields.io" alt="Style"/>
   <img src="https://shields.io" alt="License"/>
   <img src="https://shields.io" alt="Version"/>
@@ -9,7 +14,7 @@
 ---
 
 ### 🍵 ようこそ、Sigilの世界へ！
-**Sigil**は、まるでカフェで美味しいマカロンを味わっているときのような、**心地よさと直感的な美しさ**を大切にした新しいプログラミング言語です。
+**Sigil**は、あの愛らしい緑のちいさな相棒がフォースで引き寄せた**お気に入りのミントマカロン**のように、ひとくちで心をときめかせる**心地よさと美しさ**を大切にした新しいプログラミング言語です。
 
 コードを書く時間が、もっと楽しく、もっとあなたらしくなるように。魔法の印（Sigil）を紡ぐように、お気に入りのロジックをデザインしてみませんか？
 
@@ -17,25 +22,25 @@
 
 ## 🎀 3つのときめきポイント (Features)
 
-* **ストロベリー・シンタックス (Sweet Syntax)**
-  甘くてシンプル。無駄な記号をそぎ落とし、まるでダイアリーを読んでいるかのように滑らかに頭に入ってくるコードデザインです。
-
 * **ミント・セーフティ (Refreshing Safety)**
-  ミントのように爽快でタフな静的型チェック。バグを事前に優しくキャッチし、あなたの開発ライフの安心を守ります。
+  爽快でタフな静的型チェック。バグを事前に優しくキャッチし、あなたの開発ライフの安心をフォースのようにそっと守ります。
 
-* **バニラ・エコシステム (Pure & Light Ecosystem)**
+* **マカロン・シンタックス (Sweet Syntax)**
+  甘くてシンプル。無駄な記号をそぎ落とし、まるで可愛いブログのダイアリーを読んでいるかのように滑らかに頭に入ってくるコードデザインです。
+
+* **パステル・エコシステム (Pure & Light Ecosystem)**
   余計なものは一切なし。ピュアで軽量なコアランタイムにより、どんな環境でもサクサクと軽快に動き出します。
 
 ---
 
 ## 🎨 コードのぞき見 (Hello, Sigil!)
 
-まずは一番シンプルな魔法を使ってみましょう。ストロベリーミルクのように優しいコードの佇まいを感じてください。
+まずは一番シンプルな魔法を使ってみましょう。爽やかなミントミルクのように優しいコードの佇まいを感じてください。
 
 ```sigil
-// 🌸 はじめての魔法
+// 💚 はじめての魔法
 cast spell invocation() {
-    let greeting = "Hello, Sweet World!"
+    let greeting = "Hello, Sweet Mint World!"
     print(greeting)
 }
 
@@ -66,15 +71,14 @@ sigil run welcome.sigil
 
 ## 🍰 カラーパレットと世界観 (Design Identity)
 
-Sigilのコミュニティやツールチェーンは、以下の**マカロンパステル**な世界観で統一されています。
+Sigilのコミュニティやツールチェーンは、以下の**ミント＆マカロンパステル**な世界観で統一されています。
 
 | カラー名 | カラーコード | 役割 |
 | :--- | :--- | :--- |
-| **Strawberry Pink** | `#FFB3BA` | メインアクセント・キーワード |
-| **Apricot Peach** | `#FFDFBA` | 警告・インフォメーション |
+| **Nevarro Mint** | `#BFE3DB` | メインアクセント・キーワード（グローグーのマカロン色） |
+| **Macaron Pink** | `#FFD1DC` | サブアクセント・型名 |
 | **Lemon Yellow** | `#FFFFBA` | ストリング・リテラル |
-| **Mint Green** | `#BFFCC6` | 成功ステータス・数値型 |
-| **Lavender Blue** | `#BAE1FF` | 関数名・ビルトイン魔法 |
+| **Lavender Spell** | `#E8DCFA` | 関数名・ビルトイン魔法 |
 
 ---
 
@@ -90,9 +94,10 @@ Sigilはみんなで育てるオープンソースの秘密基地です。
 ---
 
 <div align="center">
-  <p>Made with 🤍 and a cup of tea.</p>
+  <p>Made with 💚 and a cup of mint tea.</p>
   <p>Copyright © 2026 Sigil Core Team. Licensed under the MIT License.</p>
 </div>
+
 
 ---
 

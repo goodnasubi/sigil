@@ -2,7 +2,6 @@
 
 <div align="center">
   <img src="https://shields.io" alt="Style"/>
-  [LICENSE](LICENSE)
   <img src="https://shields.io" alt="License"/>
   <img src="https://shields.io" alt="Version"/>
 </div>

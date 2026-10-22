@@ -1,3 +1,101 @@
+# 🌸 Sigil Programming Language ✨
+
+<div align="center">
+  <img src="https://shields.io" alt="Style"/>
+  <img src="https://shields.io" alt="License"/>
+  <img src="https://shields.io" alt="Version"/>
+</div>
+
+---
+
+### 🍵 ようこそ、Sigilの世界へ！
+**Sigil**は、まるでカフェで美味しいマカロンを味わっているときのような、**心地よさと直感的な美しさ**を大切にした新しいプログラミング言語です。
+
+コードを書く時間が、もっと楽しく、もっとあなたらしくなるように。魔法の印（Sigil）を紡ぐように、お気に入りのロジックをデザインしてみませんか？
+
+---
+
+## 🎀 3つのときめきポイント (Features)
+
+* **ストロベリー・シンタックス (Sweet Syntax)**
+  甘くてシンプル。無駄な記号をそぎ落とし、まるでダイアリーを読んでいるかのように滑らかに頭に入ってくるコードデザインです。
+
+* **ミント・セーフティ (Refreshing Safety)**
+  ミントのように爽快でタフな静的型チェック。バグを事前に優しくキャッチし、あなたの開発ライフの安心を守ります。
+
+* **バニラ・エコシステム (Pure & Light Ecosystem)**
+  余計なものは一切なし。ピュアで軽量なコアランタイムにより、どんな環境でもサクサクと軽快に動き出します。
+
+---
+
+## 🎨 コードのぞき見 (Hello, Sigil!)
+
+まずは一番シンプルな魔法を使ってみましょう。ストロベリーミルクのように優しいコードの佇まいを感じてください。
+
+```sigil
+// 🌸 はじめての魔法
+cast spell invocation() {
+    let greeting = "Hello, Sweet World!"
+    print(greeting)
+}
+
+invocation()
+```
+
+---
+
+## 🚀 はじめかた (Quick Start)
+
+あなたのお手元の環境に、またたく間にSigilをインストールできます。
+
+### 1. 魔法陣の準備 (Installation)
+ターミナルを開いて、以下のコマンドをそっと実行してください。
+
+```bash
+curl -fsSL https://sigil-lang.org | sh
+```
+
+### 2. スクリプトの実行 (Run Your First Spell)
+拡張子 `.sigil` のファイルを作ったら、いよいよ起動です。
+
+```bash
+sigil run welcome.sigil
+```
+
+---
+
+## 🍰 カラーパレットと世界観 (Design Identity)
+
+Sigilのコミュニティやツールチェーンは、以下の**マカロンパステル**な世界観で統一されています。
+
+| カラー名 | カラーコード | 役割 |
+| :--- | :--- | :--- |
+| **Strawberry Pink** | `#FFB3BA` | メインアクセント・キーワード |
+| **Apricot Peach** | `#FFDFBA` | 警告・インフォメーション |
+| **Lemon Yellow** | `#FFFFBA` | ストリング・リテラル |
+| **Mint Green** | `#BFFCC6` | 成功ステータス・数値型 |
+| **Lavender Blue** | `#BAE1FF` | 関数名・ビルトイン魔法 |
+
+---
+
+## 🤝 一緒にお茶しませんか？ (Contributing)
+
+Sigilはみんなで育てるオープンソースの秘密基地です。
+「このシンタックスをもっと可愛くしたい！」「このエラーメッセージを優しくしたい！」といったアイデアがあれば、いつでもお気軽に Pull Request や Issue を投げてくださいね。
+
+1. このリポジトリを **Fork** する 🍴
+2. あなたのアイデアを **Branch** にまとめる 🌿
+3. 楽しんでコードを書き、**Pull Request** を送る 🎉
+
+---
+
+<div align="center">
+  <p>Made with 🤍 and a cup of tea.</p>
+  <p>Copyright © 2026 Sigil Core Team. Licensed under the MIT License.</p>
+</div>
+
+---
+
 # Sigil
 
 **人間に代わって AI がコーディングするための開発言語。**

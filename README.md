@@ -23,6 +23,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 最終的には、Sigil で次のものを置き換えられるようにすることを目指します（[ADR 0005](docs/decisions/0005-long-term-goals.md)）。
 
 - Next.js（フロントエンドとサーバーを一体で書く Web フレームワーク）
+- Spring（Java のサーバーアプリケーション用フレームワーク）
 - Python
 - データベース
 - Git（ソースを管理するリポジトリ管理）
@@ -36,7 +37,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 | 段階 | 内容 |
 |---|---|
 | P0 | 言語の核（コンパイラ・検査・仕様の表示・標準ライブラリの最小部分・言語サーバー） |
-| P1 | サーバーと Docker コンテナでのリリース |
+| P1 | サーバー（Spring の置き換え）と Docker コンテナでのリリース |
 | P2 | Web フルスタック（Java・React・Node.js・Next.js の置き換え）と IDE |
 | P3 | Python の置き換えと Python 連携 |
 | P4 | データベース・リポジトリ管理（Sigil で書くアプリケーション） |

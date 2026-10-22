@@ -65,7 +65,7 @@
 
 ## 6. 長期目標と段階計画
 
-最終的に Next.js・Python・データベース・Git・Docker コンテナでのリリースとコンテナ管理・OS（ESXi 上の仮想マシンを含む）を置き換え、IDE とブラウザを作ることを目指し、P0（言語の核）から P7（ブラウザ）までの段階で進める（[ADR 0005](decisions/0005-long-term-goals.md)）。
+最終的に Next.js・Spring・Python・データベース・Git・Docker コンテナでのリリースとコンテナ管理・OS（ESXi 上の仮想マシンを含む）を置き換え、IDE とブラウザを作ることを目指し、P0（言語の核）から P7（ブラウザ）までの段階で進める（[ADR 0005](decisions/0005-long-term-goals.md)）。
 
 設計上の帰結:
 

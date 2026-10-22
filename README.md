@@ -1,6 +1,6 @@
 <div align="center">
   <!-- 💚 お手持ちのロゴ画像をリポジトリにアップロード後、srcのパスを書き換えてください -->
-  <img src="https://githubusercontent.com" alt="Sigil Logo" width="220">
+  <img src="sigil-logo-mint.jpg" alt="Sigil Logo" width="220">
 
   <h1>💚 Sigil Programming Language ✨</h1>
 

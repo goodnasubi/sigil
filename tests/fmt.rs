@@ -269,30 +269,47 @@ fn deep_output_is_explicit_error() {
     }
 }
 
+/// 入力がパースできる最大の n（境界）。
+fn max_ok(mk: &dyn Fn(usize) -> String) -> usize {
+    (1..=1000)
+        .rev()
+        .find(|&n| sigil::parse(&mk(n)).is_ok())
+        .expect("パースできる n がない")
+}
+
+/// 境界直下の入力で、format が成功して冪等か、TooDeep / FmtVerify のどちらかであること。
+fn check_boundary(mk: &dyn Fn(usize) -> String) {
+    let n = max_ok(mk);
+    assert!(n >= 50, "境界が浅すぎる: {n}");
+    assert!(sigil::parse(&mk(n)).is_ok());
+    assert!(
+        sigil::parse(&mk(n + 1)).is_err(),
+        "n+1 でパースできてしまう"
+    );
+    for m in [n - 1, n] {
+        let src = mk(m);
+        match format(&src) {
+            Ok(out) => assert_eq!(fmt(&out), out),
+            Err(e) => assert!(
+                e.kind == sigil::ErrorKind::TooDeep || e.kind == sigil::ErrorKind::FmtVerify,
+                "{e}"
+            ),
+        }
+    }
+}
+
 #[test]
 fn long_chains_do_not_break_verification() {
-    for n in [100, 200, 254] {
-        let ops = format!("x{}", " + 1".repeat(n));
-        let r = format(&body(&format!("  return {ops};\n")));
-        if let Ok(out) = r {
-            assert_eq!(fmt(&out), out);
-        }
+    check_boundary(&|n| body(&format!("  return x{};\n", " + 1".repeat(n))));
+    check_boundary(&|n| body(&format!("  return x{};\n", ".a".repeat(n))));
+    check_boundary(&|n| {
         let mut s = String::from("  if a {\n    return 1;\n  }");
         for _ in 0..n {
             s.push_str(" else if a {\n    return 1;\n  }");
         }
         s.push('\n');
-        let src = body(&s);
-        if let Ok(src) = parse_ok(&src) {
-            if let Ok(out) = format(&src) {
-                assert_eq!(fmt(&out), out);
-            }
-        }
-    }
-}
-
-fn parse_ok(s: &str) -> Result<String, ()> {
-    sigil::parse(s).map(|_| s.to_string()).map_err(|_| ())
+        body(&s)
+    });
 }
 
 #[test]

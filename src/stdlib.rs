@@ -141,7 +141,16 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
             ),
         ],
     ),
-    ("Path", &[("is_empty(self: &Path) -> Bool", "none")]),
+    (
+        "Path",
+        &[
+            ("new(s: &String) -> Path", "none"),
+            ("is_empty(self: &Path) -> Bool", "none"),
+            ("join(self: &Path, name: &String) -> Path", "none"),
+            ("file_name(self: &Path) -> Option<String>", "none"),
+            ("parent(self: &Path) -> Option<Path>", "none"),
+        ],
+    ),
     ("<T> Cell<T>", &[("new(value: T) -> Cell<T>", "none")]),
     ("<T> Shared<T>", &[("new(value: T) -> Shared<T>", "none")]),
     (

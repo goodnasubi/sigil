@@ -99,6 +99,11 @@ pub enum ErrorKind {
     UseAfterMove,
     MoveFromRef,
     MovedInLoop,
+    BorrowOverlap,
+    BorrowConflict,
+    TempBorrow,
+    ReturnBorrowRoot,
+    RefSubstitution,
     RedundantAnnotation,
     OldNotCopyable,
     MissingReturn,
@@ -179,6 +184,11 @@ impl ErrorKind {
             | UseAfterMove
             | MoveFromRef
             | MovedInLoop
+            | BorrowOverlap
+            | BorrowConflict
+            | TempBorrow
+            | ReturnBorrowRoot
+            | RefSubstitution
             | RedundantAnnotation
             | OldNotCopyable
             | MissingReturn

@@ -13,7 +13,7 @@
 //! 制約（`T: Equatable` など）は、型が決まった時点で調べ、決まっていなければ本体の終わりまで
 //! 繰り延べる。`let` の型注釈の要否は、注釈を外して本体を検査し直し、同じ型に決まるかで判定する。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ast::*;
 use crate::effects::{EffectTable, Options, Primitive};
@@ -261,6 +261,16 @@ struct Ck {
     skip_use: bool,
     /// `pat` が、値で束縛する Copyable でない部分を見つけた。
     pat_moves: bool,
+    /// 直前に評価した式の値が借りている場所（参照を含む値の「貸し」。ADR 0012 の決定 1 の 3）。
+    res: Vec<Src>,
+    /// 場所の読み出し・借用・移動の記録（1 つの呼び出しの中の重なりの検査用）。
+    log: Vec<Acc>,
+    /// 貸しを持つ変数のうち、使われたもの（ループの次の周での使用の検査用）。
+    used: BTreeSet<String>,
+    /// 置き換えた後のシグネチャ（引数の型・戻り値の型・呼び出しの説明・位置）。型が決まってから調べ直す。
+    sig_checks: Vec<(Vec<Ty>, Ty, String, Span)>,
+    /// 型が決まっていない値の移動の後の使用。型が決まって `Copyable` でないと分かればエラーにする。
+    moved_pending: Vec<(Ty, Error)>,
     last_closure: Vec<Atom>,
     inferred: Vec<Atom>,
 }
@@ -269,7 +279,56 @@ struct Ck {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Flow {
     moved: BTreeMap<String, Span>,
+    /// 型が決まっていない値を移動したかもしれない場所（型が決まってから移動かを調べる）。
+    maybe: BTreeMap<String, (Span, Ty)>,
+    /// 参照を含む値を持つ変数が、いま借りている場所（貸し）。
+    loans: Vec<Loan>,
     dead: bool,
+}
+
+/// 借りている場所（経路と、`&mut` か）。経路が `TEMP` なら一時的な値。
+type Src = (String, bool);
+
+/// 一時的な値を借りている貸しの経路。
+const TEMP: &str = "<temp>";
+
+/// 貸しが使えなくなった理由。
+#[derive(Debug, Clone, PartialEq)]
+enum Dead {
+    /// 借りた場所を、`&mut` の借用・書き換え・移動・（`&mut` の貸しなら）読み出しで使った。
+    Conflict(String),
+    /// 一時的な値が文の終わりで破棄された。
+    Temp,
+}
+
+/// 変数 `holder` が場所 `path` を借りている。使えなくなったら `dead` に位置と理由を入れ、
+/// `holder` を後で使った時点でエラーにする（最後に使う地点までが区間）。
+#[derive(Debug, Clone, PartialEq)]
+struct Loan {
+    holder: String,
+    path: String,
+    mutable: bool,
+    dead: Option<(Span, Dead)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AccKind {
+    Read,
+    Shared,
+    Mut,
+    Move,
+}
+
+/// 1 つの呼び出しの中の、場所の使われ方の記録。
+#[derive(Debug, Clone)]
+struct Acc {
+    path: String,
+    kind: AccKind,
+}
+
+/// 2 つの経路が重なるか（同じか、一方が他方に `.フィールド` を足したもの）。
+fn overlaps(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."))
 }
 
 /// 経路の合流。早期に戻る経路は加えず、そうでなければ移動した場所の和集合（先の位置を残す）。
@@ -284,8 +343,28 @@ fn merge(a: Flow, b: Flow) -> Flow {
     for (k, v) in b.moved {
         m.entry(k).or_insert(v);
     }
+    let mut maybe = a.maybe;
+    for (k, v) in b.maybe {
+        maybe.entry(k).or_insert(v);
+    }
+    let mut loans = a.loans;
+    for l in b.loans {
+        match loans
+            .iter_mut()
+            .find(|x| x.holder == l.holder && x.path == l.path && x.mutable == l.mutable)
+        {
+            Some(x) => {
+                if x.dead.is_none() {
+                    x.dead = l.dead;
+                }
+            }
+            None => loans.push(l),
+        }
+    }
     Flow {
         moved: m,
+        maybe,
+        loans,
         dead: false,
     }
 }
@@ -327,6 +406,11 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
         closure_base: 0,
         skip_use: false,
         pat_moves: false,
+        res: vec![],
+        log: vec![],
+        used: BTreeSet::new(),
+        sig_checks: vec![],
+        moved_pending: vec![],
         last_closure: vec![],
         inferred: vec![],
     };
@@ -1321,6 +1405,11 @@ impl Ck {
         self.closure_base = 0;
         self.skip_use = false;
         self.pat_moves = false;
+        self.res.clear();
+        self.log.clear();
+        self.used.clear();
+        self.sig_checks.clear();
+        self.moved_pending.clear();
     }
 
     fn add_eff(&mut self, a: Atom) {
@@ -1376,6 +1465,21 @@ impl Ck {
                 span,
                 "型が決まらないので、性質を調べられない",
             ));
+        }
+        // 型が決まっていない値の移動の後の使用: `Copyable` と分からなければ移動として扱う
+        for (t, e) in std::mem::take(&mut self.moved_pending) {
+            if self.holds(&self.zonk(&t), Prop::Copyable, 0) != Some(true) {
+                return Err(e);
+            }
+        }
+        for (ps, ret, what, span) in std::mem::take(&mut self.sig_checks) {
+            if let Some(m) = self.subst_problem(&ps, &ret) {
+                return Err(Error::new(
+                    ErrorKind::RefSubstitution,
+                    span,
+                    format!("{what}の型引数に参照を入れた結果が、参照の位置の規則に合わない: {m}"),
+                ));
+            }
         }
         if let Some(t) = self.skipped.take() {
             self.skipped = Some(self.zonk(&t));
@@ -1558,40 +1662,273 @@ impl Ck {
         self.flow
             .moved
             .retain(|k, _| live.contains(&k.split('.').next().unwrap_or(k).to_string()));
+        self.flow
+            .maybe
+            .retain(|k, _| live.contains(&k.split('.').next().unwrap_or(k).to_string()));
+        self.flow.loans.retain(|l| live.contains(&l.holder));
     }
 
     // ---------- 移動（ADR 0012 の決定 1 の 1・2） ----------
 
     /// 場所 `path` を使えるか。移動済み（部分的な移動を含む）ならエラー。
-    fn use_place(&self, path: &str) -> R<()> {
+    /// 型が決まっていない値を移動したかもしれない場所は、型が決まってから調べ直す。
+    fn use_place(&mut self, path: &str) -> R<()> {
         if !self.track || self.refine {
             return Ok(());
         }
-        let hit = self.flow.moved.iter().find(|(k, _)| {
-            k.as_str() == path
-                || k.starts_with(&format!("{path}."))
-                || path.starts_with(&format!("{k}."))
-        });
-        let Some((k, at)) = hit else {
+        let near = |k: &str| {
+            k == path || k.starts_with(&format!("{path}.")) || path.starts_with(&format!("{k}."))
+        };
+        let msg = |k: &str, at: Span| {
+            if k == path {
+                format!(
+                    "`{path}` は {} 行目で移動していて、ここでは使えない（移動した値は、再び代入するまで使えない。複製が要るなら `.clone()` を使う）",
+                    at.line
+                )
+            } else if k.len() > path.len() {
+                format!(
+                    "`{path}` の一部 `{k}` は {} 行目で移動していて、`{path}` の全体はここでは使えない（他のフィールドは使える）",
+                    at.line
+                )
+            } else {
+                format!(
+                    "`{k}` は {} 行目で移動していて、その一部 `{path}` もここでは使えない",
+                    at.line
+                )
+            }
+        };
+        if let Some((k, at)) = self.flow.moved.iter().find(|(k, _)| near(k)) {
+            let m = msg(k, *at);
+            return self.err(ErrorKind::UseAfterMove, m);
+        }
+        let hit = self
+            .flow
+            .maybe
+            .iter()
+            .find(|(k, _)| near(k))
+            .map(|(k, (at, ty))| (msg(k, *at), ty.clone()));
+        if let Some((m, ty)) = hit {
+            let e = Error::new(ErrorKind::UseAfterMove, self.span, m);
+            self.moved_pending.push((ty, e));
+        }
+        Ok(())
+    }
+
+    // ---------- 借用（ADR 0012 の決定 1 の 3・4） ----------
+
+    /// 場所 `path` への書き込み（`write`）または読み出しで、重なる貸しを使えなくする。
+    /// 読み出しは `&mut` の貸しだけ、書き込み・`&mut` の借用・移動・代入はすべての貸しを使えなくする。
+    fn touch(&mut self, path: &str, write: bool, op: &str) {
+        if !self.track || self.refine {
+            return;
+        }
+        let at = self.span;
+        for l in &mut self.flow.loans {
+            if l.dead.is_none() && l.path != TEMP && overlaps(&l.path, path) && (write || l.mutable)
+            {
+                l.dead = Some((at, Dead::Conflict(op.to_string())));
+            }
+        }
+    }
+
+    /// 変数 `n` が貸しを持つなら、使えるかを調べて、使われたと記録する。
+    fn check_holder(&mut self, n: &str) -> R<()> {
+        if !self.track || self.refine || !self.flow.loans.iter().any(|l| l.holder == n) {
+            return Ok(());
+        }
+        self.used.insert(n.to_string());
+        let Some(l) = self
+            .flow
+            .loans
+            .iter()
+            .find(|l| l.holder == n && l.dead.is_some())
+            .cloned()
+        else {
             return Ok(());
         };
-        let msg = if k == path {
-            format!(
-                "`{path}` は {} 行目で移動していて、ここでは使えない（移動した値は、再び代入するまで使えない。複製が要るなら `.clone()` を使う）",
-                at.line
-            )
-        } else if k.len() > path.len() {
-            format!(
-                "`{path}` の一部 `{k}` は {} 行目で移動していて、`{path}` の全体はここでは使えない（他のフィールドは使える）",
-                at.line
-            )
-        } else {
-            format!(
-                "`{k}` は {} 行目で移動していて、その一部 `{path}` もここでは使えない",
-                at.line
-            )
+        let Some((at, why)) = l.dead else {
+            return Ok(());
         };
-        self.err(ErrorKind::UseAfterMove, msg)
+        match why {
+            Dead::Conflict(op) => self.err(
+                ErrorKind::BorrowConflict,
+                format!(
+                    "`{n}` は `{}` を借りているが、{} 行目の{op}で `{}` が使われたため、ここでは使えない（借りた値は、`{}` を変更・移動する前に使い終える。あとで要る値は先に取り出すか `.clone()` で複製しておく）",
+                    l.path, at.line, l.path, l.path
+                ),
+            ),
+            Dead::Temp => self.err(
+                ErrorKind::TempBorrow,
+                format!(
+                    "`{n}` は一時的な値を借りていて、その値は {} 行目の文の終わりで破棄されたので、ここでは使えない（一時的な値を先に `let` の変数に入れてから借りる）",
+                    at.line
+                ),
+            ),
+        }
+    }
+
+    fn log_acc(&mut self, path: &str, kind: AccKind) {
+        if self.track && !self.refine {
+            self.log.push(Acc {
+                path: path.to_string(),
+                kind,
+            });
+        }
+    }
+
+    /// 1 つの呼び出しの中（`mark` 以降の記録）で、`&mut` の借用が他の使い方と重なっていないか。
+    fn check_overlap(&mut self, mark: usize) -> R<()> {
+        if !self.track || self.refine || mark >= self.log.len() {
+            return Ok(());
+        }
+        let l = self.log[mark..].to_vec();
+        for (i, a) in l.iter().enumerate() {
+            for (j, b) in l.iter().enumerate() {
+                if i == j || !overlaps(&a.path, &b.path) {
+                    continue;
+                }
+                let bad = matches!(
+                    (a.kind, b.kind),
+                    (AccKind::Mut, _) | (AccKind::Move, AccKind::Shared)
+                );
+                if !bad {
+                    continue;
+                }
+                let what = match b.kind {
+                    AccKind::Read => "読み出し",
+                    AccKind::Shared => "借用",
+                    AccKind::Mut => "`&mut` の借用",
+                    AccKind::Move => "移動",
+                };
+                let (own, other) = if a.kind == AccKind::Mut {
+                    (&a.path, &b.path)
+                } else {
+                    (&b.path, &a.path)
+                };
+                let msg = if a.kind == AccKind::Mut {
+                    format!(
+                        "`{}` を `&mut` で借りる引数と、同じ呼び出しの中の `{}` の{what}が重なっている（変更の最中に同じ場所を読めない）。先に値を変数に取り出して分ける（例: `xs.push(xs.len());` は `let n = xs.len(); xs.push(n);`）",
+                        a.path, other
+                    )
+                } else {
+                    format!(
+                        "`{other}` の移動と、同じ呼び出しの中の `{own}` の借用が重なっている（借りた値が、渡した先で使われる間に移動してしまう）。先に値を変数に取り出して分ける"
+                    )
+                };
+                return self.err(ErrorKind::BorrowOverlap, msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// 借用 `&place`・`&mut place` の貸し。場所なら場所そのものと、根の変数が持つ貸し。一時的な値なら `TEMP`。
+    fn borrow_srcs(
+        &self,
+        inner: &Expr,
+        mutable: bool,
+        inner_res: &[Src],
+        inner_ty: &Ty,
+    ) -> Vec<Src> {
+        let inner = strip_paren(inner);
+        match place_path(inner) {
+            Some((root, path)) if self.lookup(&root).is_some() => {
+                let mut v = vec![(path, mutable)];
+                for l in &self.flow.loans {
+                    if l.holder == root {
+                        v.push((l.path.clone(), l.mutable));
+                    }
+                }
+                v
+            }
+            _ => {
+                let mut v = vec![(TEMP.to_string(), mutable)];
+                if contains_ref(&self.zonk(inner_ty)) {
+                    v.extend(inner_res.iter().cloned());
+                }
+                v
+            }
+        }
+    }
+
+    /// 呼び出しの値が参照を含むなら、その貸しを `srcs` にする。
+    fn set_res(&mut self, ret: &Ty, srcs: Vec<Src>) {
+        self.res.clear();
+        if contains_ref(&self.zonk(ret)) {
+            for s in srcs {
+                if !self.res.contains(&s) {
+                    self.res.push(s);
+                }
+            }
+        }
+    }
+
+    /// 現在のスコープで宣言された、参照を含む型の名前に、貸し `srcs` を持たせる。
+    fn adopt(&mut self, names: &[String], srcs: &[Src], stmt_match: bool) -> R<()> {
+        if !self.track || self.refine {
+            return Ok(());
+        }
+        let at = self.span;
+        for n in names {
+            let Some(l) = self.lookup(n) else { continue };
+            if !contains_ref(&self.zonk(&l.ty)) {
+                continue;
+            }
+            for (path, mutable) in srcs {
+                let dead = if path == TEMP && stmt_match {
+                    Some((at, Dead::Temp))
+                } else {
+                    None
+                };
+                self.flow.loans.push(Loan {
+                    holder: n.clone(),
+                    path: path.clone(),
+                    mutable: *mutable,
+                    dead,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 呼び出しの戻り値の型が、置き換えの規則（ADR 0012 の決定 1 の 4）を満たさない理由。
+    fn subst_problem(&self, ps: &[Ty], ret: &Ty) -> Option<String> {
+        for p in ps {
+            if let Ty::Ref(true, i) = self.zonk(p) {
+                if contains_ref(&i) {
+                    return Some(format!(
+                        "`&mut` で渡す先の型 `{}` が参照を含んでいる（参照を入れ物に入れて書き換える形は、まだ扱えない）",
+                        self.sh(&i)
+                    ));
+                }
+            }
+        }
+        let ret = self.zonk(ret);
+        if !contains_ref(&ret) {
+            return None;
+        }
+        let top_ok = match &ret {
+            Ty::Ref(_, i) => !contains_ref(i),
+            Ty::Named(n, a) if n == "Option" && a.len() == 1 => {
+                matches!(&a[0], Ty::Ref(_, i) if !contains_ref(i))
+            }
+            _ => false,
+        };
+        if !top_ok {
+            return Some(format!(
+                "戻り値の型 `{}` の参照は、戻り値そのものか、最も外側の `Option<>` の中にしか置けない",
+                show(&ret)
+            ));
+        }
+        let n = ps
+            .iter()
+            .filter(|p| contains_ref_outside_fn(&self.zonk(p)))
+            .count();
+        if n != 1 {
+            return Some(format!(
+                "参照を返す呼び出しは、借用の引数（参照を含む型の引数）がちょうど 1 つでなければならないが、{n} 個ある"
+            ));
+        }
+        None
     }
 
     /// 変数 `root` が、いま検査しているクロージャの外側で宣言されたものか。
@@ -1617,10 +1954,12 @@ impl Ck {
                 format!("{what}（複製は `.clone()`。`Copyable` な型なら複製として渡せる）"),
             );
         }
+        self.log_acc(path, AccKind::Move);
         // クロージャが外側の変数を移すかは、とらえ方の規則（後続の PR）で決める
         if self.is_outer(root) {
             return Ok(());
         }
+        self.touch(path, true, "移動");
         let at = self.span;
         self.flow.moved.entry(path.to_string()).or_insert(at);
         Ok(())
@@ -1639,8 +1978,23 @@ impl Ck {
         }
         let ty = self.zonk(t);
         // 関数の値の受け渡しはクロージャの規則（後続の PR）で扱う。型が決まらないものは移動にしない。
-        if matches!(ty, Ty::Fn(..)) || self.holds(&ty, Prop::Copyable, 0) != Some(false) {
+        if matches!(ty, Ty::Fn(..)) {
             return Ok(());
+        }
+        match self.holds(&ty, Prop::Copyable, 0) {
+            Some(false) => {}
+            None => {
+                // 型が決まっていない値: 移動かもしれない。型が決まってから、使用を調べ直す
+                let is_ref = self
+                    .lookup(&root)
+                    .is_some_and(|l| matches!(self.shallow(&l.ty), Ty::Ref(..)));
+                if !is_ref && !self.is_outer(&root) {
+                    let at = self.span;
+                    self.flow.maybe.entry(path).or_insert((at, ty));
+                }
+                return Ok(());
+            }
+            Some(true) => return Ok(()),
         }
         self.record_move(&root, &path)
     }
@@ -1667,6 +2021,9 @@ impl Ck {
         let sub = format!("{path}.");
         self.flow
             .moved
+            .retain(|k, _| k != path && !k.starts_with(&sub));
+        self.flow
+            .maybe
             .retain(|k, _| k != path && !k.starts_with(&sub));
         Ok(())
     }
@@ -1733,6 +2090,7 @@ impl Ck {
                 let vt = self.expr(value);
                 self.defer = false;
                 let vt = vt?;
+                let let_srcs = std::mem::take(&mut self.res);
                 let vt_moved = vt.clone();
                 self.fn_value_form(value, &vt)?;
                 if closure {
@@ -1796,7 +2154,23 @@ impl Ck {
                 if !matches!(pattern, Pattern::Wild) {
                     self.consume(value, &vt_moved)?;
                 }
-                self.bind(pattern, &fin, *mutable)
+                self.bind(pattern, &fin, *mutable)?;
+                let mut names = vec![];
+                pat_names(pattern, &mut names);
+                if self.track
+                    && let_srcs.iter().any(|(p, _)| p == TEMP)
+                    && names.iter().any(|n| {
+                        self.lookup(n)
+                            .is_some_and(|l| contains_ref(&self.zonk(&l.ty)))
+                    })
+                {
+                    self.span = s.span;
+                    return self.err(
+                        ErrorKind::TempBorrow,
+                        "一時的な値への参照は、この文の終わりで使えなくなるので、変数に持てない（一時的な値を先に `let` の変数に入れてから借りる。例: `let l = make(); let r = l.get(0);`）",
+                    );
+                }
+                self.adopt(&names, &let_srcs, false)
             }
             StmtKind::Assign { target, value } => {
                 let root = place_root(target).map(str::to_string);
@@ -1834,6 +2208,7 @@ impl Ck {
                 }
                 self.consume(value, &vt)?;
                 if let Some((r, p)) = place_path(target) {
+                    self.touch(&p, true, "代入");
                     self.reinit(&r, &p)?;
                 }
                 Ok(())
@@ -1859,6 +2234,7 @@ impl Ck {
                         // 参照を返す関数（ADR 0012 の決定 1）。`return 場所;` は場所への参照を返す
                         // ので、型は参照を外して比べる。どの場所を返せるかは所有権の検査で調べる。
                         let t = self.expr(e)?;
+                        self.return_roots(e)?;
                         let (want, got) =
                             (strip_refs(&self.zonk(&ret)), strip_refs(&self.zonk(&t)));
                         if !self.coerce(&want, &got, e) {
@@ -1887,6 +2263,8 @@ impl Ck {
                 // ループは、本体の終わりの状態が次の周の頭の状態に合流する。外側の場所を本体で
                 // 移動して再代入しないまま周の終わりに届くなら、次の周でその移動が二重になる。
                 let head = self.flow.moved.clone();
+                let head_loans = self.flow.loans.clone();
+                let head_used = std::mem::take(&mut self.used);
                 self.expect(&Ty::Bool, cond, "`while` の条件")?;
                 let after_cond = self.flow.clone();
                 self.block(body)?;
@@ -1911,6 +2289,36 @@ impl Ck {
                         ));
                     }
                 }
+                // 周の中で使えなくなった貸しの変数が、周の中で使われていれば、次の周で使えない
+                if !self.flow.dead && self.track {
+                    let hit = self
+                        .flow
+                        .loans
+                        .iter()
+                        .find(|l| {
+                            l.dead.is_some()
+                                && self.used.contains(&l.holder)
+                                && head_loans.iter().any(|h| {
+                                    h.holder == l.holder
+                                        && h.path == l.path
+                                        && h.mutable == l.mutable
+                                        && h.dead.is_none()
+                                })
+                        })
+                        .cloned();
+                    if let Some(l) = hit {
+                        let at = l.dead.map_or(self.span, |d| d.0);
+                        return Err(Error::new(
+                            ErrorKind::BorrowConflict,
+                            at,
+                            format!(
+                                "`{}` は `{}` を借りているが、ループの本体のこの行で `{}` が変更・移動されている。`{}` は次の周でも使われるので、使えなくなっている（借りた値の使用をループの中で完結させるか、変更の前に使い終える）",
+                                l.holder, l.path, l.path, l.holder
+                            ),
+                        ));
+                    }
+                }
+                self.used.extend(head_used);
                 // 0 周で抜ける経路と、本体の終わりから抜ける経路の合流
                 let end = std::mem::take(&mut self.flow);
                 self.flow = merge(after_cond, end);
@@ -1920,6 +2328,7 @@ impl Ck {
                 scrutinee, arms, ..
             } => {
                 let (st, by_ref) = self.scrutinee(scrutinee)?;
+                let m_srcs = std::mem::take(&mut self.res);
                 let st = self.peel(&st);
                 let sp = s.span;
                 let mut pats = vec![];
@@ -1934,6 +2343,9 @@ impl Ck {
                     let r = self.pat(&a.pattern, &st);
                     self.by_ref = false;
                     r?;
+                    let mut names = vec![];
+                    pat_names(&a.pattern, &mut names);
+                    self.adopt(&names, &m_srcs, true)?;
                     self.block(&a.body)?;
                     self.pop_scope();
                     pats.push(&a.pattern);
@@ -1948,6 +2360,64 @@ impl Ck {
                 self.exhaustive(&pats)
             }
         }
+    }
+
+    /// 参照を返す `return` の式 `e` が借りる場所の根が、参照の引数（またはそれを通して借りた値）か。
+    fn return_roots(&mut self, e: &Expr) -> R<()> {
+        if !self.track || self.refine || self.closure_base > 0 {
+            return Ok(());
+        }
+        let mut srcs: Vec<Src> = vec![];
+        self.return_srcs(e, &mut srcs);
+        for (path, _) in &srcs {
+            if path == TEMP {
+                return self.err(
+                    ErrorKind::ReturnBorrowRoot,
+                    "一時的な値の参照は、文の終わりで破棄されるので返せない（返せるのは、参照の引数を通して借りた場所だけ）",
+                );
+            }
+            let root = path.split('.').next().unwrap_or(path);
+            let ok = self
+                .lookup(root)
+                .is_some_and(|l| contains_ref(&self.zonk(&l.ty)));
+            if !ok {
+                return self.err(
+                    ErrorKind::ReturnBorrowRoot,
+                    format!(
+                        "`{root}` はこの関数が所有する値なので、その参照は返せない（関数を抜けると破棄される。返せるのは、参照の引数を通して借りた場所だけ）"
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn return_srcs(&self, e: &Expr, out: &mut Vec<Src>) {
+        let e = strip_paren(e);
+        if let Some((root, path)) = place_path(e) {
+            if self.lookup(&root).is_some() {
+                out.push((path, false));
+                for l in &self.flow.loans {
+                    if l.holder == root {
+                        out.push((l.path.clone(), l.mutable));
+                    }
+                }
+                return;
+            }
+        }
+        if let Expr::Call { callee, args } = e {
+            if let Expr::Name(n) = &**callee {
+                if matches!(n.as_str(), "Some" | "Ok" | "Err") && self.lookup(n).is_none() {
+                    for a in args {
+                        let mut v = vec![];
+                        self.return_srcs(a, &mut v);
+                        out.extend(v);
+                    }
+                    return;
+                }
+            }
+        }
+        out.extend(self.res.iter().cloned());
     }
 
     fn if_stmt(&mut self, i: &IfStmt) -> R<()> {
@@ -1970,6 +2440,10 @@ impl Ck {
         self.flow
             .moved
             .retain(|k, _| k.split('.').next().unwrap_or(k) != n);
+        self.flow
+            .maybe
+            .retain(|k, _| k.split('.').next().unwrap_or(k) != n);
+        self.flow.loans.retain(|l| l.holder != n);
     }
 
     fn shadow_check(&self, n: &str) -> R<()> {
@@ -2133,12 +2607,14 @@ impl Ck {
                     );
                 }
                 let Some(root) = place_root(expr).map(str::to_string) else {
-                    return self.err(
-                        ErrorKind::MatchBorrowForm,
-                        "`match &e` の `e` は変数かそのフィールドでなければならない",
-                    );
+                    // 一時的な値の借用（文の終わりまで）
+                    let t = self.expr(expr)?;
+                    let inner_res = std::mem::take(&mut self.res);
+                    self.res = self.borrow_srcs(expr, false, &inner_res, &t);
+                    return Ok((t, true));
                 };
                 let t = self.expr(expr)?;
+                let inner_res = std::mem::take(&mut self.res);
                 if self
                     .lookup(&root)
                     .is_some_and(|l| contains_ref(&self.zonk(&l.ty)))
@@ -2150,6 +2626,7 @@ impl Ck {
                         ),
                     );
                 }
+                self.res = self.borrow_srcs(expr, false, &inner_res, &t);
                 return Ok((t, true));
             }
         }
@@ -2389,6 +2866,12 @@ impl Ck {
     /// `hint` は、クロージャの引数の型を文脈から決めるための期待される関数の型。
     fn expr_hint(&mut self, e: &Expr, hint: Option<&Ty>) -> R<Ty> {
         let t = self.expr_hint_inner(e, hint)?;
+        // 参照を含まない値は、貸しを持たない
+        let ref_name = matches!(strip_paren(e), Expr::Name(n)
+            if self.lookup(n).is_some_and(|l| contains_ref(&self.zonk(&l.ty))));
+        if !ref_name && !contains_ref(&self.zonk(&t)) {
+            self.res.clear();
+        }
         // 関数の値は入れ物（組・借用・構造体・列挙型・List など）に入れられない
         // （ADR 0011 決定 10）。入れると効果の追跡が漏れる。
         if matches!(
@@ -2470,12 +2953,16 @@ impl Ck {
             Expr::Paren(i) => self.expr_hint(i, hint),
             Expr::Tuple(es) => {
                 let mut ts = vec![];
+                let mut srcs: Vec<Src> = vec![];
                 for e in es {
                     let t = self.expr(e)?;
+                    srcs.append(&mut self.res);
                     self.consume(e, &t)?;
                     ts.push(t);
                 }
-                Ok(Ty::Tuple(ts))
+                let t = Ty::Tuple(ts);
+                self.set_res(&t, srcs);
+                Ok(t)
             }
             Expr::Unary { op, expr } => self.unary(*op, expr),
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs),
@@ -2487,6 +2974,8 @@ impl Ck {
                 scrutinee, arms, ..
             } => {
                 let (st, by_ref) = self.scrutinee(scrutinee)?;
+                let m_srcs = std::mem::take(&mut self.res);
+                let mut arm_srcs: Vec<Src> = vec![];
                 let st = self.peel(&st);
                 let sp = self.span;
                 let r = self.fresh();
@@ -2501,10 +2990,34 @@ impl Ck {
                     let pr = self.pat(&a.pattern, &st);
                     self.by_ref = false;
                     pr?;
+                    let mut names = vec![];
+                    pat_names(&a.pattern, &mut names);
+                    self.adopt(&names, &m_srcs, false)?;
                     let t = self.expr(&a.body)?;
                     // 腕の値は `match` の値として移る
+                    let arm_res = self.res.clone();
                     self.consume(&a.body, &t)?;
+                    self.res = arm_res;
                     self.span = sp;
+                    // 腕が所有する束縛を借りた参照は、腕の外へ持ち出せない
+                    if self.track && !self.refine && self.closure_base == 0 {
+                        for (path, _) in &self.res {
+                            let root = path.split('.').next().unwrap_or(path);
+                            if names.iter().any(|n| n == root)
+                                && self
+                                    .lookup(root)
+                                    .is_some_and(|l| !contains_ref(&self.zonk(&l.ty)))
+                            {
+                                return self.err(
+                                    ErrorKind::TempBorrow,
+                                    format!(
+                                        "`{root}` は `match` の腕が所有する値で、腕の終わりで破棄されるので、その参照は `match` の外へ出せない（腕の中で使い終えるか、値を `.clone()` で取り出す）"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    arm_srcs.append(&mut self.res);
                     if i == 0 {
                         let _ = self.unify(&r, &t);
                     } else if !self.coerce(&r, &t, &a.body) {
@@ -2527,6 +3040,13 @@ impl Ck {
                 }
                 self.flow = joined.unwrap_or(start);
                 self.exhaustive(&pats)?;
+                let live: Vec<Src> = arm_srcs
+                    .into_iter()
+                    .filter(|(p, _)| {
+                        p == TEMP || self.lookup(p.split('.').next().unwrap_or(p)).is_some()
+                    })
+                    .collect();
+                self.set_res(&r, live);
                 Ok(r)
             }
             Expr::Closure { params, body, .. } => self.closure(params, body, hint),
@@ -2555,6 +3075,7 @@ impl Ck {
         self.scopes.push(HashMap::new());
         // 本体の移動は外側の流れに影響しない（外側の変数のとらえ方は後続の PR）
         let outer_flow = self.flow.clone();
+        let log_mark = self.log.len();
         let outer_base = std::mem::replace(&mut self.closure_base, self.scopes.len() - 1);
         let mut pts = vec![];
         for (i, p) in params.iter().enumerate() {
@@ -2618,6 +3139,8 @@ impl Ck {
         self.ret = saved;
         self.scopes.pop();
         self.flow = outer_flow;
+        self.log.truncate(log_mark);
+        self.res.clear();
         self.closure_base = outer_base;
         let effs = self.eff_stack.pop().unwrap_or_default();
         if defer {
@@ -2714,8 +3237,16 @@ impl Ck {
                 ),
             );
         }
-        if self.lookup(n).is_some() && !skip {
-            self.use_place(n)?;
+        if self.lookup(n).is_some() {
+            if !skip {
+                self.use_place(n)?;
+            }
+            self.check_holder(n)?;
+            if !skip {
+                self.touch(n, false, "読み出し");
+                self.log_acc(n, AccKind::Read);
+            }
+            self.name_res(n);
         }
         if let Some(v) = self.lookup(n) {
             // 参照の型の名前は、式の中では参照先の値を表す（ADR 0011 の決定 4）。
@@ -2734,6 +3265,28 @@ impl Ck {
             return self.variant_value(tn, n);
         }
         self.err(ErrorKind::UnknownName, format!("名前 `{n}` が見つからない"))
+    }
+
+    /// 変数 `n` の値が持つ貸し。貸しを持つ変数ならその貸し、参照の変数ならその変数自身。
+    fn name_res(&mut self, n: &str) {
+        self.res.clear();
+        let Some(l) = self.lookup(n) else { return };
+        let ty = self.shallow(&l.ty);
+        let held: Vec<Src> = self
+            .flow
+            .loans
+            .iter()
+            .filter(|x| x.holder == n)
+            .map(|x| (x.path.clone(), x.mutable))
+            .collect();
+        if !held.is_empty() {
+            self.res = held;
+        } else if contains_ref(&self.zonk(&ty)) {
+            self.res = vec![(n.to_string(), matches!(ty, Ty::Ref(true, _)))];
+            if !self.track || self.refine {
+                self.res.clear();
+            }
+        }
     }
 
     fn unary(&mut self, op: UnOp, inner: &Expr) -> R<Ty> {
@@ -2765,10 +3318,12 @@ impl Ck {
                 if !std::mem::take(&mut self.ref_ok) {
                     return self.err(
                         ErrorKind::BorrowPosition,
-                        "`&`・`&mut` で借りられるのは、参照の引数への実引数と `match` の対象だけ（`let r = &x;` や戻り値・フィールドの値には書けない。ADR 0012 の決定 1）",
+                        "`&`・`&mut` を書けるのは、関数・メソッド・構築子（`Some(&x)` など）の引数と、`match` の対象だけ（`let r = &x;`・`return &x;`・組やフィールドの値には書けない。参照は呼び出しの引数で渡し、戻り値の参照は呼び出しの結果として受ける。ADR 0012 の決定 1）",
                     );
                 }
+                let mark = self.log.len();
                 let t = self.expr(inner)?;
+                let inner_res = std::mem::take(&mut self.res);
                 if mutable {
                     let Some(root) = place_root(inner).map(str::to_string) else {
                         return self.err(
@@ -2778,7 +3333,26 @@ impl Ck {
                     };
                     self.assignable_place(&root, inner, false)?;
                 }
-                Ok(Ty::Ref(mutable, Box::new(t)))
+                let srcs = self.borrow_srcs(inner, mutable, &inner_res, &t);
+                if let Some((root, path)) = place_path(strip_paren(inner)) {
+                    if self.lookup(&root).is_some() {
+                        self.log.truncate(mark);
+                        self.log_acc(
+                            &path,
+                            if mutable {
+                                AccKind::Mut
+                            } else {
+                                AccKind::Shared
+                            },
+                        );
+                        if mutable {
+                            self.touch(&path, true, "`&mut` の借用");
+                        }
+                    }
+                }
+                let rt = Ty::Ref(mutable, Box::new(t));
+                self.res = srcs;
+                Ok(rt)
             }
         }
     }
@@ -2905,9 +3479,15 @@ impl Ck {
         }
         // 場所の連なり（`a.b.c`）は、全体の場所で移動済みかを調べる（部分的な移動を見分ける）
         let chain = place_path(recv).filter(|(r, _)| self.lookup(r).is_some());
-        if let Some((_, p)) = &chain {
+        if let Some((r, p)) = &chain {
+            let full = format!("{p}.{name}");
             if !skip {
-                self.use_place(&format!("{p}.{name}"))?;
+                self.use_place(&full)?;
+            }
+            self.check_holder(r)?;
+            if !skip {
+                self.touch(&full, false, "読み出し");
+                self.log_acc(&full, AccKind::Read);
             }
             self.skip_use = true;
         }
@@ -2948,11 +3528,23 @@ impl Ck {
         }
     }
 
+    /// 置き換えた後のシグネチャの検査を、型が決まってからに回す。
+    fn sig_check(&mut self, ps: &[Ty], ret: &Ty, what: &str) {
+        if self.track && !self.refine {
+            self.sig_checks
+                .push((ps.to_vec(), ret.clone(), what.to_string(), self.span));
+        }
+    }
+
     /// 関数の型 `ft` の値を `args` で呼ぶ。
     fn apply(&mut self, ft: Ty, args: &[Expr], what: &str, eff: Eff) -> R<Ty> {
         match self.shallow(&ft) {
             Ty::Fn(ps, r) => {
-                self.args(&ps, args, what, &eff)?;
+                let mark = self.log.len();
+                let srcs = self.args(&ps, args, what, &eff)?;
+                self.check_overlap(mark)?;
+                self.sig_check(&ps, &r, what);
+                self.set_res(&r, srcs);
                 Ok(*r)
             }
             Ty::Var(_) => self.err(
@@ -3076,7 +3668,9 @@ impl Ck {
                     return self.apply(ft, args, &what, eff);
                 }
                 // メソッド呼び出し x.m(...)
+                let mark = self.log.len();
                 let rt0 = self.expr(expr)?;
+                let recv_res = std::mem::take(&mut self.res);
                 let rt = self.peel(&rt0);
                 let (tn, _) = match &rt {
                     Ty::Named(tn, a) => (tn.clone(), a.clone()),
@@ -3134,8 +3728,27 @@ impl Ck {
                     };
                     self.assignable_place(&root, expr, false)?;
                 }
-                if !matches!(sig.params[0].1, Ty::Ref(..)) {
+                let mut srcs: Vec<Src> = vec![];
+                if let Ty::Ref(m, _) = sig.params[0].1 {
+                    // 借りる受け手
+                    let kind = if m { AccKind::Mut } else { AccKind::Shared };
+                    let place =
+                        place_path(strip_paren(expr)).filter(|(r, _)| self.lookup(r).is_some());
+                    if let Some((_, path)) = &place {
+                        self.log.truncate(mark);
+                        self.log_acc(path, kind);
+                        if m {
+                            self.touch(
+                                path,
+                                true,
+                                &format!("`&mut` を受け取るメソッド `{name}` の呼び出し"),
+                            );
+                        }
+                    }
+                    srcs = self.borrow_srcs(expr, m, &recv_res, &rt0);
+                } else {
                     // 値で受け取る受け手（`opt.map(..)` など）は移動する
+                    srcs.extend(recv_res);
                     self.consume(expr, &rt0)?;
                 }
                 let ps: Vec<Ty> = sig.params[1..]
@@ -3147,8 +3760,15 @@ impl Ck {
                     off: 1,
                     ..Eff::default()
                 };
-                self.args(&ps, args, &what, &eff)?;
-                Ok(substitute(&sig.ret, &m))
+                let more = self.args(&ps, args, &what, &eff)?;
+                srcs.extend(more);
+                self.check_overlap(mark)?;
+                let ret = substitute(&sig.ret, &m);
+                let mut all: Vec<Ty> = vec![substitute(&sig.params[0].1, &m)];
+                all.extend(ps.iter().cloned());
+                self.sig_check(&all, &ret, &what);
+                self.set_res(&ret, srcs);
+                Ok(ret)
             }
             _ => self.err(
                 ErrorKind::NotCallable,
@@ -3185,7 +3805,7 @@ impl Ck {
         }
     }
 
-    fn args(&mut self, params: &[Ty], args: &[Expr], what: &str, eff: &Eff) -> R<()> {
+    fn args(&mut self, params: &[Ty], args: &[Expr], what: &str, eff: &Eff) -> R<Vec<Src>> {
         if params.len() != args.len() {
             return self.err(
                 ErrorKind::ArgCount,
@@ -3198,6 +3818,7 @@ impl Ck {
         }
         let sp = self.span;
         let mut gained: Vec<Atom> = vec![];
+        let mut srcs: Vec<Src> = vec![];
         for (i, (p, a)) in params.iter().zip(args).enumerate() {
             let closure = matches!(strip_paren(a), Expr::Closure { .. });
             self.defer = closure;
@@ -3207,11 +3828,15 @@ impl Ck {
                     op: UnOp::Ref | UnOp::RefMut,
                     ..
                 }
-            ) && matches!(self.shallow(p), Ty::Ref(..));
+            ) && matches!(self.shallow(p), Ty::Ref(..) | Ty::Var(_));
             let t = self.expr_hint(a, Some(p));
             self.defer = false;
             self.ref_ok = false;
             let t = t?;
+            if !closure {
+                srcs.append(&mut self.res);
+            }
+            self.res.clear();
             self.span = sp;
             self.fn_value_form(a, &t)?;
             // 値で受け取る引数は移動する（参照の引数は `&x` と書くので場所ではない）
@@ -3257,7 +3882,7 @@ impl Ck {
         for a in eff.extra.iter().cloned().chain(gained) {
             self.add_eff(a);
         }
-        Ok(())
+        Ok(srcs)
     }
 
     fn struct_lit(&mut self, path: &[String], fields: &[(String, Expr)]) -> R<Ty> {
@@ -3378,6 +4003,16 @@ fn place_root(e: &Expr) -> Option<&str> {
         Expr::Field { expr, .. } => place_root(expr),
         Expr::Paren(i) => place_root(i),
         _ => None,
+    }
+}
+
+/// パターンが束縛する名前。
+fn pat_names(p: &Pattern, out: &mut Vec<String>) {
+    match p {
+        Pattern::Bind(n) => out.push(n.clone()),
+        Pattern::Variant { args, .. } => args.iter().for_each(|a| pat_names(a, out)),
+        Pattern::Tuple(ps) => ps.iter().for_each(|a| pat_names(a, out)),
+        _ => {}
     }
 }
 

@@ -2,6 +2,10 @@
 // 受け取る（T）・読む（&T）・書き換える（&mut T）の 3 種類と、
 // 参照を二級に限る規則（構造体に参照を持てない、参照の返却は借用の引数が 1 つのときだけ）を示す。
 
+module examples.ownership
+  targets server, browser
+  trust none
+
 struct Account {
   owner: String,
   balance: Int,
@@ -18,7 +22,7 @@ fn balance_of(account: &Account) -> Int
 }
 
 // 書き換える: 排他借用。呼び出しの間、account への他の借用は許されない。
-// ensures の old(x) は、呼び出し前の x の値を表す（表記は未決。仮のもの）。
+// ensures の old(x) は、関数の入口で記録した x の値を表す（ADR 0008）。
 fn deposit(account: &mut Account, amount: Int)
   intent "口座に入金する"
   requires amount > 0

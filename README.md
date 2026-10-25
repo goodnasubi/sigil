@@ -111,6 +111,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 > **ステータス:** 設計段階（構想・文書化）。処理系はまだありません。
 > P0（言語の核）の実装の進め方（Rust で書くコンパイラ、段階 M0〜M6）を [ADR 0006](docs/decisions/0006-p0-scope-and-bootstrap.md) で決めました。
 > 並行処理のモデル（中断を効果として扱う構造化並行処理）を [ADR 0007](docs/decisions/0007-concurrency-model.md) で決めました。
+> M0 の前に決める表記（`old`・篩型・モジュールの宣言・`sigil spec` の出力など）を [ADR 0008](docs/decisions/0008-m0-notation.md) で決めました。
 
 ## 目標
 

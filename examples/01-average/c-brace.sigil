@@ -1,6 +1,10 @@
 // 例 01: 平均値（候補 C: 波括弧 + 契約節）※ ADR 0002 で採用
 // 純粋関数。シグネチャの後に 4 つの契約節を固定順で並べ、本体を波括弧で囲む。
 
+module examples.average
+  targets server, browser
+  trust none
+
 fn average(xs: List<Float>) -> Float
   intent "数値列の算術平均を返す"
   requires len(xs) > 0

@@ -1,6 +1,11 @@
 // 例 02: 設定ファイルからポート番号を読む（候補 C: 波括弧 + 契約節）※ ADR 0002 で採用
 // 副作用（ファイル読み込み）と失敗（Result）を含む関数。
 // 値の範囲は篩型（refinement type）で表し、事後条件を型に寄せる。
+// Port.check は処理系が篩型ごとに生成し、条件を満たせば Some、満たさなければ None を返す（ADR 0008）。
+
+module examples.read_port
+  targets server
+  trust none
 
 type Port = Int where 1 <= self && self <= 65535;
 
@@ -18,7 +23,7 @@ fn read_port(path: Path) -> Result<Port, ConfigError>
 {
   let text = fs.read(path).map_err(ConfigError.Io)?;
   return match parse_int(trim(text)) {
-    Ok(n) => Port.check(n, ConfigError.OutOfRange(n)),
+    Ok(n) => Port.check(n).ok_or(ConfigError.OutOfRange(n)),
     Err(_) => Err(ConfigError.NotANumber(text)),
   };
 }

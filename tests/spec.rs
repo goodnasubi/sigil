@@ -69,3 +69,20 @@ fn trust_base_and_generics_and_expression_forms() {
 fn syntax_error_is_error() {
     assert!(spec("fn").is_err());
 }
+
+#[test]
+fn intent_line_separators_and_format_chars_are_escaped() {
+    // U+2028/U+2029（改行扱いの空白）、U+200B・U+202E（書式文字）、U+00A0（空白）は生で出さない。
+    let src = "module m.a\n  targets server\n  trust none\n\nfn f()\n  intent \"a\u{2028}b\u{2029}c\u{200B}d\u{202E}e\u{A0}f\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\n";
+    let out = spec(src).unwrap();
+    assert!(
+        out.contains("意図: a\\u{2028}b\\u{2029}c\\u{200B}d\\u{202E}e\\u{A0}f"),
+        "{out}"
+    );
+    for c in ['\u{2028}', '\u{2029}', '\u{200B}', '\u{202E}', '\u{A0}'] {
+        assert!(!out.contains(c), "生の U+{:X} が残っている", c as u32);
+    }
+    // 通常の文字（日本語・通常の空白）はそのまま。
+    let src = src.replace("a\u{2028}b\u{2029}c\u{200B}d\u{202E}e\u{A0}f", "日本語 ok");
+    assert!(spec(&src).unwrap().contains("意図: 日本語 ok"));
+}

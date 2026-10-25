@@ -86,3 +86,17 @@ fn intent_line_separators_and_format_chars_are_escaped() {
     let src = src.replace("a\u{2028}b\u{2029}c\u{200B}d\u{202E}e\u{A0}f", "日本語 ok");
     assert!(spec(&src).unwrap().contains("意図: 日本語 ok"));
 }
+
+#[test]
+fn impl_methods_and_constraints_in_spec() {
+    let src = "module m.a\n  targets server\n  trust none\n\nstruct Account {\n  balance: Int,\n}\n\nimpl Account {\n  fn deposit(self: &mut Account, n: Int)\n    intent \"入金する\"\n    requires n > 0\n    ensures none\n    effects none\n  {}\n}\n\nfn eq<T: Sendable + Equatable>(a: T)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{}\n";
+    let out = spec(src).unwrap();
+    assert!(out.contains("メソッド Account.deposit"), "{out}");
+    assert!(out.contains("戻り値: なし"), "{out}");
+    assert!(out.contains("Equatable + Sendable"), "{out}");
+    let with_unit = src.replace(
+        "deposit(self: &mut Account, n: Int)",
+        "deposit(self: &mut Account, n: Int) -> Unit",
+    );
+    assert_eq!(spec(&with_unit).unwrap(), out);
+}

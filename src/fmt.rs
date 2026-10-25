@@ -115,6 +115,11 @@ struct Printer<'a> {
     lead: bool,
 }
 
+/// 名前 `Unit` の型（`Unit` は予約名なので、構文だけで判定できる。ADR 0011 の決定 2）。
+pub(crate) fn is_unit(t: &Type) -> bool {
+    matches!(t, Type::Path { path, args } if args.is_empty() && path.len() == 1 && path[0] == "Unit")
+}
+
 fn strip(mut e: &Expr) -> &Expr {
     while let Expr::Paren(inner) = e {
         e = inner;
@@ -476,7 +481,8 @@ impl<'a> Printer<'a> {
                 }
                 Item::Struct(s) => self.struct_decl(s),
                 Item::Enum(e) => self.enum_decl(e),
-                Item::Fn(d) => self.fn_decl(d),
+                Item::Fn(d) => self.fn_decl(d, 0, true),
+                Item::Impl(i) => self.impl_decl(i),
             }
         }
         self.top_comments(u32::MAX, false, true);
@@ -492,8 +498,12 @@ impl<'a> Printer<'a> {
                 self.w(", ");
             }
             self.w(&g.name);
-            if let Some(b) = &g.bound {
-                self.w(&format!(": {}", b.join(".")));
+            if !g.bounds.is_empty() {
+                // 性質の名前の文字の順に並べ、重複を取り除く（ADR 0011 の決定 6）。
+                let mut bs: Vec<String> = g.bounds.iter().map(|b| b.join(".")).collect();
+                bs.sort();
+                bs.dedup();
+                self.w(&format!(": {}", bs.join(" + ")));
             }
         }
         self.w(">");
@@ -548,9 +558,37 @@ impl<'a> Printer<'a> {
         self.w("}");
     }
 
-    fn fn_decl(&mut self, d: &FnDecl) {
-        self.top_comments(d.span.line, true, false);
-        self.nl(0, d.span.line);
+    fn impl_decl(&mut self, i: &ImplDecl) {
+        self.top_comments(i.span.line, true, false);
+        self.nl(0, i.span.line);
+        self.w("impl");
+        if !i.generics.is_empty() {
+            self.generics(&i.generics);
+        }
+        self.w(" ");
+        self.ty(&i.ty);
+        self.w(" {");
+        for (k, f) in i.fns.iter().enumerate() {
+            if k > 0 {
+                self.blank();
+            }
+            self.fn_decl(f, 1, k == 0);
+        }
+        let mut first = i.fns.is_empty();
+        self.comments_before(i.end_line, 1, false, &mut first);
+        self.nl(0, i.end_line);
+        self.w("}");
+    }
+
+    /// `ind` は宣言の字下げ（トップレベルは 0、`impl` の中は 1）。
+    fn fn_decl(&mut self, d: &FnDecl, ind: usize, first: bool) {
+        if ind == 0 {
+            self.top_comments(d.span.line, true, false);
+        } else {
+            let mut f = first;
+            self.comments_before(d.span.line, ind, false, &mut f);
+        }
+        self.nl(ind, d.span.line);
         self.w(&format!("fn {}", d.name));
         self.generics(&d.generics);
         self.w("(");
@@ -562,34 +600,35 @@ impl<'a> Printer<'a> {
             self.ty(&p.ty);
         }
         self.w(")");
-        if let Some(r) = &d.ret {
+        // `-> Unit` は書かない（ADR 0011 の決定 2。`->` を省いた形が正規形）。
+        if let Some(r) = d.ret.as_ref().filter(|r| !is_unit(r)) {
             self.w(" -> ");
             self.ty(r);
         }
-        self.plain_start(d.clause_lines[0], 1);
+        self.plain_start(d.clause_lines[0], ind + 1);
         self.w(&format!("intent {}", escape_str(&d.intent)));
-        self.plain_start(d.clause_lines[1], 1);
+        self.plain_start(d.clause_lines[1], ind + 1);
         self.w("requires ");
         match &d.requires {
-            Some(e) => self.expr(e, 0, false, 1),
+            Some(e) => self.expr(e, 0, false, ind + 1),
             None => self.w("none"),
         }
-        self.plain_start(d.clause_lines[2], 1);
+        self.plain_start(d.clause_lines[2], ind + 1);
         self.w("ensures ");
         match &d.ensures {
-            Some(e) => self.expr(e, 0, false, 1),
+            Some(e) => self.expr(e, 0, false, ind + 1),
             None => self.w("none"),
         }
-        self.plain_start(d.clause_lines[3], 1);
+        self.plain_start(d.clause_lines[3], ind + 1);
         let effs = normalize_effects(&d.effects, &d.params);
         if effs.is_empty() {
             self.w("effects none");
         } else {
             self.w(&format!("effects {}", effs.join(", ")));
         }
-        self.plain_start(d.body.open_line, 0);
+        self.plain_start(d.body.open_line, ind);
         // 戻り値のない関数の末尾の `return;` は書かない（ADR 0008 の決定 2）。
-        let drop_ret = d.ret.is_none()
+        let drop_ret = d.ret.as_ref().is_none_or(is_unit)
             && matches!(
                 d.body.stmts.last(),
                 Some(Stmt {
@@ -597,7 +636,7 @@ impl<'a> Printer<'a> {
                     ..
                 })
             );
-        self.block(&d.body, 0, drop_ret);
+        self.block(&d.body, ind, drop_ret);
     }
 
     // ---- 型・パターン ----
@@ -630,7 +669,7 @@ impl<'a> Printer<'a> {
                     self.ty(a);
                 }
                 self.w(")");
-                if let Some(r) = ret {
+                if let Some(r) = ret.as_deref().filter(|r| !is_unit(r)) {
                     self.w(" -> ");
                     self.ty(r);
                 }
@@ -705,11 +744,16 @@ impl<'a> Printer<'a> {
         match &s.kind {
             StmtKind::Let {
                 mutable,
-                name,
+                pattern,
+                ty,
                 value,
             } => {
                 self.w(if *mutable { "let mut " } else { "let " });
-                self.w(name);
+                self.pattern(pattern);
+                if let Some(t) = ty {
+                    self.w(": ");
+                    self.ty(t);
+                }
                 self.w(" = ");
                 self.expr(value, 0, false, indent);
                 self.w(";");

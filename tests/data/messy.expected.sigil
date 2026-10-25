@@ -1,0 +1,53 @@
+// header
+
+module m.a
+  targets server
+  trust none
+
+struct P {
+  x: Int,
+  y: Int,
+}
+
+enum E {
+  A,
+  B(Int),
+}
+
+fn f(x: Int, g: fn(Int) -> Int) -> Int
+  intent "x"
+  requires x > 0 && x < 10
+  ensures none
+  effects of(g), console, fs
+{
+  let a = (1 + 2) * 3;  // c
+  let b = 1.5;
+  let s = "a\tb é";
+  let c = |y| y + 1;
+  let t = f(1, 2);
+  return match x {
+    1 => 1,
+    _ => 2,
+  };
+  return x;
+}
+
+fn h()
+  intent "x"
+  requires none
+  ensures none
+  effects net.connect, net.listen, net.recv, net.send
+{}
+
+fn k(x: Int) -> Int
+  intent "x"
+  requires none
+  ensures none
+  effects none
+{
+  let y = match x {
+    1 => 2,
+    _ => 3,
+  };
+  return (&(&y)).len() + (1).abs();
+}

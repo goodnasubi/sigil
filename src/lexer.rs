@@ -49,13 +49,13 @@ pub struct Lexed {
 pub const KEYWORDS: &[&str] = &[
     "module", "targets", "trust", "fn", "type", "struct", "enum", "intent", "requires", "ensures",
     "effects", "none", "of", "old", "result", "where", "self", "let", "mut", "return", "if",
-    "else", "while", "match", "move", "true", "false",
+    "else", "while", "match", "move", "true", "false", "impl",
 ];
 
 /// 将来のために予約する語。P0 では使えば字句エラー。
 pub const FUTURE_RESERVED: &[&str] = &[
-    "trait", "impl", "for", "in", "loop", "break", "continue", "use", "pub", "const", "as",
-    "async", "await",
+    "trait", "for", "in", "loop", "break", "continue", "use", "pub", "const", "as", "async",
+    "await",
 ];
 
 fn keyword(s: &str) -> Option<&'static str> {

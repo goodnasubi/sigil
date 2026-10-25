@@ -6,7 +6,7 @@
 
 use crate::ast::*;
 use crate::error::Error;
-use crate::fmt::{expr_lines, normalize_effects, type_text};
+use crate::fmt::{expr_lines, is_unit, normalize_effects, type_text};
 use crate::parser::parse;
 
 /// ソースから仕様のテキストを作る。構文エラーならそのエラー。
@@ -18,7 +18,23 @@ pub fn spec(src: &str) -> Result<String, Error> {
             Item::Type(t) => type_spec(t),
             Item::Struct(s) => struct_spec(s),
             Item::Enum(e) => enum_spec(e),
-            Item::Fn(f) => fn_spec(f),
+            Item::Fn(f) => fn_spec(f, "関数", &f.name, &f.generics),
+            Item::Impl(i) => i
+                .fns
+                .iter()
+                .map(|f| {
+                    let name = format!("{}.{}", type_text(&i.ty), f.name);
+                    // `impl<T> 型<T>` の型引数と、メソッド自身の型引数をあわせて示す。
+                    let gs: Vec<Generic> = i
+                        .generics
+                        .iter()
+                        .chain(f.generics.iter())
+                        .cloned()
+                        .collect();
+                    fn_spec(f, "メソッド", &name, &gs)
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
         });
     }
     Ok(blocks.join("\n"))
@@ -52,9 +68,15 @@ fn generics(gs: &[Generic]) -> String {
     }
     let v: Vec<String> = gs
         .iter()
-        .map(|g| match &g.bound {
-            Some(b) => format!("{}: {}", g.name, b.join(".")),
-            None => g.name.clone(),
+        .map(|g| {
+            if g.bounds.is_empty() {
+                g.name.clone()
+            } else {
+                let mut bs: Vec<String> = g.bounds.iter().map(|b| b.join(".")).collect();
+                bs.sort();
+                bs.dedup();
+                format!("{}: {}", g.name, bs.join(" + "))
+            }
         })
         .collect();
     format!("<{}>", v.join(", "))
@@ -181,7 +203,7 @@ fn intent_text(s: &str) -> String {
     }
 }
 
-fn fn_spec(f: &FnDecl) -> String {
+fn fn_spec(f: &FnDecl, label: &str, name: &str, gs: &[Generic]) -> String {
     let params = if f.params.is_empty() {
         "なし".to_string()
     } else {
@@ -191,11 +213,17 @@ fn fn_spec(f: &FnDecl) -> String {
             .collect::<Vec<_>>()
             .join("、")
     };
-    let ret = f.ret.as_ref().map_or("なし".to_string(), type_text);
+    // `-> Unit` は正規形では書かない（ADR 0011 の決定 2）ので、`Unit` も「なし」と示す。
+    let ret = f
+        .ret
+        .as_ref()
+        .filter(|r| !is_unit(r))
+        .map_or("なし".to_string(), type_text);
     format!(
-        "関数 {}{}\n  意図: {}\n  引数: {}\n  戻り値: {}\n  事前条件: {}\n  事後条件: {}\n  効果: {}\n",
-        f.name,
-        generics(&f.generics),
+        "{} {}{}\n  意図: {}\n  引数: {}\n  戻り値: {}\n  事前条件: {}\n  事後条件: {}\n  効果: {}\n",
+        label,
+        name,
+        generics(gs),
         intent_text(&f.intent),
         params,
         ret,

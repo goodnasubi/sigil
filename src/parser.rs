@@ -16,8 +16,34 @@ type R<T> = Result<T, Error>;
 /// 利用者が関数・変数・引数・型として定義できない名前（ADR 0009 の決定 4）。
 /// `check` は関数名としてだけ予約するので、ここには含めない。
 pub const RESERVED_NAMES: &[&str] = &[
-    "console", "fs", "net", "db", "state", "clock", "process", "foreign", "task", "browser", "Int",
-    "Float", "Bool", "String", "List", "Option", "Result", "Some", "None", "Ok", "Err",
+    "console",
+    "fs",
+    "net",
+    "db",
+    "state",
+    "clock",
+    "process",
+    "foreign",
+    "task",
+    "browser",
+    "Int",
+    "Float",
+    "Bool",
+    "String",
+    "Unit",
+    "List",
+    "Option",
+    "Result",
+    "Some",
+    "None",
+    "Ok",
+    "Err",
+    "Copyable",
+    "Equatable",
+    "Comparable",
+    "Numeric",
+    "Sendable",
+    "Shareable",
 ];
 
 /// 出力先（ADR 0008 の決定 6。P0 で書けるもの）。
@@ -349,8 +375,11 @@ impl Parser {
                 Tok::Kw("type") => items.push(Item::Type(self.type_decl()?)),
                 Tok::Kw("struct") => items.push(Item::Struct(self.struct_decl()?)),
                 Tok::Kw("enum") => items.push(Item::Enum(self.enum_decl()?)),
-                Tok::Kw("fn") => items.push(Item::Fn(self.fn_decl()?)),
-                _ => return Err(self.unexpected("`type`・`struct`・`enum`・`fn` のいずれか")),
+                Tok::Kw("fn") => items.push(Item::Fn(self.fn_decl(false)?)),
+                Tok::Kw("impl") => items.push(Item::Impl(self.impl_decl()?)),
+                _ => {
+                    return Err(self.unexpected("`type`・`struct`・`enum`・`fn`・`impl` のいずれか"))
+                }
             }
         }
         Ok(File { module, items })
@@ -457,12 +486,14 @@ impl Parser {
         }
         let gs = self.comma_sep(">", |p| {
             let name = p.camel_def("型引数名")?;
-            let bound = if p.eat_punct(":") {
-                Some(p.path("制約")?)
-            } else {
-                None
-            };
-            Ok(Generic { name, bound })
+            let mut bounds = Vec::new();
+            if p.eat_punct(":") {
+                bounds.push(p.path("制約")?);
+                while p.eat_punct("+") {
+                    bounds.push(p.path("制約")?);
+                }
+            }
+            Ok(Generic { name, bounds })
         })?;
         if gs.is_empty() {
             return Err(self.unexpected("型引数"));
@@ -566,7 +597,38 @@ impl Parser {
         })
     }
 
-    fn fn_decl(&mut self) -> R<FnDecl> {
+    fn impl_decl(&mut self) -> R<ImplDecl> {
+        let span = self.span();
+        self.bump();
+        let generics = self.generics()?;
+        let ty = self.ty()?;
+        if !matches!(ty, Type::Path { .. }) {
+            return Err(Error::new(
+                ErrorKind::Unexpected,
+                span,
+                "`impl` の対象は型の名前（`impl Account { ... }`）",
+            ));
+        }
+        self.expect_punct("{")?;
+        let mut fns = Vec::new();
+        while !self.at_punct("}") {
+            if !self.at_kw("fn") {
+                return Err(self.unexpected("`fn` または `}`"));
+            }
+            fns.push(self.fn_decl(true)?);
+        }
+        let end_line = self.span().line;
+        self.bump();
+        Ok(ImplDecl {
+            generics,
+            ty,
+            fns,
+            span,
+            end_line,
+        })
+    }
+
+    fn fn_decl(&mut self, in_impl: bool) -> R<FnDecl> {
         let span = self.span();
         self.bump();
         let name_span = self.span();
@@ -580,14 +642,36 @@ impl Parser {
         }
         let generics = self.generics()?;
         self.expect_punct("(")?;
+        let mut first_param = true;
+        let saved_self = self.allow_self;
         let params = self.comma_sep(")", |p| {
-            let name = p.snake_def("引数名")?;
+            let name = if in_impl && first_param && p.at_kw("self") {
+                p.bump();
+                p.allow_self = true;
+                "self".to_string()
+            } else {
+                p.snake_def("引数名")?
+            };
+            first_param = false;
             p.expect_punct(":")?;
             let ty = p.ty()?;
             Ok(Param { name, ty })
-        })?;
+        });
+        let params = match params {
+            Ok(v) => v,
+            Err(e) => {
+                self.allow_self = saved_self;
+                return Err(e);
+            }
+        };
         let ret = if self.eat_punct("->") {
-            Some(self.ty()?)
+            match self.ty() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    self.allow_self = saved_self;
+                    return Err(e);
+                }
+            }
         } else {
             None
         };
@@ -645,7 +729,9 @@ impl Parser {
             }
         }
 
-        let body = self.block()?;
+        let body = self.block();
+        self.allow_self = saved_self;
+        let body = body?;
         Ok(FnDecl {
             name,
             generics,
@@ -797,19 +883,25 @@ impl Parser {
             Tok::Kw("let") => {
                 self.bump();
                 let mutable = self.eat_kw("mut");
-                let name = self.snake_def("変数名")?;
-                if self.at_punct(":") {
+                if mutable && self.at_punct("(") {
                     return Err(self.err(
                         ErrorKind::NotInP0,
-                        "`let` の型注釈は P0 の M0 にない（型推論に任せる）",
+                        "`let mut (a, b)` は書けない（分解した名前に `mut` は付けられない。ADR 0011 の決定 7）",
                     ));
                 }
+                let pattern = self.let_pattern()?;
+                let ty = if self.eat_punct(":") {
+                    Some(self.ty()?)
+                } else {
+                    None
+                };
                 self.expect_punct("=")?;
                 let value = self.expr()?;
                 self.expect_punct(";")?;
                 StmtKind::Let {
                     mutable,
-                    name,
+                    pattern,
+                    ty,
                     value,
                 }
             }
@@ -939,6 +1031,30 @@ impl Parser {
     }
 
     // ---- パターン ----
+
+    /// `let` の分解のパターン: 束縛・`_`・組の入れ子だけ（ADR 0011 の決定 7）。
+    fn let_pattern(&mut self) -> R<Pattern> {
+        match self.tok().clone() {
+            Tok::Underscore => {
+                self.bump();
+                Ok(Pattern::Wild)
+            }
+            Tok::Punct("(") => {
+                let sp = self.span();
+                self.bump();
+                let ps = self.comma_sep(")", |p| p.let_pattern())?;
+                if ps.len() < 2 {
+                    return Err(Error::new(
+                        ErrorKind::BadTuple,
+                        sp,
+                        "組の分解は要素 2 つ以上",
+                    ));
+                }
+                Ok(Pattern::Tuple(ps))
+            }
+            _ => Ok(Pattern::Bind(self.snake_def("変数名")?)),
+        }
+    }
 
     fn pattern_inner(&mut self) -> R<Pattern> {
         match self.tok().clone() {
@@ -1442,6 +1558,7 @@ fn is_place(e: &Expr) -> bool {
     loop {
         match cur {
             Expr::Name(n) => return !is_upper_start(n),
+            Expr::SelfValue => return true,
             Expr::Field { expr, name } if !is_upper_start(name) => cur = expr,
             _ => return false,
         }

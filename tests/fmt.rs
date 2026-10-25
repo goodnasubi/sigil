@@ -286,8 +286,12 @@ fn check_boundary(mk: &dyn Fn(usize) -> String) {
         sigil::parse(&mk(n + 1)).is_err(),
         "n+1 でパースできてしまう"
     );
-    for m in [n - 1, n] {
-        let src = mk(m);
+    // n-1 は必ず整形でき、冪等でなければならない。
+    let below = format(&mk(n - 1)).expect("n-1 の整形に失敗");
+    assert_eq!(fmt(&below), below, "n-1 の整形結果が冪等でない");
+    // n は境界そのもの。整形できるなら冪等、できないなら深さ系のエラーだけを許す。
+    {
+        let src = mk(n);
         match format(&src) {
             Ok(out) => assert_eq!(fmt(&out), out),
             Err(e) => assert!(

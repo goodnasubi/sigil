@@ -4,7 +4,8 @@
 //! 制約・`Option`/`Result`/`?`・`match` と網羅性・クロージャ・単一化による推論・`T.check`・`let` の
 //! 型注釈の要否を扱う。式を下から上へ型づけ、最初の型エラーで打ち切る（M0 と同じ）。標準ライブラリの
 //! 関数・メソッド（`List.new`・`xs.len()` など）は後続の PR で扱うので、いまは `Unsupported` にする
-//! （黙って通さない）。効果の検査と所有権の検査は含まない。
+//! （黙って通さない）。効果の検査は含まない。所有権の検査のうち、移動（ADR 0012 の決定 1 の 1・2）は
+//! 型を見る流れの中で行う（`Flow`）。借用の区間・クロージャのとらえ方は後続の PR で扱う。
 //!
 //! 位置: 式は位置を持たないので、エラーの位置は式を含む文（または宣言）の位置になる。
 //!
@@ -12,7 +13,7 @@
 //! 制約（`T: Equatable` など）は、型が決まった時点で調べ、決まっていなければ本体の終わりまで
 //! 繰り延べる。`let` の型注釈の要否は、注釈を外して本体を検査し直し、同じ型に決まるかで判定する。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ast::*;
 use crate::effects::{EffectTable, Options, Primitive};
@@ -250,8 +251,43 @@ struct Ck {
     ref_ok: bool,
     /// `match` の対象が参照（`&x` か、参照を含む値）で、腕の束縛が参照になる。
     by_ref: bool,
+    /// 移動の状態（ADR 0012 の決定 1 の 1・2）。
+    flow: Flow,
+    /// 移動を追う。契約の式と篩型の条件の中では追わない（ADR 0012 の決定 3）。
+    track: bool,
+    /// 現在のクロージャの本体のスコープの位置（これより前のスコープの変数が外側）。0 ならクロージャの外。
+    closure_base: usize,
+    /// 次に評価する場所の式は、移動済みかの検査を飛ばす（呼び出し側が全体の場所で調べる）。
+    skip_use: bool,
+    /// `pat` が、値で束縛する Copyable でない部分を見つけた。
+    pat_moves: bool,
     last_closure: Vec<Atom>,
     inferred: Vec<Atom>,
+}
+
+/// 移動の状態。移動した場所（`a`・`a.owner`）とその位置、そして経路が早期の戻りで終わったか。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Flow {
+    moved: BTreeMap<String, Span>,
+    dead: bool,
+}
+
+/// 経路の合流。早期に戻る経路は加えず、そうでなければ移動した場所の和集合（先の位置を残す）。
+fn merge(a: Flow, b: Flow) -> Flow {
+    if a.dead {
+        return b;
+    }
+    if b.dead {
+        return a;
+    }
+    let mut m = a.moved;
+    for (k, v) in b.moved {
+        m.entry(k).or_insert(v);
+    }
+    Flow {
+        moved: m,
+        dead: false,
+    }
 }
 
 pub fn check_file(file: &File) -> R<()> {
@@ -286,6 +322,11 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
         defer: false,
         ref_ok: false,
         by_ref: false,
+        flow: Flow::default(),
+        track: true,
+        closure_base: 0,
+        skip_use: false,
+        pat_moves: false,
         last_closure: vec![],
         inferred: vec![],
     };
@@ -1275,6 +1316,11 @@ impl Ck {
         self.fn_params.clear();
         self.local_eff.clear();
         self.defer = false;
+        self.flow = Flow::default();
+        self.track = true;
+        self.closure_base = 0;
+        self.skip_use = false;
+        self.pat_moves = false;
     }
 
     fn add_eff(&mut self, a: Atom) {
@@ -1466,6 +1512,7 @@ impl Ck {
         self.ret = sig.ret.clone();
         // 契約の式は効果の推論に数えない（捨てる枠で検査する）
         self.eff_stack.push(vec![]);
+        self.track = false;
         if let Some(r) = &f.requires {
             self.expect(&Ty::Bool, r, "`requires`")?;
         }
@@ -1475,6 +1522,7 @@ impl Ck {
             self.result = None;
             r?;
         }
+        self.track = true;
         self.eff_stack.pop();
         self.block(&f.body)?;
         self.inferred = self.eff_stack[0].clone();
@@ -1499,7 +1547,127 @@ impl Ck {
         for s in &b.stmts {
             self.stmt(s)?;
         }
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn pop_scope(&mut self) {
         self.scopes.pop();
+        // 見えなくなった変数の移動の記録は捨てる
+        let live: HashSet<&String> = self.scopes.iter().flat_map(|s| s.keys()).collect();
+        self.flow
+            .moved
+            .retain(|k, _| live.contains(&k.split('.').next().unwrap_or(k).to_string()));
+    }
+
+    // ---------- 移動（ADR 0012 の決定 1 の 1・2） ----------
+
+    /// 場所 `path` を使えるか。移動済み（部分的な移動を含む）ならエラー。
+    fn use_place(&self, path: &str) -> R<()> {
+        if !self.track || self.refine {
+            return Ok(());
+        }
+        let hit = self.flow.moved.iter().find(|(k, _)| {
+            k.as_str() == path
+                || k.starts_with(&format!("{path}."))
+                || path.starts_with(&format!("{k}."))
+        });
+        let Some((k, at)) = hit else {
+            return Ok(());
+        };
+        let msg = if k == path {
+            format!(
+                "`{path}` は {} 行目で移動していて、ここでは使えない（移動した値は、再び代入するまで使えない。複製が要るなら `.clone()` を使う）",
+                at.line
+            )
+        } else if k.len() > path.len() {
+            format!(
+                "`{path}` の一部 `{k}` は {} 行目で移動していて、`{path}` の全体はここでは使えない（他のフィールドは使える）",
+                at.line
+            )
+        } else {
+            format!(
+                "`{k}` は {} 行目で移動していて、その一部 `{path}` もここでは使えない",
+                at.line
+            )
+        };
+        self.err(ErrorKind::UseAfterMove, msg)
+    }
+
+    /// 変数 `root` が、いま検査しているクロージャの外側で宣言されたものか。
+    fn is_outer(&self, root: &str) -> bool {
+        self.scopes[..self.closure_base.min(self.scopes.len())]
+            .iter()
+            .any(|s| s.contains_key(root))
+    }
+
+    /// 値で持つ場所 `path`（根は変数 `root`）を移動したと記録する。参照を通した場所は移動できない。
+    fn record_move(&mut self, root: &str, path: &str) -> R<()> {
+        let Some(l) = self.lookup(root) else {
+            return Ok(());
+        };
+        if matches!(self.shallow(&l.ty), Ty::Ref(..)) {
+            let what = if root == path {
+                format!("`{root}` は参照なので、参照先の値を移動できない")
+            } else {
+                format!("`{path}` は参照 `{root}` を通して届く場所なので、移動できない")
+            };
+            return self.err(
+                ErrorKind::MoveFromRef,
+                format!("{what}（複製は `.clone()`。`Copyable` な型なら複製として渡せる）"),
+            );
+        }
+        // クロージャが外側の変数を移すかは、とらえ方の規則（後続の PR）で決める
+        if self.is_outer(root) {
+            return Ok(());
+        }
+        let at = self.span;
+        self.flow.moved.entry(path.to_string()).or_insert(at);
+        Ok(())
+    }
+
+    /// 式 `e`（型 `t`）の値が、移動する位置に置かれた。`Copyable` でない値を持つ場所なら、移動を記録する。
+    fn consume(&mut self, e: &Expr, t: &Ty) -> R<()> {
+        if !self.track || self.refine {
+            return Ok(());
+        }
+        let Some((root, path)) = place_path(e) else {
+            return Ok(());
+        };
+        if self.lookup(&root).is_none() {
+            return Ok(());
+        }
+        let ty = self.zonk(t);
+        // 関数の値の受け渡しはクロージャの規則（後続の PR）で扱う。型が決まらないものは移動にしない。
+        if matches!(ty, Ty::Fn(..)) || self.holds(&ty, Prop::Copyable, 0) != Some(false) {
+            return Ok(());
+        }
+        self.record_move(&root, &path)
+    }
+
+    /// 代入で場所を初期化し直す。全体が移動済みの変数のフィールドには代入できない。
+    fn reinit(&mut self, root: &str, path: &str) -> R<()> {
+        if !self.track || self.refine || self.is_outer(root) {
+            return Ok(());
+        }
+        if let Some((k, at)) = self
+            .flow
+            .moved
+            .iter()
+            .find(|(k, _)| path.starts_with(&format!("{k}.")))
+        {
+            return self.err(
+                ErrorKind::UseAfterMove,
+                format!(
+                    "`{k}` は {} 行目で移動していて、その一部 `{path}` へは代入できない（先に `{k}` 全体へ代入する）",
+                    at.line
+                ),
+            );
+        }
+        let sub = format!("{path}.");
+        self.flow
+            .moved
+            .retain(|k, _| k != path && !k.starts_with(&sub));
         Ok(())
     }
 
@@ -1516,6 +1684,10 @@ impl Ck {
     }
 
     fn expect(&mut self, expected: &Ty, e: &Expr, what: &str) -> R<()> {
+        self.expect_ty(expected, e, what).map(|_| ())
+    }
+
+    fn expect_ty(&mut self, expected: &Ty, e: &Expr, what: &str) -> R<Ty> {
         let t = self.expr(e)?;
         if !self.coerce(expected, &t, e) {
             return self.err(
@@ -1528,7 +1700,7 @@ impl Ck {
                 ),
             );
         }
-        Ok(())
+        Ok(t)
     }
 
     fn check_hint(&self, expected: &Ty, actual: &Ty) -> &'static str {
@@ -1561,6 +1733,7 @@ impl Ck {
                 let vt = self.expr(value);
                 self.defer = false;
                 let vt = vt?;
+                let vt_moved = vt.clone();
                 self.fn_value_form(value, &vt)?;
                 if closure {
                     if let Pattern::Bind(n) = pattern {
@@ -1620,11 +1793,17 @@ impl Ck {
                         "関数の型の変数は `let mut` で宣言できない（関数の値の再代入では効果を追えない。`let` で束縛し直す）",
                     );
                 }
+                if !matches!(pattern, Pattern::Wild) {
+                    self.consume(value, &vt_moved)?;
+                }
                 self.bind(pattern, &fin, *mutable)
             }
             StmtKind::Assign { target, value } => {
                 let root = place_root(target).map(str::to_string);
-                let tt = self.expr(target)?;
+                self.skip_use = place_path(target).is_some();
+                let tt = self.expr(target);
+                self.skip_use = false;
+                let tt = tt?;
                 self.span = s.span;
                 let Some(root) = root else {
                     return self.err(
@@ -1653,6 +1832,10 @@ impl Ck {
                         ),
                     );
                 }
+                self.consume(value, &vt)?;
+                if let Some((r, p)) = place_path(target) {
+                    self.reinit(&r, &p)?;
+                }
                 Ok(())
             }
             StmtKind::Expr(e) => self.expr(e).map(|_| ()),
@@ -1660,6 +1843,7 @@ impl Ck {
                 let ret = self.ret.clone();
                 match v {
                     None => {
+                        self.flow.dead = true;
                         if !self.try_unify(&ret, &Ty::Unit) {
                             return self.err(
                                 ErrorKind::TypeMismatch,
@@ -1687,15 +1871,50 @@ impl Ck {
                                 ),
                             );
                         }
+                        self.flow.dead = true;
                         Ok(())
                     }
-                    Some(e) => self.expect(&ret, e, "戻り値"),
+                    Some(e) => {
+                        let t = self.expect_ty(&ret, e, "戻り値")?;
+                        self.consume(e, &t)?;
+                        self.flow.dead = true;
+                        Ok(())
+                    }
                 }
             }
             StmtKind::If(i) => self.if_stmt(i),
             StmtKind::While { cond, body } => {
+                // ループは、本体の終わりの状態が次の周の頭の状態に合流する。外側の場所を本体で
+                // 移動して再代入しないまま周の終わりに届くなら、次の周でその移動が二重になる。
+                let head = self.flow.moved.clone();
                 self.expect(&Ty::Bool, cond, "`while` の条件")?;
-                self.block(body)
+                let after_cond = self.flow.clone();
+                self.block(body)?;
+                if !self.flow.dead && self.track {
+                    let hit = self
+                        .flow
+                        .moved
+                        .iter()
+                        .find(|(k, _)| {
+                            !head.contains_key(*k)
+                                && self.lookup(k.split('.').next().unwrap_or(k)).is_some()
+                        })
+                        .map(|(k, at)| (k.clone(), *at));
+                    if let Some((k, at)) = hit {
+                        return Err(Error::new(
+                            ErrorKind::MovedInLoop,
+                            at,
+                            format!(
+                                "`{k}` は {} 行目でループの本体の中で移動していて、周の終わりまでに再代入されない。次の周でまた使われるので移動済みになる（本体の中で再代入するか、ループの外で移動する）",
+                                at.line
+                            ),
+                        ));
+                    }
+                }
+                // 0 周で抜ける経路と、本体の終わりから抜ける経路の合流
+                let end = std::mem::take(&mut self.flow);
+                self.flow = merge(after_cond, end);
+                Ok(())
             }
             StmtKind::Match {
                 scrutinee, arms, ..
@@ -1704,17 +1923,27 @@ impl Ck {
                 let st = self.peel(&st);
                 let sp = s.span;
                 let mut pats = vec![];
+                self.match_moves(scrutinee, &st, by_ref, arms.iter().map(|a| &a.pattern))?;
+                let start = self.flow.clone();
+                let mut joined: Option<Flow> = None;
                 for a in arms {
                     self.span = sp;
+                    self.flow = start.clone();
                     self.scopes.push(HashMap::new());
                     self.by_ref = by_ref;
                     let r = self.pat(&a.pattern, &st);
                     self.by_ref = false;
                     r?;
                     self.block(&a.body)?;
-                    self.scopes.pop();
+                    self.pop_scope();
                     pats.push(&a.pattern);
+                    let f = std::mem::take(&mut self.flow);
+                    joined = Some(match joined {
+                        None => f,
+                        Some(j) => merge(j, f),
+                    });
                 }
+                self.flow = joined.unwrap_or(start);
                 self.span = sp;
                 self.exhaustive(&pats)
             }
@@ -1723,12 +1952,24 @@ impl Ck {
 
     fn if_stmt(&mut self, i: &IfStmt) -> R<()> {
         self.expect(&Ty::Bool, &i.cond, "`if` の条件")?;
+        let start = self.flow.clone();
         self.block(&i.then)?;
+        let then_end = std::mem::replace(&mut self.flow, start);
         match i.otherwise.as_deref() {
-            None => Ok(()),
-            Some(Else::If(n)) => self.if_stmt(n),
-            Some(Else::Block(b)) => self.block(b),
+            None => {}
+            Some(Else::If(n)) => self.if_stmt(n)?,
+            Some(Else::Block(b)) => self.block(b)?,
         }
+        let else_end = std::mem::take(&mut self.flow);
+        self.flow = merge(then_end, else_end);
+        Ok(())
+    }
+
+    /// 新しく宣言する変数の名前の、古い移動の記録を捨てる。
+    fn forget(&mut self, n: &str) {
+        self.flow
+            .moved
+            .retain(|k, _| k.split('.').next().unwrap_or(k) != n);
     }
 
     fn shadow_check(&self, n: &str) -> R<()> {
@@ -1745,6 +1986,7 @@ impl Ck {
 
     fn declare(&mut self, n: &str, ty: Ty, mutable: bool) -> R<()> {
         self.shadow_check(n)?;
+        self.forget(n);
         self.scopes.last_mut().expect("scope").insert(
             n.to_string(),
             Local {
@@ -1843,6 +2085,40 @@ impl Ck {
         )
     }
 
+    /// `match` の対象が場所で、腕が `Copyable` でない部分を値で束縛するなら、対象はこの `match` で
+    /// 移動する（どの腕に入るかによらない）。対象が参照（の型・`&場所`）なら束縛が参照になり移動しない。
+    fn match_moves<'a>(
+        &mut self,
+        scrutinee: &Expr,
+        st: &Ty,
+        by_ref: bool,
+        pats: impl Iterator<Item = &'a Pattern>,
+    ) -> R<()> {
+        if by_ref || !self.track || self.refine {
+            return Ok(());
+        }
+        let Some((root, path)) = place_path(strip_paren(scrutinee)) else {
+            return Ok(());
+        };
+        if self.lookup(&root).is_none() {
+            return Ok(());
+        }
+        // 腕の束縛の型を調べるために、パターンを捨てるスコープで一度合わせる
+        self.pat_moves = false;
+        let sp = self.span;
+        for p in pats {
+            self.scopes.push(HashMap::new());
+            let r = self.pat(p, st);
+            self.scopes.pop();
+            r?;
+        }
+        self.span = sp;
+        if std::mem::take(&mut self.pat_moves) {
+            self.record_move(&root, &path)?;
+        }
+        Ok(())
+    }
+
     /// パターンを型 `t` に合わせ、束縛する名前を現在のスコープに宣言する。
     /// `match` の対象の型と、腕の束縛が参照になるか（ADR 0012 の決定 1 の 3）。
     /// `match &x` は所有する場所だけに書ける。参照の名前（`Option<&T>` の変数を含む）と、
@@ -1878,7 +2154,12 @@ impl Ck {
             }
         }
         let t = self.expr(e)?;
-        let by_ref = contains_ref(&self.zonk(&t));
+        // 参照を通して届く場所（`r`・`r.f`）の束縛も参照になる（ADR 0011 の決定 4）
+        let via_ref = place_path(strip_paren(e)).is_some_and(|(r, _)| {
+            self.lookup(&r)
+                .is_some_and(|l| matches!(self.shallow(&l.ty), Ty::Ref(..)))
+        });
+        let by_ref = via_ref || contains_ref(&self.zonk(&t));
         Ok((t, by_ref))
     }
 
@@ -1890,6 +2171,10 @@ impl Ck {
                 let t = if self.by_ref {
                     Ty::Ref(false, Box::new(t))
                 } else {
+                    if !matches!(t, Ty::Fn(..)) && self.holds(&t, Prop::Copyable, 0) == Some(false)
+                    {
+                        self.pat_moves = true;
+                    }
                     t
                 };
                 self.declare(n, t, false)
@@ -2183,9 +2468,15 @@ impl Ck {
                 Ok(t)
             }
             Expr::Paren(i) => self.expr_hint(i, hint),
-            Expr::Tuple(es) => Ok(Ty::Tuple(
-                es.iter().map(|e| self.expr(e)).collect::<R<_>>()?,
-            )),
+            Expr::Tuple(es) => {
+                let mut ts = vec![];
+                for e in es {
+                    let t = self.expr(e)?;
+                    self.consume(e, &t)?;
+                    ts.push(t);
+                }
+                Ok(Ty::Tuple(ts))
+            }
             Expr::Unary { op, expr } => self.unary(*op, expr),
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs),
             Expr::Field { expr, name } => self.field(expr, name),
@@ -2200,13 +2491,19 @@ impl Ck {
                 let sp = self.span;
                 let r = self.fresh();
                 let mut pats = vec![];
+                self.match_moves(scrutinee, &st, by_ref, arms.iter().map(|a| &a.pattern))?;
+                let start = self.flow.clone();
+                let mut joined: Option<Flow> = None;
                 for (i, a) in arms.iter().enumerate() {
+                    self.flow = start.clone();
                     self.scopes.push(HashMap::new());
                     self.by_ref = by_ref;
                     let pr = self.pat(&a.pattern, &st);
                     self.by_ref = false;
                     pr?;
                     let t = self.expr(&a.body)?;
+                    // 腕の値は `match` の値として移る
+                    self.consume(&a.body, &t)?;
                     self.span = sp;
                     if i == 0 {
                         let _ = self.unify(&r, &t);
@@ -2220,9 +2517,15 @@ impl Ck {
                             ),
                         );
                     }
-                    self.scopes.pop();
+                    self.pop_scope();
                     pats.push(&a.pattern);
+                    let f = std::mem::take(&mut self.flow);
+                    joined = Some(match joined {
+                        None => f,
+                        Some(j) => merge(j, f),
+                    });
                 }
+                self.flow = joined.unwrap_or(start);
                 self.exhaustive(&pats)?;
                 Ok(r)
             }
@@ -2250,9 +2553,13 @@ impl Ck {
         let defer = std::mem::take(&mut self.defer);
         self.eff_stack.push(vec![]);
         self.scopes.push(HashMap::new());
+        // 本体の移動は外側の流れに影響しない（外側の変数のとらえ方は後続の PR）
+        let outer_flow = self.flow.clone();
+        let outer_base = std::mem::replace(&mut self.closure_base, self.scopes.len() - 1);
         let mut pts = vec![];
         for (i, p) in params.iter().enumerate() {
             self.shadow_check(p)?;
+            self.forget(p);
             let t = match &hps {
                 Some(ps) => ps[i].clone(),
                 None => self.fresh_known(format!("クロージャの引数 `{p}`")),
@@ -2278,6 +2585,7 @@ impl Ck {
             ClosureBody::Expr(e) => match self.expr(e) {
                 Ok(t) => {
                     self.span = sp;
+                    self.consume(e, &t)?;
                     if self.coerce(&r, &t, e) {
                         Ok(())
                     } else {
@@ -2309,6 +2617,8 @@ impl Ck {
         };
         self.ret = saved;
         self.scopes.pop();
+        self.flow = outer_flow;
+        self.closure_base = outer_base;
         let effs = self.eff_stack.pop().unwrap_or_default();
         if defer {
             self.last_closure = effs;
@@ -2323,6 +2633,8 @@ impl Ck {
 
     fn try_op(&mut self, inner: &Expr) -> R<Ty> {
         let t = self.expr(inner)?;
+        // `x?` は `x` の中身を取り出すので、場所なら移動する（早期に戻る経路は合流に加えない）
+        self.consume(inner, &t)?;
         let ret = self.ret.clone();
         let (want, value) =
             match self.peel(&t) {
@@ -2393,6 +2705,7 @@ impl Ck {
     }
 
     fn name(&mut self, n: &str) -> R<Ty> {
+        let skip = std::mem::take(&mut self.skip_use);
         if self.refine && n != "self" {
             return self.err(
                 ErrorKind::RefinementName,
@@ -2400,6 +2713,9 @@ impl Ck {
                     "篩型の条件で値として参照できるのは `self` とリテラルだけ（`{n}` は書けない）"
                 ),
             );
+        }
+        if self.lookup(n).is_some() && !skip {
+            self.use_place(n)?;
         }
         if let Some(v) = self.lookup(n) {
             // 参照の型の名前は、式の中では参照先の値を表す（ADR 0011 の決定 4）。
@@ -2564,6 +2880,7 @@ impl Ck {
     }
 
     fn field(&mut self, recv: &Expr, name: &str) -> R<Ty> {
+        let skip = std::mem::take(&mut self.skip_use);
         if let Some(tn) = self.type_path(recv) {
             return match self.types.get(&tn).cloned() {
                 Some(TypeDef::Enum { variants, .. }) => {
@@ -2586,7 +2903,17 @@ impl Ck {
                 ),
             };
         }
-        let t = self.expr(recv)?;
+        // 場所の連なり（`a.b.c`）は、全体の場所で移動済みかを調べる（部分的な移動を見分ける）
+        let chain = place_path(recv).filter(|(r, _)| self.lookup(r).is_some());
+        if let Some((_, p)) = &chain {
+            if !skip {
+                self.use_place(&format!("{p}.{name}"))?;
+            }
+            self.skip_use = true;
+        }
+        let t = self.expr(recv);
+        self.skip_use = false;
+        let t = t?;
         match self.val(&t) {
             Ty::Named(n, args) => match self.types.get(&n).cloned() {
                 Some(TypeDef::Struct { params, fields }) => {
@@ -2807,6 +3134,10 @@ impl Ck {
                     };
                     self.assignable_place(&root, expr, false)?;
                 }
+                if !matches!(sig.params[0].1, Ty::Ref(..)) {
+                    // 値で受け取る受け手（`opt.map(..)` など）は移動する
+                    self.consume(expr, &rt0)?;
+                }
                 let ps: Vec<Ty> = sig.params[1..]
                     .iter()
                     .map(|(_, t)| substitute(t, &m))
@@ -2883,6 +3214,10 @@ impl Ck {
             let t = t?;
             self.span = sp;
             self.fn_value_form(a, &t)?;
+            // 値で受け取る引数は移動する（参照の引数は `&x` と書くので場所ではない）
+            if !matches!(self.shallow(p), Ty::Ref(..)) {
+                self.consume(a, &t)?;
+            }
             let of_this = eff
                 .terms
                 .iter()
@@ -2959,6 +3294,7 @@ impl Ck {
             let ft = substitute(ft, &m);
             let sp = self.span;
             let t = self.expr_hint(e, Some(&ft))?;
+            self.consume(e, &t)?;
             self.span = sp;
             if !self.coerce(&ft, &t, e) {
                 return self.err(
@@ -3018,6 +3354,20 @@ fn contains_ref_outside_fn(t: &Ty) -> bool {
         Ty::Named(_, a) => a.iter().any(contains_ref_outside_fn),
         Ty::Tuple(ts) => ts.iter().any(contains_ref_outside_fn),
         _ => false,
+    }
+}
+
+/// 場所の式（変数とそのフィールドの連なり）の根の変数と、`a.b.c` の形の経路。
+fn place_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Name(n) => Some((n.clone(), n.clone())),
+        Expr::SelfValue => Some(("self".into(), "self".into())),
+        Expr::Field { expr, name } => {
+            let (r, p) = place_path(expr)?;
+            Some((r, format!("{p}.{name}")))
+        }
+        Expr::Paren(i) => place_path(i),
+        _ => None,
     }
 }
 

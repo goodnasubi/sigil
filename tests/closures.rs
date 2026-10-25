@@ -314,3 +314,30 @@ fn unresolved_capture_is_treated_as_move() {
         "  let x = anyv();\n  let g = move |a| a + rdg(&x);\n  let w = x;\n  return g(1) + w + x;",
     );
 }
+
+/// 関数の値は Copyable でないので、他の値と同じく移動を追う（PR #30 の既知の制限の解消）。
+#[test]
+fn function_values_are_moved() {
+    assert_eq!(
+        kind(
+            "f(g: fn(Int) -> Int) -> Int",
+            "  let h = g;\n  let k = g;\n  return 0;"
+        ),
+        UseAfterMove
+    );
+    // 移動した先だけを使うのは構わない。
+    ok("f(g: fn(Int) -> Int) -> Int", "  let h = g;\n  return 0;");
+    // 別のクロージャを渡すのは構わない。
+    ok(
+        "f() -> Int",
+        "  let c = move |x| x + 1;\n  let d = move |x| x + 2;\n  return run(c, 1) + run(d, 2);",
+    );
+    // 同じ値を 2 回渡すのは移動後の使用。
+    assert_eq!(
+        kind(
+            "f() -> Int",
+            "  let c = move |x| x + 1;\n  return run(c, 1) + run(c, 2);"
+        ),
+        UseAfterMove
+    );
+}

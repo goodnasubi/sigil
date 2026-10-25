@@ -334,16 +334,19 @@ B は、本体を持たない検査用の表を正式な一覧として固定し
 
 ADR 0006 の M2 の完了条件に、次のテストを加える（エラー例はテスト用のファイルに切り出す）。
 
+テストは `tests/m2_completion.rs` にまとめ、各項目の名前を括弧に示す。
+
 - エラーになる:
-  - 移動: `if` の片方の腕で移動した変数の合流後の使用、`while` の本体でループの外の変数を移動して再び代入しないもの、`Copyable` でない値を束縛する `match` の後の対象の使用、参照を通したフィールドの移動、部分的に移動した変数全体を渡す呼び出し。
-  - 借用: `let r = &x;`、`f(&mut a, &a)`、`f(&mut a, a)`（`Copyable` でない `a`）、`xs.push(xs.len())`（意図したエラー。説明に一時変数での直し方が出ること）、`let mut` でない変数の `&mut` の借用、`List.get` の結果を使い終わる前の `push`、`unwrap_or` に `Option<&T>` を渡す呼び出し、`ok_or` に `Option<&T>` を渡す呼び出し、借用の引数から始まらない場所を返す参照の関数、`let mut` の `Option<&T>` の変数、`&Option<&T>` と書いた宣言、`List.get` の結果を渡した参照を返す関数の結果を使い終わる前の `push`（区間の推移）。
-  - `match &x`: 参照の名前 `x: &T` への `match &x`（「`&` を外す」と示す）。
-  - 一時的な値: `let r = first(&make_list());`・`let r = make().get(0);` の後の `r` の使用、文の `match &make()` の腕のブロックの中での束縛の使用、一時的な値から借りた参照の `return`、`match make().get(0)` の腕のブロックの中での束縛の使用。
-  - クロージャ: `move` のない脱出するクロージャ、参照の名前をとらえた `move` のクロージャ、本体でとらえた値を移動するクロージャ。
-  - 篩型と契約: `&mut p`（`p` は篩型）を `&mut B` の引数に渡す呼び出し、`requires` の中で `Copyable` でない値を値の引数に渡す呼び出し、`ensures` が参照する値の引数を本体で移動した関数。
-- 通る: `f(&mut a.x, &a.y)`、`let n = match make().get(0) { Some(a) => a.n, None => 0, };`、`match &x { ... }`（`x` は `let` の変数）の腕での束縛の使用とその後の `x` の使用、`Option<&Account>` の `map(|a| a.balance)`、`Option<&Account>` の `is_some`、`max_by(|a| a.balance)`、`if` の両方の腕で移動した後に再び代入した変数の使用、`return account.owner;`（部分的な移動）、`get` の結果を使い終わった後の `push`、`&p`（篩型）を `&B` の引数に渡す呼び出し、`console.log(&"text")`。
-- 決定 2 で直したサンプルが、型検査・効果の検査・所有権の検査をすべて通る。
-- 決定 5: 標準の自由関数と同じ名前の関数の宣言がエラーになる。
+  - 移動: `if` の片方の腕で移動した変数の合流後の使用、`while` の本体でループの外の変数を移動して再び代入しないもの、`Copyable` でない値を束縛する `match` の後の対象の使用、参照を通したフィールドの移動、部分的に移動した変数全体を渡す呼び出し。（`err_move_if_one_arm`・`err_move_in_while_body`・`err_move_match_binding_then_use_target`・`err_move_field_through_reference`・`err_whole_use_after_partial_move`）
+  - 借用: `let r = &x;`、`f(&mut a, &a)`、`f(&mut a, a)`（`Copyable` でない `a`）、`xs.push(xs.len())`（意図したエラー。説明に一時変数での直し方が出ること）、`let mut` でない変数の `&mut` の借用、`List.get` の結果を使い終わる前の `push`、`unwrap_or` に `Option<&T>` を渡す呼び出し、`ok_or` に `Option<&T>` を渡す呼び出し、借用の引数から始まらない場所を返す参照の関数、`let mut` の `Option<&T>` の変数、`&Option<&T>` と書いた宣言、`List.get` の結果を渡した参照を返す関数の結果を使い終わる前の `push`（区間の推移）。（`err_let_borrow`・`err_mut_and_shared_in_one_call`・`err_mut_and_move_in_one_call`・`err_push_len_with_fix_in_message`・`err_mut_borrow_of_immutable_variable`・`err_get_then_push`・`err_unwrap_or_with_option_of_ref`・`err_ok_or_with_option_of_ref`・`err_return_ref_not_rooted_at_borrow_argument`・`err_let_mut_option_of_ref`・`err_ref_to_option_of_ref_declaration`・`err_push_while_returned_ref_alive_transitively`）
+  - `match &x`: 参照の名前 `x: &T` への `match &x`（「`&` を外す」と示す）。（`err_match_ref_of_reference_name`）
+  - 一時的な値: `let r = first(&make_list());`・`let r = make().get(0);` の後の `r` の使用、文の `match &make()` の腕のブロックの中での束縛の使用、一時的な値から借りた参照の `return`、`match make().get(0)` の腕のブロックの中での束縛の使用。（`err_temp_borrow_first_of_make`・`err_temp_get_of_make`・`err_stmt_match_ref_temp_binding_in_block`・`err_return_ref_of_temp`・`err_match_get_of_temp_binding_in_block`）
+  - クロージャ: `move` のない脱出するクロージャ、参照の名前をとらえた `move` のクロージャ、本体でとらえた値を移動するクロージャ。（`err_closure_without_move_escaping`・`err_move_closure_captures_reference`・`err_closure_moves_captured_value`）
+  - 篩型と契約: `&mut p`（`p` は篩型）を `&mut B` の引数に渡す呼び出し、`requires` の中で `Copyable` でない値を値の引数に渡す呼び出し、`ensures` が参照する値の引数を本体で移動した関数。（`err_refined_mut_borrow`・`err_requires_moves_value`・`err_ensures_value_moved_by_body`）
+- 通る: `f(&mut a.x, &a.y)`、`let n = match make().get(0) { Some(a) => a.n, None => 0, };`、`match &x { ... }`（`x` は `let` の変数）の腕での束縛の使用とその後の `x` の使用、`Option<&Account>` の `map(|a| a.balance)`、`Option<&Account>` の `is_some`、`max_by(|a| a.balance)`、`if` の両方の腕で移動した後に再び代入した変数の使用、`return account.owner;`（部分的な移動）、`get` の結果を使い終わった後の `push`、`&p`（篩型）を `&B` の引数に渡す呼び出し、`console.log(&"text")`。（`pass_disjoint_fields`・`pass_match_on_get_of_temp_value_only`・`pass_match_ref_of_let_variable`・`pass_option_of_ref_combinators`・`pass_if_both_arms_move_then_reassign`・`pass_return_partial_move`・`pass_push_after_last_use_of_get`・`pass_refined_shared_borrow_as_base`・`pass_console_log_literal_ref`）
+- 決定 2 で直したサンプルが、型検査・効果の検査・所有権の検査をすべて通る。（`examples_pass_all_checks`）
+- 決定 5: 標準の自由関数と同じ名前の関数の宣言がエラーになる。（`stdlib_function_name_redeclared`）
+- 関数の値の移動（PR5）: `let h = g; let k = g;` が `UseAfterMove`（`tests/closures.rs` の `function_values_are_moved`）。
 
 ## 影響
 
@@ -438,5 +441,17 @@ ADR に細部がなかった点: 引数の位置の判定（入れ子の式の�
 
 既知の制限:
 
-- 関数の値は移動を追わない。`let h = g; let k = g;`（`g` はクロージャ）が通る。ADR の「関数の型は `Copyable` でない」と実装がずれている。PR5 で扱う。
-- `src/borrow.rs` の `regions`（イベント列から衝突を出す部品）は、検査器（`check.rs`）からは呼ばれない。検査器は同じ規則を `Loans` と `check.rs` の結びつけで別に実装している。条件 8 の部品としてはユニットテストで規則を固定しているが、二つの実装の一致は自動では保証されない。統合は後続の課題とする。
+- `src/borrow.rs` の `regions`（イベント列から衝突を出す部品）は、検査器（`check.rs`）からは呼ばれない。検査器は同じ規則を `Loans` と `check.rs` の結びつけで別に実装している。条件 8 の部品としてはユニットテストで規則を固定しているが、二つの実装の一致は自動では保証されない。統合は後続の課題とする。（PR5 でも統合しなかった。検査器の流れの解析に組み込む大きな変更になるため）
+
+### PR5 で実装したこと（完了）
+
+- **サンプル**: `examples/01〜05` の c-brace 版は、すべて `sigil check` の型・効果・所有権の検査を通る。検査器の誤拒否も、サンプルの書き方の誤りもなかったので、検査器もサンプルも変えていない（`examples_pass_all_checks`）。
+- **関数の値の移動**: PR #30 の既知の制限（`let h = g; let k = g;` が通る）を直した。関数の型だけを移動の対象から外していた 4 か所（`consume`、`match` の束縛、`move` のとらえ、契約の式の移動の禁止）の例外を取り除いた。関数の型は `holds(.., Copyable)` が `Some(false)` なので、他の `Copyable` でない値と同じ経路で移動を追う。呼び出し `h(1)` は消費でなく読みなので、関数の値は何度でも呼べる。
+- **条件 1（M2）の差し込み口**: `Options::copy_override: Vec<(String, bool)>`（型名ごとの `Copyable` の上書き。名前つきの struct・enum のみ）。`holds` が `Prop::Copyable` を求めるときにだけ参照する。
+- **完了条件の表**: ADR 0006 の M2 の項と条件の表、本 ADR の「M2 の完了条件に加えるもの」に、対応するテストの名前を記した。
+
+仮に決めたこと（誤りと分かった場合は直す）:
+
+- 同じ関数の値を 2 回の呼び出しの引数に渡すと `UseAfterMove`（`run(c, 1) + run(c, 2)`）。ADR の「関数の型は `Copyable` でない」に忠実にした結果で、使い勝手は悪くなりうる。複製できるクロージャ（`Copyable` な値だけをとらえる `move` クロージャ）を `Copyable` にするかは M4 以降で決める。
+- `copy_override` は名前つきの型だけに効く。タプル・参照・関数の型・型引数の規則は変えられない。
+- サンプルの a-sexpr・b-indent 版は別の構文の検討用なので、検査にかけない。

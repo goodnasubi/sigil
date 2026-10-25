@@ -50,6 +50,7 @@ fn prim(sig: &str, effects: &[&str]) -> Primitive {
 /// 標準ライブラリが入るまでの、効果のある仮の関数。
 fn emit_options() -> Options {
     Options {
+        copy_override: vec![],
         table: EffectTable::standard(),
         primitives: vec![
             prim("emit(n: Int) -> Bool", &["console"]),
@@ -895,7 +896,10 @@ fn derived_properties_follow_the_adr_table() {
     assert_eq!(
         kind(&format!(
             "{eq}{}",
-            func("g(f: fn(Int) -> Int)", "  let x = same(f, f);")
+            func(
+                "g(f: fn(Int) -> Int, h: fn(Int) -> Int)",
+                "  let x = same(f, h);"
+            )
         )),
         ErrorKind::ConstraintUnsatisfied
     );

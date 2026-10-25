@@ -124,6 +124,8 @@ pub struct Primitive {
 pub struct Options {
     pub table: EffectTable,
     pub primitives: Vec<Primitive>,
+    /// 型名ごとの Copyable の上書き（ADR0006 の判定表を差し替える差し込み口。名前つきの struct/enum のみ）。
+    pub copy_override: Vec<(String, bool)>,
 }
 
 impl Default for Options {
@@ -131,6 +133,7 @@ impl Default for Options {
         Options {
             table: EffectTable::standard(),
             primitives: vec![],
+            copy_override: vec![],
         }
     }
 }

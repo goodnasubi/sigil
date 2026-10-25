@@ -55,7 +55,7 @@ fn trust_base_and_generics_and_expression_forms() {
     assert!(out.contains("出力先: ブラウザ\n  信頼基盤: はい"));
     assert!(out.contains("関数 f<T: Sendable>"));
     assert!(out.contains("意図: a\\nb"));
-    assert!(out.contains("xs を書き換える（List<T>）、g を受け取る（fn(Int) -> Int）"));
+    assert!(out.contains("xs を書き換える（List<T>）、g を呼ぶ（fn(Int) -> Int）"));
     // 式は正規形の表記（冗長な括弧は落ちる）、old を含む
     assert!(out.contains("事前条件: xs.len() > 0"));
     assert!(out.contains("事後条件: old(xs.len()) == result.len()"));

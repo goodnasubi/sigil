@@ -315,29 +315,36 @@ fn unresolved_capture_is_treated_as_move() {
     );
 }
 
-/// 関数の値は Copyable でないので、他の値と同じく移動を追う（PR #30 の既知の制限の解消）。
+/// 関数の値は、引数に渡すときは呼び出しの間だけの共有借用で、移動しない（ADR 0013 の決定 3）。
+/// 別名 `let h = c;` と `move` のクロージャへのとらえ込みは、`let` で束縛したクロージャなら移動のまま。
 #[test]
-fn function_values_are_moved() {
-    assert_eq!(
-        kind(
-            "f(g: fn(Int) -> Int) -> Int",
-            "  let h = g;\n  let k = g;\n  return 0;"
-        ),
-        UseAfterMove
-    );
-    // 移動した先だけを使うのは構わない。
-    ok("f(g: fn(Int) -> Int) -> Int", "  let h = g;\n  return 0;");
-    // 別のクロージャを渡すのは構わない。
+fn function_values_are_borrowed_when_passed() {
+    // 同じ値を何度渡しても移動しない
     ok(
         "f() -> Int",
-        "  let c = move |x| x + 1;\n  let d = move |x| x + 2;\n  return run(c, 1) + run(d, 2);",
+        "  let c = move |x| x + 1;\n  return run(c, 1) + run(c, 2);",
     );
-    // 同じ値を 2 回渡すのは移動後の使用。
+    // 別名にした `let` のクロージャは移動。移動した先だけを使うのは構わない
     assert_eq!(
         kind(
             "f() -> Int",
-            "  let c = move |x| x + 1;\n  return run(c, 1) + run(c, 2);"
+            "  let c = move |x| x + 1;\n  let h = c;\n  let k = c;\n  return 0;"
         ),
         UseAfterMove
     );
+    ok(
+        "f() -> Int",
+        "  let c = move |x| x + 1;\n  let h = c;\n  return run(h, 1);",
+    );
+}
+
+#[test]
+fn moved_function_message_has_no_clone_hint() {
+    let s = src(
+        "f() -> Int",
+        "  let c = move |x| x + 1;\n  let h = c;\n  return run(c, 1);",
+    );
+    let m = check(&s).unwrap_err().to_string();
+    assert!(!m.contains(".clone()"), "{m}");
+    assert!(m.contains("移動しない"), "{m}");
 }

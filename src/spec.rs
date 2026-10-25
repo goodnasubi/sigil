@@ -145,6 +145,8 @@ fn param_spec(p: &Param) -> String {
             mutable: false,
             inner,
         } => format!("{} を読む（{}）", p.name, type_text(inner)),
+        // 関数の値の受け渡しは呼び出しの間の借用なので、受け取る（所有する）とは訳さない（ADR 0013）
+        t @ Type::Fn { .. } => format!("{} を呼ぶ（{}）", p.name, type_text(t)),
         t => format!("{} を受け取る（{}）", p.name, type_text(t)),
     }
 }

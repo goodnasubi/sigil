@@ -564,9 +564,10 @@ fn definitions() {
 fn direct_recursive_types() {
     assert_eq!(kind("struct A {\n  a: A,\n}\n"), ErrorKind::RecursiveType);
     assert_eq!(
-        kind("enum T {\n  Node(T, T),\n  Leaf,\n}\n"),
+        kind("enum Tree {\n  Only(Tree),\n}\n"),
         ErrorKind::RecursiveType
     );
+    ok("enum Tree {\n  Node(Tree, Tree),\n  Leaf,\n}\n");
     assert_eq!(
         kind("struct A {\n  b: B,\n}\nstruct B {\n  t: (Int, A),\n}\n"),
         ErrorKind::RecursiveType

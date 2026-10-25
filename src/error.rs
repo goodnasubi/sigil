@@ -43,6 +43,7 @@ pub enum ErrorKind {
     ReservedWordAsName,
     BadNameForm,
     ReservedNameDefined,
+    CloneOfCopyable,
     ModuleMissing,
     ModuleDuplicate,
     ModuleClauseMissing,

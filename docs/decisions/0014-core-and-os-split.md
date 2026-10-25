@@ -1,6 +1,6 @@
 # 0014: 標準ライブラリの核と OS 依存部分の分割（M4）
 
-- **状態**: 提案（2026-10-25。Claude の案。承認は所有者の判断を待つ。下の「人間の判断が要る点」を参照）
+- **状態**: 承認（2026-10-25。所有者の委任を受けて Claude が決定。ADR 0005 の「核」の定義を改めた点は所有者へ事後報告とする。計測による再検証の条件は末尾を参照）
 
 ## 背景
 
@@ -49,7 +49,7 @@
 
 **A** を採用する。
 
-- 出力先の語に `bare` を加える。意味は「OS も実行環境もない環境（ADR 0005 の『実行環境なしのネイティブ出力』）で動かせる」。P0 で書ける語は `bare`・`browser`・`server` の 3 つになる。
+- 出力先の語に `bare` を加える。意味は「OS も実行環境もない環境（ADR 0005 の『実行環境なしのネイティブ出力』）で動かせる」。メモリの確保器は言語の外の環境が供給する（P0 では実行環境（インタプリタ・M5 の暫定ランタイム）、P6 ではプラットフォーム層。決定 2）。P0 で書ける語は `bare`・`browser`・`server` の 3 つになる。
 - **`targets` に `bare` を含むモジュールを「核のモジュール」と呼ぶ**。`targets bare` だけでも、`targets bare, browser, server` のように他と並べてもよい。並べ方は従来どおり文字の順（`bare` < `browser` < `server`）。
 - `targets` は「この出力先で使えるコードしか書かない」という制約の宣言であり、何を出力するかの指定ではない。P0 の `sigil build`（M5）は `bare` を含むモジュールも Linux x86-64 の実行ファイルとして出力する。実行環境なしの出力そのものは P6 で作る。
 - `sigil spec` は `bare` を「実行環境なし」と訳す（例: `出力先: 実行環境なし, ブラウザ, サーバー`）。
@@ -256,6 +256,8 @@ ADR 0006 の M4 の完了条件の「核の部分と OS の機能を使う部分
 | `core_rejects_path_new` | `let p = Path.new(&s);` |
 | `core_rejects_path_annotation` | `let p: Option<Path> = None;` |
 | `core_rejects_os_type_in_struct_and_enum` | `struct S { p: Path }`、`enum E { A(IoError) }` |
+| `core_rejects_os_type_in_fn_type` | 関数の型の位置: `fn f(g: fn(&Path) -> Bool) -> Bool`、`fn f(g: fn(Int) -> Option<IoError>)` |
+| `core_rejects_os_type_in_closure` | クロージャの中の型の位置: `xs.map(\|x\| { let p: Option<Path> = None; return x; })`。クロージャの引数には型注釈の文法がない（`Expr::Closure` の引数は名前だけ）ので、クロージャの本体の `let` の注釈で確かめる。引数の型注釈を文法に加えるときは、同じ `resolve` を通すので同じエラーになることをこのテストに足す |
 | `core_with_server_still_rejects` | `targets bare, server` のモジュールで `console.log`（`server` があっても核なら拒否） |
 | `core_trust_base_still_rejects` | `trust base` かつ `targets bare` で `console.log`（決定 5） |
 
@@ -265,6 +267,8 @@ ADR 0006 の M4 の完了条件の「核の部分と OS の機能を使う部分
 |---|---|
 | `core_allows_core_items` | 核のモジュールで `List`・`Option`・`Result`・`String` のメソッド、`to_float`・`to_int`・`Int.min_value()`・`clone`、`List.map` にクロージャを渡す |
 | `example_01_is_core` | `01-average` が `targets bare, browser, server` で `check` を通り、`average` の実行結果が M3 と同じ |
+| `hosted_passes_console_fn_to_core_hof` | `targets server` のモジュールで、`console` を起こすクロージャを核の高階関数（`std.core` の `List.map`）に渡す。`effects console` で通る（決定 4 の「許すもの」の関数の値）。P0 には利用者のモジュールどうしの参照がないので、核の側は標準ライブラリの高階関数で確かめる |
+| `core_generic_accepts_path_type_arg` | `targets server` のモジュールで、核の総称の型と関数に `Path` を型引数として渡す（`List<Path>` の `new`・`push`・`get`・`len`、`Option<Path>`）。通る（決定 4 の「許すもの」の型引数） |
 | `hosted_modules_unchanged` | `targets server` のモジュールで `console.log`・`fs.read`・`Path.new` が従来どおり通る（既存のテスト `tests/m4_effects.rs`・`tests/m3_fs_cell.rs` がすべて通ることでも確かめる） |
 
 ### 表の不変条件（`src/stdlib.rs` の単体テスト）
@@ -290,36 +294,47 @@ ADR 0006 の条件 10 の M5 側（核の部分だけを使うプログラムの
 
 - 暫定ランタイムを、核の部分（確保と解放・破棄・異常停止と終了コード 70）と OS 層（`console`・`fs`・`Path`）の 2 つの静的ライブラリに分け、プログラムのモジュールがすべて核なら OS 層をリンクしない。テストは「`01-average` の入口の実行ファイルが核のライブラリだけでリンクできる」とする。
 
-## 実装の手順（提案）
+## 実装の手順
 
-承認後、次の 2 つの PR に分ける（どの変更で何が変わったかを追えるようにするため）。
+この ADR に従い、次の 3 つの PR に分ける（どの変更で何が変わったかを追えるようにするため）。
 
-1. **出力先 `bare` と効果の列**: `src/parser.rs` の `TARGETS` に `bare` を加え、`UnknownTarget` の説明を改める。`src/spec.rs` で `bare` を「実行環境なし」と訳す。`src/effects.rs` の `Targets` に `bare` を加え、`ALL` を `HOSTED` に改名、`ANY` を加える（決定 3）。上の「構文・整形・仕様」「効果の表」のテスト。
-2. **層と参照の検査**: `src/stdlib.rs` の `Layer` と各表の列、`std.core`・`std.os` の見出し。`src/check.rs` の `core`・`os_items` と 4 つの位置の検査、`src/error.rs` の `OsItemInCore`・`ModuleMismatch`、`src/interp.rs` の `run_sources` の宣言の一致の検査。`01-average` の宣言と `.spec`。上の「参照」「通る例」「表の不変条件」「複数のファイル」のテスト。ADR 0006・0004 などの追記（下の「影響」）。
+1. **PR1: 出力先 `bare` と効果の列**: `src/parser.rs` の `TARGETS` に `bare` を加え、`UnknownTarget` の説明を改める。`src/spec.rs` で `bare` を「実行環境なし」と訳す。`src/effects.rs` の `Targets` に `bare` を加え、`ALL` を `HOSTED` に改名、`ANY` を加える（決定 3）。上の「構文・整形・仕様」「効果の表」のテスト。
+   - 注記: `TARGETS` 配列は辞書順で `bare` を先頭に置く（`&["bare", "browser", "server"]`）。並びの検査（`TargetsUnsorted`）と説明の列挙がこの順に従う。
+   - 注記: `Targets` に欄を足すので、`Targets::SERVER`・`Targets::BROWSER` にも `bare: false` が要る（`HOSTED` も `bare: false`、`ANY` だけ `bare: true`）。`allows` に `"bare" => self.bare` の腕を足す。
+2. **PR2a: 層と参照の検査**: `src/stdlib.rs` の `Layer` と各表の列、`std.core`・`std.os` の見出し。`src/check.rs` の `core`・`os_items` と 4 つの位置の検査、`src/error.rs` の `OsItemInCore`。`01-average` の宣言と `.spec`。上の「参照」「通る例」「表の不変条件」のテスト。ADR 0006・0004 などの追記（下の「影響」）。
+3. **PR2b: 複数のファイルの宣言の一致**: `src/error.rs` の `ModuleMismatch`、`src/interp.rs` の `run_sources` の宣言の一致の検査。上の「複数のファイル」のテスト。PR2a と独立して入れられるが、PR2a の後に入れる（核の検査が外れる経路を塞ぐ変更なので、核の検査が先にある方が意味を確かめやすい）。
 
 ## 影響
 
-承認後に、実装の PR で次を反映する。
+この ADR に従い、実装の PR で次を反映する。
 
 - **ADR 0005**: 影響の「標準ライブラリの分割」の「核の部分（メモリ確保に依存しない部分）」に、本 ADR の決定 2 で「OS に依存しない部分（確保は使う）」と改め、確保なしの部分は P6 で分けることを追記する。
 - **ADR 0004**: 規則 1 の表の「使える出力先」に「実行環境なし」を加える（`state` だけ）。規則 5 に、`bare` の語と核のモジュールの参照の規則（本 ADR の決定 4）への参照を追記する。
 - **ADR 0006**: 決定 4 の表の「標準ライブラリの分割」を解決とする。M4 の「完了条件の充足」の未達の 2 点を、本 ADR の完了条件のテストに置き換える。条件 10 の行の M4 の欄にテスト名を書く。
 - **ADR 0008**: 決定 6 の「P0 で書けるのは `server` と `browser`」に、本 ADR で `bare` を加えたことを追記する。
 - **ADR 0013**: 決定 2 の「効果を持つ部分（M4 の前に正式に決める）」に、本 ADR の決定 2 で正式に決めたことを追記する。
-- **DESIGN.md**: 未決の論点の表の「標準ライブラリの分割」を決定とする。
+- **docs/DESIGN.md**: 未決の論点の表の「標準ライブラリの分割」を決定とする。
 - **README.md**: ステータスの ADR の行に本 ADR を加える。
 - **examples**: `01-average/c-brace.sigil` の宣言と `c-brace.spec`（決定 6）。
 - 依存の追加、CI の設定の変更はない。
 
-## 人間の判断が要る点
+## 委任による決定の記録
 
-1. **ADR 0005 の「核」の定義の改め**: ADR 0005 は核を「メモリ確保に依存しない部分」と書いている。本 ADR は P0 の実用のため「OS に依存しない部分（確保は使う）」に改め、確保なしの部分を P6 に繰り延べる（決定 2）。ADR 0005 は承認済みで、長期目標（OS）に関わる記述なので、所有者の確認を求める。
-2. **出力先の語 `bare` の綴りと訳**: ADR 0008 は出力先の語を ADR に記録してから加えるとしている。語（`bare`）と仕様の訳（「実行環境なし」）は読み手が日常的に見るものなので、別の語（`metal`・`core` など）がよいかの判断を求める。
-3. **前提として未決の ADR**: 「モジュールの単位と出力先の指定」（M1 の前の予定）と「信頼基盤の宣言方法」（M4 の前の予定）がまだない。本 ADR はどちらにも依存しない形にした（複数ファイルは宣言の一致を求めるだけ、`trust` は独立の軸）が、M4 を閉じる前に後者を書くかは段階の進め方の判断になる。
+次の 3 点は、所有者の委任を受けて Claude が決めた。
+
+1. **ADR 0005 の「核」の定義を改める**: ADR 0005 の影響「標準ライブラリの分割」の「核の部分（メモリ確保に依存しない部分）」を、「OS に依存しない部分（確保は使う）」に改める。確保なしの層は P6 の ADR で分ける（決定 2）。ADR 0005 は承認済みで長期目標（OS）に関わるため、この改めは所有者へ事後報告とする。
+2. **出力先の語は `bare`、仕様の訳は「実行環境なし」とする**（決定 1）。ADR 0008 の決定 6 の「出力先の語は ADR に記録してから加える」の記録を本 ADR とする。
+3. **信頼基盤の宣言方法の ADR は別途後で書く**: `trust base` を宣言できる範囲・検査を外した箇所の契約の書き方・条件 12 の大域の状態の例外は、本 ADR では決めない（決定 5）。本 ADR は `trust` を独立の軸とし、その ADR に依存しない。「モジュールの単位と出力先の指定」の ADR にも依存しない（複数ファイルは宣言の一致を求めるだけ。決定 4）。
 
 ## 根拠の限界と再検証
 
+- 本 ADR の決定は、所有者の委任を受けて Claude が行った（ADR 0005 の「核」の定義の改めを含む。上の「委任による決定の記録」）。所有者への事後報告で異論が出た場合は、この ADR を見直す。
 - 候補の案出しと採点を同じ者（Claude）が行っており、偏りがありうる。
 - 決定 4 の「名指しの位置で漏れなく閉じる」は、P0 にモジュールどうしの参照がなく、標準ライブラリの名前が前置きで見えることに依存する。モジュールの単位の ADR で取り込みの仕組みを入れるときは、取り込んだ利用者のモジュールの `targets` に `bare` がなければ核から参照できない、という同じ規則に広げる（決定 4 の B の到達の検査に切り替えるかもそこで判断する）。
 - 決定 2 の 2 層は、P6 で確保なしの部分が要ることを前提に繰り延べている。P1〜P5 の間に、確保できない環境（割り込みの処理など）で動くコードが必要になった場合は、その時点で層を加える。
 - 決定 3 の `clock`・`random` を `bare` で使えないとしたのは、P0 の核に時刻・乱数の源がないためである。P6 のプラットフォーム層の設計で改める。
+- M4 の完了後、次を計測する。結果が本決定と大きく食い違う場合は、この ADR を見直す。
+  - `OsItemInCore` が出た回数と、そのうち `bare` を外して直したもの・OS 層を使わない書き方に直したものの数（`bare` を外す直しばかりなら、核の範囲が狭すぎる疑いがある）
+  - 核のモジュールで `EffectTarget` が出た回数と、そのカテゴリ（`clock`・`random`・`task.*` が多ければ、決定 3 の列を P6 より前に見直す）
+  - `ModuleMismatch` が出た回数（多ければ、モジュールの単位の ADR を前倒しする）
+  - 核の行と OS 層の行の間で、表の行を移す変更が要った回数（`os_layer_is_exactly_the_adr_list` が落ちた回数）

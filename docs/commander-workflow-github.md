@@ -1,7 +1,7 @@
-# 司令塔方式の導入手順（ローカル Claude Code + GitLab）
+# 司令塔方式の導入手順（ローカル Claude Code + GitHub）
 
 > **使い方**: 導入したいリポジトリで Claude Code を起動し、このファイルを渡して
-> 「commander-workflow.md をみて、導入して」と頼む。以降の作業は Claude が行う。
+> 「commander-workflow-github.md をみて、導入して」と頼む。以降の作業は Claude が行う。
 
 ## 0. Claude への導入指示
 
@@ -9,13 +9,13 @@
 手順の中で「人間に確認する」と書いた箇所だけにする。
 
 1. **導入先の種類を判定する**（導入先 = Claude Code を起動したディレクトリ。以下「ルート」）
-   - **種類 A**: ルートが社内 GitLab のリポジトリそのもの
-     （`git rev-parse --show-toplevel` がルートを返し、`git remote get-url origin` が社内 GitLab を指す）。
-   - **種類 B**: それ以外。ルートが git 管理されていない、GitLab 以外のリモートを持つ、
+   - **種類 A**: ルートがGitHub のリポジトリそのもの
+     （`git rev-parse --show-toplevel` がルートを返し、`git remote get-url origin` が GitHub を指す）。
+   - **種類 B**: それ以外。ルートが git 管理されていない、GitHub 以外のリモートを持つ、
      または配下に複数のリポジトリを置いた作業用ディレクトリである場合。
-     配下の GitLab リポジトリを `find . -maxdepth 3 -name .git` で探し、一覧にしておく。
-   - どちらの場合も `glab auth status` を確かめる。失敗したら、社内 GitLab への `glab auth login` を
-     人間に頼んで止まる（種類 B で配下に GitLab リポジトリが一つもなければ、この確認は飛ばす）。
+     配下の GitHub リポジトリを `find . -maxdepth 3 -name .git` で探し、一覧にしておく。
+   - どちらの場合も `gh auth status` を確かめる。失敗したら、GitHub への `gh auth login` を
+     人間に頼んで止まる（種類 B で配下に GitHub リポジトリが一つもなければ、この確認は飛ばす）。
    - 種類 A なら既定ブランチ名を調べる（`git symbolic-ref refs/remotes/origin/HEAD`）。
      以下の `main` はその名前に読み替える。種類 B では、作業のたびに対象リポジトリの既定ブランチを調べる。
 2. **作業ブランチを作る**: 種類 A のときだけ、既定ブランチの最新から `chore/commander-workflow` を作る。
@@ -25,16 +25,16 @@
    - 3.2 の内容を `CLAUDE.md` の末尾に追記する（なければ作る）。同じ見出しがすでにあれば重ねて書かない。
    - 3.3 の `allow` / `deny` を `.claude/settings.json` にマージする（既存の項目は消さない）。
    - 種類 A では、リポジトリにある lint・型検査・テストのコマンド（package.json、Makefile、pyproject.toml など）を調べ、
-     `CLAUDE.md` の「MR の流れ」手順 5 に具体的なコマンドとして書き込む。見つからなければ人間に確認する。
+     `CLAUDE.md` の「PR の流れ」手順 5 に具体的なコマンドとして書き込む。見つからなければ人間に確認する。
      種類 B では書き込まず、作業のたびに対象リポジトリで調べる（手順 5 の記述のまま）。
 4. **動作を確かめる**
    - reviewer エージェントを起動し、`/code-review` を呼び出せるか試す。呼び出せなければ、`reviewer.md` から
-     `/code-review` の行と `Skill` を外し、`CLAUDE.md` の「MR の流れ」手順 4 を
+     `/code-review` の行と `Skill` を外し、`CLAUDE.md` の「PR の流れ」手順 4 を
      「司令塔が `/code-review` を実行し、結果を reviewer に渡す」に改める。
-5. **MR を作る**（種類 A のときだけ）: コミットして push し、`glab mr create` で MR を作る。
-   この MR は導入そのものなので、自分ではマージせず、人間のマージを待つ。
-   種類 B では MR を作らず、置いたファイルの一覧を報告する。
-6. **人間に報告する**（5 行以内）: 種類（A / B）、MR の URL またはファイルの一覧、手順 4 の結果、人間が GitLab の画面で行う設定（3.4）の一覧。
+5. **PR を作る**（種類 A のときだけ）: コミットして push し、`gh pr create --draft` で PR を作る。
+   この PR は導入そのものなので、自分ではマージせず、人間のマージを待つ。
+   種類 B では PR を作らず、置いたファイルの一覧を報告する。
+6. **人間に報告する**（5 行以内）: 種類（A / B）、PR の URL またはファイルの一覧、手順 4 の結果、人間が GitHub の画面で行う設定（3.4）の一覧。
 
 ## 1. 何をするか
 
@@ -54,7 +54,7 @@
 | 設計 | Opus | medium | 設計判断（ADR）、方式の比較 |
 | 実装 | Sonnet | medium | コードとテストの作成 |
 | 機械的な作業 | Haiku | low | 表記の統一、リンクの修正、単純な置換 |
-| 自己レビュー | Sonnet | medium | MR の差分レビュー（実装した子とは別に起動する） |
+| 自己レビュー | Sonnet | medium | PR の差分レビュー（実装した子とは別に起動する） |
 
 運用の規則:
 
@@ -78,8 +78,8 @@ effort: medium
 ---
 あなたは設計担当です。依頼された論点について、選択肢・比較・決定・影響を ADR にまとめます。
 - 既存の ADR と矛盾させない。矛盾する場合は、改訂する箇所を明記する。
-- 作業ブランチを作り、コミットし、push して、MR を作成する（手順は CLAUDE.md の「MR の流れ」に従う）。
-- 最後に、MR の URL と要点を 3 行以内で報告する。
+- 作業ブランチを作り、コミットし、push して、PR を作成する（手順は CLAUDE.md の「PR の流れ」に従う）。
+- 最後に、PR の URL と要点を 3 行以内で報告する。
 ```
 
 `.claude/agents/implementer.md`
@@ -94,8 +94,8 @@ effort: medium
 あなたは実装担当です。
 - 変更は依頼された範囲に限る。
 - push する前に、lint・型検査・テストをローカルで実行し、すべて通ることを確かめる。
-- 作業ブランチを作り、コミットし、push して、MR を作成する（手順は CLAUDE.md の「MR の流れ」に従う）。
-- 最後に、MR の URL・テスト結果・残った課題を 3 行以内で報告する。
+- 作業ブランチを作り、コミットし、push して、PR を作成する（手順は CLAUDE.md の「PR の流れ」に従う）。
+- 最後に、PR の URL・テスト結果・残った課題を 3 行以内で報告する。
 ```
 
 `.claude/agents/chore.md`
@@ -108,7 +108,7 @@ model: haiku
 effort: low
 ---
 あなたは機械的な作業の担当です。指示どおりに変更し、判断が必要になったら作業を止めて報告します。
-MR の作成は CLAUDE.md の「MR の流れ」に従います。報告は 2 行以内にします。
+PR の作成は CLAUDE.md の「PR の流れ」に従います。報告は 2 行以内にします。
 ```
 
 `.claude/agents/reviewer.md`
@@ -116,14 +116,14 @@ MR の作成は CLAUDE.md の「MR の流れ」に従います。報告は 2 行
 ```markdown
 ---
 name: reviewer
-description: MR の差分をレビューする。実装した子とは別に起動する。
+description: PR の差分をレビューする。実装した子とは別に起動する。
 model: sonnet
 effort: medium
 tools: Bash, Read, Grep, Glob, Skill
 ---
 あなたはレビュー担当です。
-まず MR のブランチを対象に、Claude Code 組み込みの `/code-review` を実行します（例: `/code-review medium <ブランチ名>`）。
-続けて `glab mr diff <番号>` で差分を読み、`/code-review` の指摘も含めて次の観点で確かめます。
+まず PR のブランチを対象に、Claude Code 組み込みの `/code-review` を実行します（例: `/code-review medium <ブランチ名>`）。
+続けて `gh pr diff <番号>` で差分を読み、`/code-review` の指摘も含めて次の観点で確かめます。
 1. 正しさ（バグ・境界条件・エラー処理）
 2. 依頼と仕様（ADR）に合っているか
 3. テストが変更内容を確かめているか
@@ -144,31 +144,31 @@ tools: Bash, Read, Grep, Glob, Skill
   （designer / implementer / chore）に依頼する。
 - 同時に動かすサブエージェントは最大 2 つ。並行させる場合は isolation: worktree で起動する。
 - 依頼文には次を含める: 目的、対象ファイル、完了の条件、参照すべき文書。会話の経緯は渡さない。
-- コミット・MR・報告は日本語で書く。時刻は JST で示す。
+- コミット・PR・報告は日本語で書く。時刻は JST で示す。
 
-## MR の流れ
+## PR の流れ
 
-0. ルートが git 管理されていない場合や、配下に複数のリポジトリがある場合は、git・glab の操作を
+0. ルートが git 管理されていない場合や、配下に複数のリポジトリがある場合は、git・gh の操作を
    すべて対象リポジトリのディレクトリで行う。worktree も対象リポジトリごとに作る。
    依頼文には対象リポジトリのパスを必ず書く。
 1. 対象リポジトリの既定ブランチから作業ブランチを作る（例: feat/xxx, docs/adr-0006）。
 2. コミットして `git push -u origin <ブランチ>` で push する。
-3. `glab mr create --fill --target-branch <既定ブランチ> --remove-source-branch` で MR を作成する。
+3. `gh pr create --fill --base <既定ブランチ>` で PR を作成する。
 4. 司令塔が reviewer に自己レビューを依頼する。
    - 「要修正」の場合は、作成した担当に修正を依頼し、もう一度レビューする（最大 3 回まで。
      超えたら人間に判断を求める）。
-5. CI（GitLab Runner）は使わないので、マージの前に司令塔が担当の子に、MR のブランチで
+5. CI（GitHub Actions など）は使わないので、マージの前に司令塔が担当の子に、PR のブランチで
    lint・型検査・テストをローカルで実行させ、すべて通ることを確かめる。
    失敗したら修正させ、手順 4 に戻る。テストを無効にして通すことはしない。
 6. レビューが「OK」でテストも通ったら、司令塔が
-   `glab mr merge <番号> --remove-source-branch --yes` を実行してマージする。
+   `gh pr merge <番号> --squash --delete-branch` を実行してマージする。
 7. マージを確かめたら、worktree を削除する（`git worktree remove <パス>`）。
 
 ## 司令塔がマージしないもの（人間の承認を待つ）
 
 - 秘密情報・認証・権限に関わる変更
 - データベースのスキーマ変更・データ移行
-- CI 設定（.gitlab-ci.yml）・デプロイ設定の変更
+- CI 設定（.github/workflows/）・デプロイ設定の変更
 - 依存ライブラリの追加・メジャーバージョンの更新
 ```
 
@@ -183,8 +183,8 @@ tools: Bash, Read, Grep, Glob, Skill
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
       "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push -u origin:*)",
       "Bash(git worktree:*)",
-      "Bash(glab mr create:*)", "Bash(glab mr view:*)", "Bash(glab mr diff:*)",
-      "Bash(glab mr merge:*)"
+      "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr diff:*)",
+      "Bash(gh pr merge:*)"
     ],
     "deny": [
       "Bash(git push --force:*)", "Bash(git push -f:*)"
@@ -193,15 +193,18 @@ tools: Bash, Read, Grep, Glob, Skill
 }
 ```
 
-### 3.4 GitLab 側の設定
+### 3.4 GitHub 側の設定
 
-- 既定ブランチを保護し、直接 push を禁止する（「設定 > リポジトリ > 保護ブランチ」）。
-  マージは MR 経由に限られるので、司令塔のマージも MR の記録として残る。
-- CI を使わないため、「パイプラインが成功した場合のみマージを許可」は **無効** のままにする
-  （有効にするとパイプラインがない MR をマージできない）。
+- 既定ブランチを保護し、直接 push を禁止する（「Settings > Branches > Branch protection rules」または Rulesets）。
+  マージは PR 経由に限られるので、司令塔のマージも PR の記録として残る。
+- 「Require status checks to pass before merging」は、GitHub Actions など CI を使わない場合は **無効** のままにする
+  （有効にすると、チェックが報告されない PR をマージできない）。
+- 「Require approvals」は、司令塔が自分でマージするため **無効** にするか、司令塔のアカウントを
+  バイパスの対象にする。有効にすると、人間の承認がないとマージできなくなる。
 - 前の節の「司令塔がマージしないもの」を確実に守るには、該当するパスに CODEOWNERS を設定し、
-  承認を必須にする。これは有償版（Premium 以上）の機能で、無償版（Community Edition）では使えない。
-  無償版の場合は、CLAUDE.md の規則と reviewer の確認だけで守ることになる。
+  「Require review from Code Owners」を有効にする。ただし有効にすると、そのパスを含む PR は
+  すべて人間の承認が必要になる（司令塔のバイパスは効かない）。
+  プライベートリポジトリでは、プランによって使えない機能がある。自社のプランで確認する。
 
 ## 4. 使い方
 

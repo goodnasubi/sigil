@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70";
 
 fn read(path: &str) -> Option<String> {
     match std::fs::read(path)
@@ -193,6 +193,36 @@ fn main() -> ExitCode {
             }
         }
         Some("run") if args.len() >= 3 => {
+            // テスト用の差し替え（ADR 0004 の規則 7）。`--fs-double 仮のパス=実ファイル` で、
+            // `fs.read(&仮のパス)` が実ファイルの内容を返す。指定がなければ `fs.read` は未対応。
+            let mut doubles: Vec<(String, String)> = vec![];
+            let mut i = 1;
+            while args.get(i).map(String::as_str) == Some("--fs-double") {
+                let Some((k, v)) = args.get(i + 1).and_then(|a| a.split_once('=')) else {
+                    eprintln!("--fs-double には 仮のパス=実ファイル が要る");
+                    return ExitCode::from(2);
+                };
+                doubles.push((k.to_string(), v.to_string()));
+                i += 2;
+            }
+            if args.len() < i + 2 {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            let args: Vec<String> = std::iter::once(args[0].clone())
+                .chain(args[i..].iter().cloned())
+                .collect();
+            let mut opts = sigil::interp::Options::default();
+            if !doubles.is_empty() {
+                let mut m = std::collections::BTreeMap::new();
+                for (k, v) in doubles {
+                    let Some(text) = read(&v) else {
+                        return ExitCode::FAILURE;
+                    };
+                    m.insert(k, text);
+                }
+                opts.fs_files = Some(m);
+            }
             let path = &args[1];
             let Some(src) = read(path) else {
                 return ExitCode::FAILURE;
@@ -208,7 +238,7 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match sigil::interp::run(&src, &args[2], &call) {
+            match sigil::interp::run_with(&src, &args[2], &call, &opts) {
                 Ok(out) => {
                     print!("{}", out.output);
                     println!("{}", out.value);

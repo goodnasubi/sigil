@@ -44,7 +44,7 @@ fn stopped(items: &str, entry: &str, args: &[Arg]) -> (StopKind, Vec<String>) {
     match run_with(&src, entry, args, &opts()) {
         Ok(o) => panic!("停止しなかった: {}\n{src}", o.value),
         Err(e) => match e.error {
-            RunError::Stop(s) => (s.kind, *e.drops),
+            RunError::Stop(s) => (s.kind, e.drops.into_vec()),
             other => panic!("{other}\n{src}"),
         },
     }

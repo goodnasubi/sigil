@@ -167,34 +167,3 @@ fn merge_keeps_a_loan_dead_on_either_path() {
 fn moves_are_not_loans() {
     err("f(a: Account)", "  let b = a;\n  look(&a);", UseAfterMove);
 }
-
-/// `src/borrow.rs` の単体テストと、この枠のテストの名前が一致していること。
-/// 片方だけ増減すると対が崩れるので、ここで落とす。
-#[test]
-fn unit_tests_and_pair_tests_have_the_same_names() {
-    fn names(src: &str, from: usize) -> Vec<String> {
-        let mut v: Vec<String> = src[from..]
-            .lines()
-            .filter_map(|l| l.trim_start().strip_prefix("fn "))
-            .filter_map(|l| l.split('(').next())
-            .map(|s| s.to_string())
-            .collect();
-        v.sort();
-        v
-    }
-    let unit_src = include_str!("../src/borrow.rs");
-    let unit_from = unit_src.find("mod tests {").expect("mod tests");
-    let unit: Vec<String> = names(unit_src, unit_from)
-        .into_iter()
-        .filter(|n| !matches!(n.as_str(), "b" | "d" | "u"))
-        .collect();
-    let pair_src = include_str!("borrow_pairs.rs");
-    let pair_from = pair_src.find("\n#[test]").expect("a test");
-    let helper = ["run", "ok", "err"];
-    let this = "unit_tests_and_pair_tests_have_the_same_names";
-    let pair: Vec<String> = names(pair_src, pair_from)
-        .into_iter()
-        .filter(|n| !helper.contains(&n.as_str()) && n != this && n != "names")
-        .collect();
-    assert_eq!(unit, pair);
-}

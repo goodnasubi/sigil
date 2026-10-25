@@ -72,25 +72,17 @@ pub struct Stop {
 
 impl fmt::Display for Stop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let what = match self.kind {
-            StopKind::RequiresViolated => "契約違反: requires を満たしていない".to_string(),
-            StopKind::EnsuresViolated => "契約違反: ensures を満たしていない".to_string(),
-            StopKind::StdRequiresViolated => {
-                format!("標準の関数の requires 違反: {}", self.detail)
-            }
-            StopKind::Overflow => "Int の桁あふれ".to_string(),
-            StopKind::DivisionByZero => "0 での除算".to_string(),
-            StopKind::StackExhausted => "スタックの枯渇".to_string(),
-        };
-        write!(
-            f,
-            "異常停止: {what}（関数 {}、{} 行目）",
-            self.func, self.line
-        )?;
-        if let Some((func, clause)) = &self.during {
-            write!(f, "。{func} の {clause} の式の評価中に起きた")?;
-        }
-        Ok(())
+        let during = self
+            .during
+            .as_ref()
+            .map(|(func, clause)| (func.as_str(), *clause));
+        f.write_str(&crate::report::stop_message(
+            self.kind,
+            &self.func,
+            self.line,
+            during,
+            &self.detail,
+        ))
     }
 }
 

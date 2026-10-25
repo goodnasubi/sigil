@@ -120,6 +120,81 @@ struct RawClosure {
     caps: Vec<(String, Ty, CapMode)>,
 }
 
+/// 呼び出しの解決の種類（ADR 0015 の決定 3）。
+#[allow(dead_code)] // 読むのは lowering（ADR 0015 の PR3 以降）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResKind {
+    /// 名前で呼ぶ関数（利用者の関数・標準の自由関数・`Some`/`Ok`/`Err` などの値の構築子）。
+    Fn,
+    /// 局所の関数の値（引数・`let` で束縛した関数）の呼び出し。
+    Local,
+    /// 名前空間の関数（`fs.read`・`console.log`）。
+    Namespaced,
+    /// 型に付く関数（`Path.new`・`List.new`）。`owner` が型の名前。
+    TypeFn,
+    /// 利用者の列挙型の値の構築子（`Color.Red(..)`）。`owner` が型の名前。
+    Variant,
+    /// 篩型の `T.check`。`owner` が型の名前。
+    Check,
+    /// 受け手のあるメソッド（`xs.push(..)`）。`owner` が受け手の型の名前。
+    Method,
+}
+
+/// 呼び出しの解決（どの関数・メソッドか、型引数の具体化）。
+#[allow(dead_code)] // 読むのは lowering（ADR 0015 の PR3 以降）
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Resolved {
+    pub(crate) kind: ResKind,
+    pub(crate) owner: Option<String>,
+    pub(crate) name: String,
+    /// 型引数の名前と、具体化した型（宣言の順）。
+    pub(crate) targs: Vec<(String, Ty)>,
+}
+
+/// 検査器が記録した型の情報（ADR 0015 の決定 3）。表の鍵は式・文の番地（`*const Expr as usize`）。
+/// 番地は `file` を借りている間だけ有効で、検査器は式を複製せずに検査する。
+#[allow(dead_code)] // 読むのは lowering（ADR 0015 の PR3 以降）と単体テスト
+pub struct Typed<'a> {
+    pub file: &'a File,
+    /// 式の番地 -> 具体化前の型（型引数を含みうる）。
+    pub(crate) expr_ty: HashMap<usize, Ty>,
+    /// 呼び出しの式の番地 -> 解決した関数・メソッドと型引数。
+    pub(crate) calls: HashMap<usize, Resolved>,
+    /// 値を移動する名前の式の番地（それ以外の読みは複製か借用）。
+    pub(crate) moves: HashSet<usize>,
+    /// `let` の文（`&Stmt`）の番地 -> 束縛した型。
+    pub(crate) let_ty: HashMap<usize, Ty>,
+}
+
+#[derive(Default)]
+struct TypedTables {
+    expr_ty: HashMap<usize, Ty>,
+    calls: HashMap<usize, Resolved>,
+    moves: HashSet<usize>,
+    let_ty: HashMap<usize, Ty>,
+}
+
+/// 検査して、式ごとの型・呼び出しの解決・移動の地点の表を返す。`check_file` と同じ検査をする。
+pub fn typed(file: &File) -> R<Typed<'_>> {
+    typed_with(file, &Options::default())
+}
+
+pub fn typed_with<'a>(file: &'a File, opts: &Options) -> R<Typed<'a>> {
+    let ck = analyze(file, opts)?;
+    let t = ck.typed;
+    Ok(Typed {
+        file,
+        expr_ty: t.expr_ty,
+        calls: t.calls,
+        moves: t.moves,
+        let_ty: t.let_ty,
+    })
+}
+
+fn addr(e: &Expr) -> usize {
+    e as *const Expr as usize
+}
+
 /// ソースを構文解析してから型検査する。最初のエラーを返す。
 pub fn check(src: &str) -> R<()> {
     check_with(src, &Options::default())
@@ -131,7 +206,7 @@ pub fn check_with(src: &str, opts: &Options) -> R<()> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Ty {
+pub(crate) enum Ty {
     Int,
     Float,
     Bool,
@@ -346,6 +421,16 @@ struct Ck {
     annots: Vec<(Span, Ty)>,
     skip: Option<usize>,
     skipped: Option<Ty>,
+    /// 型の情報の記録（`skip` が `None` の 1 回目の検査だけ。関数の終わりに `flush_typed` で確定する）。
+    rec_ty: Vec<(usize, Ty)>,
+    rec_calls: Vec<(usize, Resolved)>,
+    rec_moves: Vec<(usize, Ty)>,
+    rec_lets: Vec<(usize, Ty)>,
+    /// 検査中の呼び出しの解決（呼び出しの入れ子ごとに 1 つ）。
+    call_stack: Vec<Option<Resolved>>,
+    /// 直近の `instantiate`・`fresh_named` が作った型引数。
+    last_inst: Vec<(String, Ty)>,
+    typed: TypedTables,
     table: EffectTable,
     prims: Vec<Primitive>,
     copy_override: Vec<(String, bool)>,
@@ -491,6 +576,13 @@ fn analyze(file: &File, opts: &Options) -> R<Ck> {
         annots: vec![],
         skip: None,
         skipped: None,
+        rec_ty: vec![],
+        rec_calls: vec![],
+        rec_moves: vec![],
+        rec_lets: vec![],
+        call_stack: vec![],
+        last_inst: vec![],
+        typed: TypedTables::default(),
         table: opts.table.clone(),
         prims: opts.primitives.clone(),
         copy_override: opts.copy_override.clone(),
@@ -532,6 +624,17 @@ fn analyze(file: &File, opts: &Options) -> R<Ck> {
     Ok(ck)
 }
 
+/// 構造体・列挙型の型引数を宣言の順に並べる。
+fn args_named(def: Option<&TypeDef>, m: &HashMap<String, Ty>) -> Vec<(String, Ty)> {
+    match def {
+        Some(TypeDef::Struct { params, .. } | TypeDef::Enum { params, .. }) => params
+            .iter()
+            .filter_map(|p| m.get(p).map(|t| (p.clone(), t.clone())))
+            .collect(),
+        _ => vec![],
+    }
+}
+
 fn substitute(t: &Ty, m: &HashMap<String, Ty>) -> Ty {
     let go = |ts: &[Ty]| ts.iter().map(|t| substitute(t, m)).collect::<Vec<_>>();
     match t {
@@ -554,6 +657,56 @@ impl Ck {
             ErrorKind::Unsupported,
             format!("{what}は、この版の型検査ではまだ扱えない（M1 の後続の PR で対応する）"),
         )
+    }
+
+    fn rec_expr(&mut self, e: &Expr, t: &Ty) {
+        if self.skip.is_none() {
+            self.rec_ty.push((addr(e), t.clone()));
+        }
+    }
+
+    /// 呼び出しの解決を、いま検査中の呼び出しに結ぶ（型引数は直近の具体化から取る）。
+    fn set_resolved(
+        &mut self,
+        kind: ResKind,
+        owner: Option<&str>,
+        name: &str,
+        targs: Vec<(String, Ty)>,
+    ) {
+        if self.skip.is_none() {
+            if let Some(top) = self.call_stack.last_mut() {
+                *top = Some(Resolved {
+                    kind,
+                    owner: owner.map(str::to_string),
+                    name: name.to_string(),
+                    targs,
+                });
+            }
+        }
+    }
+
+    /// 1 回目の検査で記録した型の情報を、型変数が決まった状態で確定する（本体の検査が通った直後に呼ぶ）。
+    fn flush_typed(&mut self) {
+        for (k, t) in std::mem::take(&mut self.rec_ty) {
+            let z = self.zonk(&t);
+            self.typed.expr_ty.insert(k, z);
+        }
+        for (k, mut r) in std::mem::take(&mut self.rec_calls) {
+            for (_, t) in &mut r.targs {
+                *t = self.zonk(t);
+            }
+            self.typed.calls.insert(k, r);
+        }
+        for (k, t) in std::mem::take(&mut self.rec_moves) {
+            let z = self.zonk(&t);
+            if self.holds(&z, Prop::Copyable, 0) != Some(true) {
+                self.typed.moves.insert(k);
+            }
+        }
+        for (k, t) in std::mem::take(&mut self.rec_lets) {
+            let z = self.zonk(&t);
+            self.typed.let_ty.insert(k, z);
+        }
     }
 
     fn prelude(&mut self) {
@@ -908,6 +1061,10 @@ impl Ck {
             }
             m.insert(n.clone(), v);
         }
+        self.last_inst = generics
+            .iter()
+            .map(|(n, _)| (n.clone(), m[n].clone()))
+            .collect();
         Ok(m)
     }
 
@@ -924,6 +1081,7 @@ impl Ck {
             args.push(v.clone());
             m.insert(p, v);
         }
+        self.last_inst = args_named(self.types.get(name), &m);
         (Ty::Named(name.to_string(), args), m)
     }
 
@@ -1650,6 +1808,11 @@ impl Ck {
         self.pending.clear();
         self.must_know.clear();
         self.skipped = None;
+        self.rec_ty.clear();
+        self.rec_calls.clear();
+        self.rec_moves.clear();
+        self.rec_lets.clear();
+        self.call_stack.clear();
         self.annot_n = 0;
         self.scopes.clear();
         self.refine = false;
@@ -1829,7 +1992,9 @@ impl Ck {
         let r = self.expect(&Ty::Bool, &t.cond, "篩型の条件");
         self.refine = false;
         r?;
-        self.finish()
+        self.finish()?;
+        self.flush_typed();
+        Ok(())
     }
 
     fn check_fn(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
@@ -1847,6 +2012,7 @@ impl Ck {
         self.annots.clear();
         self.cur_fn = f.name.clone();
         self.body_once(f, sig)?;
+        self.flush_typed();
         let mut fin = std::mem::take(&mut self.fin_closures);
         self.closures.append(&mut fin);
         self.span = f.span;
@@ -2381,6 +2547,10 @@ impl Ck {
             return Ok(());
         }
         let ty = self.zonk(t);
+        if self.skip.is_none() {
+            // 移動かどうか（`Copyable` でないか）は、型が決まった後の `flush_typed` で決める。
+            self.rec_moves.push((addr(e), ty.clone()));
+        }
         match self.holds(&ty, Prop::Copyable, 0) {
             Some(false) => {}
             None => {
@@ -2544,6 +2714,9 @@ impl Ck {
                         }
                     }
                 };
+                if self.skip.is_none() {
+                    self.rec_lets.push((s as *const Stmt as usize, fin.clone()));
+                }
                 if *mutable && contains_ref(&self.zonk(&fin)) {
                     return self.err(
                         ErrorKind::LetMutRef,
@@ -3309,6 +3482,7 @@ impl Ck {
     /// `hint` は、クロージャの引数の型を文脈から決めるための期待される関数の型。
     fn expr_hint(&mut self, e: &Expr, hint: Option<&Ty>) -> R<Ty> {
         let t = self.expr_hint_inner(e, hint)?;
+        self.rec_expr(e, &t);
         // 参照を含まない値は、貸しを持たない
         let ref_name = matches!(strip_paren(e), Expr::Name(n)
             if self.lookup(n).is_some_and(|l| contains_ref(&self.zonk(&l.ty))));
@@ -3413,7 +3587,18 @@ impl Ck {
             Expr::Unary { op, expr } => self.unary(*op, expr),
             Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs),
             Expr::Field { expr, name } => self.field(expr, name),
-            Expr::Call { callee, args } => self.call(callee, args),
+            Expr::Call { callee, args } => {
+                self.call_stack.push(None);
+                let r = self.call(callee, args);
+                let res = self.call_stack.pop().flatten();
+                let t = r?;
+                if let Some(res) = res {
+                    if self.skip.is_none() {
+                        self.rec_calls.push((addr(e), res));
+                    }
+                }
+                Ok(t)
+            }
             Expr::StructLit { path, fields } => self.struct_lit(path, fields),
             Expr::Try(inner) => self.try_op(inner),
             Expr::Match {
@@ -4136,6 +4321,9 @@ impl Ck {
                     return match self.fns.get(n).cloned() {
                         Some(sig) if sig.effects_none => {
                             let ft = self.fn_type(&sig, &format!("関数 `{n}`"))?;
+                            let targs = std::mem::take(&mut self.last_inst);
+                            self.set_resolved(ResKind::Fn, None, n, targs);
+                            self.rec_expr(callee, &ft);
                             self.apply(ft, args, &format!("関数 `{n}`"), Eff::default())
                         }
                         Some(_) => self.err(
@@ -4160,7 +4348,16 @@ impl Ck {
                         ),
                     );
                 }
+                self.last_inst.clear();
                 let ft = self.name(n)?;
+                let targs = std::mem::take(&mut self.last_inst);
+                let kind = if self.lookup(n).is_some() {
+                    ResKind::Local
+                } else {
+                    ResKind::Fn
+                };
+                self.set_resolved(kind, None, n, targs);
+                self.rec_expr(callee, &ft);
                 let eff = if self.lookup(n).is_some() {
                     if self.fn_params.contains(&n.to_string()) {
                         Eff {
@@ -4192,6 +4389,9 @@ impl Ck {
                         let sig = self.fns[&key].clone();
                         let what = format!("`{key}`");
                         let ft = self.fn_type(&sig, &what)?;
+                        let targs = std::mem::take(&mut self.last_inst);
+                        self.set_resolved(ResKind::Namespaced, None, &key, targs);
+                        self.rec_expr(callee, &ft);
                         let eff = Eff {
                             terms: sig.effects.clone(),
                             ..Eff::default()
@@ -4207,11 +4407,17 @@ impl Ck {
                         Some(TypeDef::Enum { variants, .. })
                             if variants.iter().any(|(v, _)| v == name) =>
                         {
+                            self.last_inst.clear();
                             let ft = self.variant_value(&tn, name)?;
+                            let targs = std::mem::take(&mut self.last_inst);
+                            self.set_resolved(ResKind::Variant, Some(&tn), name, targs);
+                            self.rec_expr(callee, &ft);
                             return self.apply(ft, args, &format!("`{tn}.{name}`"), Eff::default());
                         }
                         Some(TypeDef::Alias(base)) if name == "check" => {
                             let ft = self.check_fn_type(&tn, &base);
+                            self.set_resolved(ResKind::Check, Some(&tn), name, vec![]);
+                            self.rec_expr(callee, &ft);
                             return self.apply(ft, args, &format!("`{tn}.check`"), Eff::default());
                         }
                         Some(TypeDef::Opaque(_))
@@ -4238,6 +4444,9 @@ impl Ck {
                     }
                     let what = format!("`{tn}.{name}`");
                     let ft = self.fn_type(&sig, &what)?;
+                    let targs = std::mem::take(&mut self.last_inst);
+                    self.set_resolved(ResKind::TypeFn, Some(&tn), name, targs);
+                    self.rec_expr(callee, &ft);
                     let eff = Eff {
                         terms: sig.effects.clone(),
                         ..Eff::default()
@@ -4296,6 +4505,8 @@ impl Ck {
                 }
                 let what = format!("メソッド `{tn}.{name}`");
                 let m = self.instantiate(&sig.generics, &what)?;
+                let targs = std::mem::take(&mut self.last_inst);
+                self.set_resolved(ResKind::Method, Some(&tn), name, targs);
                 let selfty = self.peel(&substitute(&sig.params[0].1, &m));
                 if !self.try_unify(&selfty, &rt) {
                     return self.err(
@@ -4352,6 +4563,7 @@ impl Ck {
                 srcs.extend(more);
                 self.check_overlap(mark)?;
                 let ret = substitute(&sig.ret, &m);
+                self.rec_expr(callee, &Ty::Fn(ps.clone(), Box::new(ret.clone())));
                 let mut all: Vec<Ty> = vec![substitute(&sig.params[0].1, &m)];
                 all.extend(ps.iter().cloned());
                 self.sig_check(&all, &ret, &what);
@@ -4697,4 +4909,402 @@ fn if_returns(i: &IfStmt) -> bool {
             Some(Else::If(n)) => if_returns(n),
             Some(Else::Block(b)) => block_returns(b),
         }
+}
+
+#[cfg(test)]
+mod typed_tests {
+    use super::*;
+
+    /// 式の番地を集める。呼び出しの名前空間・型の接頭辞（`fs`・`Path`）は値ではないので数えない。
+    fn walk_expr(e: &Expr, t: &Typed<'_>, out: &mut Vec<(usize, String)>) {
+        out.push((addr(e), format!("{e:?}")));
+        match e {
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Name(_)
+            | Expr::Result
+            | Expr::SelfValue => {}
+            Expr::Old(x) | Expr::Paren(x) | Expr::Try(x) => walk_expr(x, t, out),
+            Expr::Unary { expr, .. } => walk_expr(expr, t, out),
+            Expr::Tuple(xs) => xs.iter().for_each(|x| walk_expr(x, t, out)),
+            Expr::Binary { lhs, rhs, .. } => {
+                walk_expr(lhs, t, out);
+                walk_expr(rhs, t, out);
+            }
+            Expr::Field { expr, .. } => {
+                // `ConfigError.NotFound`・`fs.read` の前置きは型・名前空間の名前で、値ではない
+                let ns = matches!(&**expr, Expr::Name(n)
+                    if n == "fs" || n == "console" || n.starts_with(|c: char| c.is_uppercase()));
+                if !ns {
+                    walk_expr(expr, t, out)
+                }
+            }
+            Expr::Call { callee, args } => {
+                let prefix_only = matches!(
+                    t.calls.get(&addr(e)).map(|r| r.kind),
+                    Some(ResKind::Namespaced | ResKind::TypeFn | ResKind::Variant | ResKind::Check)
+                );
+                match (&**callee, prefix_only) {
+                    (Expr::Field { .. }, true) => out.push((addr(callee), format!("{callee:?}"))),
+                    _ => walk_expr(callee, t, out),
+                }
+                args.iter().for_each(|x| walk_expr(x, t, out));
+            }
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|(_, x)| walk_expr(x, t, out)),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                walk_expr(scrutinee, t, out);
+                arms.iter().for_each(|a| walk_expr(&a.body, t, out));
+            }
+            Expr::Closure { body, .. } => match body {
+                ClosureBody::Expr(x) => walk_expr(x, t, out),
+                ClosureBody::Block(b) => walk_block(b, t, out),
+            },
+        }
+    }
+
+    fn walk_block(b: &Block, t: &Typed<'_>, out: &mut Vec<(usize, String)>) {
+        for s in &b.stmts {
+            match &s.kind {
+                StmtKind::Let { value, .. } => walk_expr(value, t, out),
+                StmtKind::Assign { target, value } => {
+                    walk_expr(target, t, out);
+                    walk_expr(value, t, out);
+                }
+                StmtKind::Expr(e) => walk_expr(e, t, out),
+                StmtKind::Return(e) => {
+                    if let Some(e) = e {
+                        walk_expr(e, t, out)
+                    }
+                }
+                StmtKind::If(i) => walk_if(i, t, out),
+                StmtKind::While { cond, body } => {
+                    walk_expr(cond, t, out);
+                    walk_block(body, t, out);
+                }
+                StmtKind::Match {
+                    scrutinee, arms, ..
+                } => {
+                    walk_expr(scrutinee, t, out);
+                    arms.iter().for_each(|a| walk_block(&a.body, t, out));
+                }
+            }
+        }
+    }
+
+    fn walk_if(i: &IfStmt, t: &Typed<'_>, out: &mut Vec<(usize, String)>) {
+        walk_expr(&i.cond, t, out);
+        walk_block(&i.then, t, out);
+        match i.otherwise.as_deref() {
+            None => {}
+            Some(Else::If(n)) => walk_if(n, t, out),
+            Some(Else::Block(b)) => walk_block(b, t, out),
+        }
+    }
+
+    fn walk_fn(f: &FnDecl, t: &Typed<'_>, out: &mut Vec<(usize, String)>) {
+        if let Some(r) = &f.requires {
+            walk_expr(r, t, out);
+        }
+        if let Some(e) = &f.ensures {
+            walk_expr(e, t, out);
+        }
+        walk_block(&f.body, t, out);
+    }
+
+    fn lets(b: &Block, out: &mut Vec<usize>) {
+        for s in &b.stmts {
+            match &s.kind {
+                StmtKind::Let { .. } => out.push(s as *const Stmt as usize),
+                StmtKind::If(i) => lets_if(i, out),
+                StmtKind::While { body, .. } => lets(body, out),
+                StmtKind::Match { arms, .. } => arms.iter().for_each(|a| lets(&a.body, out)),
+                _ => {}
+            }
+        }
+    }
+
+    fn lets_if(i: &IfStmt, out: &mut Vec<usize>) {
+        lets(&i.then, out);
+        match i.otherwise.as_deref() {
+            None => {}
+            Some(Else::If(n)) => lets_if(n, out),
+            Some(Else::Block(b)) => lets(b, out),
+        }
+    }
+
+    /// すべての式に `expr_ty` が、すべての `let` に `let_ty` がある。
+    fn covers(label: &str, src: &str) {
+        let file = parse(src).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let t = typed(&file).unwrap_or_else(|e| panic!("{label}: {e}"));
+        let mut exprs = vec![];
+        let mut let_stmts = vec![];
+        for item in &file.items {
+            match item {
+                Item::Fn(f) => {
+                    walk_fn(f, &t, &mut exprs);
+                    lets(&f.body, &mut let_stmts);
+                }
+                Item::Impl(i) => {
+                    for f in &i.fns {
+                        walk_fn(f, &t, &mut exprs);
+                        lets(&f.body, &mut let_stmts);
+                    }
+                }
+                Item::Type(d) => walk_expr(&d.cond, &t, &mut exprs),
+                Item::Struct(_) | Item::Enum(_) => {}
+            }
+        }
+        assert!(!exprs.is_empty(), "{label}: 式がない");
+        for (a, dbg) in &exprs {
+            assert!(t.expr_ty.contains_key(a), "{label}: 型の記録がない式 {dbg}");
+        }
+        for a in &let_stmts {
+            assert!(t.let_ty.contains_key(a), "{label}: 型の記録がない let");
+        }
+        // 表の鍵は、どれも file の中の式・文の番地である
+        for k in t.expr_ty.keys() {
+            assert!(
+                exprs.iter().any(|(a, _)| a == k),
+                "{label}: file にない番地が記録されている"
+            );
+        }
+    }
+
+    const MIX: &str = r#"module m.mix
+  targets server
+  trust none
+
+type Port = Int where self >= 0 && self <= 65535;
+
+struct Pt {
+  x: Int,
+  y: Int,
+}
+
+enum Shape {
+  Dot,
+  Line(Int),
+  Box(Int, Int),
+}
+
+impl Pt {
+  fn sum(self: &Pt) -> Int
+    intent "x と y の和"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.x + self.y;
+  }
+}
+
+fn pair<T>(a: T, b: T) -> (T, T)
+  intent "組にする"
+  requires none
+  ensures none
+  effects none
+{
+  return (a, b);
+}
+
+fn area(s: &Shape) -> Int
+  intent "面積"
+  requires none
+  ensures result >= 0 || result < 0
+  effects none
+{
+  let r = match s {
+    Shape.Dot => 0,
+    Shape.Line(n) => n,
+    Shape.Box(a, b) => a * b,
+  };
+  return r;
+}
+
+fn run(xs: &List<Int>) -> Int
+  intent "いろいろな式"
+  requires xs.len() >= 0
+  ensures result == result
+  effects none
+{
+  let p = Pt { x: 1, y: -2 };
+  let q = pair(1, 2);
+  let f = 1.5;
+  let s = "a";
+  let ok = !(1 < 2) || true;
+  let port = Port.check(8080);
+  let mut v = List.new();
+  v.push(1);
+  let ys = xs.map(|x| x + 1);
+  let mut i = 0;
+  while i < 3 {
+    i = i + 1;
+  }
+  if ok {
+    let w = p.sum();
+    return w + i;
+  } else if i > 1 {
+    return 1;
+  }
+  match q {
+    (a, b) => {
+      return a + b;
+    }
+  }
+}
+"#;
+
+    const TRY: &str = r#"module m.t
+  targets server
+  trust none
+
+fn parse(s: &String) -> Result<Int, ParseError>
+  intent "整数にする"
+  requires none
+  ensures none
+  effects none
+{
+  let n = s.parse_int()?;
+  return Ok(n + 1);
+}
+
+fn opt(o: Option<Int>) -> Int
+  intent "既定値"
+  requires none
+  ensures none
+  effects none
+{
+  let r = match o {
+    Some(n) => n,
+    None => 0,
+  };
+  return r;
+}
+
+fn io(p: Path) -> Int
+  intent "読む"
+  requires none
+  ensures none
+  effects console, fs.read
+{
+  console.log(&1);
+  let r = fs.read(&p);
+  let q = Path.new(&"a");
+  let e = q.is_empty();
+  return 0;
+}
+"#;
+
+    #[test]
+    fn typed_covers_every_expr() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for rel in [
+            "examples/01-average/c-brace.sigil",
+            "examples/02-read-port/c-brace.sigil",
+            "examples/03-ownership/ownership.sigil",
+            "examples/04-effects/effects.sigil",
+            "examples/05-control/control.sigil",
+        ] {
+            let src = std::fs::read_to_string(root.join(rel)).unwrap();
+            covers(rel, &src);
+        }
+        covers("MIX", MIX);
+        covers("TRY", TRY);
+    }
+
+    #[test]
+    fn typed_records_calls_moves_and_lets() {
+        let src = r#"module m.r
+  targets server
+  trust none
+
+fn pair<T>(a: T, b: T) -> (T, T)
+  intent "組にする"
+  requires none
+  ensures none
+  effects none
+{
+  return (a, b);
+}
+
+fn take(xs: List<Int>) -> Int
+  intent "消費する"
+  requires none
+  ensures none
+  effects none
+{
+  return xs.len();
+}
+
+fn main() -> Int
+  intent "確かめ"
+  requires none
+  ensures none
+  effects none
+{
+  let q = pair(1, 2);
+  let mut v = List.new();
+  v.push(1);
+  let n = take(v);
+  let k = 3;
+  let m = k + k;
+  return n + m;
+}
+"#;
+        let file = parse(src).unwrap();
+        let t = typed(&file).unwrap();
+        let Item::Fn(main) = &file.items[2] else {
+            panic!()
+        };
+        fn call_of(s: &Stmt) -> &Expr {
+            match &s.kind {
+                StmtKind::Let { value, .. } | StmtKind::Expr(value) => value,
+                _ => panic!(),
+            }
+        }
+        let st = &main.body.stmts;
+        // 総称の関数: 型引数が具体化されている
+        let r = &t.calls[&addr(call_of(&st[0]))];
+        assert_eq!((r.kind, r.name.as_str()), (ResKind::Fn, "pair"));
+        assert_eq!(r.targs, vec![("T".to_string(), Ty::Int)]);
+        // 型に付く関数とメソッド
+        let r = &t.calls[&addr(call_of(&st[1]))];
+        assert_eq!(
+            (r.kind, r.owner.as_deref(), r.name.as_str()),
+            (ResKind::TypeFn, Some("List"), "new")
+        );
+        assert_eq!(r.targs, vec![("T".to_string(), Ty::Int)]);
+        let r = &t.calls[&addr(call_of(&st[2]))];
+        assert_eq!(
+            (r.kind, r.owner.as_deref(), r.name.as_str()),
+            (ResKind::Method, Some("List"), "push")
+        );
+        // `let` の型
+        assert_eq!(
+            t.let_ty[&(&st[0] as *const Stmt as usize)],
+            Ty::Tuple(vec![Ty::Int, Ty::Int])
+        );
+        assert_eq!(t.let_ty[&(&st[4] as *const Stmt as usize)], Ty::Int);
+        // 移動: `take(v)` の `v`。`k + k` の読みは複製
+        let StmtKind::Let { value, .. } = &st[3].kind else {
+            panic!()
+        };
+        let Expr::Call { args, .. } = value else {
+            panic!()
+        };
+        assert!(t.moves.contains(&addr(&args[0])));
+        let StmtKind::Let { value, .. } = &st[5].kind else {
+            panic!()
+        };
+        let Expr::Binary { lhs, rhs, .. } = value else {
+            panic!()
+        };
+        assert!(!t.moves.contains(&addr(lhs)) && !t.moves.contains(&addr(rhs)));
+        // ほかの移動は `pair` の `(a, b)` の二つ(`T` は Copyable と限らない)
+        assert_eq!(t.moves.len(), 3);
+    }
 }

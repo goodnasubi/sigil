@@ -12,6 +12,7 @@ pub mod fmt;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
+pub mod report;
 pub mod spec;
 pub mod stdlib;
 

@@ -709,3 +709,41 @@ fn function_returned_from_generic_call_is_rejected() {
     );
     assert_eq!(kind(&format!("{id}\n{f}")), ErrorKind::FnTypePosition);
 }
+
+#[test]
+fn function_variable_cannot_be_let_mut() {
+    let f = fx("f() -> Int", "none", "  let mut c = |x| x;\n  return c(1);");
+    assert_eq!(kind(&f), ErrorKind::FnTypePosition);
+}
+
+#[test]
+fn function_value_cannot_be_reassigned() {
+    let a = fx(
+        "f() -> Int",
+        "none",
+        "  let mut c = |x| x;\n  c = emit;\n  return c(1);",
+    );
+    assert_eq!(kind(&a), ErrorKind::FnTypePosition);
+    let b = fx(
+        "k(f: fn(Int) -> Int) -> Int",
+        "none",
+        "  let c = |x| x;\n  c = f;\n  return c(1);",
+    );
+    assert_eq!(kind(&b), ErrorKind::FnTypePosition);
+    let p = fx(
+        "k(f: fn(Int) -> Int) -> Int",
+        "none",
+        "  f = emit;\n  return f(1);",
+    );
+    assert_eq!(kind(&p), ErrorKind::FnTypePosition);
+    let g = format!(
+        "{}\n{}",
+        apply_all(),
+        fx(
+            "f() -> Int",
+            "none",
+            "  let mut c = |x| x;\n  c = emit;\n  return apply_all(c, 1);"
+        )
+    );
+    assert_eq!(kind(&g), ErrorKind::FnTypePosition);
+}

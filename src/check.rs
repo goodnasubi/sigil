@@ -1513,6 +1513,12 @@ impl Ck {
                         "型が参照の変数は `let mut` で宣言できない（参照を別の参照で束縛し直す操作はない）",
                     );
                 }
+                if *mutable && matches!(self.zonk(&fin), Ty::Fn(..)) {
+                    return self.err(
+                        ErrorKind::FnTypePosition,
+                        "関数の型の変数は `let mut` で宣言できない（関数の値の再代入では効果を追えない。`let` で束縛し直す）",
+                    );
+                }
                 self.bind(pattern, &fin, *mutable)
             }
             StmtKind::Assign { target, value } => {
@@ -1525,6 +1531,12 @@ impl Ck {
                         "代入できるのは変数とそのフィールドだけ",
                     );
                 };
+                if matches!(self.zonk(&tt), Ty::Fn(..)) {
+                    return self.err(
+                        ErrorKind::FnTypePosition,
+                        "関数の値は再代入できない（引数への代入も同じ。`let` で束縛し直す）",
+                    );
+                }
                 self.assignable_place(&root, target, true)?;
                 self.span = s.span;
                 let vt = self.expr(value)?;

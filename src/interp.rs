@@ -5,7 +5,7 @@
 //! - 異常停止（契約違反・`Int` の桁あふれ・0 での除算と剰余・標準の関数の `requires` 違反・スタックの枯渇）。
 //!   どれもプログラムからは捕まえられず、`Stop` として報告する。終了コードは種類によらず `STOP_EXIT_CODE`。
 //! - 実行の歩数に上限は設けない（ADR 0013 の決定 1）。スタックの枯渇だけは検出して異常停止にする。
-//! - `console.log` は出力を文字列に溜める（M4 で本物の入出力に替える）。`fs`・`Shared`・`Cell`・`Path` は M4。
+//! - `console.log` は出力を文字列に溜める（M4 で本物の入出力に替える）。`fs.read` はテスト用の差し替え（`Options::fs_files`）だけ。実際のファイルと `fs.write` は M4。
 //!
 //! 値の持ち方:
 //! - 共有借用 `&x` は、その時点の値の写し（`Rc` の複製）。借用の間は元の値が変わらないことを検査器が保証する。
@@ -108,7 +108,7 @@ pub enum Arg {
 pub enum RunError {
     /// 構文または型検査のエラー（実行の前に止める）。
     Check(Error),
-    Stop(Stop),
+    Stop(Box<Stop>),
     /// 現在の範囲にない機能（`fs`・`Shared` など）。
     Unsupported(String),
     /// 入口の指定の誤り（関数がない・引数の数が違う）。
@@ -141,7 +141,7 @@ pub struct Failure {
     pub error: RunError,
     pub output: String,
     /// `Outcome::drops` と同じ。異常停止の前に破棄した値も含む。
-    pub drops: Box<Vec<String>>,
+    pub drops: Box<[String]>,
 }
 
 impl fmt::Display for Failure {
@@ -156,6 +156,10 @@ pub struct Options {
     /// 構造体の値が破棄された順序を `drops` に記録する（ADR 0006 の条件 9 のテスト用）。
     /// 記録中は、名前だけの値の使用を移動として扱い、`clone` は構造体を複製する。
     pub trace_drops: bool,
+    /// `fs.read` のテスト用の差し替え（ADR 0004 の規則 7）。`Some` のとき、`fs.read(&p)` は
+    /// この表（パス -> 内容）を引き、ない `p` は `Err(IoError.NotFound(p))` を返す。
+    /// `None`（既定）のときは実際のファイルを読まず、未対応として停止する（実ファイルは M4）。
+    pub fs_files: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl Default for Options {
@@ -163,6 +167,7 @@ impl Default for Options {
         Options {
             stack_bytes: 256 * 1024 * 1024,
             trace_drops: false,
+            fs_files: None,
         }
     }
 }
@@ -255,11 +260,11 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
             // 戻り値は表示した後に破棄する（破棄の記録に含める）。
             drop(v);
             match it.after_deep() {
-                Err(Abort::Stop(s)) => Err((RunError::Stop(s), output)),
+                Err(Abort::Stop(s)) => Err((RunError::Stop(Box::new(s)), output)),
                 _ => Ok((value, output)),
             }
         }
-        Err(Abort::Stop(s)) => Err((RunError::Stop(s), output)),
+        Err(Abort::Stop(s)) => Err((RunError::Stop(Box::new(s)), output)),
         Err(Abort::Unsupported(m)) => Err((RunError::Unsupported(m), output)),
         Err(Abort::Return(_)) => Err((RunError::Unsupported("関数の外への return".into()), output)),
     };
@@ -274,7 +279,7 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
         Err((error, output)) => Err(Failure {
             error,
             output,
-            drops: Box::new(drops),
+            drops: drops.into_boxed_slice(),
         }),
     }
 }
@@ -356,6 +361,8 @@ enum Value {
     Struct(Rc<StructVal>),
     Variant(Rc<VariantVal>),
     ParseError,
+    /// `Cell<T>`（`Shared<Cell<T>>` の実体。共有するので `Rc` の中身を書き換える）。
+    Cell(Rc<std::cell::RefCell<Value>>),
     Closure(Rc<ClosureVal>),
     /// 名前で参照した関数。
     Named(Rc<str>),
@@ -419,7 +426,7 @@ fn is_copy_value(v: &Value) -> bool {
         | Value::Named(_)
         | Value::Ctor(..)
         | Value::MutRef(_) => true,
-        Value::Str(_) | Value::List(_) | Value::Struct(_) => false,
+        Value::Str(_) | Value::List(_) | Value::Struct(_) | Value::Cell(_) => false,
         Value::Tuple(t) => t.iter().all(is_copy_value),
         Value::Variant(x) => {
             matches!(&*x.enum_name, "Option" | "Result") && x.args.iter().all(is_copy_value)
@@ -499,6 +506,11 @@ fn drain(mut stack: Vec<Value>) {
                     let n = stack.len();
                     stack.extend(inner);
                     stack[n..].reverse();
+                }
+            }
+            Value::Cell(rc) => {
+                if let Ok(inner) = Rc::try_unwrap(rc) {
+                    stack.push(inner.into_inner());
                 }
             }
             _ => {}
@@ -734,6 +746,7 @@ impl Value {
                 }
             }
             Value::ParseError => "ParseError".into(),
+            Value::Cell(c) => format!("Cell({})", c.borrow().show(true)),
             Value::Closure(_) | Value::Named(_) | Value::Ctor(..) => "<関数>".into(),
             Value::MutRef(_) => deref(self.clone()).show(quote),
         }
@@ -776,6 +789,7 @@ fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Variant(x), Value::Variant(y)) => {
             x.enum_name == y.enum_name && x.name == y.name && seq_eq(&x.args, &y.args)
         }
+        (Value::Cell(x), Value::Cell(y)) => Rc::ptr_eq(x, y) || values_eq(&x.borrow(), &y.borrow()),
         _ => false,
     }
 }
@@ -885,6 +899,8 @@ struct Interp<'a> {
     exit_at: (String, u32),
     base: usize,
     budget: usize,
+    /// `Options::fs_files` の写し（`fs.read` の差し替え）。
+    fs: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[inline(never)]
@@ -983,6 +999,7 @@ impl<'a> Interp<'a> {
             exit_at: (String::new(), 0),
             base,
             budget: opts.stack_bytes / 4 * 3,
+            fs: opts.fs_files.clone(),
         }
     }
 
@@ -1767,9 +1784,26 @@ impl<'a> Interp<'a> {
                 items: vec![],
                 float: false,
             }))),
-            ("fs" | "Shared" | "Cell" | "Path", _) => {
-                unsupported(format!("{ns}.{name}（M4 で扱う）"))
-            }
+            ("Cell", "new") if a.len() == 1 => Ok(Value::Cell(Rc::new(std::cell::RefCell::new(
+                deref(a.remove(0)),
+            )))),
+            // `Shared<T>` は共有の所有。値は `Rc` で共有されるので、そのまま包まずに返す。
+            ("Shared", "new") if a.len() == 1 => Ok(deref(a.remove(0))),
+            ("fs", "read") if a.len() == 1 => match &self.fs {
+                None => unsupported(
+                    "fs.read（実際のファイルは M4。テスト用の差し替えは Options::fs_files）",
+                ),
+                Some(files) => {
+                    let Value::Str(p) = deref(a.remove(0)) else {
+                        return unsupported("fs.read の引数");
+                    };
+                    Ok(match files.get(&*p) {
+                        Some(text) => ok(Value::Str(text.as_str().into())),
+                        None => err(variant("IoError", "NotFound", vec![Value::Str(p)])),
+                    })
+                }
+            },
+            ("fs", "write") => unsupported("fs.write（M4 で扱う）"),
             _ => unsupported(format!("{ns}.{name}")),
         }
     }
@@ -1886,6 +1920,17 @@ impl<'a> Interp<'a> {
         match &recv {
             Value::List(l) => self.list_method(name, l, args),
             Value::Str(s) => str_method(name, s, args),
+            Value::Cell(c) => match (name, args.len()) {
+                ("get", 0) => Ok(c.borrow().clone()),
+                ("set", 1) => {
+                    let new = args.into_iter().next().map(deref).unwrap_or(Value::Unit);
+                    // 古い値は借用を外してから破棄する（破棄が借用中に走らない）。
+                    let old = std::mem::replace(&mut *c.borrow_mut(), new);
+                    drop(old);
+                    Ok(Value::Unit)
+                }
+                _ => unsupported(format!("Cell.{name}")),
+            },
             Value::Variant(v) if &*v.enum_name == "Option" => self.option_method(name, v, args),
             Value::Variant(v) if &*v.enum_name == "Result" => self.result_method(name, v, args),
             _ => unsupported(format!("メソッド {name}")),

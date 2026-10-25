@@ -26,7 +26,7 @@ fn stop(items: &str, f: &str, args: &[Arg]) -> Stop {
     match run(&program(items), f, args) {
         Ok(o) => panic!("異常停止するはずが成功した: {}", o.value),
         Err(e) => match e.error {
-            RunError::Stop(s) => s,
+            RunError::Stop(s) => *s,
             other => panic!("異常停止でない失敗: {other}"),
         },
     }

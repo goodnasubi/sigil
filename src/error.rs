@@ -69,16 +69,30 @@ pub enum ErrorKind {
     TypeAliasWithoutWhere,
     BadTuple,
     NotInP0,
+    TooDeep,
 }
 
 impl ErrorKind {
     pub fn phase(&self) -> Phase {
         use ErrorKind::*;
         match self {
-            Bom | CarriageReturn | Tab | NonAsciiOutsideLiteral | BlockComment
-            | UnexpectedChar | UnderscoreName | FutureReservedWord | CharLiteral
-            | UnterminatedString | NewlineInString | BadEscape | LeadingZero | BadNumber
-            | CompoundAssign | RangeOperator | PathSeparator => Phase::Lex,
+            Bom
+            | CarriageReturn
+            | Tab
+            | NonAsciiOutsideLiteral
+            | BlockComment
+            | UnexpectedChar
+            | UnderscoreName
+            | FutureReservedWord
+            | CharLiteral
+            | UnterminatedString
+            | NewlineInString
+            | BadEscape
+            | LeadingZero
+            | BadNumber
+            | CompoundAssign
+            | RangeOperator
+            | PathSeparator => Phase::Lex,
             _ => Phase::Syntax,
         }
     }
@@ -93,7 +107,11 @@ pub struct Error {
 
 impl Error {
     pub fn new(kind: ErrorKind, span: Span, message: impl Into<String>) -> Self {
-        Error { kind, message: message.into(), span }
+        Error {
+            kind,
+            message: message.into(),
+            span,
+        }
     }
 }
 
@@ -103,7 +121,11 @@ impl fmt::Display for Error {
             Phase::Lex => "字句エラー",
             Phase::Syntax => "構文エラー",
         };
-        write!(f, "{}:{}: {}: {}", self.span.line, self.span.col, phase, self.message)
+        write!(
+            f,
+            "{}:{}: {}: {}",
+            self.span.line, self.span.col, phase, self.message
+        )
     }
 }
 

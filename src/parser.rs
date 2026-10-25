@@ -43,9 +43,13 @@ pub fn parse_with_comments(src: &str) -> Result<Parsed, Error> {
         allow_result: false,
         allow_self: false,
         in_old: false,
+        depth: 0,
     };
     let file = p.file()?;
-    Ok(Parsed { file, comments: lexed.comments })
+    Ok(Parsed {
+        file,
+        comments: lexed.comments,
+    })
 }
 
 fn is_snake(s: &str) -> bool {
@@ -87,7 +91,11 @@ struct Parser {
     allow_result: bool,
     allow_self: bool,
     in_old: bool,
+    depth: usize,
 }
+
+/// 式・型・パターン・ブロックの入れ子の深さの上限。
+const MAX_DEPTH: usize = 128;
 
 fn describe(t: &Tok) -> String {
     match t {
@@ -144,11 +152,61 @@ impl Parser {
         }
     }
 
+    fn ty(&mut self) -> R<Type> {
+        self.enter()?;
+        let r = self.ty_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn block(&mut self) -> R<Block> {
+        self.enter()?;
+        let r = self.block_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn pattern(&mut self) -> R<Pattern> {
+        self.enter()?;
+        let r = self.pattern_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn expr(&mut self) -> R<Expr> {
+        self.enter()?;
+        let r = self.expr_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn prefix(&mut self) -> R<Expr> {
+        self.enter()?;
+        let r = self.prefix_inner();
+        self.depth -= 1;
+        r
+    }
+
+    /// 入れ子の深さを 1 つ進める。上限を超えたら構文エラー（スタックあふれ防止）。
+    fn enter(&mut self) -> R<()> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.err(
+                ErrorKind::TooDeep,
+                format!("入れ子が深すぎる（上限は {MAX_DEPTH}）"),
+            ));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
     fn unexpected(&self, expected: &str) -> Error {
         Error::new(
             ErrorKind::Unexpected,
             self.span(),
-            format!("{expected}が要る（見つかったのは {}）", describe(self.tok())),
+            format!(
+                "{expected}が要る（見つかったのは {}）",
+                describe(self.tok())
+            ),
         )
     }
 
@@ -165,11 +223,7 @@ impl Parser {
     }
 
     /// `open` を消費した後に呼ぶ。末尾のカンマは受理する（整形器が正規形にする）。
-    fn comma_sep<T>(
-        &mut self,
-        close: &str,
-        mut f: impl FnMut(&mut Self) -> R<T>,
-    ) -> R<Vec<T>> {
+    fn comma_sep<T>(&mut self, close: &str, mut f: impl FnMut(&mut Self) -> R<T>) -> R<Vec<T>> {
         let mut items = Vec::new();
         while !self.at_punct(close) {
             items.push(f(self)?);
@@ -321,7 +375,7 @@ impl Parser {
                 break;
             }
         }
-        self.module_clause("targets", "trust")?;
+        self.module_clause("targets")?;
         let mut targets: Vec<(String, Span)> = Vec::new();
         loop {
             let (s, sp) = self.ident_raw("出力先")?;
@@ -349,11 +403,17 @@ impl Parser {
                 }
             }
             targets.push((s, sp));
-            if !(self.eat_punct(",") && matches!(self.tok(), Tok::Ident(_))) {
+            if !self.eat_punct(",") {
                 break;
             }
+            if !matches!(self.tok(), Tok::Ident(_)) {
+                return Err(self.err(
+                    ErrorKind::UnknownTarget,
+                    "`targets` は 1 行の並びで、末尾に `,` は付けない",
+                ));
+            }
         }
-        self.module_clause("trust", "trust")?;
+        self.module_clause("trust")?;
         let trust = match self.tok() {
             Tok::Kw("none") => Trust::None,
             Tok::Ident(s) if s == "base" => Trust::Base,
@@ -369,7 +429,7 @@ impl Parser {
     }
 
     /// `module` の宣言の節（`targets` → `trust` の順）を 1 つ読む。
-    fn module_clause(&mut self, want: &'static str, _last: &str) -> R<()> {
+    fn module_clause(&mut self, want: &'static str) -> R<()> {
         if self.eat_kw(want) {
             return Ok(());
         }
@@ -391,7 +451,11 @@ impl Parser {
         }
         let gs = self.comma_sep(">", |p| {
             let name = p.camel_def("型引数名")?;
-            let bound = if p.eat_punct(":") { Some(p.path("制約")?) } else { None };
+            let bound = if p.eat_punct(":") {
+                Some(p.path("制約")?)
+            } else {
+                None
+            };
             Ok(Generic { name, bound })
         })?;
         if gs.is_empty() {
@@ -427,7 +491,12 @@ impl Parser {
         self.allow_self = saved;
         let cond = cond?;
         self.expect_punct(";")?;
-        Ok(TypeDecl { name, base, cond, span })
+        Ok(TypeDecl {
+            name,
+            base,
+            cond,
+            span,
+        })
     }
 
     fn struct_decl(&mut self) -> R<StructDecl> {
@@ -442,7 +511,12 @@ impl Parser {
             let ty = p.ty()?;
             Ok(Field { name, ty })
         })?;
-        Ok(StructDecl { name, generics, fields, span })
+        Ok(StructDecl {
+            name,
+            generics,
+            fields,
+            span,
+        })
     }
 
     fn enum_decl(&mut self) -> R<EnumDecl> {
@@ -466,9 +540,18 @@ impl Parser {
             Ok(Variant { name, fields })
         })?;
         if variants.is_empty() {
-            return Err(Error::new(ErrorKind::EmptyEnum, open, "列挙型は値を 1 つ以上持つ"));
+            return Err(Error::new(
+                ErrorKind::EmptyEnum,
+                open,
+                "列挙型は値を 1 つ以上持つ",
+            ));
         }
-        Ok(EnumDecl { name, generics, variants, span })
+        Ok(EnumDecl {
+            name,
+            generics,
+            variants,
+            span,
+        })
     }
 
     fn fn_decl(&mut self) -> R<FnDecl> {
@@ -491,7 +574,11 @@ impl Parser {
             let ty = p.ty()?;
             Ok(Param { name, ty })
         })?;
-        let ret = if self.eat_punct("->") { Some(self.ty()?) } else { None };
+        let ret = if self.eat_punct("->") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
 
         self.expect_clause("intent")?;
         let intent_span = self.span();
@@ -503,11 +590,19 @@ impl Parser {
             _ => return Err(self.unexpected("`intent` の説明（文字列リテラル）")),
         };
         if intent.is_empty() {
-            return Err(Error::new(ErrorKind::EmptyIntent, intent_span, "`intent` は空にできない"));
+            return Err(Error::new(
+                ErrorKind::EmptyIntent,
+                intent_span,
+                "`intent` は空にできない",
+            ));
         }
 
         self.expect_clause("requires")?;
-        let requires = if self.eat_kw("none") { None } else { Some(self.expr()?) };
+        let requires = if self.eat_kw("none") {
+            None
+        } else {
+            Some(self.expr()?)
+        };
 
         self.expect_clause("ensures")?;
         let ensures = if self.eat_kw("none") {
@@ -587,12 +682,15 @@ impl Parser {
 
     // ---- 型 ----
 
-    fn ty(&mut self) -> R<Type> {
+    fn ty_inner(&mut self) -> R<Type> {
         match self.tok().clone() {
             Tok::Punct("&") => {
                 self.bump();
                 let mutable = self.eat_kw("mut");
-                Ok(Type::Ref { mutable, inner: Box::new(self.ty()?) })
+                Ok(Type::Ref {
+                    mutable,
+                    inner: Box::new(self.ty()?),
+                })
             }
             Tok::Punct("&&") => Err(self.err(
                 ErrorKind::RefOfRef,
@@ -602,7 +700,11 @@ impl Parser {
                 self.bump();
                 self.expect_punct("(")?;
                 let params = self.comma_sep(")", |p| p.ty())?;
-                let ret = if self.eat_punct("->") { Some(Box::new(self.ty()?)) } else { None };
+                let ret = if self.eat_punct("->") {
+                    Some(Box::new(self.ty()?))
+                } else {
+                    None
+                };
                 Ok(Type::Fn { params, ret })
             }
             Tok::Punct("(") => {
@@ -635,7 +737,7 @@ impl Parser {
 
     // ---- 文 ----
 
-    fn block(&mut self) -> R<Block> {
+    fn block_inner(&mut self) -> R<Block> {
         self.expect_punct("{")?;
         let saved = self.no_struct;
         self.no_struct = false;
@@ -676,11 +778,19 @@ impl Parser {
                 self.expect_punct("=")?;
                 let value = self.expr()?;
                 self.expect_punct(";")?;
-                StmtKind::Let { mutable, name, value }
+                StmtKind::Let {
+                    mutable,
+                    name,
+                    value,
+                }
             }
             Tok::Kw("return") => {
                 self.bump();
-                let value = if self.at_punct(";") { None } else { Some(self.expr()?) };
+                let value = if self.at_punct(";") {
+                    None
+                } else {
+                    Some(self.expr()?)
+                };
                 self.expect_punct(";")?;
                 StmtKind::Return(value)
             }
@@ -742,7 +852,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(IfStmt { cond, then, otherwise })
+        Ok(IfStmt {
+            cond,
+            then,
+            otherwise,
+        })
     }
 
     fn stmt_match(&mut self) -> R<StmtKind> {
@@ -771,14 +885,18 @@ impl Parser {
         }
         self.bump();
         if arms.is_empty() {
-            return Err(Error::new(ErrorKind::EmptyMatch, open_span, "`match` は腕を 1 つ以上持つ"));
+            return Err(Error::new(
+                ErrorKind::EmptyMatch,
+                open_span,
+                "`match` は腕を 1 つ以上持つ",
+            ));
         }
         Ok(StmtKind::Match { scrutinee, arms })
     }
 
     // ---- パターン ----
 
-    fn pattern(&mut self) -> R<Pattern> {
+    fn pattern_inner(&mut self) -> R<Pattern> {
         match self.tok().clone() {
             Tok::Underscore => {
                 self.bump();
@@ -845,7 +963,7 @@ impl Parser {
 
     // ---- 式 ----
 
-    fn expr(&mut self) -> R<Expr> {
+    fn expr_inner(&mut self) -> R<Expr> {
         if self.at_punct("|") || self.at_punct("||") || self.at_kw("move") {
             self.closure()
         } else {
@@ -871,7 +989,11 @@ impl Parser {
         } else {
             ClosureBody::Expr(Box::new(self.expr()?))
         };
-        Ok(Expr::Closure { is_move, params, body })
+        Ok(Expr::Closure {
+            is_move,
+            params,
+            body,
+        })
     }
 
     fn or_expr(&mut self) -> R<Expr> {
@@ -886,7 +1008,11 @@ impl Parser {
         while self.at_punct(tok) {
             self.bump();
             let rhs = self.cmp_expr()?;
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         if self.at_punct(other) {
             return Err(self.err(
@@ -922,7 +1048,11 @@ impl Parser {
                 "比較は連鎖できない（`a < b && b < c` のように `&&` でつなぐ）",
             ));
         }
-        Ok(Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) })
+        Ok(Expr::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        })
     }
 
     fn add_expr(&mut self) -> R<Expr> {
@@ -935,7 +1065,11 @@ impl Parser {
             };
             self.bump();
             let rhs = self.mul_expr()?;
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
     }
 
@@ -950,17 +1084,25 @@ impl Parser {
             };
             self.bump();
             let rhs = self.prefix()?;
-            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
     }
 
-    fn prefix(&mut self) -> R<Expr> {
+    fn prefix_inner(&mut self) -> R<Expr> {
         let op = match self.tok() {
             Tok::Punct("!") => UnOp::Not,
             Tok::Punct("-") => UnOp::Neg,
             Tok::Punct("&") => {
                 self.bump();
-                let op = if self.eat_kw("mut") { UnOp::RefMut } else { UnOp::Ref };
+                let op = if self.eat_kw("mut") {
+                    UnOp::RefMut
+                } else {
+                    UnOp::Ref
+                };
                 let expr = Box::new(self.prefix()?);
                 return Ok(Expr::Unary { op, expr });
             }
@@ -982,13 +1124,19 @@ impl Parser {
         loop {
             if self.eat_punct(".") {
                 let name = self.name_ref("フィールド名・メソッド名")?;
-                e = Expr::Field { expr: Box::new(e), name };
+                e = Expr::Field {
+                    expr: Box::new(e),
+                    name,
+                };
             } else if self.eat_punct("(") {
                 let saved = self.no_struct;
                 self.no_struct = false;
                 let args = self.comma_sep(")", |p| p.expr());
                 self.no_struct = saved;
-                e = Expr::Call { callee: Box::new(e), args: args? };
+                e = Expr::Call {
+                    callee: Box::new(e),
+                    args: args?,
+                };
             } else if self.eat_punct("?") {
                 e = Expr::Try(Box::new(e));
             } else if self.at_punct("[") {
@@ -1000,9 +1148,23 @@ impl Parser {
                 break;
             }
         }
-        if self.at_punct("{") && !self.no_struct {
+        if self.at_punct("{") {
             if let Some(path) = as_type_path(&e) {
-                return self.struct_lit(path);
+                if !self.no_struct {
+                    return self.struct_lit(path);
+                }
+                if matches!(
+                    self.toks.get(self.pos + 1).map(|t| &t.tok),
+                    Some(Tok::Ident(_))
+                ) && matches!(
+                    self.toks.get(self.pos + 2).map(|t| &t.tok),
+                    Some(Tok::Punct(":"))
+                ) {
+                    return Err(self.err(
+                        ErrorKind::Unexpected,
+                        "条件や `match` の対象に構造体の値を直接書けない。括弧で囲む（例: `if x == (Foo { a: 1 }) {`）",
+                    ));
+                }
             }
         }
         Ok(e)
@@ -1033,6 +1195,10 @@ impl Parser {
 
     fn primary(&mut self) -> R<Expr> {
         match self.tok().clone() {
+            Tok::Kw("if") => Err(self.err(
+                ErrorKind::Unexpected,
+                "`if` は文であり式ではない。値を選ぶ分岐は `match` で書く（例: `let y = match c { true => a, false => b };`）",
+            )),
             Tok::Int(s) => {
                 self.bump();
                 Ok(Expr::Int(s))
@@ -1157,9 +1323,16 @@ impl Parser {
         self.no_struct = saved;
         let arms = arms?;
         if arms.is_empty() {
-            return Err(Error::new(ErrorKind::EmptyMatch, open_span, "`match` は腕を 1 つ以上持つ"));
+            return Err(Error::new(
+                ErrorKind::EmptyMatch,
+                open_span,
+                "`match` は腕を 1 つ以上持つ",
+            ));
         }
-        Ok(Expr::Match { scrutinee: Box::new(scrutinee), arms })
+        Ok(Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+        })
     }
 
     fn value_arms(&mut self) -> R<Vec<ExprArm>> {
@@ -1188,7 +1361,7 @@ impl Parser {
 fn is_place(e: &Expr) -> bool {
     match e {
         Expr::Name(n) => !is_upper_start(n),
-        Expr::Field { expr, .. } => is_place(expr) || matches!(**expr, Expr::Name(_)),
+        Expr::Field { expr, name } => !is_upper_start(name) && is_place(expr),
         _ => false,
     }
 }

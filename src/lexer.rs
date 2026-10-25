@@ -94,7 +94,10 @@ impl Lexer {
     }
 
     fn span(&self) -> Span {
-        Span { line: self.line, col: self.col }
+        Span {
+            line: self.line,
+            col: self.col,
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -125,8 +128,16 @@ impl Lexer {
     /// タブ・CR は文字列やコメントの中でも字句エラー。
     fn check_raw(&self, c: char, span: Span) -> Result<(), Error> {
         match c {
-            '\t' => Err(err(ErrorKind::Tab, span, "タブは書けない（字下げは空白 2 つ）")),
-            '\r' => Err(err(ErrorKind::CarriageReturn, span, "改行は LF だけ（CR は書けない）")),
+            '\t' => Err(err(
+                ErrorKind::Tab,
+                span,
+                "タブは書けない（字下げは空白 2 つ）",
+            )),
+            '\r' => Err(err(
+                ErrorKind::CarriageReturn,
+                span,
+                "改行は LF だけ（CR は書けない）",
+            )),
             _ => Ok(()),
         }
     }
@@ -176,7 +187,10 @@ impl Lexer {
         }
         let span = self.span();
         self.push(Tok::Eof, span);
-        Ok(Lexed { tokens: self.tokens, comments: self.comments })
+        Ok(Lexed {
+            tokens: self.tokens,
+            comments: self.comments,
+        })
     }
 
     fn comment(&mut self, span: Span) -> Result<(), Error> {
@@ -192,7 +206,11 @@ impl Lexer {
             self.bump();
         }
         let trailing = self.last_token_line == span.line;
-        self.comments.push(Comment { span, text, trailing });
+        self.comments.push(Comment {
+            span,
+            text,
+            trailing,
+        });
         Ok(())
     }
 
@@ -202,7 +220,11 @@ impl Lexer {
         loop {
             let here = self.span();
             let Some(c) = self.peek() else {
-                return Err(err(ErrorKind::UnterminatedString, span, "文字列が閉じていない"));
+                return Err(err(
+                    ErrorKind::UnterminatedString,
+                    span,
+                    "文字列が閉じていない",
+                ));
             };
             match c {
                 '"' => {
@@ -233,7 +255,11 @@ impl Lexer {
 
     fn escape(&mut self, at: Span) -> Result<char, Error> {
         let Some(c) = self.bump() else {
-            return Err(err(ErrorKind::UnterminatedString, at, "文字列が閉じていない"));
+            return Err(err(
+                ErrorKind::UnterminatedString,
+                at,
+                "文字列が閉じていない",
+            ));
         };
         match c {
             '\\' => Ok('\\'),
@@ -307,7 +333,10 @@ impl Lexer {
                 ));
             }
         }
-        if self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+        if self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
             return Err(err(
                 ErrorKind::BadNumber,
                 span,
@@ -316,7 +345,14 @@ impl Lexer {
                 ),
             ));
         }
-        self.push(if is_float { Tok::Float(text) } else { Tok::Int(text) }, span);
+        self.push(
+            if is_float {
+                Tok::Float(text)
+            } else {
+                Tok::Int(text)
+            },
+            span,
+        );
         Ok(())
     }
 
@@ -386,11 +422,7 @@ impl Lexer {
                 ));
             }
             ('.', Some('.')) => {
-                return Err(err(
-                    ErrorKind::RangeOperator,
-                    span,
-                    "範囲 `..` は持たない",
-                ));
+                return Err(err(ErrorKind::RangeOperator, span, "範囲 `..` は持たない"));
             }
             (':', Some(':')) => {
                 return Err(err(

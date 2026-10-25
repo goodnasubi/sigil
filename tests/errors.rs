@@ -34,7 +34,10 @@ fn lex_tab() {
 
 #[test]
 fn lex_cr() {
-    assert_eq!(kind(&fnsrc(GOOD_FN).replace('\n', "\r\n")), ErrorKind::CarriageReturn);
+    assert_eq!(
+        kind(&fnsrc(GOOD_FN).replace('\n', "\r\n")),
+        ErrorKind::CarriageReturn
+    );
 }
 
 #[test]
@@ -57,32 +60,51 @@ fn lex_bad_escape() {
 #[test]
 fn lex_newline_in_string() {
     let s = fnsrc(&GOOD_FN.replace("\"x\"", "\"a\nb\""));
-    assert!(matches!(kind(&s), ErrorKind::NewlineInString | ErrorKind::UnterminatedString));
+    assert_eq!(kind(&s), ErrorKind::NewlineInString);
 }
 
 #[test]
 fn lex_leading_zero() {
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", "return 007;"))), ErrorKind::LeadingZero);
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", "return 007;"))),
+        ErrorKind::LeadingZero
+    );
 }
 
 #[test]
 fn lex_hex_and_exponent() {
-    assert!(matches!(
+    assert_eq!(
         kind(&fnsrc(&GOOD_FN.replace("return x;", "return 0x10;"))),
-        ErrorKind::BadNumber | ErrorKind::LeadingZero
-    ));
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", "return 1e3;"))), ErrorKind::BadNumber);
+        ErrorKind::BadNumber
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", "return 1e3;"))),
+        ErrorKind::BadNumber
+    );
 }
 
 #[test]
 fn lex_non_ascii_ident() {
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", "let é = 1;\n  return x;"))), ErrorKind::NonAsciiOutsideLiteral);
+    assert_eq!(
+        kind(&fnsrc(
+            &GOOD_FN.replace("return x;", "let é = 1;\n  return x;")
+        )),
+        ErrorKind::NonAsciiOutsideLiteral
+    );
 }
 
 #[test]
 fn lex_compound_assign_and_range() {
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", "x += 1;\n  return x;"))), ErrorKind::CompoundAssign);
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", "return x..x;"))), ErrorKind::RangeOperator);
+    assert_eq!(
+        kind(&fnsrc(
+            &GOOD_FN.replace("return x;", "x += 1;\n  return x;")
+        )),
+        ErrorKind::CompoundAssign
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", "return x..x;"))),
+        ErrorKind::RangeOperator
+    );
 }
 
 #[test]
@@ -102,25 +124,53 @@ fn module_missing() {
 
 #[test]
 fn module_duplicate() {
-    assert_eq!(kind(&format!("{HEAD}{HEAD}{GOOD_FN}")), ErrorKind::ModuleDuplicate);
+    assert_eq!(
+        kind(&format!("{HEAD}{HEAD}{GOOD_FN}")),
+        ErrorKind::ModuleDuplicate
+    );
 }
 
 #[test]
 fn module_clause_missing() {
-    assert_eq!(kind(&format!("module m.a\n  targets server\n\n{GOOD_FN}")), ErrorKind::ModuleClauseMissing);
+    assert_eq!(
+        kind(&format!("module m.a\n  targets server\n\n{GOOD_FN}")),
+        ErrorKind::ModuleClauseMissing
+    );
 }
 
 #[test]
 fn module_clause_order() {
-    assert_eq!(kind(&format!("module m.a\n  trust none\n  targets server\n\n{GOOD_FN}")), ErrorKind::ModuleClauseOrder);
+    assert_eq!(
+        kind(&format!(
+            "module m.a\n  trust none\n  targets server\n\n{GOOD_FN}"
+        )),
+        ErrorKind::ModuleClauseOrder
+    );
 }
 
 #[test]
 fn module_targets() {
-    assert_eq!(kind(&format!("module m.a\n  targets server, server\n  trust none\n\n{GOOD_FN}")), ErrorKind::TargetsDuplicate);
-    assert_eq!(kind(&format!("module m.a\n  targets server, browser\n  trust none\n\n{GOOD_FN}")), ErrorKind::TargetsUnsorted);
-    assert_eq!(kind(&format!("module m.a\n  targets mars\n  trust none\n\n{GOOD_FN}")), ErrorKind::UnknownTarget);
-    ok(&format!("module m.a\n  targets browser, server\n  trust none\n\n{GOOD_FN}"));
+    assert_eq!(
+        kind(&format!(
+            "module m.a\n  targets server, server\n  trust none\n\n{GOOD_FN}"
+        )),
+        ErrorKind::TargetsDuplicate
+    );
+    assert_eq!(
+        kind(&format!(
+            "module m.a\n  targets server, browser\n  trust none\n\n{GOOD_FN}"
+        )),
+        ErrorKind::TargetsUnsorted
+    );
+    assert_eq!(
+        kind(&format!(
+            "module m.a\n  targets mars\n  trust none\n\n{GOOD_FN}"
+        )),
+        ErrorKind::UnknownTarget
+    );
+    ok(&format!(
+        "module m.a\n  targets browser, server\n  trust none\n\n{GOOD_FN}"
+    ));
 }
 
 // ---- 契約節 (ADR0002/0008) ----
@@ -132,13 +182,19 @@ fn clause_missing() {
 
 #[test]
 fn clause_order() {
-    let s = fnsrc(&GOOD_FN.replace("  requires none\n  ensures none\n", "  ensures none\n  requires none\n"));
+    let s = fnsrc(&GOOD_FN.replace(
+        "  requires none\n  ensures none\n",
+        "  ensures none\n  requires none\n",
+    ));
     assert_eq!(kind(&s), ErrorKind::ClauseOrder);
 }
 
 #[test]
 fn intent_empty() {
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("\"x\"", "\"\""))), ErrorKind::EmptyIntent);
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("\"x\"", "\"\""))),
+        ErrorKind::EmptyIntent
+    );
 }
 
 #[test]
@@ -147,7 +203,9 @@ fn old_outside_ensures() {
     assert_eq!(kind(&s), ErrorKind::OldOutsideEnsures);
     let s = fnsrc(&GOOD_FN.replace("return x;", "return old(x);"));
     assert_eq!(kind(&s), ErrorKind::OldOutsideEnsures);
-    ok(&fnsrc(&GOOD_FN.replace("ensures none", "ensures result == old(x)")));
+    ok(&fnsrc(
+        &GOOD_FN.replace("ensures none", "ensures result == old(x)"),
+    ));
 }
 
 #[test]
@@ -159,10 +217,24 @@ fn result_outside_ensures() {
 // ---- 名前 ----
 #[test]
 fn name_forms() {
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn myFn("))), ErrorKind::BadNameForm);
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn _f("))), ErrorKind::UnderscoreName);
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn match("))), ErrorKind::ReservedWordAsName);
-    assert_eq!(kind(&fnsrc(&format!("type my_type = Int where self > 0;\n{GOOD_FN}"))), ErrorKind::BadNameForm);
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn myFn("))),
+        ErrorKind::BadNameForm
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn _f("))),
+        ErrorKind::UnderscoreName
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn match("))),
+        ErrorKind::ReservedWordAsName
+    );
+    assert_eq!(
+        kind(&fnsrc(&format!(
+            "type my_type = Int where self > 0;\n{GOOD_FN}"
+        ))),
+        ErrorKind::BadNameForm
+    );
 }
 
 // ---- 式 ----
@@ -186,16 +258,207 @@ fn match_arm_forms() {
     let stmt_ok = "match x {\n    0 => { return 1; }\n    _ => { return 2; }\n  }";
     ok(&fnsrc(&GOOD_FN.replace("return x;", stmt_ok)));
     let stmt_comma = "match x {\n    0 => { return 1; },\n    _ => { return 2; }\n  }";
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", stmt_comma))), ErrorKind::StmtMatchArmComma);
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", stmt_comma))),
+        ErrorKind::StmtMatchArmComma
+    );
     let stmt_expr = "match x {\n    0 => 1,\n    _ => 2,\n  }";
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", stmt_expr))), ErrorKind::StmtMatchArmNotBlock);
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", stmt_expr))),
+        ErrorKind::StmtMatchArmNotBlock
+    );
     let val_ok = "return match x {\n    0 => 1,\n    _ => 2,\n  };";
     ok(&fnsrc(&GOOD_FN.replace("return x;", val_ok)));
     let val_block = "return match x {\n    0 => { 1 },\n    _ => 2,\n  };";
-    assert_eq!(kind(&fnsrc(&GOOD_FN.replace("return x;", val_block))), ErrorKind::ValueMatchArmBlock);
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", val_block))),
+        ErrorKind::ValueMatchArmBlock
+    );
 }
 
 #[test]
 fn shift_right_is_two_gt() {
-    ok(&fnsrc(&GOOD_FN.replace("-> Int", "-> List<List<Int>>").replace("return x;", "return empty();")));
+    ok(&fnsrc(
+        &GOOD_FN
+            .replace("-> Int", "-> List<List<Int>>")
+            .replace("return x;", "return empty();"),
+    ));
+}
+
+// ---- 追加: 深さ上限 ----
+fn ret(e: &str) -> String {
+    fnsrc(&GOOD_FN.replace("return x;", &format!("return {e};")))
+}
+
+#[test]
+fn depth_limit() {
+    let n = 5000;
+    assert_eq!(
+        kind(&ret(&format!("{}x{}", "(".repeat(n), ")".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("{}x", "-".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("{}x", "!".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    let blocks = format!("{}return x;{}", "if true {\n".repeat(n), "}\n".repeat(n));
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", &blocks))),
+        ErrorKind::TooDeep
+    );
+    let ty = format!("{}Int{}", "List<".repeat(n), ">".repeat(n));
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("-> Int", &format!("-> {ty}")))),
+        ErrorKind::TooDeep
+    );
+    ok(&ret(&format!("{}x{}", "(".repeat(50), ")".repeat(50))));
+}
+
+// ---- 追加: 代入の左辺 ----
+#[test]
+fn assign_targets() {
+    let b = |s: &str| fnsrc(&GOOD_FN.replace("return x;", &format!("{s}\n  return x;")));
+    assert_eq!(kind(&b("Foo.bar = 1;")), ErrorKind::InvalidAssignTarget);
+    assert!(matches!(
+        kind(&b("x.B = 1;")),
+        ErrorKind::InvalidAssignTarget | ErrorKind::BadNameForm
+    ));
+    assert_eq!(kind(&b("f(x) = 1;")), ErrorKind::InvalidAssignTarget);
+    ok(&b("x.a.b = 1;"));
+}
+
+// ---- 追加: targets の末尾カンマ ----
+#[test]
+fn targets_trailing_comma() {
+    let s = format!("module m.a\n  targets browser,\n  trust none\n\n{GOOD_FN}");
+    assert_eq!(kind(&s), ErrorKind::UnknownTarget);
+}
+
+// ---- 追加: 案内メッセージ ----
+#[test]
+fn guidance_messages() {
+    let s = fnsrc(&GOOD_FN.replace(
+        "return x;",
+        "if x == Foo { a: 1 } {\n    return x;\n  }\n  return x;",
+    ));
+    let e = parse(&s).unwrap_err();
+    assert!(e.message.contains("括弧で囲む"), "{e}");
+    let s = fnsrc(&GOOD_FN.replace(
+        "return x;",
+        "let y = if true { 1 } else { 2 };\n  return x;",
+    ));
+    let e = parse(&s).unwrap_err();
+    assert!(e.message.contains("match"), "{e}");
+    ok(&fnsrc(&GOOD_FN.replace(
+        "return x;",
+        "if x == Color.Red {\n    return 1;\n  }\n  return x;",
+    )));
+}
+
+// ---- 追加: 各エラー種別 ----
+#[test]
+fn lex_kinds() {
+    assert_eq!(kind(&format!("\u{feff}{}", fnsrc(GOOD_FN))), ErrorKind::Bom);
+    assert_eq!(kind(&ret("x @ x")), ErrorKind::UnexpectedChar);
+    assert_eq!(kind(&ret("'a'")), ErrorKind::CharLiteral);
+    assert_eq!(kind(&ret("a::b")), ErrorKind::PathSeparator);
+}
+
+#[test]
+fn reserved_names_defined() {
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn console("))),
+        ErrorKind::ReservedNameDefined
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("x: Int", "state: Int"))),
+        ErrorKind::ReservedNameDefined
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn check("))),
+        ErrorKind::ReservedNameDefined
+    );
+}
+
+#[test]
+fn ref_of_ref() {
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("x: Int", "x: &&Int"))),
+        ErrorKind::RefOfRef
+    );
+    assert_eq!(kind(&ret("&&x")), ErrorKind::RefOfRef);
+}
+
+#[test]
+fn self_outside_refinement() {
+    assert_eq!(kind(&ret("self")), ErrorKind::SelfOutsideRefinement);
+    ok(&fnsrc(&format!(
+        "type Pos = Int where self > 0;\n{GOOD_FN}"
+    )));
+}
+
+#[test]
+fn empty_forms() {
+    assert_eq!(
+        kind(&fnsrc(&format!("enum E {{}}\n{GOOD_FN}"))),
+        ErrorKind::EmptyEnum
+    );
+    assert_eq!(
+        kind(&fnsrc(
+            &GOOD_FN.replace("return x;", "match x {\n  }\n  return x;")
+        )),
+        ErrorKind::EmptyMatch
+    );
+    assert_eq!(kind(&ret("Foo {}")), ErrorKind::EmptyStructLiteral);
+    assert_eq!(
+        kind(&fnsrc(&format!("type Pos = Int;\n{GOOD_FN}"))),
+        ErrorKind::TypeAliasWithoutWhere
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("-> Int", "-> (Int)"))),
+        ErrorKind::BadTuple
+    );
+}
+
+// ---- 追加: 正の側 ----
+#[test]
+fn positive_forms() {
+    let b = |s: &str| ok(&fnsrc(&GOOD_FN.replace("return x;", s)));
+    b("while x > 0 {\n    x = x - 1;\n  }\n  return x;");
+    b("if x > 0 {\n    return 1;\n  } else if x < 0 {\n    return 2;\n  } else {\n    return 3;\n  }");
+    b("f(x)?;\n  return x;");
+    b("let g = move || x;\n  let h = |a, b| a + b;\n  return x;");
+    b("match c {\n    Color.Red => { return 1; }\n    Shape.Circle(r) => { return r; }\n    _ => { return 2; }\n  }");
+    ok(&fnsrc(&GOOD_FN.replace(
+        "ensures none",
+        "ensures result == -1 || result == 1",
+    )));
+}
+
+// ---- 追加: 位置 ----
+#[test]
+fn spans() {
+    // HEAD は 4 行。fn は 5 行目。
+    let e = parse(&fnsrc(&GOOD_FN.replace("intent \"x\"", "intent \"\""))).unwrap_err();
+    assert_eq!(e.span.line, 6);
+    let e = parse(&fnsrc(&GOOD_FN.replace("return x;", "return 007;"))).unwrap_err();
+    assert_eq!((e.span.line, e.span.col), (11, 10));
+    let e = parse(&fnsrc(&GOOD_FN.replace("return x;", "\t"))).unwrap_err();
+    assert_eq!((e.span.line, e.span.col), (11, 3));
+    let e = parse("module m.a\n  targets mars\n  trust none\n").unwrap_err();
+    assert_eq!((e.span.line, e.span.col), (2, 11));
+}
+
+#[test]
+fn tuples_positive() {
+    ok(&fnsrc(
+        &GOOD_FN
+            .replace("-> Int", "-> (Int, Int)")
+            .replace("return x;", "return (x, x);"),
+    ));
+    assert_eq!(kind(&ret("()")), ErrorKind::BadTuple);
 }

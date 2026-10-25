@@ -109,9 +109,18 @@ pub enum Effect {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    Path { path: Vec<String>, args: Vec<Type> },
-    Ref { mutable: bool, inner: Box<Type> },
-    Fn { params: Vec<Type>, ret: Option<Box<Type>> },
+    Path {
+        path: Vec<String>,
+        args: Vec<Type>,
+    },
+    Ref {
+        mutable: bool,
+        inner: Box<Type>,
+    },
+    Fn {
+        params: Vec<Type>,
+        ret: Option<Box<Type>>,
+    },
     Tuple(Vec<Type>),
 }
 
@@ -130,15 +139,28 @@ pub struct Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
-    Let { mutable: bool, name: String, value: Expr },
-    Assign { target: Expr, value: Expr },
+    Let {
+        mutable: bool,
+        name: String,
+        value: Expr,
+    },
+    Assign {
+        target: Expr,
+        value: Expr,
+    },
     /// 呼び出し（末尾の `?` を含む）だけ。
     Expr(Expr),
     Return(Option<Expr>),
     If(IfStmt),
-    While { cond: Expr, body: Block },
+    While {
+        cond: Expr,
+        body: Block,
+    },
     /// 文の `match`（腕はブロック）。
-    Match { scrutinee: Expr, arms: Vec<StmtArm> },
+    Match {
+        scrutinee: Expr,
+        arms: Vec<StmtArm>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,7 +197,10 @@ pub enum Pattern {
     Str(String),
     Bool(bool),
     /// `Some(p)`・`None`・`ConfigError.Io(e)`
-    Variant { path: Vec<String>, args: Vec<Pattern> },
+    Variant {
+        path: Vec<String>,
+        args: Vec<Pattern>,
+    },
     Tuple(Vec<Pattern>),
 }
 
@@ -225,12 +250,35 @@ pub enum Expr {
     Old(Box<Expr>),
     Paren(Box<Expr>),
     Tuple(Vec<Expr>),
-    Unary { op: UnOp, expr: Box<Expr> },
-    Binary { op: BinOp, lhs: Box<Expr>, rhs: Box<Expr> },
-    Field { expr: Box<Expr>, name: String },
-    Call { callee: Box<Expr>, args: Vec<Expr> },
+    Unary {
+        op: UnOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        op: BinOp,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    Field {
+        expr: Box<Expr>,
+        name: String,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
     Try(Box<Expr>),
-    StructLit { path: Vec<String>, fields: Vec<(String, Expr)> },
-    Match { scrutinee: Box<Expr>, arms: Vec<ExprArm> },
-    Closure { is_move: bool, params: Vec<String>, body: ClosureBody },
+    StructLit {
+        path: Vec<String>,
+        fields: Vec<(String, Expr)>,
+    },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<ExprArm>,
+    },
+    Closure {
+        is_move: bool,
+        params: Vec<String>,
+        body: ClosureBody,
+    },
 }

@@ -2994,10 +2994,30 @@ impl Ck {
                     pat_names(&a.pattern, &mut names);
                     self.adopt(&names, &m_srcs, false)?;
                     let t = self.expr(&a.body)?;
-                    arm_srcs.append(&mut self.res);
                     // 腕の値は `match` の値として移る
+                    let arm_res = self.res.clone();
                     self.consume(&a.body, &t)?;
+                    self.res = arm_res;
                     self.span = sp;
+                    // 腕が所有する束縛を借りた参照は、腕の外へ持ち出せない
+                    if self.track && !self.refine && self.closure_base == 0 {
+                        for (path, _) in &self.res {
+                            let root = path.split('.').next().unwrap_or(path);
+                            if names.iter().any(|n| n == root)
+                                && self
+                                    .lookup(root)
+                                    .is_some_and(|l| !contains_ref(&self.zonk(&l.ty)))
+                            {
+                                return self.err(
+                                    ErrorKind::TempBorrow,
+                                    format!(
+                                        "`{root}` は `match` の腕が所有する値で、腕の終わりで破棄されるので、その参照は `match` の外へ出せない（腕の中で使い終えるか、値を `.clone()` で取り出す）"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    arm_srcs.append(&mut self.res);
                     if i == 0 {
                         let _ = self.unify(&r, &t);
                     } else if !self.coerce(&r, &t, &a.body) {

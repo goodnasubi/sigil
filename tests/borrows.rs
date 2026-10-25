@@ -21,7 +21,7 @@ fn func(sig: &str, body: &str) -> String {
 
 fn defs() -> String {
     format!(
-        "struct Account {{\n  balance: Int,\n  owner: String,\n}}\nstruct Pair {{\n  x: Int,\n  y: Int,\n}}\n{}{}{}{}{}{}",
+        "struct Account {{\n  balance: Int,\n  owner: String,\n}}\nstruct Pair {{\n  x: Int,\n  y: Int,\n}}\n{}{}{}{}{}{}{}",
         func("show(n: &Int)", "  return;"),
         func("both(a: &mut Int, b: &Int)", "  return;"),
         func("bump(a: &mut Int, n: Int)", "  return;"),
@@ -31,6 +31,10 @@ fn defs() -> String {
         ),
         func("make() -> List<Account>", "  return List.new();"),
         func("pick(a: &Account) -> &Account", "  return a;"),
+        func(
+            "mk() -> Account",
+            "  return Account { balance: 1, owner: \"a\" };"
+        ),
     )
 }
 
@@ -350,5 +354,68 @@ fn unresolved_closure_param_double_move() {
     ok(
         "g() -> Int",
         "  let f = |x| {\n    let a = x;\n    let b = x;\n    return a + b;\n  };\n  return f(1);",
+    );
+}
+
+// ---- 腕の束縛を借りた参照は腕の外へ出せない ----
+
+#[test]
+fn borrow_of_arm_binding_cannot_escape_value_match() {
+    assert_eq!(
+        kind(
+            "f(a: &Account) -> Int",
+            "  let n = match mk() {\n    x => pick(&x),\n  };\n  return n.balance;"
+        ),
+        TempBorrow
+    );
+    assert_eq!(
+        kind(
+            "f(a: &Account) -> Int",
+            "  let n = match Some(mk()) {\n    Some(x) => pick(&x),\n    None => a,\n  };\n  return n.balance;"
+        ),
+        TempBorrow
+    );
+    assert_eq!(
+        kind(
+            "f(a: &Account) -> Int",
+            "  let o = match Some(mk()) {\n    Some(x) => Some(pick(&x)),\n    None => None,\n  };\n  return 1;"
+        ),
+        TempBorrow
+    );
+    // 腕の外の値を借りるなら出せる
+    ok(
+        "f(b: Account) -> Int",
+        "  let n = match Some(1) {\n    Some(k) => pick(&b),\n    None => pick(&b),\n  };\n  return n.balance;",
+    );
+    // 腕の中で使い終えるなら通る
+    ok(
+        "f(a: &Account) -> Int",
+        "  let n = match Some(mk()) {\n    Some(x) => pick(&x).balance,\n    None => 0,\n  };\n  return n;",
+    );
+}
+
+#[test]
+fn stmt_match_on_temp_ref_binding_use_is_error() {
+    // 文の match の対象が一時的な値なら、腕の束縛は使えない
+    assert_eq!(
+        kind(
+            "f(a: Int)",
+            "  match &Some(mk()) {\n    Some(x) => {\n      let b = x.balance;\n    }\n    None => {\n      let b = 0;\n    }\n  }\n  return;"
+        ),
+        TempBorrow
+    );
+    // 束縛を使わなければ通る
+    ok(
+        "f(a: Int)",
+        "  match &Some(1) {\n    Some(_) => {\n      let b = 1;\n    }\n    None => {\n      let b = 0;\n    }\n  }\n  return;",
+    );
+}
+
+#[test]
+fn match_ref_binding_unused_allows_write() {
+    // 束縛を使わない腕では、借りた場所を書き換えられる（最後に使う地点で終わる）
+    ok(
+        "f(a: Account)",
+        "  let mut o = Some(1);\n  match &o {\n    Some(_) => {\n      o = None;\n    }\n    None => {\n      let b = 0;\n    }\n  }\n  return;",
     );
 }

@@ -1,17 +1,22 @@
-//! 型検査（M1 の最初の一区切り。ADR 0011）。
+//! 型検査（M1。ADR 0011）。
 //!
-//! 対象は総称を含まないコード: 基本型（`Int`・`Float`・`Bool`・`String`・`Unit`）・組・参照・
-//! 構造体・列挙型・篩型・`impl` のメソッド・関数の型の引数。式を下から上へ型づけ、最初の
-//! 型エラーで打ち切る（M0 と同じ）。総称・標準ライブラリの型（`List`・`Option`・`Result`）・
-//! `match`・クロージャ・`?` は後続の PR で扱うので、いまは `Unsupported` のエラーにする
+//! 基本型・組・参照・構造体・列挙型・篩型・総称（関数・構造体・列挙型・`impl`）・6 つの性質と型引数の
+//! 制約・`Option`/`Result`/`?`・`match` と網羅性・クロージャ・単一化による推論・`T.check`・`let` の
+//! 型注釈の要否を扱う。式を下から上へ型づけ、最初の型エラーで打ち切る（M0 と同じ）。標準ライブラリの
+//! 関数・メソッド（`List.new`・`xs.len()` など）は後続の PR で扱うので、いまは `Unsupported` にする
 //! （黙って通さない）。効果の検査と所有権の検査は含まない。
 //!
 //! 位置: 式は位置を持たないので、エラーの位置は式を含む文（または宣言）の位置になる。
+//!
+//! 推論: 型変数 `Ty::Var` に単一化で型を割り当てる。関数 1 つの本体ごとに状態を作り直す。性質の
+//! 制約（`T: Equatable` など）は、型が決まった時点で調べ、決まっていなければ本体の終わりまで
+//! 繰り延べる。`let` の型注釈の要否は、注釈を外して本体を検査し直し、同じ型に決まるかで判定する。
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::error::{Error, ErrorKind, Span};
+use crate::exhaustive::{missing, Ctor, P};
 use crate::parser::parse;
 
 type R<T> = Result<T, Error>;
@@ -30,41 +35,85 @@ enum Ty {
     Unit,
     Tuple(Vec<Ty>),
     Ref(bool, Box<Ty>),
-    /// 構造体・列挙型・篩型の名前。
-    Named(String),
+    /// 構造体・列挙型・篩型・標準の型（`Option`・`List` など）の名前と型引数。
+    Named(String, Vec<Ty>),
+    /// 総称の宣言の中の型引数（剛体: 他の型とは等しくない）。
+    Param(String),
+    /// 推論中の未知の型。
+    Var(u32),
     Fn(Vec<Ty>, Box<Ty>),
 }
 
 fn show(t: &Ty) -> String {
+    let list = |ts: &[Ty]| ts.iter().map(show).collect::<Vec<_>>().join(", ");
     match t {
         Ty::Int => "Int".into(),
         Ty::Float => "Float".into(),
         Ty::Bool => "Bool".into(),
         Ty::Str => "String".into(),
         Ty::Unit => "Unit".into(),
-        Ty::Tuple(ts) => format!("({})", ts.iter().map(show).collect::<Vec<_>>().join(", ")),
+        Ty::Tuple(ts) => format!("({})", list(ts)),
         Ty::Ref(m, i) => format!("&{}{}", if *m { "mut " } else { "" }, show(i)),
-        Ty::Named(n) => n.clone(),
+        Ty::Named(n, a) if a.is_empty() => n.clone(),
+        Ty::Named(n, a) => format!("{n}<{}>", list(a)),
+        Ty::Param(n) => n.clone(),
+        Ty::Var(_) => "_".into(),
         Ty::Fn(ps, r) => {
-            let ps = ps.iter().map(show).collect::<Vec<_>>().join(", ");
             if **r == Ty::Unit {
-                format!("fn({ps})")
+                format!("fn({})", list(ps))
             } else {
-                format!("fn({ps}) -> {}", show(r))
+                format!("fn({}) -> {}", list(ps), show(r))
             }
         }
     }
 }
 
+/// 型引数の制約に書ける性質（ADR 0011 の決定 6）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prop {
+    Copyable,
+    Equatable,
+    Comparable,
+    Numeric,
+    Sendable,
+    Shareable,
+}
+
+const PROPS: &[(&str, Prop)] = &[
+    ("Copyable", Prop::Copyable),
+    ("Equatable", Prop::Equatable),
+    ("Comparable", Prop::Comparable),
+    ("Numeric", Prop::Numeric),
+    ("Sendable", Prop::Sendable),
+    ("Shareable", Prop::Shareable),
+];
+
+impl Prop {
+    fn name(self) -> &'static str {
+        PROPS.iter().find(|(_, p)| *p == self).expect("prop").0
+    }
+}
+
 #[derive(Debug, Clone)]
 enum TypeDef {
+    /// 篩型（基の型）。
     Alias(Ty),
-    Struct(Vec<(String, Ty)>),
-    Enum(Vec<(String, Vec<Ty>)>),
+    Struct {
+        params: Vec<String>,
+        fields: Vec<(String, Ty)>,
+    },
+    Enum {
+        params: Vec<String>,
+        variants: Vec<(String, Vec<Ty>)>,
+    },
+    /// 標準ライブラリの型で、中身は見せない（型引数の数だけ持つ）。
+    Opaque(usize),
 }
 
 #[derive(Debug, Clone)]
 struct Sig {
+    /// 型引数（`impl` のものを先に、関数のものを後に）と制約。
+    generics: Vec<(String, Vec<Prop>)>,
     params: Vec<(String, Ty)>,
     ret: Ty,
     effects_none: bool,
@@ -72,7 +121,7 @@ struct Sig {
 }
 
 #[derive(Debug, Clone)]
-struct Var {
+struct Local {
     ty: Ty,
     /// `let mut` で宣言した変数。
     mutable: bool,
@@ -80,9 +129,15 @@ struct Var {
     param: bool,
 }
 
-/// 標準の前置きの型・値のうち、いまの範囲では扱わないもの。
+/// 標準の前置きの型。利用者は同じ名前の型を宣言できない。
 const PRELUDE_TYPES: &[&str] = &["List", "Option", "Result", "Map", "Set", "Path", "IoError"];
-const PRELUDE_VALUES: &[&str] = &["Some", "None", "Ok", "Err"];
+/// 型名を付けずに書く値（`Option`・`Result` の値）。
+const PRELUDE_VALUES: &[(&str, &str)] = &[
+    ("Some", "Option"),
+    ("None", "Option"),
+    ("Ok", "Result"),
+    ("Err", "Result"),
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pos {
@@ -91,15 +146,38 @@ enum Pos {
     Other,
 }
 
+/// 型が決まってから調べる性質の制約。
+struct Pending {
+    ty: Ty,
+    prop: Prop,
+    kind: ErrorKind,
+    /// `{}` の位置に型を入れて表示する。
+    text: String,
+    span: Span,
+}
+
 struct Ck {
     types: HashMap<String, TypeDef>,
     fns: HashMap<String, Sig>,
     methods: HashMap<(String, String), Sig>,
-    scopes: Vec<HashMap<String, Var>>,
+    scopes: Vec<HashMap<String, Local>>,
     span: Span,
     ret: Ty,
     result: Option<Ty>,
     refine: bool,
+    /// 型の中で名前として使える型引数。
+    tparams: Vec<String>,
+    /// いま検査している関数の型引数の制約。
+    env: HashMap<String, Vec<Prop>>,
+    subst: Vec<Option<Ty>>,
+    pending: Vec<Pending>,
+    /// 本体の終わりまでに決まっていなければならない型変数（説明つき）。
+    must_know: Vec<(Ty, String, Span)>,
+    /// `let` の型注釈の通し番号（要否の判定で、番号ごとに注釈を外して検査し直す）。
+    annot_n: usize,
+    annots: Vec<(Span, Ty)>,
+    skip: Option<usize>,
+    skipped: Option<Ty>,
 }
 
 pub fn check_file(file: &File) -> R<()> {
@@ -112,8 +190,30 @@ pub fn check_file(file: &File) -> R<()> {
         ret: Ty::Unit,
         result: None,
         refine: false,
+        tparams: vec![],
+        env: HashMap::new(),
+        subst: vec![],
+        pending: vec![],
+        must_know: vec![],
+        annot_n: 0,
+        annots: vec![],
+        skip: None,
+        skipped: None,
     };
+    ck.prelude();
     ck.run(file)
+}
+
+fn substitute(t: &Ty, m: &HashMap<String, Ty>) -> Ty {
+    let go = |ts: &[Ty]| ts.iter().map(|t| substitute(t, m)).collect::<Vec<_>>();
+    match t {
+        Ty::Param(p) => m.get(p).cloned().unwrap_or_else(|| t.clone()),
+        Ty::Tuple(ts) => Ty::Tuple(go(ts)),
+        Ty::Ref(mu, i) => Ty::Ref(*mu, Box::new(substitute(i, m))),
+        Ty::Named(n, a) => Ty::Named(n.clone(), go(a)),
+        Ty::Fn(ps, r) => Ty::Fn(go(ps), Box::new(substitute(r, m))),
+        _ => t.clone(),
+    }
 }
 
 impl Ck {
@@ -128,35 +228,423 @@ impl Ck {
         )
     }
 
-    // ---------- 宣言の収集 ----------
+    fn prelude(&mut self) {
+        let t = || Ty::Param("T".into());
+        let e = || Ty::Param("E".into());
+        self.types.insert(
+            "Option".into(),
+            TypeDef::Enum {
+                params: vec!["T".into()],
+                variants: vec![("Some".into(), vec![t()]), ("None".into(), vec![])],
+            },
+        );
+        self.types.insert(
+            "Result".into(),
+            TypeDef::Enum {
+                params: vec!["T".into(), "E".into()],
+                variants: vec![("Ok".into(), vec![t()]), ("Err".into(), vec![e()])],
+            },
+        );
+        for (n, k) in [
+            ("List", 1),
+            ("Set", 1),
+            ("Map", 2),
+            ("Path", 0),
+            ("IoError", 0),
+        ] {
+            self.types.insert(n.into(), TypeDef::Opaque(k));
+        }
+    }
 
-    fn run(&mut self, file: &File) -> R<()> {
-        // 1. 型の名前
-        let mut names: HashSet<String> = HashSet::new();
-        for item in &file.items {
-            let (name, span, generics) = match item {
-                Item::Type(t) => (Some(&t.name), t.span, &[][..]),
-                Item::Struct(s) => (Some(&s.name), s.span, &s.generics[..]),
-                Item::Enum(e) => (Some(&e.name), e.span, &e.generics[..]),
-                Item::Fn(f) => (None, f.span, &f.generics[..]),
-                Item::Impl(i) => (None, i.span, &i.generics[..]),
-            };
-            self.span = span;
-            if !generics.is_empty() {
-                return self.unsupported("総称の宣言");
+    // ---------- 型変数と単一化 ----------
+
+    fn fresh(&mut self) -> Ty {
+        self.subst.push(None);
+        Ty::Var(self.subst.len() as u32 - 1)
+    }
+
+    /// 推論で決まるべき型変数を作る（本体の終わりまでに決まらなければ `CannotInfer`）。
+    fn fresh_known(&mut self, what: String) -> Ty {
+        let v = self.fresh();
+        self.must_know.push((v.clone(), what, self.span));
+        v
+    }
+
+    fn shallow(&self, t: &Ty) -> Ty {
+        let mut t = t.clone();
+        while let Ty::Var(v) = t {
+            match &self.subst[v as usize] {
+                Some(n) => t = n.clone(),
+                None => break,
             }
-            if let Some(n) = name {
-                if !names.insert(n.clone()) {
-                    return self.err(
-                        ErrorKind::DuplicateDefinition,
-                        format!("型 `{n}` が二重に宣言されている"),
-                    );
+        }
+        t
+    }
+
+    fn zonk(&self, t: &Ty) -> Ty {
+        let go = |ts: &[Ty]| ts.iter().map(|t| self.zonk(t)).collect::<Vec<_>>();
+        match self.shallow(t) {
+            Ty::Tuple(ts) => Ty::Tuple(go(&ts)),
+            Ty::Ref(m, i) => Ty::Ref(m, Box::new(self.zonk(&i))),
+            Ty::Named(n, a) => Ty::Named(n, go(&a)),
+            Ty::Fn(ps, r) => Ty::Fn(go(&ps), Box::new(self.zonk(&r))),
+            t => t,
+        }
+    }
+
+    fn sh(&self, t: &Ty) -> String {
+        show(&self.zonk(t))
+    }
+
+    fn occurs(&self, v: u32, t: &Ty) -> bool {
+        match self.shallow(t) {
+            Ty::Var(w) => v == w,
+            Ty::Tuple(ts) => ts.iter().any(|t| self.occurs(v, t)),
+            Ty::Ref(_, i) => self.occurs(v, &i),
+            Ty::Named(_, a) => a.iter().any(|t| self.occurs(v, t)),
+            Ty::Fn(ps, r) => ps.iter().any(|t| self.occurs(v, t)) || self.occurs(v, &r),
+            _ => false,
+        }
+    }
+
+    fn unify(&mut self, a: &Ty, b: &Ty) -> Result<(), ()> {
+        let (a, b) = (self.shallow(a), self.shallow(b));
+        match (&a, &b) {
+            (Ty::Var(x), Ty::Var(y)) if x == y => Ok(()),
+            (Ty::Var(x), t) | (t, Ty::Var(x)) => {
+                if self.occurs(*x, t) {
+                    return Err(());
+                }
+                self.subst[*x as usize] = Some(t.clone());
+                Ok(())
+            }
+            (Ty::Int, Ty::Int)
+            | (Ty::Float, Ty::Float)
+            | (Ty::Bool, Ty::Bool)
+            | (Ty::Str, Ty::Str)
+            | (Ty::Unit, Ty::Unit) => Ok(()),
+            (Ty::Param(p), Ty::Param(q)) if p == q => Ok(()),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => self.unify_all(xs, ys),
+            (Ty::Ref(m, x), Ty::Ref(n, y)) if m == n => self.unify(x, y),
+            (Ty::Named(n, xs), Ty::Named(m, ys)) if n == m && xs.len() == ys.len() => {
+                self.unify_all(xs, ys)
+            }
+            (Ty::Fn(ps, r), Ty::Fn(qs, s)) if ps.len() == qs.len() => {
+                self.unify_all(ps, qs)?;
+                self.unify(r, s)
+            }
+            _ => Err(()),
+        }
+    }
+
+    fn unify_all(&mut self, xs: &[Ty], ys: &[Ty]) -> Result<(), ()> {
+        for (x, y) in xs.iter().zip(ys) {
+            self.unify(x, y)?;
+        }
+        Ok(())
+    }
+
+    /// 失敗したら束縛を元に戻す単一化。
+    fn try_unify(&mut self, a: &Ty, b: &Ty) -> bool {
+        let snap = self.subst.clone();
+        if self.unify(a, b).is_ok() {
+            true
+        } else {
+            self.subst = snap;
+            false
+        }
+    }
+
+    /// 値を `expected` が求められる位置に渡せるか。暗黙の移しは篩型 -> 基の型と、リテラル -> 篩型
+    /// だけ（ADR 0011 の決定 8。型の中では行わない）。`&mut T` から `&T` への変換はしない（決定 4）。
+    fn coerce(&mut self, expected: &Ty, actual: &Ty, e: &Expr) -> bool {
+        if self.try_unify(expected, actual) {
+            return true;
+        }
+        if let Some(b) = self.refinement_base(actual) {
+            if self.try_unify(expected, &b) {
+                return true;
+            }
+        }
+        if is_literal(e) {
+            if let Some(b) = self.refinement_base(expected) {
+                if self.try_unify(&b, actual) {
+                    return true;
                 }
             }
         }
+        false
+    }
+
+    fn refinement_base(&self, t: &Ty) -> Option<Ty> {
+        match self.shallow(t) {
+            Ty::Named(n, _) => match self.types.get(&n) {
+                Some(TypeDef::Alias(b)) => Some(b.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// 値の位置での型: 参照を外し、篩型は基の型にする（ADR 0011 の決定 4・8）。
+    fn val(&self, t: &Ty) -> Ty {
+        match self.shallow(t) {
+            Ty::Ref(_, i) => self.val(&i),
+            t @ Ty::Named(..) => match self.refinement_base(&t) {
+                Some(b) => b,
+                None => self.zonk(&t),
+            },
+            t => self.zonk(&t),
+        }
+    }
+
+    // ---------- 型の性質（導出。ADR 0011 の決定 6） ----------
+
+    /// 性質を持つか。持つ・持たないが決まらない（型変数が残っている）ときは `None`。
+    fn holds(&self, t: &Ty, p: Prop, depth: u32) -> Option<bool> {
+        if depth > 32 {
+            return Some(false);
+        }
+        fn all(it: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+            let mut unknown = false;
+            for r in it {
+                match r {
+                    Some(false) => return Some(false),
+                    None => unknown = true,
+                    Some(true) => {}
+                }
+            }
+            if unknown {
+                None
+            } else {
+                Some(true)
+            }
+        }
+        let d = depth + 1;
+        match self.shallow(t) {
+            Ty::Var(_) => None,
+            Ty::Int | Ty::Float => Some(true),
+            Ty::Bool | Ty::Unit => Some(!matches!(p, Prop::Comparable | Prop::Numeric)),
+            Ty::Str => Some(!matches!(p, Prop::Copyable | Prop::Numeric)),
+            Ty::Tuple(ts) => match p {
+                Prop::Comparable | Prop::Numeric => Some(false),
+                _ => all(ts.iter().map(|t| self.holds(t, p, d))),
+            },
+            Ty::Ref(m, i) => match p {
+                Prop::Sendable => Some(false),
+                Prop::Shareable if m => Some(false),
+                _ => self.holds(&i, p, d),
+            },
+            Ty::Fn(..) => Some(false),
+            Ty::Param(n) => {
+                let bs = self.env.get(&n).map(|v| &v[..]).unwrap_or(&[]);
+                Some(bs.contains(&p) || (p == Prop::Comparable && bs.contains(&Prop::Numeric)))
+            }
+            Ty::Named(n, args) => match self.types.get(&n) {
+                Some(TypeDef::Alias(b)) => {
+                    if p == Prop::Numeric {
+                        Some(false)
+                    } else {
+                        self.holds(b, p, d)
+                    }
+                }
+                Some(TypeDef::Opaque(_)) => match p {
+                    Prop::Equatable | Prop::Sendable | Prop::Shareable => {
+                        all(args.iter().map(|t| self.holds(t, p, d)))
+                    }
+                    _ => Some(false),
+                },
+                Some(TypeDef::Struct { .. } | TypeDef::Enum { .. }) => match p {
+                    Prop::Copyable | Prop::Comparable | Prop::Numeric => Some(false),
+                    _ => all(self
+                        .component_types(&n, &args)
+                        .iter()
+                        .map(|t| self.holds(t, p, d))),
+                },
+                None => Some(false),
+            },
+        }
+    }
+
+    /// 構造体のフィールド・列挙型の値の中身の型を、型引数を入れて返す。
+    fn component_types(&self, n: &str, args: &[Ty]) -> Vec<Ty> {
+        match self.types.get(n) {
+            Some(TypeDef::Struct { params, fields }) => {
+                let m = params.iter().cloned().zip(args.iter().cloned()).collect();
+                fields.iter().map(|(_, t)| substitute(t, &m)).collect()
+            }
+            Some(TypeDef::Enum { params, variants }) => {
+                let m = params.iter().cloned().zip(args.iter().cloned()).collect();
+                variants
+                    .iter()
+                    .flat_map(|(_, ts)| ts.iter().map(|t| substitute(t, &m)))
+                    .collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    /// `ty` が性質 `prop` を持つことを求める。決まらなければ本体の終わりまで繰り延べる。
+    fn require(&mut self, ty: &Ty, prop: Prop, kind: ErrorKind, text: String) -> R<()> {
+        match self.holds(ty, prop, 0) {
+            Some(true) => Ok(()),
+            Some(false) => self.err(kind, text.replace("{}", &self.sh(ty))),
+            None => {
+                self.pending.push(Pending {
+                    ty: ty.clone(),
+                    prop,
+                    kind,
+                    text,
+                    span: self.span,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    /// 総称の型を具体化する: 型引数ごとに新しい型変数を作り、制約を繰り延べの調べに加える。
+    fn instantiate(
+        &mut self,
+        generics: &[(String, Vec<Prop>)],
+        what: &str,
+    ) -> R<HashMap<String, Ty>> {
+        let mut m = HashMap::new();
+        for (n, props) in generics {
+            let v = self.fresh_known(format!("{what}の型引数 `{n}`"));
+            for p in props {
+                self.require(
+                    &v,
+                    *p,
+                    ErrorKind::ConstraintUnsatisfied,
+                    format!(
+                        "{what}の型引数 `{n}` は `{}` でなければならないが、`{{}}` は持たない",
+                        p.name()
+                    ),
+                )?;
+            }
+            m.insert(n.clone(), v);
+        }
+        Ok(m)
+    }
+
+    /// 型引数に新しい型変数を入れた、構造体・列挙型の型。
+    fn fresh_named(&mut self, name: &str) -> (Ty, HashMap<String, Ty>) {
+        let params = match self.types.get(name) {
+            Some(TypeDef::Struct { params, .. } | TypeDef::Enum { params, .. }) => params.clone(),
+            _ => vec![],
+        };
+        let mut m = HashMap::new();
+        let mut args = vec![];
+        for p in params {
+            let v = self.fresh_known(format!("`{name}` の型引数 `{p}`"));
+            args.push(v.clone());
+            m.insert(p, v);
+        }
+        (Ty::Named(name.to_string(), args), m)
+    }
+
+    // ---------- 宣言の収集 ----------
+
+    /// 総称の宣言の型引数と制約。`bounded` が偽なら制約を書けない（構造体・列挙型）。
+    fn generics(&self, gs: &[Generic], bounded: bool) -> R<Vec<(String, Vec<Prop>)>> {
+        let mut out: Vec<(String, Vec<Prop>)> = vec![];
+        for g in gs {
+            if out.iter().any(|(n, _)| *n == g.name) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("型引数 `{}` が二重にある", g.name),
+                );
+            }
+            if self.types.contains_key(&g.name) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("型引数 `{}` が同じ名前の型を隠している", g.name),
+                );
+            }
+            if !bounded && !g.bounds.is_empty() {
+                return self.err(
+                    ErrorKind::TypeParamBound,
+                    format!(
+                        "構造体・列挙型の型引数 `{}` には制約を書けない（制約は関数と `impl` の型引数にだけ書ける）",
+                        g.name
+                    ),
+                );
+            }
+            let mut props = vec![];
+            for b in &g.bounds {
+                let name = b.join(".");
+                let Some((_, p)) = PROPS.iter().find(|(n, _)| *n == name) else {
+                    return self.err(
+                        ErrorKind::UnknownProperty,
+                        format!(
+                            "性質 `{name}` はない（使えるのは {}）",
+                            PROPS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("・")
+                        ),
+                    );
+                };
+                if !props.contains(p) {
+                    props.push(*p);
+                }
+            }
+            out.push((g.name.clone(), props));
+        }
+        Ok(out)
+    }
+
+    fn run(&mut self, file: &File) -> R<()> {
+        // 1. 型の名前と型引数
+        let mut names: HashSet<String> = HashSet::new();
+        let mut shells: Vec<(String, TypeDef)> = vec![];
+        for item in &file.items {
+            let (name, span, generics, shell) = match item {
+                Item::Type(t) => (Some(&t.name), t.span, &[][..], TypeDef::Alias(Ty::Unit)),
+                Item::Struct(s) => (
+                    Some(&s.name),
+                    s.span,
+                    &s.generics[..],
+                    TypeDef::Struct {
+                        params: vec![],
+                        fields: vec![],
+                    },
+                ),
+                Item::Enum(e) => (
+                    Some(&e.name),
+                    e.span,
+                    &e.generics[..],
+                    TypeDef::Enum {
+                        params: vec![],
+                        variants: vec![],
+                    },
+                ),
+                Item::Fn(f) => (None, f.span, &f.generics[..], TypeDef::Alias(Ty::Unit)),
+                Item::Impl(i) => (None, i.span, &i.generics[..], TypeDef::Alias(Ty::Unit)),
+            };
+            self.span = span;
+            let Some(n) = name else { continue };
+            if PRELUDE_TYPES.contains(&n.as_str()) || PRELUDE_VALUES.iter().any(|(v, _)| v == n) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("`{n}` は標準の前置きの名前なので、型の名前に使えない"),
+                );
+            }
+            if !names.insert(n.clone()) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("型 `{n}` が二重に宣言されている"),
+                );
+            }
+            let gs = self.generics(generics, false)?;
+            let params: Vec<String> = gs.into_iter().map(|(n, _)| n).collect();
+            let shell = match shell {
+                TypeDef::Struct { fields, .. } => TypeDef::Struct { params, fields },
+                TypeDef::Enum { variants, .. } => TypeDef::Enum { params, variants },
+                other => other,
+            };
+            shells.push((n.clone(), shell));
+        }
         // 型の名前を先に仮登録（互いに参照できるように）
-        for n in &names {
-            self.types.insert(n.clone(), TypeDef::Alias(Ty::Unit));
+        for (n, d) in shells {
+            self.types.insert(n, d);
         }
         // 2. 型の中身
         for item in &file.items {
@@ -178,6 +666,7 @@ impl Ck {
                 }
                 Item::Struct(s) => {
                     self.span = s.span;
+                    self.tparams = s.generics.iter().map(|g| g.name.clone()).collect();
                     let mut fields = vec![];
                     let mut seen = HashSet::new();
                     for f in &s.fields {
@@ -189,11 +678,15 @@ impl Ck {
                         }
                         fields.push((f.name.clone(), self.resolve(&f.ty, Pos::Other)?));
                     }
-                    self.types.insert(s.name.clone(), TypeDef::Struct(fields));
+                    self.tparams.clear();
+                    let params = s.generics.iter().map(|g| g.name.clone()).collect();
+                    self.types
+                        .insert(s.name.clone(), TypeDef::Struct { params, fields });
                 }
                 Item::Enum(e) => {
                     self.span = e.span;
-                    let mut vs = vec![];
+                    self.tparams = e.generics.iter().map(|g| g.name.clone()).collect();
+                    let mut variants = vec![];
                     let mut seen = HashSet::new();
                     for v in &e.variants {
                         if !seen.insert(v.name.clone()) {
@@ -206,9 +699,12 @@ impl Ck {
                         for t in &v.fields {
                             ts.push(self.resolve(t, Pos::Other)?);
                         }
-                        vs.push((v.name.clone(), ts));
+                        variants.push((v.name.clone(), ts));
                     }
-                    self.types.insert(e.name.clone(), TypeDef::Enum(vs));
+                    self.tparams.clear();
+                    let params = e.generics.iter().map(|g| g.name.clone()).collect();
+                    self.types
+                        .insert(e.name.clone(), TypeDef::Enum { params, variants });
                 }
                 _ => {}
             }
@@ -241,7 +737,7 @@ impl Ck {
                             format!("関数 `{}` が二重に宣言されている", f.name),
                         );
                     }
-                    let sig = self.signature(f, None)?;
+                    let sig = self.signature(f, None, &[])?;
                     self.fns.insert(f.name.clone(), sig);
                 }
                 Item::Impl(i) => self.register_impl(i)?,
@@ -257,11 +753,12 @@ impl Ck {
                     self.check_fn(f, &sig)?;
                 }
                 Item::Impl(i) => {
-                    let Type::Path { path, .. } = &i.ty else {
-                        continue;
-                    };
+                    self.tparams = i.generics.iter().map(|g| g.name.clone()).collect();
+                    let r = self.resolve(&i.ty, Pos::Other);
+                    self.tparams.clear();
+                    let Ok(Ty::Named(tn, _)) = r else { continue };
                     for f in &i.fns {
-                        let sig = self.methods[&(path[0].clone(), f.name.clone())].clone();
+                        let sig = self.methods[&(tn.clone(), f.name.clone())].clone();
                         self.check_fn(f, &sig)?;
                     }
                 }
@@ -273,17 +770,24 @@ impl Ck {
 
     fn register_impl(&mut self, i: &ImplDecl) -> R<()> {
         self.span = i.span;
-        let Ty::Named(tn) = self.resolve(&i.ty, Pos::Other)? else {
+        let outer = self.generics(&i.generics, true)?;
+        self.tparams = outer.iter().map(|(n, _)| n.clone()).collect();
+        let ity = self.resolve(&i.ty, Pos::Other);
+        self.tparams.clear();
+        let Ty::Named(tn, _) = ity? else {
             return self.err(
                 ErrorKind::TypeMismatch,
                 "`impl` は構造体・列挙型・篩型に付ける",
             );
         };
+        if PRELUDE_TYPES.contains(&tn.as_str()) {
+            return self.err(
+                ErrorKind::TypeMismatch,
+                format!("`impl` は型を宣言したモジュールの中にだけ書ける（標準の型 `{tn}` には付けられない）"),
+            );
+        }
         for f in &i.fns {
             self.span = f.span;
-            if !f.generics.is_empty() {
-                return self.unsupported("総称のメソッド");
-            }
             let key = (tn.clone(), f.name.clone());
             if self.methods.contains_key(&key) {
                 return self.err(
@@ -291,8 +795,8 @@ impl Ck {
                     format!("`{tn}` のメソッド `{}` が二重に宣言されている", f.name),
                 );
             }
-            if let Some(TypeDef::Struct(fs)) = self.types.get(&tn) {
-                if fs.iter().any(|(n, _)| *n == f.name) {
+            if let Some(TypeDef::Struct { fields, .. }) = self.types.get(&tn) {
+                if fields.iter().any(|(n, _)| *n == f.name) {
                     return self.err(
                         ErrorKind::MemberConflict,
                         format!(
@@ -302,16 +806,42 @@ impl Ck {
                     );
                 }
             }
-            let sig = self.signature(f, Some(&tn))?;
+            let sig = self.signature(f, Some((&tn, &i.ty)), &outer)?;
             self.methods.insert(key, sig);
         }
         Ok(())
     }
 
-    fn signature(&mut self, f: &FnDecl, recv: Option<&str>) -> R<Sig> {
-        if !f.generics.is_empty() {
-            return self.unsupported("総称の関数");
+    /// 関数のシグネチャ。`recv` は `impl` の中のとき（型の名前と、`impl` の型）。`outer` は `impl` の型引数。
+    fn signature(
+        &mut self,
+        f: &FnDecl,
+        recv: Option<(&str, &Type)>,
+        outer: &[(String, Vec<Prop>)],
+    ) -> R<Sig> {
+        let own = self.generics(&f.generics, true)?;
+        let mut generics = outer.to_vec();
+        for (n, ps) in own {
+            if generics.iter().any(|(m, _)| *m == n) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("型引数 `{n}` が `impl` の型引数と重なっている"),
+                );
+            }
+            generics.push((n, ps));
         }
+        self.tparams = generics.iter().map(|(n, _)| n.clone()).collect();
+        let r = self.signature_in(f, recv, generics);
+        self.tparams.clear();
+        r
+    }
+
+    fn signature_in(
+        &mut self,
+        f: &FnDecl,
+        recv: Option<(&str, &Type)>,
+        generics: Vec<(String, Vec<Prop>)>,
+    ) -> R<Sig> {
         let mut params = vec![];
         let mut seen = HashSet::new();
         for p in &f.params {
@@ -325,22 +855,24 @@ impl Ck {
         }
         let has_self = params.first().is_some_and(|(n, _)| n == "self");
         if has_self {
-            let Some(tn) = recv else {
+            let Some((tn, ity)) = recv else {
                 return self.err(
                     ErrorKind::TypeMismatch,
                     "`self` を受け手に書けるのは `impl` の中のメソッドだけ",
                 );
             };
+            let want = self.resolve(ity, Pos::Other)?;
             let inner = match &params[0].1 {
                 Ty::Ref(_, i) => (**i).clone(),
                 t => t.clone(),
             };
-            if inner != Ty::Named(tn.to_string()) {
+            if inner != want {
                 return self.err(
                     ErrorKind::TypeMismatch,
                     format!(
-                        "受け手 `self` の型は `{tn}`・`&{tn}`・`&mut {tn}` のどれかでなければならない（`{}` は違う）",
-                        show(&params[0].1)
+                        "受け手 `self` の型は `{w}`・`&{w}`・`&mut {w}` のどれかでなければならない（`{}` は違う。型 `{tn}`）",
+                        show(&params[0].1),
+                        w = show(&want),
                     ),
                 );
             }
@@ -350,6 +882,7 @@ impl Ck {
             Some(t) => self.resolve(t, Pos::Other)?,
         };
         Ok(Sig {
+            generics,
             params,
             ret,
             effects_none: f.effects.is_empty(),
@@ -360,9 +893,6 @@ impl Ck {
     fn resolve(&self, t: &Type, pos: Pos) -> R<Ty> {
         match t {
             Type::Path { path, args } => {
-                if !args.is_empty() {
-                    return self.unsupported("型引数のある型");
-                }
                 if path.len() != 1 {
                     return self.err(
                         ErrorKind::UnknownType,
@@ -370,19 +900,50 @@ impl Ck {
                     );
                 }
                 let n = path[0].as_str();
+                let arity = if self.tparams.iter().any(|p| p == n) {
+                    0
+                } else {
+                    match n {
+                        "Int" | "Float" | "Bool" | "String" | "Unit" => 0,
+                        _ => match self.types.get(n) {
+                            Some(TypeDef::Alias(_)) => 0,
+                            Some(TypeDef::Struct { params, .. } | TypeDef::Enum { params, .. }) => {
+                                params.len()
+                            }
+                            Some(TypeDef::Opaque(k)) => *k,
+                            None => {
+                                return self.err(
+                                    ErrorKind::UnknownType,
+                                    format!("型 `{n}` が見つからない（標準ライブラリの型は、後続の PR で扱う）"),
+                                )
+                            }
+                        },
+                    }
+                };
+                if args.len() != arity {
+                    return self.err(
+                        ErrorKind::TypeArgCount,
+                        format!(
+                            "型 `{n}` の型引数は {arity} 個だが、{} 個書かれている",
+                            args.len()
+                        ),
+                    );
+                }
+                if self.tparams.iter().any(|p| p == n) {
+                    return Ok(Ty::Param(n.to_string()));
+                }
                 Ok(match n {
                     "Int" => Ty::Int,
                     "Float" => Ty::Float,
                     "Bool" => Ty::Bool,
                     "String" => Ty::Str,
                     "Unit" => Ty::Unit,
-                    _ if self.types.contains_key(n) => Ty::Named(n.to_string()),
-                    _ if PRELUDE_TYPES.contains(&n) => {
-                        return self.unsupported(&format!("標準ライブラリの型 `{n}`"))
-                    }
-                    _ => {
-                        return self.err(ErrorKind::UnknownType, format!("型 `{n}` が見つからない"))
-                    }
+                    _ => Ty::Named(
+                        n.to_string(),
+                        args.iter()
+                            .map(|a| self.resolve(a, Pos::Other))
+                            .collect::<R<_>>()?,
+                    ),
                 })
             }
             Type::Ref { mutable, inner } => Ok(Ty::Ref(
@@ -417,136 +978,182 @@ impl Ck {
     fn contains_bad_base(&self, t: &Ty) -> bool {
         match t {
             Ty::Ref(..) | Ty::Fn(..) => true,
-            Ty::Named(n) => matches!(self.types.get(n), Some(TypeDef::Alias(_))),
+            Ty::Named(n, a) => {
+                matches!(self.types.get(n), Some(TypeDef::Alias(_)))
+                    || a.iter().any(|t| self.contains_bad_base(t))
+            }
             Ty::Tuple(ts) => ts.iter().any(|t| self.contains_bad_base(t)),
             _ => false,
         }
     }
 
-    /// `from` の定義が（組・構造体・列挙型・篩型をたどって）`target` を直接含むか。
+    /// `from` の定義が（組・構造体・列挙型・篩型をたどって）`target` を直接含むか。標準の入れ物
+    /// （`List` など）は中身を別の場所に持つので、含むとは数えない。
     fn reaches(&self, from: &str, target: &str, seen: &mut HashSet<String>) -> bool {
-        let tys: Vec<&Ty> = match self.types.get(from) {
-            Some(TypeDef::Alias(b)) => vec![b],
-            Some(TypeDef::Struct(fs)) => fs.iter().map(|(_, t)| t).collect(),
-            Some(TypeDef::Enum(vs)) => vs.iter().flat_map(|(_, ts)| ts.iter()).collect(),
-            None => return false,
+        let tys: Vec<Ty> = match self.types.get(from) {
+            Some(TypeDef::Alias(b)) => vec![b.clone()],
+            Some(TypeDef::Struct { fields, .. }) => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Some(TypeDef::Enum { variants, .. }) => variants
+                .iter()
+                .flat_map(|(_, ts)| ts.iter().cloned())
+                .collect(),
+            _ => return false,
         };
-        fn names<'a>(t: &'a Ty, out: &mut Vec<&'a str>) {
+        fn names(ck: &Ck, t: &Ty, out: &mut Vec<String>) {
             match t {
-                Ty::Named(n) => out.push(n),
-                Ty::Tuple(ts) => ts.iter().for_each(|t| names(t, out)),
+                Ty::Named(n, a) => {
+                    if !matches!(ck.types.get(n), Some(TypeDef::Opaque(_))) {
+                        out.push(n.clone());
+                        a.iter().for_each(|t| names(ck, t, out));
+                    }
+                }
+                Ty::Tuple(ts) => ts.iter().for_each(|t| names(ck, t, out)),
                 _ => {}
             }
         }
         let mut ns = vec![];
-        tys.iter().for_each(|t| names(t, &mut ns));
+        tys.iter().for_each(|t| names(self, t, &mut ns));
         for n in ns {
             if n == target {
                 return true;
             }
-            if seen.insert(n.to_string()) && self.reaches(n, target, seen) {
+            if seen.insert(n.clone()) && self.reaches(&n, target, seen) {
                 return true;
             }
         }
         false
     }
 
-    // ---------- 型の性質 ----------
+    // ---------- 篩型・関数の検査 ----------
 
-    /// 値の位置での型: 参照を外し、篩型は基の型にする（ADR 0011 の決定 4・8）。
-    fn val(&self, t: &Ty) -> Ty {
-        match t {
-            Ty::Ref(_, i) => self.val(i),
-            Ty::Named(n) => match self.types.get(n) {
-                Some(TypeDef::Alias(b)) => b.clone(),
-                _ => t.clone(),
-            },
-            _ => t.clone(),
+    /// 関数 1 つ（または篩型 1 つ）ごとに推論の状態を作り直す。
+    fn begin(&mut self) {
+        self.subst.clear();
+        self.pending.clear();
+        self.must_know.clear();
+        self.skipped = None;
+        self.annot_n = 0;
+        self.scopes.clear();
+        self.refine = false;
+        self.result = None;
+        self.ret = Ty::Unit;
+    }
+
+    fn has_var(&self, t: &Ty) -> bool {
+        match self.shallow(t) {
+            Ty::Var(_) => true,
+            Ty::Tuple(ts) => ts.iter().any(|t| self.has_var(t)),
+            Ty::Ref(_, i) => self.has_var(&i),
+            Ty::Named(_, a) => a.iter().any(|t| self.has_var(t)),
+            Ty::Fn(ps, r) => ps.iter().any(|t| self.has_var(t)) || self.has_var(&r),
+            _ => false,
         }
     }
 
-    fn copyable(&self, t: &Ty) -> bool {
-        match t {
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Unit => true,
-            Ty::Tuple(ts) => ts.iter().all(|t| self.copyable(t)),
-            Ty::Named(_) => {
-                let b = self.val(t);
-                b != *t && self.copyable(&b)
-            }
-            Ty::Ref(_, i) => self.copyable(i),
-            Ty::Str | Ty::Fn(..) => false,
-        }
-    }
-
-    fn equatable(&self, t: &Ty, depth: u32) -> bool {
-        if depth > 32 {
-            return false;
-        }
-        match t {
-            Ty::Int | Ty::Float | Ty::Bool | Ty::Unit | Ty::Str => true,
-            Ty::Tuple(ts) => ts.iter().all(|t| self.equatable(t, depth + 1)),
-            Ty::Ref(_, i) => self.equatable(i, depth + 1),
-            Ty::Fn(..) => false,
-            Ty::Named(n) => match self.types.get(n) {
-                Some(TypeDef::Alias(b)) => self.equatable(b, depth + 1),
-                Some(TypeDef::Struct(fs)) => fs.iter().all(|(_, t)| self.equatable(t, depth + 1)),
-                Some(TypeDef::Enum(vs)) => vs
-                    .iter()
-                    .all(|(_, ts)| ts.iter().all(|t| self.equatable(t, depth + 1))),
-                None => false,
-            },
-        }
-    }
-
-    /// 値を `expected` が求められる位置に渡せるか（暗黙の移しは篩型 -> 基の型と、リテラル -> 篩型だけ）。
-    fn assignable(&self, expected: &Ty, actual: &Ty, e: &Expr) -> bool {
-        if expected == actual {
-            return true;
-        }
-        if matches!(actual, Ty::Named(_)) {
-            let b = self.val(actual);
-            if b != *actual && b == *expected {
-                return true;
+    /// 本体の終わり: 繰り延べた性質の制約を調べ、決まっていない型変数があれば `CannotInfer`。
+    fn finish(&mut self) -> R<()> {
+        let pend = std::mem::take(&mut self.pending);
+        let mut unknown = None;
+        for p in &pend {
+            match self.holds(&p.ty, p.prop, 0) {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(Error::new(
+                        p.kind.clone(),
+                        p.span,
+                        p.text.replace("{}", &self.sh(&p.ty)),
+                    ))
+                }
+                None => unknown = Some(p.span),
             }
         }
-        if matches!(expected, Ty::Named(_)) {
-            let b = self.val(expected);
-            if b != *expected && b == *actual && is_literal(e) {
-                return true;
+        let mk = std::mem::take(&mut self.must_know);
+        for (t, what, span) in &mk {
+            if self.has_var(t) {
+                return Err(Error::new(
+                    ErrorKind::CannotInfer,
+                    *span,
+                    format!(
+                        "{what}の型が決まらない（使い方で型が決まるようにするか、型注釈で示す）"
+                    ),
+                ));
             }
         }
-        false
+        if let Some(span) = unknown {
+            return Err(Error::new(
+                ErrorKind::CannotInfer,
+                span,
+                "型が決まらないので、性質を調べられない",
+            ));
+        }
+        if let Some(t) = self.skipped.take() {
+            self.skipped = Some(self.zonk(&t));
+        }
+        Ok(())
     }
-
-    // ---------- 関数 ----------
 
     fn check_refinement(&mut self, t: &TypeDecl) -> R<()> {
         self.span = t.span;
         let Some(TypeDef::Alias(base)) = self.types.get(&t.name).cloned() else {
             return Ok(());
         };
+        self.begin();
         self.scopes = vec![HashMap::from([(
             "self".to_string(),
-            Var {
+            Local {
                 ty: base,
                 mutable: false,
                 param: true,
             },
         )])];
         self.refine = true;
-        self.result = None;
         let r = self.expect(&Ty::Bool, &t.cond, "篩型の条件");
         self.refine = false;
-        r
+        r?;
+        self.finish()
     }
 
     fn check_fn(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
+        self.env = sig.generics.iter().cloned().collect();
+        self.tparams = sig.generics.iter().map(|(n, _)| n.clone()).collect();
+        let r = self.check_fn_in(f, sig);
+        self.env.clear();
+        self.tparams.clear();
+        self.skip = None;
+        r
+    }
+
+    fn check_fn_in(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
+        self.skip = None;
+        self.annots.clear();
+        self.body_once(f, sig)?;
+        // 型注釈の要否: 注釈を 1 つ外して検査し直し、同じ型に決まれば冗長
+        let annots = self.annots.clone();
+        for (i, (span, declared)) in annots.iter().enumerate() {
+            self.skip = Some(i);
+            let again = self.body_once(f, sig);
+            if again.is_ok() && self.skipped.as_ref() == Some(declared) {
+                return Err(Error::new(
+                    ErrorKind::RedundantAnnotation,
+                    *span,
+                    format!(
+                        "型注釈 `{}` を外しても同じ型に決まるので、型注釈を取り除く",
+                        show(declared)
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn body_once(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
         self.span = f.span;
+        self.begin();
         let mut scope = HashMap::new();
         for (n, t) in &sig.params {
             scope.insert(
                 n.clone(),
-                Var {
+                Local {
                     ty: t.clone(),
                     mutable: false,
                     param: true,
@@ -555,8 +1162,6 @@ impl Ck {
         }
         self.scopes = vec![scope];
         self.ret = sig.ret.clone();
-        self.refine = false;
-        self.result = None;
         if let Some(r) = &f.requires {
             self.expect(&Ty::Bool, r, "`requires`")?;
         }
@@ -578,7 +1183,7 @@ impl Ck {
                 ),
             );
         }
-        Ok(())
+        self.finish()
     }
 
     // ---------- 文 ----------
@@ -592,23 +1197,48 @@ impl Ck {
         Ok(())
     }
 
-    fn lookup(&self, n: &str) -> Option<&Var> {
+    fn lookup(&self, n: &str) -> Option<&Local> {
         self.scopes.iter().rev().find_map(|s| s.get(n))
+    }
+
+    /// 参照を外して、型変数は解決できるところまで解決した型。
+    fn peel(&self, t: &Ty) -> Ty {
+        match self.shallow(t) {
+            Ty::Ref(_, i) => self.peel(&i),
+            t => t,
+        }
     }
 
     fn expect(&mut self, expected: &Ty, e: &Expr, what: &str) -> R<()> {
         let t = self.expr(e)?;
-        if !self.assignable(expected, &t, e) {
+        if !self.coerce(expected, &t, e) {
             return self.err(
                 ErrorKind::TypeMismatch,
                 format!(
-                    "{what}は `{}` でなければならないが、`{}` である",
-                    show(expected),
-                    show(&t)
+                    "{what}は `{}` でなければならないが、`{}` である{}",
+                    self.sh(expected),
+                    self.sh(&t),
+                    self.check_hint(expected, &t)
                 ),
             );
         }
         Ok(())
+    }
+
+    fn check_hint(&self, expected: &Ty, actual: &Ty) -> &'static str {
+        let (ex, ac) = (self.zonk(expected), self.zonk(actual));
+        if self
+            .refinement_base(&ex)
+            .is_some_and(|b| self.zonk(&b) == ac)
+        {
+            "（基の型から篩型への変換は、リテラルの定数か `T.check` に限る）"
+        } else if matches!(ex, Ty::Int) && ac == Ty::Float
+            || matches!(ex, Ty::Float) && ac == Ty::Int
+        {
+            "（`Int` と `Float` の暗黙の変換はない）"
+        } else {
+            ""
+        }
     }
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
@@ -626,30 +1256,31 @@ impl Ck {
                     None => vt,
                     Some(t) => {
                         let d = self.resolve(t, Pos::Other)?;
-                        if d == vt {
-                            return self.err(
-                                ErrorKind::RedundantAnnotation,
-                                format!(
-                                    "型注釈 `{}` を外しても同じ型に決まるので、型注釈を取り除く",
-                                    show(&d)
-                                ),
-                            );
+                        let i = self.annot_n;
+                        self.annot_n += 1;
+                        if self.skip == Some(i) {
+                            self.skipped = Some(vt.clone());
+                            vt
+                        } else {
+                            if self.skip.is_none() {
+                                self.annots.push((s.span, d.clone()));
+                            }
+                            if !self.coerce(&d, &vt, value) {
+                                return self.err(
+                                    ErrorKind::TypeMismatch,
+                                    format!(
+                                        "型注釈は `{}` だが、式の型は `{}` である{}",
+                                        show(&d),
+                                        self.sh(&vt),
+                                        self.check_hint(&d, &vt)
+                                    ),
+                                );
+                            }
+                            d
                         }
-                        if !self.assignable(&d, &vt, value) {
-                            return self.err(
-                                ErrorKind::TypeMismatch,
-                                format!(
-                                    "型注釈は `{}` だが、式の型は `{}` である{}",
-                                    show(&d),
-                                    show(&vt),
-                                    self.check_hint(&d, &vt)
-                                ),
-                            );
-                        }
-                        d
                     }
                 };
-                if *mutable && matches!(fin, Ty::Ref(..)) {
+                if *mutable && matches!(self.shallow(&fin), Ty::Ref(..)) {
                     return self.err(
                         ErrorKind::LetMutRef,
                         "型が参照の変数は `let mut` で宣言できない（参照を別の参照で束縛し直す操作はない）",
@@ -671,13 +1302,13 @@ impl Ck {
                 self.span = s.span;
                 let vt = self.expr(value)?;
                 self.span = s.span;
-                if !self.assignable(&tt, &vt, value) {
+                if !self.coerce(&tt, &vt, value) {
                     return self.err(
                         ErrorKind::TypeMismatch,
                         format!(
                             "代入先は `{}` だが、右辺は `{}` である{}",
-                            show(&tt),
-                            show(&vt),
+                            self.sh(&tt),
+                            self.sh(&vt),
                             self.check_hint(&tt, &vt)
                         ),
                     );
@@ -689,12 +1320,12 @@ impl Ck {
                 let ret = self.ret.clone();
                 match v {
                     None => {
-                        if ret != Ty::Unit {
+                        if !self.try_unify(&ret, &Ty::Unit) {
                             return self.err(
                                 ErrorKind::TypeMismatch,
                                 format!(
                                     "`{}` を返す関数で、値のない `return;` は書けない",
-                                    show(&ret)
+                                    self.sh(&ret)
                                 ),
                             );
                         }
@@ -708,22 +1339,24 @@ impl Ck {
                 self.expect(&Ty::Bool, cond, "`while` の条件")?;
                 self.block(body)
             }
-            StmtKind::Match { .. } => self.unsupported("`match`"),
-        }
-    }
-
-    fn check_hint(&self, expected: &Ty, actual: &Ty) -> &'static str {
-        if matches!(expected, Ty::Named(_))
-            && self.val(expected) != *expected
-            && self.val(expected) == *actual
-        {
-            "（基の型から篩型への変換は、リテラルの定数か `T.check` に限る）"
-        } else if matches!(expected, Ty::Int) && *actual == Ty::Float
-            || matches!(expected, Ty::Float) && *actual == Ty::Int
-        {
-            "（`Int` と `Float` の暗黙の変換はない）"
-        } else {
-            ""
+            StmtKind::Match {
+                scrutinee, arms, ..
+            } => {
+                let st = self.expr(scrutinee)?;
+                let st = self.peel(&st);
+                let sp = s.span;
+                let mut pats = vec![];
+                for a in arms {
+                    self.span = sp;
+                    self.scopes.push(HashMap::new());
+                    self.pat(&a.pattern, &st)?;
+                    self.block(&a.body)?;
+                    self.scopes.pop();
+                    pats.push(&a.pattern);
+                }
+                self.span = sp;
+                self.exhaustive(&pats)
+            }
         }
     }
 
@@ -737,26 +1370,53 @@ impl Ck {
         }
     }
 
+    fn shadow_check(&self, n: &str) -> R<()> {
+        if self.lookup(n).is_some() {
+            return self.err(
+                ErrorKind::ShadowedName,
+                format!(
+                    "名前 `{n}` は、同じ関数の外側ですでに使われている（名前の隠蔽は禁止。別の名前にする）"
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    fn declare(&mut self, n: &str, ty: Ty, mutable: bool) -> R<()> {
+        self.shadow_check(n)?;
+        self.scopes.last_mut().expect("scope").insert(
+            n.to_string(),
+            Local {
+                ty,
+                mutable,
+                param: false,
+            },
+        );
+        Ok(())
+    }
+
+    /// `let` の分解。名前・`_`・組だけ（場合分けは `match`）。
     fn bind(&mut self, p: &Pattern, t: &Ty, mutable: bool) -> R<()> {
         match p {
             Pattern::Wild => Ok(()),
-            Pattern::Bind(n) => {
-                self.scopes.last_mut().expect("scope").insert(
-                    n.clone(),
-                    Var {
-                        ty: t.clone(),
-                        mutable,
-                        param: false,
-                    },
-                );
-                Ok(())
-            }
+            Pattern::Bind(n) => self.declare(n, t.clone(), mutable),
             Pattern::Tuple(ps) => {
-                let Ty::Tuple(ts) = t else {
-                    return self.err(
-                        ErrorKind::DestructureMismatch,
-                        format!("組として分解しているが、式の型は `{}` である", show(t)),
-                    );
+                let ts = match self.shallow(t) {
+                    Ty::Tuple(ts) => ts,
+                    Ty::Var(_) => {
+                        let ts: Vec<Ty> = ps.iter().map(|_| self.fresh()).collect();
+                        let _ = self.unify(t, &Ty::Tuple(ts.clone()));
+                        ts
+                    }
+                    other => {
+                        return self.err(
+                            ErrorKind::DestructureMismatch,
+                            format!(
+                                "組として分解しているが、式の型は `{}` である",
+                                self.sh(&other)
+                            ),
+                        )
+                    }
                 };
                 if ps.len() != ts.len() {
                     return self.err(
@@ -768,12 +1428,193 @@ impl Ck {
                         ),
                     );
                 }
-                for (p, t) in ps.iter().zip(ts) {
+                for (p, t) in ps.iter().zip(&ts) {
                     self.bind(p, t, mutable)?;
                 }
                 Ok(())
             }
-            _ => self.unsupported("この形のパターン"),
+            _ => self.err(
+                ErrorKind::PatternMismatch,
+                "`let` で分解できるのは名前・`_`・組だけ（場合分けは `match` で書く）",
+            ),
+        }
+    }
+
+    // ---------- パターンと網羅性 ----------
+
+    /// パターンの値の名前（`Some`・`Shape.Circle` など）から、列挙型の名前と値の名前。
+    fn variant_of(&self, path: &[String]) -> R<(String, String)> {
+        match path {
+            [v] => match PRELUDE_VALUES.iter().find(|(n, _)| n == v) {
+                Some((n, t)) => Ok((t.to_string(), n.to_string())),
+                None => self.err(
+                    ErrorKind::UnknownName,
+                    format!("値 `{v}` が見つからない（列挙型の値は `型.値` と書く）"),
+                ),
+            },
+            [e, v] => match self.types.get(e) {
+                Some(TypeDef::Enum { variants, .. }) => {
+                    if variants.iter().any(|(n, _)| n == v) {
+                        Ok((e.clone(), v.clone()))
+                    } else {
+                        self.err(
+                            ErrorKind::NoSuchMember,
+                            format!("列挙型 `{e}` に値 `{v}` がない"),
+                        )
+                    }
+                }
+                _ => self.err(
+                    ErrorKind::UnknownType,
+                    format!("列挙型 `{e}` が見つからない"),
+                ),
+            },
+            _ => self.err(
+                ErrorKind::UnknownName,
+                format!("値 `{}` が見つからない", path.join(".")),
+            ),
+        }
+    }
+
+    fn pat_mismatch<T>(&self, p: &str, t: &Ty) -> R<T> {
+        self.err(
+            ErrorKind::PatternMismatch,
+            format!("{p}のパターンだが、調べる式の型は `{}` である", self.sh(t)),
+        )
+    }
+
+    /// パターンを型 `t` に合わせ、束縛する名前を現在のスコープに宣言する。
+    fn pat(&mut self, p: &Pattern, t: &Ty) -> R<()> {
+        let t = self.peel(t);
+        match p {
+            Pattern::Wild => Ok(()),
+            Pattern::Bind(n) => self.declare(n, t, false),
+            Pattern::Int(s) | Pattern::NegInt(s) => {
+                let text = if matches!(p, Pattern::NegInt(_)) {
+                    format!("-{s}")
+                } else {
+                    s.clone()
+                };
+                if text.parse::<i64>().is_err() {
+                    return self.err(
+                        ErrorKind::IntLiteralRange,
+                        format!("整数のリテラル `{text}` が `Int` の範囲を超えている"),
+                    );
+                }
+                let v = self.val(&t);
+                if !self.try_unify(&v, &Ty::Int) {
+                    return self.pat_mismatch("整数", &t);
+                }
+                Ok(())
+            }
+            Pattern::Str(_) => {
+                let v = self.val(&t);
+                if !self.try_unify(&v, &Ty::Str) {
+                    return self.pat_mismatch("文字列", &t);
+                }
+                Ok(())
+            }
+            Pattern::Bool(_) => {
+                let v = self.val(&t);
+                if !self.try_unify(&v, &Ty::Bool) {
+                    return self.pat_mismatch("`Bool`", &t);
+                }
+                Ok(())
+            }
+            Pattern::Tuple(ps) => {
+                let ts = match self.shallow(&t) {
+                    Ty::Tuple(ts) => ts,
+                    Ty::Var(_) => {
+                        let ts: Vec<Ty> = ps.iter().map(|_| self.fresh()).collect();
+                        let _ = self.unify(&t, &Ty::Tuple(ts.clone()));
+                        ts
+                    }
+                    other => return self.pat_mismatch("組", &other),
+                };
+                if ps.len() != ts.len() {
+                    return self.err(
+                        ErrorKind::PatternMismatch,
+                        format!(
+                            "{} 個の組のパターンだが、組の要素は {} 個ある",
+                            ps.len(),
+                            ts.len()
+                        ),
+                    );
+                }
+                for (p, t) in ps.iter().zip(&ts) {
+                    self.pat(p, t)?;
+                }
+                Ok(())
+            }
+            Pattern::Variant { path, args } => {
+                let (en, vn) = self.variant_of(path)?;
+                let (ty, m) = self.fresh_named(&en);
+                if !self.try_unify(&t, &ty) {
+                    return self.pat_mismatch(&format!("`{en}`"), &t);
+                }
+                let Some(TypeDef::Enum { variants, .. }) = self.types.get(&en).cloned() else {
+                    return Ok(());
+                };
+                let (_, fs) = variants.iter().find(|(n, _)| *n == vn).expect("variant");
+                if fs.len() != args.len() {
+                    return self.err(
+                        ErrorKind::PatternMismatch,
+                        format!(
+                            "値 `{en}.{vn}` の中身は {} 個だが、パターンは {} 個ある",
+                            fs.len(),
+                            args.len()
+                        ),
+                    );
+                }
+                for (a, f) in args.iter().zip(fs) {
+                    self.pat(a, &substitute(f, &m))?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn to_p(&self, p: &Pattern) -> P {
+        match p {
+            Pattern::Wild | Pattern::Bind(_) => P::Wild,
+            Pattern::Int(s) => P::Ctor(Ctor::Lit(s.clone()), vec![]),
+            Pattern::NegInt(s) => P::Ctor(Ctor::Lit(format!("-{s}")), vec![]),
+            Pattern::Str(s) => P::Ctor(Ctor::Lit(format!("{s:?}")), vec![]),
+            Pattern::Bool(b) => P::Ctor(Ctor::Bool(*b), vec![]),
+            Pattern::Tuple(ps) => P::Ctor(
+                Ctor::Tuple(ps.len()),
+                ps.iter().map(|p| self.to_p(p)).collect(),
+            ),
+            Pattern::Variant { path, args } => match self.variant_of(path) {
+                Ok((ty, name)) => P::Ctor(
+                    Ctor::Variant { ty, name },
+                    args.iter().map(|p| self.to_p(p)).collect(),
+                ),
+                Err(_) => P::Wild,
+            },
+        }
+    }
+
+    /// `match` の腕がすべての値を覆うか（ADR 0011 の決定 9）。
+    fn exhaustive(&self, pats: &[&Pattern]) -> R<()> {
+        let rows: Vec<Vec<P>> = pats.iter().map(|p| vec![self.to_p(p)]).collect();
+        let enums = |ty: &str| -> Vec<(String, usize)> {
+            match self.types.get(ty) {
+                Some(TypeDef::Enum { variants, .. }) => variants
+                    .iter()
+                    .map(|(n, fs)| (n.clone(), fs.len()))
+                    .collect(),
+                _ => vec![],
+            }
+        };
+        match missing(&rows, 1, &enums) {
+            None => Ok(()),
+            Some(w) => self.err(
+                ErrorKind::NotExhaustive,
+                format!(
+                    "`match` が値をすべて覆っていない: `{}` の場合がない（腕を足すか、`_` を最後に置く）",
+                    w.first().cloned().unwrap_or_default()
+                ),
+            ),
         }
     }
 
@@ -830,6 +1671,11 @@ impl Ck {
     // ---------- 式 ----------
 
     fn expr(&mut self, e: &Expr) -> R<Ty> {
+        self.expr_hint(e, None)
+    }
+
+    /// `hint` は、クロージャの引数の型を文脈から決めるための期待される関数の型。
+    fn expr_hint(&mut self, e: &Expr, hint: Option<&Ty>) -> R<Ty> {
         match e {
             Expr::Int(s) => {
                 if s.parse::<i64>().is_err() {
@@ -854,18 +1700,16 @@ impl Ck {
             },
             Expr::Old(inner) => {
                 let t = self.expr(inner)?;
-                if !self.copyable(&t) {
-                    return self.err(
-                        ErrorKind::OldNotCopyable,
-                        format!(
-                            "`old(...)` の引数は暗黙に複製される型（`Copyable`）でなければならないが、`{}` である",
-                            show(&t)
-                        ),
-                    );
-                }
+                self.require(
+                    &t,
+                    Prop::Copyable,
+                    ErrorKind::OldNotCopyable,
+                    "`old(...)` の引数は暗黙に複製される型（`Copyable`）でなければならないが、`{}` である"
+                        .into(),
+                )?;
                 Ok(t)
             }
-            Expr::Paren(i) => self.expr(i),
+            Expr::Paren(i) => self.expr_hint(i, hint),
             Expr::Tuple(es) => Ok(Ty::Tuple(
                 es.iter().map(|e| self.expr(e)).collect::<R<_>>()?,
             )),
@@ -874,10 +1718,192 @@ impl Ck {
             Expr::Field { expr, name } => self.field(expr, name),
             Expr::Call { callee, args } => self.call(callee, args),
             Expr::StructLit { path, fields } => self.struct_lit(path, fields),
-            Expr::Try(_) => self.unsupported("`?`"),
-            Expr::Match { .. } => self.unsupported("`match`"),
-            Expr::Closure { .. } => self.unsupported("クロージャ"),
+            Expr::Try(inner) => self.try_op(inner),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                let st = self.expr(scrutinee)?;
+                let st = self.peel(&st);
+                let sp = self.span;
+                let r = self.fresh();
+                let mut pats = vec![];
+                for (i, a) in arms.iter().enumerate() {
+                    self.scopes.push(HashMap::new());
+                    self.pat(&a.pattern, &st)?;
+                    let t = self.expr(&a.body)?;
+                    self.span = sp;
+                    if i == 0 {
+                        let _ = self.unify(&r, &t);
+                    } else if !self.coerce(&r, &t, &a.body) {
+                        return self.err(
+                            ErrorKind::TypeMismatch,
+                            format!(
+                                "`match` の腕の型が揃わない: `{}` と `{}`",
+                                self.sh(&r),
+                                self.sh(&t)
+                            ),
+                        );
+                    }
+                    self.scopes.pop();
+                    pats.push(&a.pattern);
+                }
+                self.exhaustive(&pats)?;
+                Ok(r)
+            }
+            Expr::Closure { params, body, .. } => self.closure(params, body, hint),
         }
+    }
+
+    fn closure(&mut self, params: &[String], body: &ClosureBody, hint: Option<&Ty>) -> R<Ty> {
+        let (hps, hret) = match hint.map(|h| self.shallow(h)) {
+            Some(Ty::Fn(ps, r)) => (Some(ps), Some(*r)),
+            _ => (None, None),
+        };
+        if let Some(ps) = &hps {
+            if ps.len() != params.len() {
+                return self.err(
+                    ErrorKind::ArgCount,
+                    format!(
+                        "クロージャの引数は {} 個だが、渡す先は {} 個の引数の関数を求めている",
+                        params.len(),
+                        ps.len()
+                    ),
+                );
+            }
+        }
+        self.scopes.push(HashMap::new());
+        let mut pts = vec![];
+        for (i, p) in params.iter().enumerate() {
+            self.shadow_check(p)?;
+            let t = match &hps {
+                Some(ps) => ps[i].clone(),
+                None => self.fresh_known(format!("クロージャの引数 `{p}`")),
+            };
+            self.scopes.last_mut().expect("scope").insert(
+                p.clone(),
+                Local {
+                    ty: t.clone(),
+                    mutable: false,
+                    param: true,
+                },
+            );
+            pts.push(t);
+        }
+        let saved = self.ret.clone();
+        let r = match hret {
+            Some(r) => r,
+            None => self.fresh(),
+        };
+        self.ret = r.clone();
+        let sp = self.span;
+        let res: R<()> = match body {
+            ClosureBody::Expr(e) => match self.expr(e) {
+                Ok(t) => {
+                    self.span = sp;
+                    if self.coerce(&r, &t, e) {
+                        Ok(())
+                    } else {
+                        self.err(
+                            ErrorKind::TypeMismatch,
+                            format!(
+                                "クロージャの戻り値は `{}` でなければならないが、`{}` である",
+                                self.sh(&r),
+                                self.sh(&t)
+                            ),
+                        )
+                    }
+                }
+                Err(e) => Err(e),
+            },
+            ClosureBody::Block(b) => self.block(b).and_then(|()| {
+                self.span = sp;
+                if !block_returns(b) && !self.try_unify(&r, &Ty::Unit) {
+                    return self.err(
+                        ErrorKind::MissingReturn,
+                        format!(
+                            "クロージャは `{}` を返すので、すべての道が `return` で終わらなければならない",
+                            self.sh(&r)
+                        ),
+                    );
+                }
+                Ok(())
+            }),
+        };
+        self.ret = saved;
+        self.scopes.pop();
+        res?;
+        Ok(Ty::Fn(pts, Box::new(r)))
+    }
+
+    fn try_op(&mut self, inner: &Expr) -> R<Ty> {
+        let t = self.expr(inner)?;
+        let ret = self.ret.clone();
+        let (want, value) =
+            match self.peel(&t) {
+                Ty::Named(n, a) if n == "Option" => {
+                    let v = a[0].clone();
+                    (Ty::Named("Option".into(), vec![self.fresh()]), v)
+                }
+                Ty::Named(n, a) if n == "Result" => {
+                    let (v, e) = (a[0].clone(), a[1].clone());
+                    (Ty::Named("Result".into(), vec![self.fresh(), e]), v)
+                }
+                Ty::Var(_) => return self.err(
+                    ErrorKind::CannotInfer,
+                    "`?` を付けた式の型が決まっていない（`Option` か `Result` でなければならない）",
+                ),
+                other => {
+                    return self.err(
+                        ErrorKind::TryOperand,
+                        format!(
+                            "`?` は `Option` か `Result` に使うが、`{}` である",
+                            self.sh(&other)
+                        ),
+                    )
+                }
+            };
+        if !self.try_unify(&ret, &want) {
+            return self.err(
+                ErrorKind::TryOperand,
+                format!(
+                    "`?` は、関数の戻り値と同じ種類（`Option` か `Result`）で、`Result` ならエラーの型 E も同じでなければ使えない。ここでは対象が `{}`、戻り値が `{}` である",
+                    self.sh(&t),
+                    self.sh(&ret)
+                ),
+            );
+        }
+        Ok(value)
+    }
+
+    /// 列挙型の値（`Some`・`Shape.Circle` など）を値として使うときの型。
+    fn variant_value(&mut self, tn: &str, vn: &str) -> R<Ty> {
+        let Some(TypeDef::Enum { variants, .. }) = self.types.get(tn).cloned() else {
+            return self.err(
+                ErrorKind::UnknownType,
+                format!("列挙型 `{tn}` が見つからない"),
+            );
+        };
+        let Some((_, fs)) = variants.iter().find(|(n, _)| n == vn) else {
+            return self.err(
+                ErrorKind::NoSuchMember,
+                format!("列挙型 `{tn}` に値 `{vn}` がない"),
+            );
+        };
+        let (ty, m) = self.fresh_named(tn);
+        let fs: Vec<Ty> = fs.iter().map(|t| substitute(t, &m)).collect();
+        Ok(if fs.is_empty() {
+            ty
+        } else {
+            Ty::Fn(fs, Box::new(ty))
+        })
+    }
+
+    fn fn_type(&mut self, sig: &Sig, what: &str) -> R<Ty> {
+        let m = self.instantiate(&sig.generics, what)?;
+        Ok(Ty::Fn(
+            sig.params.iter().map(|(_, t)| substitute(t, &m)).collect(),
+            Box::new(substitute(&sig.ret, &m)),
+        ))
     }
 
     fn name(&mut self, n: &str) -> R<Ty> {
@@ -899,14 +1925,11 @@ impl Ck {
         if n == "Unit" {
             return Ok(Ty::Unit);
         }
-        if let Some(sig) = self.fns.get(n) {
-            return Ok(Ty::Fn(
-                sig.params.iter().map(|(_, t)| t.clone()).collect(),
-                Box::new(sig.ret.clone()),
-            ));
+        if let Some(sig) = self.fns.get(n).cloned() {
+            return self.fn_type(&sig, &format!("関数 `{n}`"));
         }
-        if PRELUDE_VALUES.contains(&n) {
-            return self.unsupported(&format!("標準ライブラリの値 `{n}`"));
+        if let Some((_, tn)) = PRELUDE_VALUES.iter().find(|(v, _)| *v == n) {
+            return self.variant_value(tn, n);
         }
         self.err(ErrorKind::UnknownName, format!("名前 `{n}` が見つからない"))
     }
@@ -915,10 +1938,11 @@ impl Ck {
         match op {
             UnOp::Not => {
                 let t = self.expr(inner)?;
-                if t != Ty::Bool {
+                let v = self.val(&t);
+                if !self.try_unify(&v, &Ty::Bool) {
                     return self.err(
                         ErrorKind::OperandTypes,
-                        format!("`!` は `Bool` に使うが、`{}` である", show(&t)),
+                        format!("`!` は `Bool` に使うが、`{}` である", self.sh(&t)),
                     );
                 }
                 Ok(Ty::Bool)
@@ -926,15 +1950,12 @@ impl Ck {
             UnOp::Neg => {
                 let t = self.expr(inner)?;
                 let v = self.val(&t);
-                if v != Ty::Int && v != Ty::Float {
-                    return self.err(
-                        ErrorKind::OperandTypes,
-                        format!(
-                            "前置の `-` は `Int`・`Float` に使うが、`{}` である",
-                            show(&t)
-                        ),
-                    );
-                }
+                self.require(
+                    &v,
+                    Prop::Numeric,
+                    ErrorKind::OperandTypes,
+                    "前置の `-` は数（`Numeric`）に使うが、`{}` である".into(),
+                )?;
                 Ok(v)
             }
             UnOp::Ref | UnOp::RefMut => {
@@ -960,13 +1981,14 @@ impl Ck {
         let (lv, rv) = (self.val(&lt), self.val(&rt));
         let sym = op_text(op);
         let mismatch = |ck: &Ck| -> R<Ty> {
+            let (a, b) = (ck.zonk(&lv), ck.zonk(&rv));
             ck.err(
                 ErrorKind::OperandTypes,
                 format!(
                     "`{sym}` の両辺の型が合わない: `{}` と `{}`{}",
-                    show(&lt),
-                    show(&rt),
-                    if (lv == Ty::Int && rv == Ty::Float) || (lv == Ty::Float && rv == Ty::Int) {
+                    show(&a),
+                    show(&b),
+                    if (a == Ty::Int && b == Ty::Float) || (a == Ty::Float && b == Ty::Int) {
                         "（`Int` と `Float` の暗黙の変換はない）"
                     } else {
                         ""
@@ -974,59 +1996,56 @@ impl Ck {
                 ),
             )
         };
+        if matches!(op, BinOp::And | BinOp::Or) {
+            return if self.try_unify(&lv, &Ty::Bool) && self.try_unify(&rv, &Ty::Bool) {
+                Ok(Ty::Bool)
+            } else {
+                mismatch(self)
+            };
+        }
+        if !self.try_unify(&lv, &rv) {
+            return mismatch(self);
+        }
+        let t = self.zonk(&lv);
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                if lv == rv && (lv == Ty::Int || lv == Ty::Float) {
-                    Ok(lv)
-                } else {
-                    mismatch(self)
-                }
+                self.require(
+                    &t,
+                    Prop::Numeric,
+                    ErrorKind::OperandTypes,
+                    format!("`{sym}` は数（`Numeric`）に使うが、`{{}}` である"),
+                )?;
+                Ok(t)
             }
             BinOp::Rem => {
-                if lv == Ty::Int && rv == Ty::Int {
-                    Ok(Ty::Int)
-                } else if lv == Ty::Float && rv == Ty::Float {
-                    self.err(ErrorKind::OperandTypes, "`%` は `Float` に使えない")
-                } else {
-                    mismatch(self)
+                if t == Ty::Float {
+                    return self.err(ErrorKind::OperandTypes, "`%` は `Float` に使えない");
                 }
+                if !self.try_unify(&t, &Ty::Int) {
+                    return self.err(
+                        ErrorKind::OperandTypes,
+                        format!("`%` は `Int` に使うが、`{}` である", show(&t)),
+                    );
+                }
+                Ok(Ty::Int)
             }
             BinOp::Eq | BinOp::Ne => {
-                if lv != rv {
-                    return mismatch(self);
-                }
-                if !self.equatable(&lv, 0) {
-                    return self.err(
-                        ErrorKind::NotEquatable,
-                        format!(
-                            "`{}` は `{sym}` で比べられない（`Equatable` でない）",
-                            show(&lv)
-                        ),
-                    );
-                }
+                self.require(
+                    &t,
+                    Prop::Equatable,
+                    ErrorKind::NotEquatable,
+                    format!("`{{}}` は `{sym}` で比べられない（`Equatable` でない）"),
+                )?;
                 Ok(Ty::Bool)
             }
-            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                if lv != rv {
-                    return mismatch(self);
-                }
-                if !matches!(lv, Ty::Int | Ty::Float | Ty::Str) {
-                    return self.err(
-                        ErrorKind::NotComparable,
-                        format!(
-                            "`{}` は `{sym}` で大小を比べられない（`Comparable` でない）",
-                            show(&lv)
-                        ),
-                    );
-                }
+            _ => {
+                self.require(
+                    &t,
+                    Prop::Comparable,
+                    ErrorKind::NotComparable,
+                    format!("`{{}}` は `{sym}` で大小を比べられない（`Comparable` でない）"),
+                )?;
                 Ok(Ty::Bool)
-            }
-            BinOp::And | BinOp::Or => {
-                if lt == Ty::Bool && rt == Ty::Bool {
-                    Ok(Ty::Bool)
-                } else {
-                    mismatch(self)
-                }
             }
         }
     }
@@ -1041,18 +2060,34 @@ impl Ck {
         }
     }
 
+    /// 篩型 `T` の `T.check` の型: 基の型を受け取り `Option<T>` を返す。
+    fn check_fn_type(&self, tn: &str, base: &Ty) -> Ty {
+        Ty::Fn(
+            vec![base.clone()],
+            Box::new(Ty::Named(
+                "Option".into(),
+                vec![Ty::Named(tn.to_string(), vec![])],
+            )),
+        )
+    }
+
     fn field(&mut self, recv: &Expr, name: &str) -> R<Ty> {
         if let Some(tn) = self.type_path(recv) {
             return match self.types.get(&tn).cloned() {
-                Some(TypeDef::Enum(vs)) => match vs.iter().find(|(v, _)| v == name) {
-                    Some((_, fs)) if fs.is_empty() => Ok(Ty::Named(tn)),
-                    Some((_, fs)) => Ok(Ty::Fn(fs.clone(), Box::new(Ty::Named(tn)))),
-                    None => self.err(
-                        ErrorKind::NoSuchMember,
-                        format!("列挙型 `{tn}` に値 `{name}` がない"),
-                    ),
-                },
-                _ if name == "check" => self.unsupported("`T.check`（`Option` を返す）"),
+                Some(TypeDef::Enum { variants, .. }) => {
+                    if variants.iter().any(|(v, _)| v == name) {
+                        self.variant_value(&tn, name)
+                    } else {
+                        self.err(
+                            ErrorKind::NoSuchMember,
+                            format!("列挙型 `{tn}` に値 `{name}` がない"),
+                        )
+                    }
+                }
+                Some(TypeDef::Alias(base)) if name == "check" => Ok(self.check_fn_type(&tn, &base)),
+                Some(TypeDef::Opaque(_)) => {
+                    self.unsupported(&format!("標準ライブラリの `{tn}.{name}`"))
+                }
                 _ => self.err(
                     ErrorKind::NoSuchMember,
                     format!("`{tn}.{name}` は値として使えない"),
@@ -1061,19 +2096,28 @@ impl Ck {
         }
         let t = self.expr(recv)?;
         match self.val(&t) {
-            Ty::Named(n) => match self.types.get(&n) {
-                Some(TypeDef::Struct(fs)) => match fs.iter().find(|(f, _)| f == name) {
-                    Some((_, t)) => Ok(t.clone()),
-                    None => self.err(
-                        ErrorKind::NoSuchMember,
-                        format!("構造体 `{n}` にフィールド `{name}` がない"),
-                    ),
-                },
+            Ty::Named(n, args) => match self.types.get(&n).cloned() {
+                Some(TypeDef::Struct { params, fields }) => {
+                    match fields.iter().find(|(f, _)| f == name) {
+                        Some((_, ft)) => {
+                            let m = params.into_iter().zip(args).collect();
+                            Ok(substitute(ft, &m))
+                        }
+                        None => self.err(
+                            ErrorKind::NoSuchMember,
+                            format!("構造体 `{n}` にフィールド `{name}` がない"),
+                        ),
+                    }
+                }
                 _ => self.err(
                     ErrorKind::NoSuchMember,
                     format!("型 `{n}` にフィールド `{name}` はない"),
                 ),
             },
+            Ty::Var(_) => self.err(
+                ErrorKind::CannotInfer,
+                format!("フィールド `{name}` を取り出す式の型が決まっていない（先に型を決める）"),
+            ),
             Ty::Tuple(_) => self.err(
                 ErrorKind::NoSuchMember,
                 format!("組の要素は `.{name}` で取り出せない（`let (a, b) = t;` で分解する）"),
@@ -1085,16 +2129,32 @@ impl Ck {
         }
     }
 
+    /// 関数の型 `ft` の値を `args` で呼ぶ。
+    fn apply(&mut self, ft: Ty, args: &[Expr], what: &str) -> R<Ty> {
+        match self.shallow(&ft) {
+            Ty::Fn(ps, r) => {
+                self.args(&ps, args, what)?;
+                Ok(*r)
+            }
+            Ty::Var(_) => self.err(
+                ErrorKind::CannotInfer,
+                format!("{what}の型が決まっていないので、呼べるか分からない"),
+            ),
+            other => self.err(
+                ErrorKind::NotCallable,
+                format!("{what}は `{}` で、呼び出せない", self.sh(&other)),
+            ),
+        }
+    }
+
     fn call(&mut self, callee: &Expr, args: &[Expr]) -> R<Ty> {
         match callee {
             Expr::Name(n) => {
                 if self.refine {
-                    return match self.fns.get(n) {
+                    return match self.fns.get(n).cloned() {
                         Some(sig) if sig.effects_none => {
-                            let sig = sig.clone();
-                            let ps: Vec<Ty> = sig.params.iter().map(|(_, t)| t.clone()).collect();
-                            self.args(&ps, args, &format!("関数 `{n}`"))?;
-                            Ok(sig.ret)
+                            let ft = self.fn_type(&sig, &format!("関数 `{n}`"))?;
+                            self.apply(ft, args, &format!("関数 `{n}`"))
                         }
                         Some(_) => self.err(
                             ErrorKind::RefinementEffect,
@@ -1107,36 +2167,37 @@ impl Ck {
                         }
                     };
                 }
-                let ft = if self.lookup(n).is_some() || self.fns.contains_key(n) {
-                    self.name(n)?
-                } else if PRELUDE_VALUES.contains(&n.as_str()) {
-                    return self.unsupported(&format!("標準ライブラリの値 `{n}`"));
-                } else {
-                    return self.err(ErrorKind::UnknownName, format!("関数 `{n}` が見つからない"));
-                };
-                match ft {
-                    Ty::Fn(ps, r) => {
-                        self.args(&ps, args, &format!("`{n}`"))?;
-                        Ok(*r)
-                    }
-                    other => self.err(
-                        ErrorKind::NotCallable,
-                        format!("`{n}` は `{}` で、呼び出せない", show(&other)),
-                    ),
+                let known = self.lookup(n).is_some()
+                    || self.fns.contains_key(n)
+                    || PRELUDE_VALUES.iter().any(|(v, _)| v == n);
+                if !known {
+                    return self.err(
+                        ErrorKind::UnknownName,
+                        format!(
+                            "関数 `{n}` が見つからない（標準ライブラリの関数は、後続の PR で扱う）"
+                        ),
+                    );
                 }
+                let ft = self.name(n)?;
+                self.apply(ft, args, &format!("`{n}`"))
             }
             Expr::Field { expr, name } => {
                 if let Some(tn) = self.type_path(expr) {
                     match self.types.get(&tn).cloned() {
-                        Some(TypeDef::Enum(vs)) if vs.iter().any(|(v, _)| v == name) => {
-                            let (_, fs) = vs.iter().find(|(v, _)| v == name).expect("variant");
-                            self.args(fs, args, &format!("`{tn}.{name}`"))?;
-                            return Ok(Ty::Named(tn));
+                        Some(TypeDef::Enum { variants, .. })
+                            if variants.iter().any(|(v, _)| v == name) =>
+                        {
+                            let ft = self.variant_value(&tn, name)?;
+                            return self.apply(ft, args, &format!("`{tn}.{name}`"));
+                        }
+                        Some(TypeDef::Alias(base)) if name == "check" => {
+                            let ft = self.check_fn_type(&tn, &base);
+                            return self.apply(ft, args, &format!("`{tn}.check`"));
+                        }
+                        Some(TypeDef::Opaque(_)) => {
+                            return self.unsupported(&format!("標準ライブラリの `{tn}.{name}`"));
                         }
                         _ => {}
-                    }
-                    if name == "check" {
-                        return self.unsupported("`T.check`（`Option` を返す）");
                     }
                     let Some(sig) = self.methods.get(&(tn.clone(), name.clone())).cloned() else {
                         return self.err(
@@ -1150,20 +2211,40 @@ impl Ck {
                             format!("`{tn}.{name}` は受け手のあるメソッドなので、値に対して `x.{name}(...)` と呼ぶ"),
                         );
                     }
-                    let ps: Vec<Ty> = sig.params.iter().map(|(_, t)| t.clone()).collect();
-                    self.args(&ps, args, &format!("`{tn}.{name}`"))?;
-                    return Ok(sig.ret);
+                    let what = format!("`{tn}.{name}`");
+                    let ft = self.fn_type(&sig, &what)?;
+                    return self.apply(ft, args, &what);
                 }
                 // メソッド呼び出し x.m(...)
-                let rt = strip_ref(&self.expr(expr)?);
-                let Ty::Named(tn) = rt.clone() else {
-                    // 篩型は基の型として働く。基の型のメソッドは標準ライブラリの範囲。
-                    return self.unsupported(&format!(
-                        "標準ライブラリの型 `{}` のメソッド `{name}`",
-                        show(&rt)
-                    ));
+                let rt0 = self.expr(expr)?;
+                let rt = self.peel(&rt0);
+                let (tn, _) = match &rt {
+                    Ty::Named(tn, a) => (tn.clone(), a.clone()),
+                    Ty::Var(_) => {
+                        return self.err(
+                            ErrorKind::CannotInfer,
+                            format!("メソッド `{name}` を呼ぶ式の型が決まっていない（先に型を決める）"),
+                        )
+                    }
+                    Ty::Param(p) => {
+                        return self.err(
+                            ErrorKind::NoSuchMember,
+                            format!("型引数 `{p}` にはメソッド `{name}` がない（性質の制約で使えるのは演算子だけ）"),
+                        )
+                    }
+                    other => {
+                        return self.unsupported(&format!(
+                            "標準ライブラリの型 `{}` のメソッド `{name}`",
+                            show(&self.zonk(other))
+                        ))
+                    }
                 };
                 let Some(sig) = self.methods.get(&(tn.clone(), name.clone())).cloned() else {
+                    if PRELUDE_TYPES.contains(&tn.as_str()) {
+                        return self.unsupported(&format!(
+                            "標準ライブラリの型 `{tn}` のメソッド `{name}`"
+                        ));
+                    }
                     return self.err(
                         ErrorKind::NoSuchMember,
                         format!("型 `{tn}` にメソッド `{name}` がない"),
@@ -1175,6 +2256,19 @@ impl Ck {
                         format!("`{name}` は受け手のない関数なので、`{tn}.{name}(...)` と呼ぶ"),
                     );
                 }
+                let what = format!("メソッド `{tn}.{name}`");
+                let m = self.instantiate(&sig.generics, &what)?;
+                let selfty = self.peel(&substitute(&sig.params[0].1, &m));
+                if !self.try_unify(&selfty, &rt) {
+                    return self.err(
+                        ErrorKind::TypeMismatch,
+                        format!(
+                            "{what}の受け手は `{}` だが、`{}` である",
+                            self.sh(&selfty),
+                            self.sh(&rt)
+                        ),
+                    );
+                }
                 if let Ty::Ref(true, _) = sig.params[0].1 {
                     let Some(root) = place_root(expr).map(str::to_string) else {
                         return self.err(
@@ -1184,9 +2278,12 @@ impl Ck {
                     };
                     self.assignable_place(&root, expr, false)?;
                 }
-                let ps: Vec<Ty> = sig.params[1..].iter().map(|(_, t)| t.clone()).collect();
-                self.args(&ps, args, &format!("メソッド `{tn}.{name}`"))?;
-                Ok(sig.ret)
+                let ps: Vec<Ty> = sig.params[1..]
+                    .iter()
+                    .map(|(_, t)| substitute(t, &m))
+                    .collect();
+                self.args(&ps, args, &what)?;
+                Ok(substitute(&sig.ret, &m))
             }
             _ => self.err(
                 ErrorKind::NotCallable,
@@ -1206,10 +2303,14 @@ impl Ck {
                 ),
             );
         }
+        let sp = self.span;
         for (i, (p, a)) in params.iter().zip(args).enumerate() {
-            let t = self.expr(a)?;
-            if !self.assignable(p, &t, a) {
-                let hint = if matches!(p, Ty::Ref(..)) && !matches!(t, Ty::Ref(..)) {
+            let t = self.expr_hint(a, Some(p))?;
+            self.span = sp;
+            if !self.coerce(p, &t, a) {
+                let hint = if matches!(self.shallow(p), Ty::Ref(..))
+                    && !matches!(self.shallow(&t), Ty::Ref(..))
+                {
                     "（借用は呼び出しの位置で `&x`・`&mut x` と書く）"
                 } else {
                     self.check_hint(p, &t)
@@ -1219,8 +2320,8 @@ impl Ck {
                     format!(
                         "{what}の第 {} 引数は `{}` でなければならないが、`{}` である{hint}",
                         i + 1,
-                        show(p),
-                        show(&t)
+                        self.sh(p),
+                        self.sh(&t)
                     ),
                 );
             }
@@ -1230,12 +2331,13 @@ impl Ck {
 
     fn struct_lit(&mut self, path: &[String], fields: &[(String, Expr)]) -> R<Ty> {
         let name = path.join(".");
-        let Some(TypeDef::Struct(defs)) = (if path.len() == 1 {
+        let def = if path.len() == 1 {
             self.types.get(&path[0]).cloned()
         } else {
             None
-        }) else {
-            if path.len() == 1 && PRELUDE_TYPES.contains(&path[0].as_str()) {
+        };
+        let Some(TypeDef::Struct { fields: defs, .. }) = def else {
+            if matches!(def, Some(TypeDef::Opaque(_))) {
                 return self.unsupported(&format!("標準ライブラリの型 `{name}`"));
             }
             return self.err(
@@ -1243,6 +2345,7 @@ impl Ck {
                 format!("構造体 `{name}` が見つからない"),
             );
         };
+        let (ty, m) = self.fresh_named(&path[0]);
         let mut seen = HashSet::new();
         for (f, e) in fields {
             let Some((_, ft)) = defs.iter().find(|(n, _)| n == f) else {
@@ -1257,7 +2360,21 @@ impl Ck {
                     format!("フィールド `{f}` が二重にある"),
                 );
             }
-            self.expect(ft, e, &format!("フィールド `{f}`"))?;
+            let ft = substitute(ft, &m);
+            let sp = self.span;
+            let t = self.expr_hint(e, Some(&ft))?;
+            self.span = sp;
+            if !self.coerce(&ft, &t, e) {
+                return self.err(
+                    ErrorKind::TypeMismatch,
+                    format!(
+                        "フィールド `{f}`は `{}` でなければならないが、`{}` である{}",
+                        self.sh(&ft),
+                        self.sh(&t),
+                        self.check_hint(&ft, &t)
+                    ),
+                );
+            }
         }
         if let Some((m, _)) = defs.iter().find(|(n, _)| !seen.contains(n)) {
             return self.err(
@@ -1265,14 +2382,7 @@ impl Ck {
                 format!("構造体 `{name}` のフィールド `{m}` がない"),
             );
         }
-        Ok(Ty::Named(name))
-    }
-}
-
-fn strip_ref(t: &Ty) -> Ty {
-    match t {
-        Ty::Ref(_, i) => strip_ref(i),
-        _ => t.clone(),
+        Ok(ty)
     }
 }
 
@@ -1321,6 +2431,9 @@ fn block_returns(b: &Block) -> bool {
     b.stmts.iter().any(|s| match &s.kind {
         StmtKind::Return(_) => true,
         StmtKind::If(i) => if_returns(i),
+        StmtKind::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|a| block_returns(&a.body))
+        }
         _ => false,
     })
 }

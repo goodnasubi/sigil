@@ -102,6 +102,16 @@ pub enum ErrorKind {
     RefinementEffect,
     DestructureMismatch,
     MemberConflict,
+    ShadowedName,
+    ConstraintUnsatisfied,
+    UnknownProperty,
+    TypeParamBound,
+    TypeArgCount,
+    CannotInfer,
+    NotExhaustive,
+    TryOperand,
+    PatternMismatch,
+    InfiniteType,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -156,7 +166,17 @@ impl ErrorKind {
             | RefinementName
             | RefinementEffect
             | DestructureMismatch
-            | MemberConflict => Phase::Check,
+            | MemberConflict
+            | ShadowedName
+            | ConstraintUnsatisfied
+            | UnknownProperty
+            | TypeParamBound
+            | TypeArgCount
+            | CannotInfer
+            | NotExhaustive
+            | TryOperand
+            | PatternMismatch
+            | InfiniteType => Phase::Check,
             _ => Phase::Syntax,
         }
     }

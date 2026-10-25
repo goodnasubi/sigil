@@ -5,6 +5,7 @@
 pub mod ast;
 pub mod check;
 pub mod error;
+pub mod exhaustive;
 pub mod fmt;
 pub mod lexer;
 pub mod parser;

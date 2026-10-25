@@ -212,6 +212,7 @@ const RECURSE: &str = "fn down(n: Int) -> Int\n  intent \"x\"\n  requires none\n
 fn unbounded_recursion_is_stack_exhaustion() {
     let opts = Options {
         stack_bytes: 1024 * 1024,
+        ..Options::default()
     };
     let e = run_with(&program(RECURSE), "down", &[Arg::Int(0)], &opts).unwrap_err();
     match e.error {
@@ -523,6 +524,7 @@ fn comparing_very_deep_values_stops_instead_of_overflowing_the_host_stack() {
     );
     let opts = Options {
         stack_bytes: 1024 * 1024,
+        ..Options::default()
     };
     let e = run_with(&program(&items), "build", &[], &opts).unwrap_err();
     match e.error {
@@ -537,6 +539,7 @@ fn stack_exhaustion_while_showing_the_result_keeps_the_position() {
     let items = items.replace("build() -> Int", "build() -> L");
     let opts = Options {
         stack_bytes: 1024 * 1024,
+        ..Options::default()
     };
     let e = run_with(&program(&items), "build", &[], &opts).unwrap_err();
     match e.error {

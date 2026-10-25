@@ -243,8 +243,6 @@ fn clone_copies_lists_and_structs() {
         )
     );
     let src = format!("{HEAD}{defs}");
-    let l = Arg::List(vec![]);
-    let _ = l;
     let build = format!(
         "{src}{}",
         func(
@@ -253,6 +251,34 @@ fn clone_copies_lists_and_structs() {
         )
     );
     assert_eq!(out(&build, "go", &[]), "1099");
+}
+
+#[test]
+fn clone_copies_option_result_and_string() {
+    let src = format!(
+        "{HEAD}{}{}{}",
+        func(
+            "o(a: &Option<Int>) -> Int",
+            "let mut c = a.clone();\nc = Some(9);\nreturn a.clone().unwrap_or(0) * 100 + c.unwrap_or(0);"
+        ),
+        func(
+            "r(a: &Result<Int, Int>) -> Int",
+            "let c = a.clone();\nmatch c {\n    Ok(v) => {\n        return v + 1;\n    }\n    Err(e) => {\n        return e;\n    }\n}"
+        ),
+        func(
+            "s(a: &String) -> Int",
+            "let mut c = a.clone();\nc = \"\";\nreturn a.len() * 10 + c.len();"
+        ),
+    );
+    let go = format!(
+        "{src}{}{}{}",
+        func("go_o() -> Int", "let a = Some(4);\nreturn o(&a);"),
+        func("go_r() -> Int", "let a = Ok(6);\nreturn r(&a);"),
+        func("go_s() -> Int", "let a = \"ab\";\nreturn s(&a);"),
+    );
+    assert_eq!(out(&go, "go_o", &[]), "409");
+    assert_eq!(out(&go, "go_r", &[]), "7");
+    assert_eq!(out(&go, "go_s", &[]), "20");
 }
 
 // ---- Option / Result ----
@@ -516,4 +542,27 @@ fn function_value_effect_is_inherited_by_the_caller() {
     let o = run(&src, "go", &[]).unwrap();
     assert_eq!(o.value, "5");
     assert_eq!(o.output, "4\n");
+}
+
+#[test]
+fn function_value_effect_must_be_declared_by_the_caller() {
+    let src = format!(
+        "{HEAD}{}{}{}",
+        func_fx(
+            "apply(f: fn(Int) -> Int, x: Int) -> Int",
+            "of(f)",
+            "return f(x);"
+        ),
+        func_fx(
+            "noisy(x: Int) -> Int",
+            "console",
+            "console.log(&x);\nreturn x + 1;"
+        ),
+        func_fx("go() -> Int", "none", "return apply(noisy, 4);"),
+    );
+    let e = match run(&src, "go", &[]) {
+        Ok(o) => panic!("効果の宣言漏れが通った: {}", o.value),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("console"), "{e}");
 }

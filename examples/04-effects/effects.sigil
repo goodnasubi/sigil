@@ -1,6 +1,10 @@
 // 例 04: 効果の宣言と一致検査（ADR 0004）
 // effects 節には本体が起こしうる効果を過不足なく書く。コンパイラが推論した効果と一致しなければエラー。
 
+module examples.effects
+  targets server
+  trust none
+
 // 効果なし: 純粋な計算。
 fn add_tax(price: Int, rate_percent: Int) -> Int
   intent "税込み価格を返す"
@@ -16,7 +20,7 @@ fn load_prices(path: Path) -> Result<List<Int>, IoError>
   intent "価格の一覧をファイルから読む"
   requires !empty(path)
   ensures none
-  effects fs.read, console
+  effects console, fs.read
 {
   console.log("loading prices");
   let text = fs.read(path)?;
@@ -69,4 +73,13 @@ fn count_up(counter: &Shared<Cell<Int>>)
 //   effects console                // エラー: 本体は console を起こさないのに宣言している
 // { return x * 2; }
 //
-// ブラウザ向けのモジュールで fs.read を使う   // エラー: fs.read はサーバーでだけ使える
+// module examples.effects_browser            // 別のファイル（ブラウザ向けのモジュール）
+//   targets browser
+//   trust none
+//
+// fn bad_target(path: Path) -> Result<String, IoError>
+//   intent "ファイルを読む"
+//   requires none
+//   ensures none
+//   effects fs.read                // エラー: fs.read はサーバーでだけ使える
+// { return fs.read(path); }

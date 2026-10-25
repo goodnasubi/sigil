@@ -1,4 +1,4 @@
-//! 診断（字句エラー・構文エラー）。M0 では最初の 1 件で打ち切る。
+//! 診断（字句エラー・構文エラー・型エラー）。M0 では最初の 1 件で打ち切る。
 
 use std::fmt;
 
@@ -14,6 +14,7 @@ pub enum Phase {
     Lex,
     Syntax,
     Fmt,
+    Check,
 }
 
 /// エラーの種類。テストと将来の機械可読な出力のために安定した名前を持つ。
@@ -71,6 +72,36 @@ pub enum ErrorKind {
     BadTuple,
     NotInP0,
     TooDeep,
+    // --- 型検査（ADR 0011） ---
+    /// PR1 の範囲外の構文・型（総称・標準ライブラリの型・`match`・クロージャ・`?`）。
+    Unsupported,
+    UnknownName,
+    UnknownType,
+    DuplicateDefinition,
+    TypeMismatch,
+    OperandTypes,
+    NotEquatable,
+    NotComparable,
+    ArgCount,
+    NotCallable,
+    NoSuchMember,
+    FieldSet,
+    IntLiteralRange,
+    AssignToImmutable,
+    AssignThroughSharedRef,
+    BorrowMutOfImmutable,
+    BorrowOfNonPlace,
+    LetMutRef,
+    RedundantAnnotation,
+    OldNotCopyable,
+    MissingReturn,
+    FnTypePosition,
+    RecursiveType,
+    RefinementBase,
+    RefinementName,
+    RefinementEffect,
+    DestructureMismatch,
+    MemberConflict,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -98,6 +129,34 @@ impl ErrorKind {
             | RangeOperator
             | PathSeparator => Phase::Lex,
             FmtVerify => Phase::Fmt,
+            Unsupported
+            | UnknownName
+            | UnknownType
+            | DuplicateDefinition
+            | TypeMismatch
+            | OperandTypes
+            | NotEquatable
+            | NotComparable
+            | ArgCount
+            | NotCallable
+            | NoSuchMember
+            | FieldSet
+            | IntLiteralRange
+            | AssignToImmutable
+            | AssignThroughSharedRef
+            | BorrowMutOfImmutable
+            | BorrowOfNonPlace
+            | LetMutRef
+            | RedundantAnnotation
+            | OldNotCopyable
+            | MissingReturn
+            | FnTypePosition
+            | RecursiveType
+            | RefinementBase
+            | RefinementName
+            | RefinementEffect
+            | DestructureMismatch
+            | MemberConflict => Phase::Check,
             _ => Phase::Syntax,
         }
     }
@@ -126,6 +185,7 @@ impl fmt::Display for Error {
             Phase::Lex => "字句エラー",
             Phase::Syntax => "構文エラー",
             Phase::Fmt => "整形エラー",
+            Phase::Check => "型エラー",
         };
         write!(
             f,

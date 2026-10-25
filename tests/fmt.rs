@@ -106,8 +106,8 @@ fn return_unit_removed() {
 #[test]
 fn closure_single_return() {
     expect(
-        &body("  let c = |y| { return y + 1; };\n  return x;\n"),
-        &body("  let c = |y| y + 1;\n  return x;\n"),
+        &body("  let c = move |y| { return y + 1; };\n  return x;\n"),
+        &body("  let c = move |y| y + 1;\n  return x;\n"),
     );
 }
 
@@ -251,7 +251,7 @@ fn deep_output_is_explicit_error() {
             .unwrap()
     };
     // 不要な括弧は消えるので、出力は浅くなって成功する。
-    let mk = |n: usize| format!("{}x{}", "(".repeat(n), ")".repeat(n));
+    let mk = move |n: usize| format!("{}x{}", "(".repeat(n), ")".repeat(n));
     let n = ok_depth(&mk);
     assert!(n >= 100, "{n}");
     assert_eq!(
@@ -259,7 +259,7 @@ fn deep_output_is_explicit_error() {
         body("  return x;\n")
     );
     // 必要な括弧は残る。成功するなら再整形で変わらず、失敗なら FmtVerify か TooDeep。
-    let mk = |n: usize| format!("{}1{}", "(1 + ".repeat(n), ")".repeat(n));
+    let mk = move |n: usize| format!("{}1{}", "(1 + ".repeat(n), ")".repeat(n));
     let n = ok_depth(&mk);
     match format(&body(&format!("  return {};\n", mk(n)))) {
         Ok(out) => assert_eq!(fmt(&out), out),
@@ -414,7 +414,7 @@ fn unit_return_type_is_removed() {
 
 #[test]
 fn constraints_are_sorted_and_deduplicated() {
-    let f = |c: &str| {
+    let f = move |c: &str| {
         format!("{HEAD}fn a<T: {c}>(x: T)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{}}\n")
     };
     expect(&f("Sendable + Equatable"), &f("Equatable + Sendable"));

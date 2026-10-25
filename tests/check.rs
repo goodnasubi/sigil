@@ -276,7 +276,7 @@ fn method_reads_and_static_fn() {
 
 #[test]
 fn impl_errors() {
-    let m = |sig: &str| {
+    let m = move |sig: &str| {
         format!("{ACCOUNT}impl Account {{\n  fn {sig}\n{CL}  {{\n    return;\n  }}\n}}\n")
     };
     assert_eq!(
@@ -1322,11 +1322,14 @@ fn closures_get_types_from_context() {
 
 #[test]
 fn closure_needs_known_types() {
-    assert_eq!(body_kind("f()", "  let g = |a| a;"), ErrorKind::CannotInfer);
+    assert_eq!(
+        body_kind("f()", "  let g = move |a| a;"),
+        ErrorKind::CannotInfer
+    );
     assert_eq!(
         kind(&format!(
             "{ACCOUNT}{}",
-            func("f()", "  let g = |a| a.balance;")
+            func("f()", "  let g = move |a| a.balance;")
         )),
         ErrorKind::CannotInfer
     );

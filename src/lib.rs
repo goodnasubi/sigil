@@ -3,6 +3,7 @@
 //! 整形器（`sigil fmt`）を含む。仕様の抽出（`sigil spec`）も含む。
 
 pub mod ast;
+pub mod borrow;
 pub mod check;
 pub mod effects;
 pub mod error;

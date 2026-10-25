@@ -104,6 +104,12 @@ pub enum ErrorKind {
     TempBorrow,
     ReturnBorrowRoot,
     RefSubstitution,
+    ClosureNeedsMove,
+    ClosureCaptureRef,
+    ClosureMoveCaptured,
+    ContractMove,
+    EnsuresMoved,
+    RefineMutBorrow,
     RedundantAnnotation,
     OldNotCopyable,
     MissingReturn,
@@ -189,6 +195,12 @@ impl ErrorKind {
             | TempBorrow
             | ReturnBorrowRoot
             | RefSubstitution
+            | ClosureNeedsMove
+            | ClosureCaptureRef
+            | ClosureMoveCaptured
+            | ContractMove
+            | EnsuresMoved
+            | RefineMutBorrow
             | RedundantAnnotation
             | OldNotCopyable
             | MissingReturn

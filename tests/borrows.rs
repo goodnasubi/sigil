@@ -353,7 +353,7 @@ fn unresolved_closure_param_double_move() {
     );
     ok(
         "g() -> Int",
-        "  let f = |x| {\n    let a = x;\n    let b = x;\n    return a + b;\n  };\n  return f(1);",
+        "  let f = move |x| {\n    let a = x;\n    let b = x;\n    return a + b;\n  };\n  return f(1);",
     );
 }
 

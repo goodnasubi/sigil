@@ -451,12 +451,12 @@ fn moved_value_cannot_be_used_in_a_closure() {
 
 #[test]
 fn contracts_do_not_move() {
+    // 契約の式の中で値を移動するのは、PR #30 から誤り（ADR 0012）
     let s = format!(
         "{HEAD}{DEFS}fn f(s: String) -> Int\n  intent \"x\"\n  requires eat(s) == 0\n  ensures none\n  effects none\n{{\n  return eat(s);\n}}\n"
     );
-    if let Err(e) = check(&s) {
-        panic!("{e}\n{s}");
-    }
+    let e = check(&s).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::ContractMove, "{e}");
 }
 
 #[test]

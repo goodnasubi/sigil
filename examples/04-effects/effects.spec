@@ -20,7 +20,7 @@
 
 関数 apply_all
   意図: 一覧の各要素に f を適用した一覧を返す
-  引数: xs を読む（List<Int>）、f を受け取る（fn(Int) -> Int）
+  引数: xs を読む（List<Int>）、f を呼ぶ（fn(Int) -> Int）
   戻り値: List<Int>
   事前条件: なし
   事後条件: result.len() == xs.len()

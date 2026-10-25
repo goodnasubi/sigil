@@ -1,8 +1,8 @@
 //! 標準ライブラリの最小部分のシグネチャと効果の表（M1）。
 //!
-//! 仮の範囲。標準ライブラリの分割（どの関数・型をどのモジュールに置くか）は後の ADR で決める。
-//! ここにあるのは、5 つのサンプルと ADR 0011 の M1 完了条件のテストに必要なものだけで、
-//! 本体を持たない。型検査器はこの表を `Sigil` のシグネチャとして読み、利用者の宣言と同じ表に入れる。
+//! 効果を持たない部分の一覧は ADR 0013 の決定 2 が正式に決めたもの（M3 でインタプリタが本体を持つ）。
+//! 効果を持つ部分（`Path`・`IoError`・`console`・`fs`・`Shared`・`Cell`）は、標準ライブラリの分割を
+//! 決める ADR（M4 の前）まで暫定。この表は本体を持たず、シグネチャと効果だけを持つ。型検査器はこの表を `Sigil` のシグネチャとして読み、利用者の宣言と同じ表に入れる。
 //!
 //! 表の書き方:
 //! - 自由関数（`FREE_FNS`）: 名前空間のない関数。`Copyable` な値だけを受け取るものに限る。
@@ -24,8 +24,6 @@ pub type Entry = (&'static str, &'static str);
 /// 標準の型で、中身を見せないもの（名前, 型引数の数）。
 pub const OPAQUE_TYPES: &[(&str, usize)] = &[
     ("List", 1),
-    ("Set", 1),
-    ("Map", 2),
     ("Path", 0),
     ("IoError", 0),
     ("ParseError", 0),
@@ -34,7 +32,10 @@ pub const OPAQUE_TYPES: &[(&str, usize)] = &[
 ];
 
 /// 名前空間のない関数。読むだけの操作はメソッドに移したので、`Copyable` な値の関数だけが残る。
-pub const FREE_FNS: &[Entry] = &[("to_float(n: Int) -> Float", "none")];
+pub const FREE_FNS: &[Entry] = &[
+    ("to_float(n: Int) -> Float", "none"),
+    ("to_int(x: Float) -> Option<Int>", "none"),
+];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
 pub const NAMESPACED_FNS: &[(&str, &str, &str)] = &[
@@ -49,8 +50,8 @@ pub const NAMESPACED_FNS: &[(&str, &str, &str)] = &[
 
 /// シグネチャ（`Entry` の最初の要素）に対応する `requires` 節。ない関数は `none`。
 pub const REQUIRES: &[(&str, &str)] = &[
-    ("min(self: &List<T>) -> T", "self.len() > 0"),
-    ("max(self: &List<T>) -> T", "self.len() > 0"),
+    ("min(self: &List<T>) -> &T", "self.len() > 0"),
+    ("max(self: &List<T>) -> &T", "self.len() > 0"),
 ];
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
@@ -61,11 +62,23 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
             ("new() -> List<T>", "none"),
             ("push(self: &mut List<T>, x: T)", "none"),
             ("get(self: &List<T>, i: Int) -> Option<&T>", "none"),
+            (
+                "get_mut(self: &mut List<T>, i: Int) -> Option<&mut T>",
+                "none",
+            ),
             ("len(self: &List<T>) -> Int", "none"),
             ("is_empty(self: &List<T>) -> Bool", "none"),
             ("map<U>(self: &List<T>, f: fn(T) -> U) -> List<U>", "of(f)"),
             (
+                "find(self: &List<T>, pred: fn(&T) -> Bool) -> Option<&T>",
+                "of(pred)",
+            ),
+            (
                 "max_by<K: Comparable>(self: &List<T>, key: fn(&T) -> K) -> Option<&T>",
+                "of(key)",
+            ),
+            (
+                "min_by<K: Comparable>(self: &List<T>, key: fn(&T) -> K) -> Option<&T>",
                 "of(key)",
             ),
         ],
@@ -75,12 +88,13 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
         &[("sum(self: &List<T>) -> T", "none")],
     ),
     (
-        "<T: Comparable + Copyable> List<T>",
+        "<T: Comparable> List<T>",
         &[
-            ("min(self: &List<T>) -> T", "none"),
-            ("max(self: &List<T>) -> T", "none"),
+            ("min(self: &List<T>) -> &T", "none"),
+            ("max(self: &List<T>) -> &T", "none"),
         ],
     ),
+    ("Int", &[("min_value() -> Int", "none")]),
     (
         "<T> Option<T>",
         &[

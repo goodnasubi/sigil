@@ -211,7 +211,7 @@ fn read_only_ops_are_methods_with_ref_receivers() {
 
 #[test]
 fn constrained_impls_check_their_bounds() {
-    // sum は Numeric、min / max は Comparable + Copyable
+    // sum は Numeric、min / max は Comparable（ADR 0013 の決定 2）
     assert_eq!(
         kind(&func(
             "f(xs: &List<String>) -> String",
@@ -222,7 +222,7 @@ fn constrained_impls_check_their_bounds() {
     assert_eq!(
         kind(&format!(
             "{ACCOUNT}{}",
-            func("f(xs: &List<Account>) -> Account", "  return xs.min();")
+            func("f(xs: &List<Account>)", "  let m = xs.min();\n  return;")
         )),
         ErrorKind::ConstraintUnsatisfied
     );

@@ -335,12 +335,16 @@ struct Ck {
     table: EffectTable,
     prims: Vec<Primitive>,
     copy_override: Vec<(String, bool)>,
+    /// `holds` が今たどっている（型, 性質）。輪になった型の導出を止める。
+    holding: std::cell::RefCell<Vec<(Ty, Prop)>>,
     /// モジュールの `targets`。
     targets: Vec<String>,
     /// 効果の推論の枠（先頭が関数の本体、クロージャごとに積む）。
     eff_stack: Vec<Vec<Atom>>,
     /// 関数の型の引数（`of(f)` の `f` になれる）。
     fn_params: Vec<String>,
+    /// 呼び出し側から借りている（または名前で参照した）関数の値の変数。移動しない（ADR 0013 の決定 3）。
+    fn_borrowed: HashSet<String>,
     /// `let` で束縛したクロージャの効果。
     local_eff: HashMap<String, Vec<Atom>>,
     /// 次のクロージャの効果を、親の枠に足さずに `last_closure` へ取っておく。
@@ -474,9 +478,11 @@ fn analyze(file: &File, opts: &Options) -> R<Ck> {
         table: opts.table.clone(),
         prims: opts.primitives.clone(),
         copy_override: opts.copy_override.clone(),
+        holding: Default::default(),
         targets: file.module.targets.clone(),
         eff_stack: vec![vec![]],
         fn_params: vec![],
+        fn_borrowed: HashSet::new(),
         local_eff: HashMap::new(),
         defer: false,
         ref_ok: false,
@@ -661,6 +667,16 @@ impl Ck {
         if self.try_unify(expected, actual) {
             return true;
         }
+        // 参照は値を表す（ADR 0011 の決定 4）。`Copyable` な値への参照は、値の位置で複製される
+        // （`min` の `&T` の結果を `T` として返す、など）。
+        if !matches!(self.shallow(expected), Ty::Ref(..) | Ty::Var(_)) {
+            if let Ty::Ref(_, ai) = self.shallow(actual) {
+                if self.holds(&ai, Prop::Copyable, 0) == Some(true) && self.coerce(expected, &ai, e)
+                {
+                    return true;
+                }
+            }
+        }
         if let Some(b) = self.refinement_base(actual) {
             if self.try_unify(expected, &b) {
                 return true;
@@ -795,10 +811,20 @@ impl Ck {
                     Prop::Copyable | Prop::Comparable | Prop::Numeric | Prop::Displayable => {
                         Some(false)
                     }
-                    _ => all(self
-                        .component_types(&n, &args)
-                        .iter()
-                        .map(|t| self.holds(t, p, d))),
+                    _ => {
+                        // 輪になった型は、輪の先でも性質が成り立つと仮定する
+                        let key = (Ty::Named(n.clone(), args.clone()), p);
+                        if self.holding.borrow().contains(&key) {
+                            return Some(true);
+                        }
+                        self.holding.borrow_mut().push(key);
+                        let r = all(self
+                            .component_types(&n, &args)
+                            .iter()
+                            .map(|t| self.holds(t, p, d)));
+                        self.holding.borrow_mut().pop();
+                        r
+                    }
                 },
                 None => Some(false),
             },
@@ -1048,7 +1074,8 @@ impl Ck {
                 _ => {}
             }
         }
-        // 3. 直接の再帰（間接化の型が決まるまでエラー。ADR 0011 の繰り延べの表）
+        // 3. 再帰する型（ADR 0013 補遺。輪を通らない腕のある列挙型だけ書ける）
+        let founded = self.well_founded();
         for item in &file.items {
             let (name, span) = match item {
                 Item::Struct(s) => (&s.name, s.span),
@@ -1056,11 +1083,11 @@ impl Ck {
                 _ => continue,
             };
             self.span = span;
-            if self.reaches(name, name, &mut HashSet::new()) {
+            if !founded.contains(name) && self.reaches(name, name, &mut HashSet::new()) {
                 return self.err(
                     ErrorKind::RecursiveType,
                     format!(
-                        "型 `{name}` が自分自身を直接含んでいる（間接化の型が決まるまで書けない）"
+                        "型 `{name}` が自分自身を含んでいて、値を作り始められない（再帰する型は、輪を通らない腕を持つ列挙型を経由して書く）"
                     ),
                 );
             }
@@ -1118,6 +1145,7 @@ impl Ck {
         let tn = match ity? {
             Ty::Named(tn, _) => tn,
             Ty::Str if std => "String".to_string(),
+            Ty::Int if std => "Int".to_string(),
             _ => {
                 return self.err(
                     ErrorKind::TypeMismatch,
@@ -1387,7 +1415,7 @@ impl Ck {
                             None => {
                                 return self.err(
                                     ErrorKind::UnknownType,
-                                    format!("型 `{n}` が見つからない（標準ライブラリの型は、後続の PR で扱う）"),
+                                    format!("型 `{n}` が見つからない（この版の標準ライブラリにある型は ADR 0013 の決定 2 の一覧に限る）"),
                                 )
                             }
                         },
@@ -1477,6 +1505,45 @@ impl Ck {
 
     /// `from` の定義が（組・構造体・列挙型・篩型をたどって）`target` を直接含むか。標準の入れ物
     /// （`List` など）は中身を別の場所に持つので、含むとは数えない。
+    /// 有限の値を作り始められる型の名前（輪を通らない腕・フィールドの組があるもの）。
+    /// 空集合から、増えなくなるまで広げる。
+    fn well_founded(&self) -> HashSet<String> {
+        fn ok(t: &Ty, set: &HashSet<String>, ck: &Ck) -> bool {
+            match t {
+                Ty::Named(n, _) => match ck.types.get(n) {
+                    Some(TypeDef::Opaque(_)) | None => true,
+                    _ => set.contains(n),
+                },
+                Ty::Tuple(ts) => ts.iter().all(|t| ok(t, set, ck)),
+                _ => true,
+            }
+        }
+        let mut set: HashSet<String> = HashSet::new();
+        loop {
+            let mut grew = false;
+            for (n, d) in &self.types {
+                if set.contains(n) {
+                    continue;
+                }
+                let good = match d {
+                    TypeDef::Alias(b) => ok(b, &set, self),
+                    TypeDef::Struct { fields, .. } => fields.iter().all(|(_, t)| ok(t, &set, self)),
+                    TypeDef::Enum { variants, .. } => variants
+                        .iter()
+                        .any(|(_, ts)| ts.iter().all(|t| ok(t, &set, self))),
+                    TypeDef::Opaque(_) => false,
+                };
+                if good {
+                    set.insert(n.clone());
+                    grew = true;
+                }
+            }
+            if !grew {
+                return set;
+            }
+        }
+    }
+
     fn reaches(&self, from: &str, target: &str, seen: &mut HashSet<String>) -> bool {
         let tys: Vec<Ty> = match self.types.get(from) {
             Some(TypeDef::Alias(b)) => vec![b.clone()],
@@ -1527,6 +1594,7 @@ impl Ck {
         self.ret = Ty::Unit;
         self.eff_stack = vec![vec![]];
         self.fn_params.clear();
+        self.fn_borrowed.clear();
         self.local_eff.clear();
         self.defer = false;
         self.flow = Flow::default();
@@ -1809,6 +1877,7 @@ impl Ck {
             .filter(|(_, t)| matches!(t, Ty::Fn(..)))
             .map(|(n, _)| n.clone())
             .collect();
+        self.fn_borrowed = self.fn_params.iter().cloned().collect();
         self.ret = sig.ret.clone();
         // 契約の式は効果の推論に数えない（捨てる枠で検査する）
         self.eff_stack.push(vec![]);
@@ -1859,8 +1928,15 @@ impl Ck {
         Ok(())
     }
 
+    /// 見えなくなった名前を `fn_borrowed` から外す。
+    fn sync_borrowed(&mut self) {
+        let live: HashSet<&String> = self.scopes.iter().flat_map(|s| s.keys()).collect();
+        self.fn_borrowed.retain(|k| live.contains(k));
+    }
+
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.sync_borrowed();
         // 見えなくなった変数の移動の記録は捨てる
         let live: HashSet<&String> = self.scopes.iter().flat_map(|s| s.keys()).collect();
         self.flow
@@ -1883,8 +1959,18 @@ impl Ck {
         let near = |k: &str| {
             k == path || k.starts_with(&format!("{path}.")) || path.starts_with(&format!("{k}."))
         };
+        let is_fn = {
+            let root = path.split('.').next().unwrap_or(path);
+            self.lookup(root)
+                .is_some_and(|l| matches!(self.zonk(&l.ty), Ty::Fn(..)))
+        };
         let msg = |k: &str, at: Span| {
-            if k == path {
+            if k == path && is_fn {
+                format!(
+                    "`{path}` は {} 行目で移動していて、ここでは使えない（関数の値は、引数として渡しても移動しない。別名 `let h = {path};` や、クロージャへの `move` のとらえ込みが移動になる。元の名前をそのまま使う）",
+                    at.line
+                )
+            } else if k == path {
                 format!(
                     "`{path}` は {} 行目で移動していて、ここでは使えない（移動した値は、再び代入するまで使えない。複製が要るなら `.clone()` を使う）",
                     at.line
@@ -2191,8 +2277,23 @@ impl Ck {
         Ok(())
     }
 
+    /// `e` が、移動しない関数の値（関数の型の引数・その別名・名前で参照した関数）の名前か。
+    fn borrowed_fn(&self, e: &Expr) -> bool {
+        let Expr::Name(n) = strip_paren(e) else {
+            return false;
+        };
+        match self.lookup(n) {
+            Some(_) => self.fn_borrowed.contains(n),
+            None => self.fns.contains_key(n),
+        }
+    }
+
     /// 式 `e`（型 `t`）の値が、移動する位置に置かれた。`Copyable` でない値を持つ場所なら、移動を記録する。
     fn consume(&mut self, e: &Expr, t: &Ty) -> R<()> {
+        // 借りている関数の値（引数・その別名）は、渡しても別名にしても移動しない
+        if self.borrowed_fn(e) {
+            return Ok(());
+        }
         if self.contract {
             if let Some((root, _)) = place_path(e) {
                 let ty = self.zonk(t);
@@ -2396,6 +2497,11 @@ impl Ck {
                     self.consume(value, &vt_moved)?;
                 }
                 self.bind(pattern, &fin, *mutable)?;
+                if matches!(self.zonk(&vt_moved), Ty::Fn(..)) && self.borrowed_fn(value) {
+                    if let Pattern::Bind(n) = pattern {
+                        self.fn_borrowed.insert(n.clone());
+                    }
+                }
                 let mut names = vec![];
                 pat_names(pattern, &mut names);
                 if *mutable && self.has_var(&fin) {
@@ -2731,6 +2837,8 @@ impl Ck {
     fn declare(&mut self, n: &str, ty: Ty, mutable: bool) -> R<()> {
         self.shadow_check(n)?;
         self.forget(n);
+        // 新しい束縛は、別名と分かるまで借用の関数値ではない
+        self.fn_borrowed.remove(n);
         self.scopes.last_mut().expect("scope").insert(
             n.to_string(),
             Local {
@@ -2854,6 +2962,7 @@ impl Ck {
             self.scopes.push(HashMap::new());
             let r = self.pat(p, st);
             self.scopes.pop();
+            self.sync_borrowed();
             r?;
         }
         self.span = sp;
@@ -2911,12 +3020,14 @@ impl Ck {
     }
 
     fn pat(&mut self, p: &Pattern, t: &Ty) -> R<()> {
+        // 中身が `&mut T` なら、束縛は `&mut T` のまま持つ（`get_mut` の結果の `Some(a)` で書き換える）
+        let exclusive = matches!(self.shallow(t), Ty::Ref(true, _));
         let t = self.peel(t);
         match p {
             Pattern::Wild => Ok(()),
             Pattern::Bind(n) => {
                 let t = if self.by_ref {
-                    Ty::Ref(false, Box::new(t))
+                    Ty::Ref(exclusive, Box::new(t))
                 } else {
                     if self.holds(&t, Prop::Copyable, 0) == Some(false) {
                         self.pat_moves = true;
@@ -3436,6 +3547,7 @@ impl Ck {
         };
         self.ret = saved;
         self.scopes.pop();
+        self.sync_borrowed();
         self.flow = outer_flow;
         self.log.truncate(log_mark);
         self.res.clear();
@@ -3498,6 +3610,10 @@ impl Ck {
         let mut caps = vec![];
         for (c, ty, mode) in done {
             match mode {
+                CapMode::Move if self.fn_borrowed.contains(&c.name) => {
+                    // 借りている関数の値は、とらえても移動しない。同じ呼び出しで借りていれば重なりになる
+                    self.log_acc(&c.name, AccKind::Move);
+                }
                 CapMode::Move => {
                     if self.holds(&ty, Prop::Copyable, 0).is_none() {
                         // 型が決まってから、使用を調べ直す
@@ -3825,7 +3941,9 @@ impl Ck {
     /// `T.名前`（`T` が型）のとき、その型の名前。
     fn type_path(&self, e: &Expr) -> Option<String> {
         match e {
-            Expr::Name(n) if self.lookup(n).is_none() && self.types.contains_key(n) => {
+            Expr::Name(n)
+                if self.lookup(n).is_none() && (self.types.contains_key(n) || n == "Int") =>
+            {
                 Some(n.clone())
             }
             _ => None,
@@ -3975,7 +4093,7 @@ impl Ck {
                     return self.err(
                         ErrorKind::UnknownName,
                         format!(
-                            "関数 `{n}` が見つからない（標準ライブラリの関数は、後続の PR で扱う）"
+                            "関数 `{n}` が見つからない（この版の標準ライブラリにある関数は ADR 0013 の決定 2 の一覧に限る）"
                         ),
                     );
                 }
@@ -4062,7 +4180,13 @@ impl Ck {
                 let rt0 = self.expr(expr)?;
                 let recv_res = std::mem::take(&mut self.res);
                 let rt = self.peel(&rt0);
+                let clone_sig = if name == "clone" {
+                    Some(self.clone_sig(&rt)?)
+                } else {
+                    None
+                };
                 let (tn, _) = match &rt {
+                    _ if clone_sig.is_some() => (self.sh(&rt), vec![]),
                     Ty::Named(tn, a) => (tn.clone(), a.clone()),
                     Ty::Str => ("String".to_string(), vec![]),
                     Ty::Var(_) => {
@@ -4084,7 +4208,9 @@ impl Ck {
                         ))
                     }
                 };
-                let Some(sig) = self.methods.get(&(tn.clone(), name.clone())).cloned() else {
+                let Some(sig) =
+                    clone_sig.or_else(|| self.methods.get(&(tn.clone(), name.clone())).cloned())
+                else {
                     return self.err(
                         ErrorKind::NoSuchMember,
                         format!("型 `{tn}` にメソッド `{name}` がない"),
@@ -4167,6 +4293,40 @@ impl Ck {
         }
     }
 
+    /// 組み込みの `clone(self: &T) -> T` のシグネチャ（ADR 0013 の決定 2）。受け手の型ごとに作る。
+    fn clone_sig(&self, rt: &Ty) -> R<Sig> {
+        let shown = self.sh(rt);
+        match self.shallow(rt) {
+            Ty::Var(_) => {
+                return self.err(
+                    ErrorKind::CannotInfer,
+                    "`clone` を呼ぶ式の型が決まっていない（先に型を決める）",
+                )
+            }
+            Ty::Fn(..) => {
+                return self.err(
+                    ErrorKind::NoSuchMember,
+                    "関数の型には `clone` がない（関数の値は引数に渡しても移動しないので、別名を作らずに元の名前を使う）",
+                )
+            }
+            _ => {}
+        }
+        if self.holds(rt, Prop::Copyable, 0) == Some(true) {
+            return self.err(
+                ErrorKind::CloneOfCopyable,
+                format!("`{shown}` は `Copyable` なので `clone` は要らない（値として読む位置で複製される）"),
+            );
+        }
+        Ok(Sig {
+            generics: vec![],
+            params: vec![("self".into(), Ty::Ref(false, Box::new(rt.clone())))],
+            ret: rt.clone(),
+            effects_none: true,
+            effects: vec![],
+            has_self: true,
+        })
+    }
+
     /// 引数として渡された関数の効果。
     fn fn_effects(&self, a: &Expr) -> Vec<Atom> {
         match strip_paren(a) {
@@ -4232,7 +4392,15 @@ impl Ck {
             self.span = sp;
             self.fn_value_form(a, &t)?;
             // 値で受け取る引数は移動する（参照の引数は `&x` と書くので場所ではない）
-            if !matches!(self.shallow(p), Ty::Ref(..)) {
+            // 関数の型の引数へ渡す関数の値は、呼び出しの間だけの共有借用（ADR 0013 の決定 3）
+            let fn_arg = matches!(self.shallow(p), Ty::Fn(..))
+                && matches!(self.zonk(&t), Ty::Fn(..))
+                && matches!(strip_paren(a), Expr::Name(n) if self.lookup(n).is_some());
+            if fn_arg {
+                if let Expr::Name(n) = strip_paren(a) {
+                    self.log_acc(n, AccKind::Shared);
+                }
+            } else if !matches!(self.shallow(p), Ty::Ref(..)) {
                 self.consume(a, &t)?;
             }
             let of_this = eff

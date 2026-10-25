@@ -185,7 +185,7 @@
 **M4 の完了条件の充足（M4 の効果操作の後の点検）**
 
 - 充足: サンプルの実行（01・02・04 は関数を直接、または `examples/04-effects/entry.sigil` を合わせて、03 は `main` が `150`・`150` を標準出力へ）、`02-read-port` の `OutOfRange`、`04-effects` の `load_prices`、`console`・`fs.read`・`fs.write`・`Shared`・`Cell`・`Path` の実行、決定 3 の条件 2（`tests/m4_effects.rs`）。
-- 未達だった 2 点（核の部分と OS の機能を使う部分のモジュール分割（ADR 0005）、決定 3 の条件 10 の M4 側）は、[ADR 0014](0014-core-and-os-split.md) で設計を決め、その完了条件のテスト（`tests/m4_core_split.rs` と `src/stdlib.rs` の単体テスト）に置き換えた。層と参照の検査は ADR 0014 の PR2a で入った（複数のファイルの宣言の一致は PR2b）。
+- 未達だった 2 点（核の部分と OS の機能を使う部分のモジュール分割（ADR 0005）、決定 3 の条件 10 の M4 側）は、[ADR 0014](0014-core-and-os-split.md) で設計を決め、その完了条件のテスト（`tests/m4_core_split.rs` と `src/stdlib.rs` の単体テスト）に置き換えた。層と参照の検査は ADR 0014 の PR2a、複数のファイルの宣言の一致（`ModuleMismatch`）は PR2b で入った。
 
 **M4**
 

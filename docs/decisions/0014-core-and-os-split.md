@@ -1,6 +1,6 @@
 # 0014: 標準ライブラリの核と OS 依存部分の分割（M4）
 
-- **状態**: 承認（2026-10-25。所有者の委任を受けて Claude が決定。ADR 0005 の「核」の定義を改めた点は所有者へ事後報告とする。計測による再検証の条件は末尾を参照）
+- **状態**: 承認・実装完了（2026-10-25 承認、PR1・PR2a・PR2b で実装。所有者の委任を受けて Claude が決定。ADR 0005 の「核」の定義を改めた点は所有者へ事後報告とする。計測による再検証の条件は末尾を参照）
 
 ## 背景
 
@@ -284,7 +284,10 @@ ADR 0006 の M4 の完了条件の「核の部分と OS の機能を使う部分
 | テスト名（案） | 内容 | 期待 |
 |---|---|---|
 | `run_sources_rejects_mismatched_modules` | `targets server` のファイルと `targets bare` のファイル（`console.log` を呼ぶ）を `run_sources` に渡す（どちらの順でも） | `RunError::Check`（`ModuleMismatch`） |
-| `run_sources_accepts_same_module` | `examples/04-effects` の 2 ファイル | 従来どおり通る（既存の `tests/m3_fs_cell.rs`） |
+| `run_sources_rejects_mismatched_name_and_trust` | `name` だけ、または `trust` だけが違う 2 ファイル | `RunError::Check`（`ModuleMismatch`） |
+| `run_sources_rejects_mismatched_targets_only` | `targets` だけが違う 2 ファイル | `RunError::Check`（`ModuleMismatch`） |
+| `run_sources_accepts_same_module` | 宣言が同じ 2 ファイル（核の宣言どうし） | 通る |
+| （既存）`tests/m3_fs_cell.rs` | `examples/04-effects` の 2 ファイル | 従来どおり通る |
 
 ADR 0006 の条件の表の条件 10 の M4 の欄に、上の参照のテストの名前を書き加える。
 
@@ -306,7 +309,7 @@ ADR 0006 の条件 10 の M5 側（核の部分だけを使うプログラムの
 
 ## 影響
 
-この ADR に従い、実装の PR で次を反映する。
+この ADR に従い、実装の PR（PR1・PR2a・PR2b）で次を反映した。
 
 - **ADR 0005**: 影響の「標準ライブラリの分割」の「核の部分（メモリ確保に依存しない部分）」に、本 ADR の決定 2 で「OS に依存しない部分（確保は使う）」と改め、確保なしの部分は P6 で分けることを追記する。
 - **ADR 0004**: 規則 1 の表の「使える出力先」に「実行環境なし」を加える（`state` だけ）。規則 5 に、`bare` の語と核のモジュールの参照の規則（本 ADR の決定 4）への参照を追記する。

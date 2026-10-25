@@ -331,3 +331,73 @@ fn hosted_modules_unchanged() {
     );
     ok(&with("server", "none", &items));
 }
+
+// ---- 複数のファイル（ADR 0014 PR2b） ----
+
+fn hosted_file(targets: &str, trust: &str, name: &str) -> String {
+    format!(
+        "module {name}\n  targets {targets}\n  trust {trust}\n\nfn h() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects console\n{{\n  console.log(&1);\n  return 0;\n}}\n"
+    )
+}
+
+fn core_file(targets: &str, trust: &str, name: &str) -> String {
+    format!(
+        "module {name}\n  targets {targets}\n  trust {trust}\n\nfn g() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return 1;\n}}\n"
+    )
+}
+
+fn mismatch(a: &str, b: &str) {
+    for srcs in [[a, b], [b, a]] {
+        match sigil::interp::run_sources(&srcs, "g", &[]) {
+            Err(f) => match f.error {
+                sigil::interp::RunError::Check(e) => {
+                    assert_eq!(e.kind, ErrorKind::ModuleMismatch, "{e}")
+                }
+                other => panic!("RunError::Check のはず: {other}"),
+            },
+            Ok(_) => panic!("エラーになるはずが成功した"),
+        }
+    }
+}
+
+#[test]
+fn run_sources_rejects_mismatched_modules() {
+    mismatch(
+        &hosted_file("server", "none", "m.a"),
+        &core_file("bare", "none", "m.a"),
+    );
+}
+
+#[test]
+fn run_sources_rejects_mismatched_name_and_trust() {
+    mismatch(
+        &core_file("bare", "none", "m.a"),
+        &core_file("bare", "none", "m.b"),
+    );
+    mismatch(
+        &core_file("bare", "none", "m.a"),
+        &core_file("bare", "base", "m.a"),
+    );
+}
+
+#[test]
+fn run_sources_accepts_same_module() {
+    let a = core_file("bare", "none", "m.a");
+    let b = "module m.a\n  targets bare\n  trust none\n\nfn k() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return g();\n}\n";
+    let o = sigil::interp::run_sources(&[&a, b], "k", &[]).unwrap();
+    assert_eq!(o.value, "1");
+}
+
+#[test]
+fn run_sources_rejects_mismatched_targets_only() {
+    let e = sigil::interp::run_sources(
+        &[
+            &core_file("bare", "none", "m.a"),
+            &core_file("server", "none", "m.a"),
+        ],
+        "g",
+        &[],
+    )
+    .unwrap_err();
+    assert!(matches!(e.error, sigil::interp::RunError::Check(_)));
+}

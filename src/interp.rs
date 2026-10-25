@@ -193,7 +193,7 @@ pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Result<O
     run_sources_with(&[src], func, args, opts)
 }
 
-/// 複数のソースの宣言を 1 つにまとめて検査し、実行する（最初のソースのモジュールの宣言を使う）。
+/// 複数のソースの宣言を 1 つにまとめて検査し、実行する（モジュールの宣言は全ソースで同じでなければ `ModuleMismatch`）。
 /// サンプルのファイルと、テスト用の入口の関数を持つファイルを合わせるために使う。
 pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
     run_sources_with(srcs, func, args, &Options::captured())
@@ -231,8 +231,20 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
     let mut items = vec![];
     for s in srcs {
         let f = crate::parse(s).map_err(|e| fail(RunError::Check(e)))?;
-        if module.is_none() {
-            module = Some(f.module.clone());
+        match &module {
+            None => module = Some(f.module.clone()),
+            // 最初のファイルの宣言を全体に使うので、食い違うファイルは黙って検査が外れる。
+            // 核（`bare`）の検査を迂回させないため、宣言がすべて同じことを求める（ADR 0014 決定 4）。
+            Some(m) => {
+                let d = &f.module;
+                if d.name != m.name || d.targets != m.targets || d.trust != m.trust {
+                    return Err(fail(RunError::Check(crate::Error::new(
+                        crate::ErrorKind::ModuleMismatch,
+                        d.span,
+                        "合わせるファイルのモジュールの宣言（名前・`targets`・`trust`）が最初のファイルと食い違う（宣言がすべて同じファイルだけを合わせられる）",
+                    ))));
+                }
+            }
         }
         items.extend(f.items);
     }

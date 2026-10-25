@@ -741,6 +741,14 @@ impl Ck {
         match p {
             Pattern::Wild => Ok(()),
             Pattern::Bind(n) => {
+                if self.lookup(n).is_some() {
+                    return self.err(
+                        ErrorKind::ShadowedName,
+                        format!(
+                            "名前 `{n}` は、同じ関数の外側ですでに使われている（名前の隠蔽は禁止。別の名前にする）"
+                        ),
+                    );
+                }
                 self.scopes.last_mut().expect("scope").insert(
                     n.clone(),
                     Var {
@@ -915,7 +923,7 @@ impl Ck {
         match op {
             UnOp::Not => {
                 let t = self.expr(inner)?;
-                if t != Ty::Bool {
+                if self.val(&t) != Ty::Bool {
                     return self.err(
                         ErrorKind::OperandTypes,
                         format!("`!` は `Bool` に使うが、`{}` である", show(&t)),
@@ -1022,7 +1030,7 @@ impl Ck {
                 Ok(Ty::Bool)
             }
             BinOp::And | BinOp::Or => {
-                if lt == Ty::Bool && rt == Ty::Bool {
+                if lv == Ty::Bool && rv == Ty::Bool {
                     Ok(Ty::Bool)
                 } else {
                     mismatch(self)

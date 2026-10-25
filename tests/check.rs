@@ -645,3 +645,60 @@ fn examples_stop_at_unsupported_not_at_a_false_type_error() {
         assert_eq!(e.kind, ErrorKind::Unsupported, "{p}: {e}");
     }
 }
+
+// ---- PR #22 のレビュー指摘 ----
+
+#[test]
+fn not_and_or_see_through_refs_and_refinements() {
+    let flag = "type Flag = Bool where self || !self;\n";
+    // 篩型の Bool と &Bool は、`!`・`&&`・`||` に使える。
+    ok(&format!(
+        "{flag}{}",
+        func(
+            "f(a: Flag, b: &Bool, c: Bool) -> Bool",
+            "  let x = !a;\n  let y = !b;\n  let z = a && b;\n  let w = b || a;\n  return x && y && z && w && !c;"
+        )
+    ));
+    // Bool でないものは相変わらずエラー。
+    assert_eq!(
+        body_kind("f(a: &Int) -> Bool", "  return !a;"),
+        ErrorKind::OperandTypes
+    );
+    assert_eq!(
+        body_kind("f(a: &Int, b: Bool) -> Bool", "  return a && b;"),
+        ErrorKind::OperandTypes
+    );
+}
+
+#[test]
+fn shadowing_is_an_error() {
+    // 引数と同じ名前の let
+    assert_eq!(
+        body_kind("f(x: Int) -> Int", "  let x = 1;\n  return x;"),
+        ErrorKind::ShadowedName
+    );
+    // 外側のスコープと同じ名前
+    assert_eq!(
+        body_kind(
+            "f(a: Int) -> Int",
+            "  let y = 1;\n  if a > 0 {\n    let y = 2;\n    return y;\n  }\n  return y;"
+        ),
+        ErrorKind::ShadowedName
+    );
+    // 同じ let の分解の中
+    assert_eq!(
+        body_kind("f(t: (Int, Int)) -> Int", "  let (a, a) = t;\n  return a;"),
+        ErrorKind::ShadowedName
+    );
+    // 兄弟のブロックでの再利用は隠蔽ではない
+    body_ok(
+        "f(a: Int) -> Int",
+        "  if a > 0 {\n    let y = 1;\n    return y;\n  }\n  if a < 0 {\n    let y = 2;\n    return y;\n  }\n  return 0;",
+    );
+    // 別の関数の同名の変数は関係ない
+    ok(&format!(
+        "{}{}",
+        func("f(a: Int) -> Int", "  let y = a;\n  return y;"),
+        func("g(a: Int) -> Int", "  let y = a;\n  return y;")
+    ));
+}

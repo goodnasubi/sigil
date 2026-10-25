@@ -173,10 +173,19 @@
 - **実ファイルの `fs.read`・`fs.write`**: `Options::fs_files` が `None`（既定）のとき、`fs.read(&p)` は実ファイルを UTF-8 の文字列として読み、`fs.write(&p, &s)` は `p` を作成または上書きする（`std::fs`）。`Options::fs_files` が `Some` のときは従来どおり表だけを使い、`fs.write` は表を書き換える（実ファイルには触れない）。差し替えの表と実ファイルは混ぜない。
 - **`IoError` の腕**: 失敗は `Err(IoError.NotFound(パス))`・`Err(IoError.PermissionDenied(パス))`・`Err(IoError.Other(パス))` のいずれかで、`std::io::ErrorKind` の `NotFound`・`PermissionDenied`・それ以外に対応する。`IoError` は不透明型のままで、プログラムから腕を取り出す手段はまだない（`ConfigError.Io` に包んで運ぶだけ）。OS のエラーメッセージは含めない（環境で変わり、テストが不安定になるため）。UTF-8 でないファイルの読み込みは `Other`。
 - **`Path`**: 実行時の表現は `String` のまま。`Path.new(s: &String) -> Path`、`join(self: &Path, name: &String) -> Path`、`file_name(self: &Path) -> Option<String>`、`parent(self: &Path) -> Option<Path>` を加えた（効果は `none`）。意味は Rust の `std::path::Path` に従う（`join` に絶対パスを渡すとそれに置き換わる。`/` の `parent`・`file_name` は `None`。`a` の `parent` は空のパス）。区切りは実行環境の OS のものを使う。パスの存在確認や正規化など、ファイルシステムを引く操作は加えていない。
-- **`Cell` の複製（決定）**: `Cell` 単体の `clone` は独立した複製を作る（中身も複製する）。`Shared<Cell<T>>` の `clone` は、同じ `Cell` を指す（共有の所有を増やす）。`Shared.new(cell)` は `Cell` を `Value::Shared` で包んで両者を区別する。構造体・一覧・列挙・組が `Shared` の外に `Cell` を持つとき、その値の `clone` は `Cell` も複製する。`Shared` の中の `Cell` は複製せず共有を保つ。`trace_drops` の記録中の `clone`（`deep_clone`）も同じ規則で、`Cell` 単体の `clone` は破棄される値を 2 つにし、`Shared` の `clone` は 1 つのままにする。
+- **`Cell` の複製（決定）**: `Cell` 単体の `clone` は独立した複製を作る（中身も複製する）。`Shared<Cell<T>>` の `clone` は、同じ `Cell` を指す（共有の所有を増やす）。`Shared.new(x)` は、`x` の型によらず `Value::Shared` で包み、共有の所有と単独の所有を区別する（`Shared<Cell<T>>` 以外の `Shared<T>` も、`clone` は同じ値を指したまま）。構造体・一覧・列挙・組が `Shared` の外に `Cell` を持つとき、その値の `clone` は `Cell` も複製する。`Shared` の中の `Cell` は複製せず共有を保つ。`trace_drops` の記録中の `clone`（`deep_clone`）も同じ規則で、`Cell` 単体の `clone` は破棄される値を 2 つにし、`Shared` の `clone` は 1 つのままにする。
+- **`console.log`**: 既定で本物の標準出力へ 1 行ずつ書く（標準出力が閉じていても実行は続ける）。`Options::capture_console`（`Options::captured()`）を立てると `Outcome::output` に溜める（テスト用の切替え。`run`・`run_sources` は溜める）。異常停止の前の出力は、書いた時点で出ている。
+- **`Path` の独立**: 実行時も `String` とは別の値（`Value::Path`）にした。`join`・`file_name`・`parent`・`is_empty` は `Path` だけが持ち、`String` には持たせない。
+- **OS 依存のまま（決定）**: `Path` の区切りと `file_name`・`parent` の判定は、実行環境の OS の `std::path` に従う。OS に依存しない固定の記法（例: 常に `/`）にはしない。
+- **未決（保留）**: (a) `Path.new`・`join` の引数型(`&String` か `String`)。(b) `IoError` の腕をプログラムから取り出す手段(`match` できるようにするか)。どちらも P0 のサンプルに必要がなく、現状（`&String`、取り出せない）のまま保留する。
 - **`--fs-double` の重複**: 同じ仮のパスを 2 回指定すると使い方の誤りとして終了コード 2 で止まる（後勝ちにも先勝ちにもしない）。
-- **残した制限**: `deep_clone` は再帰で、何万段も入れ子になった `Cell` 入りの値の `clone` はホストのスタックを使う（破棄は反復化済み）。`fs` は同期で、ファイルの読み書きの途中で中断した部分の書き込みは戻さない。`console.log` の出力は文字列に溜めたまま（本物の標準出力は未実装）。
+- **残した制限**: `deep_clone` は再帰で、何万段も入れ子になった `Cell` 入りの値の `clone` はホストのスタックを使う（破棄は反復化済み）。`fs` は同期で、ファイルの読み書きの途中で中断した部分の書き込みは戻さない。
 
+
+**M4 の完了条件の充足（M4 の効果操作の後の点検）**
+
+- 充足: サンプルの実行（01・02・04 は関数を直接、または `examples/04-effects/entry.sigil` を合わせて、03 は `main` が `150`・`150` を標準出力へ）、`02-read-port` の `OutOfRange`、`04-effects` の `load_prices`、`console`・`fs.read`・`fs.write`・`Shared`・`Cell`・`Path` の実行、決定 3 の条件 2（`tests/m4_effects.rs`）。
+- 未達（大きいので埋めていない）: 核の部分と OS の機能を使う部分のモジュール分割（ADR 0005）、決定 3 の条件 10 の M4 側（核のモジュールから OS の機能を参照するとエラー）。どちらも「核のモジュール」を言語・検査器でどう表すか（`trust base` や出力先との関係）の設計が先に要る。
 
 **M4**
 

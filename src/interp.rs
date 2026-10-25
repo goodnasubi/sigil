@@ -5,7 +5,7 @@
 //! - 異常停止（契約違反・`Int` の桁あふれ・0 での除算と剰余・標準の関数の `requires` 違反・スタックの枯渇）。
 //!   どれもプログラムからは捕まえられず、`Stop` として報告する。終了コードは種類によらず `STOP_EXIT_CODE`。
 //! - 実行の歩数に上限は設けない（ADR 0013 の決定 1）。スタックの枯渇だけは検出して異常停止にする。
-//! - `console.log` は出力を文字列に溜める（M4 で本物の入出力に替える）。`fs.read`・`fs.write` は既定で実ファイル（M4）。`Options::fs_files` を渡すと、その表だけを読み書きする差し替えになる。
+//! - `console.log` は既定で本物の標準出力へ書く。`Options::capture_console`（`Options::captured()`）で文字列に溜める切替えができる（テスト用）。`fs.read`・`fs.write` は既定で実ファイル（M4）。`Options::fs_files` を渡すと、その表だけを読み書きする差し替えになる。
 //!
 //! 値の持ち方:
 //! - 共有借用 `&x` は、その時点の値の写し（`Rc` の複製）。借用の間は元の値が変わらないことを検査器が保証する。
@@ -160,6 +160,18 @@ pub struct Options {
     /// この表（パス -> 内容）を引き、ない `p` は `Err(IoError.NotFound(p))` を返す。`fs.write` は表を書き換える。
     /// `None`（既定）のときは実際のファイルを読み書きする。
     pub fs_files: Option<std::collections::BTreeMap<String, String>>,
+    /// `console.log` の出力を `Outcome::output` に溜める（テスト用）。偽（既定）なら本物の標準出力へ書き、`output` は空。
+    pub capture_console: bool,
+}
+
+impl Options {
+    /// `console.log` の出力を溜める設定（テスト用）。`run`・`run_sources` はこれを使う。
+    pub fn captured() -> Self {
+        Options {
+            capture_console: true,
+            ..Options::default()
+        }
+    }
 }
 
 impl Default for Options {
@@ -168,12 +180,13 @@ impl Default for Options {
             stack_bytes: 256 * 1024 * 1024,
             trace_drops: false,
             fs_files: None,
+            capture_console: false,
         }
     }
 }
 
 pub fn run(src: &str, func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
-    run_sources_with(&[src], func, args, &Options::default())
+    run_sources_with(&[src], func, args, &Options::captured())
 }
 
 pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
@@ -183,7 +196,7 @@ pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Result<O
 /// 複数のソースの宣言を 1 つにまとめて検査し、実行する（最初のソースのモジュールの宣言を使う）。
 /// サンプルのファイルと、テスト用の入口の関数を持つファイルを合わせるために使う。
 pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
-    run_sources_with(srcs, func, args, &Options::default())
+    run_sources_with(srcs, func, args, &Options::captured())
 }
 
 pub fn run_sources_with(
@@ -313,6 +326,7 @@ fn coerce(a: &Arg, ty: &Type) -> Result<Value, String> {
         ("Float", Arg::Int(n)) => Ok(Value::Float(*n as f64)),
         ("Bool", Arg::Bool(b)) => Ok(Value::Bool(*b)),
         ("String", Arg::Str(x)) => Ok(Value::Str(x.as_str().into())),
+        ("Path", Arg::Str(x)) => Ok(Value::Path(x.as_str().into())),
         ("List", Arg::List(xs)) => {
             let elem = args.first();
             let mut items = Vec::with_capacity(xs.len());
@@ -325,7 +339,7 @@ fn coerce(a: &Arg, ty: &Type) -> Result<Value, String> {
             let float = matches!(elem, Some(Type::Path { path, .. }) if path.last().map(String::as_str) == Some("Float"));
             Ok(Value::List(Rc::new(ListVal { items, float })))
         }
-        ("Int" | "Float" | "Bool" | "String" | "List", _) => mismatch(),
+        ("Int" | "Float" | "Bool" | "String" | "Path" | "List", _) => mismatch(),
         _ => Ok(to_value(a)),
     }
 }
@@ -356,6 +370,8 @@ enum Value {
     Float(f64),
     Bool(bool),
     Str(Rc<str>),
+    /// `Path`。`String` とは別の値で、`String` のメソッドは使えない。
+    Path(Rc<str>),
     Tuple(Rc<Vec<Value>>),
     List(Rc<ListVal>),
     Struct(Rc<StructVal>),
@@ -428,9 +444,12 @@ fn is_copy_value(v: &Value) -> bool {
         | Value::Named(_)
         | Value::Ctor(..)
         | Value::MutRef(_) => true,
-        Value::Str(_) | Value::List(_) | Value::Struct(_) | Value::Cell(_) | Value::Shared(_) => {
-            false
-        }
+        Value::Str(_)
+        | Value::Path(_)
+        | Value::List(_)
+        | Value::Struct(_)
+        | Value::Cell(_)
+        | Value::Shared(_) => false,
         Value::Tuple(t) => t.iter().all(is_copy_value),
         Value::Variant(x) => {
             matches!(&*x.enum_name, "Option" | "Result") && x.args.iter().all(is_copy_value)
@@ -640,7 +659,7 @@ fn io_error(kind: std::io::ErrorKind, path: Rc<str>) -> Value {
         std::io::ErrorKind::PermissionDenied => "PermissionDenied",
         _ => "Other",
     };
-    variant("IoError", name, vec![Value::Str(path)])
+    variant("IoError", name, vec![Value::Path(path)])
 }
 
 fn ok(v: Value) -> Value {
@@ -753,7 +772,7 @@ impl Value {
             Value::Int(n) => n.to_string(),
             Value::Float(f) => fmt_float(*f),
             Value::Bool(b) => b.to_string(),
-            Value::Str(s) => {
+            Value::Str(s) | Value::Path(s) => {
                 if quote {
                     format!("{:?}", &**s)
                 } else {
@@ -796,6 +815,7 @@ impl Value {
             Value::Float(_) => "Float".into(),
             Value::Bool(_) => "Bool".into(),
             Value::Str(_) => "String".into(),
+            Value::Path(_) => "Path".into(),
             Value::List(_) => "List".into(),
             Value::Struct(s) => s.name.to_string(),
             Value::Variant(v) => v.enum_name.to_string(),
@@ -813,7 +833,7 @@ fn values_eq(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Int(y)) => x == y,
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) | (Value::Path(x), Value::Path(y)) => x == y,
         (Value::Tuple(x), Value::Tuple(y)) => seq_eq(x, y),
         (Value::List(x), Value::List(y)) => seq_eq(&x.items, &y.items),
         (Value::Struct(x), Value::Struct(y)) => {
@@ -933,6 +953,8 @@ struct Interp<'a> {
     prog: Program<'a>,
     frames: Vec<Frame>,
     out: String,
+    /// `console.log` を `out` に溜める（テスト用。偽なら本物の標準出力へ書く）。
+    capture: bool,
     line: u32,
     /// 入口の関数が戻った時点の名前と行。戻り値の表示中の停止（フレームが空）の位置に使う。
     exit_at: (String, u32),
@@ -1034,6 +1056,7 @@ impl<'a> Interp<'a> {
             prog,
             frames: vec![],
             out: String::new(),
+            capture: opts.capture_console,
             line: 0,
             exit_at: (String::new(), 0),
             base,
@@ -1814,8 +1837,14 @@ impl<'a> Interp<'a> {
                 let v = deref(a.remove(0));
                 let text = v.show(false);
                 self.after_deep()?;
-                self.out.push_str(&text);
-                self.out.push('\n');
+                if self.capture {
+                    self.out.push_str(&text);
+                    self.out.push('\n');
+                } else {
+                    use std::io::Write;
+                    // 標準出力が閉じていても実行は続ける（`sigil run ... | head` など）。
+                    let _ = writeln!(std::io::stdout().lock(), "{text}");
+                }
                 Ok(Value::Unit)
             }
             ("Int", "min_value") => Ok(Value::Int(i64::MIN)),
@@ -1827,17 +1856,14 @@ impl<'a> Interp<'a> {
                 deref(a.remove(0)),
             )))),
             // `Shared<T>` は共有の所有。値は `Rc` で共有されるので、そのまま包まずに返す。
-            // `Cell` を包むときだけ `Shared` の印を付ける（`clone` で共有を保つため）。
-            ("Shared", "new") if a.len() == 1 => Ok(match deref(a.remove(0)) {
-                c @ Value::Cell(_) => Value::Shared(Rc::new(c)),
-                other => other,
-            }),
+            // どの型の値も `Value::Shared` で包む（`clone` は同じ値を指したまま。ADR 0006 の M4 の記録）。
+            ("Shared", "new") if a.len() == 1 => Ok(Value::Shared(Rc::new(deref(a.remove(0))))),
             ("Path", "new") if a.len() == 1 => match deref(a.remove(0)) {
-                v @ Value::Str(_) => Ok(v),
+                Value::Str(x) => Ok(Value::Path(x)),
                 _ => unsupported("Path.new の引数"),
             },
             ("fs", "read") if a.len() == 1 => {
-                let Value::Str(p) = deref(a.remove(0)) else {
+                let Value::Path(p) = deref(a.remove(0)) else {
                     return unsupported("fs.read の引数");
                 };
                 // 差し替えの表があればそれだけを引く。なければ実ファイル。
@@ -1855,7 +1881,7 @@ impl<'a> Interp<'a> {
             ("fs", "write") if a.len() == 2 => {
                 let s = deref(a.remove(1));
                 let p = deref(a.remove(0));
-                let (Value::Str(p), Value::Str(s)) = (p, s) else {
+                let (Value::Path(p), Value::Str(s)) = (p, s) else {
                     return unsupported("fs.write の引数");
                 };
                 Ok(match &mut self.fs {
@@ -1989,6 +2015,7 @@ impl<'a> Interp<'a> {
         match &recv {
             Value::List(l) => self.list_method(name, l, args),
             Value::Str(s) => str_method(name, s, args),
+            Value::Path(p) => path_method(name, p, args),
             Value::Shared(inner) => self.builtin_method(name, (**inner).clone(), args),
             Value::Cell(c) => match (name, args.len()) {
                 ("get", 0) => Ok(c.borrow().clone()),
@@ -2163,15 +2190,24 @@ impl<'a> Interp<'a> {
     }
 }
 
-fn str_method(name: &str, s: &Rc<str>, a: Vec<Value>) -> R<Value> {
-    // `Path` は実行時には文字列。`join` は `std::path::Path::join`（絶対パスを渡すとそれに置き換わる）。
-    if name == "join" {
-        let [Value::Str(other)] = a.as_slice() else {
-            return unsupported("Path.join の引数");
-        };
-        let joined = std::path::Path::new(&**s).join(&**other);
-        return Ok(Value::Str(joined.to_string_lossy().as_ref().into()));
+/// `Path` のメソッド。意味は `std::path::Path` に従う（実行環境の OS の区切りを使う。ADR 0006 の M4 の記録）。
+fn path_method(name: &str, p: &Rc<str>, a: Vec<Value>) -> R<Value> {
+    let std_path = std::path::Path::new(&**p);
+    let text = |x: &std::path::Path| -> Rc<str> { x.to_string_lossy().as_ref().into() };
+    match (name, a.as_slice()) {
+        ("is_empty", []) => Ok(Value::Bool(p.is_empty())),
+        ("join", [Value::Str(other)]) => Ok(Value::Path(text(&std_path.join(&**other)))),
+        ("file_name", []) => Ok(std_path
+            .file_name()
+            .map_or_else(none, |n| some(Value::Str(text(n.as_ref()))))),
+        ("parent", []) => Ok(std_path
+            .parent()
+            .map_or_else(none, |n| some(Value::Path(text(n))))),
+        _ => unsupported(format!("Path.{name}")),
     }
+}
+
+fn str_method(name: &str, s: &Rc<str>, a: Vec<Value>) -> R<Value> {
     if !a.is_empty() {
         return unsupported(format!("String.{name}"));
     }
@@ -2193,14 +2229,6 @@ fn str_method(name: &str, s: &Rc<str>, a: Vec<Value>) -> R<Value> {
                 float: false,
             })))
         }
-        "file_name" => Ok(std::path::Path::new(&**s)
-            .file_name()
-            .map_or_else(none, |n| {
-                some(Value::Str(n.to_string_lossy().as_ref().into()))
-            })),
-        "parent" => Ok(std::path::Path::new(&**s).parent().map_or_else(none, |n| {
-            some(Value::Str(n.to_string_lossy().as_ref().into()))
-        })),
         "parse_int" => {
             let digits = s.strip_prefix('-').unwrap_or(s);
             let valid = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());

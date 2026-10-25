@@ -317,3 +317,78 @@ fn cli_real_file_read_without_a_double() {
     assert_eq!(String::from_utf8_lossy(&o.stdout), "Ok(8080)\n");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+// ---- console.log と Shared (非 Cell) ----
+
+#[test]
+fn cli_console_log_writes_to_real_stdout() {
+    let ex = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/03-ownership/ownership.sigil"
+    );
+    let o = Command::new(env!("CARGO_BIN_EXE_sigil"))
+        .args(["run", ex, "main"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "150\n150\n()\n");
+}
+
+#[test]
+fn console_capture_is_a_switch_and_default_leaves_output_empty() {
+    let src = format!(
+        "{HEAD}{}",
+        f("t() -> Int", "console", "console.log(&1);\nreturn 0;")
+    );
+    let o = run_with(&src, "t", &[], &Options::captured()).unwrap();
+    assert_eq!(o.output, "1\n");
+    // 既定は本物の標準出力へ書くので、溜めない。
+    let o = run_with(&src, "t", &[], &Options::default()).unwrap();
+    assert_eq!(o.output, "");
+}
+
+#[test]
+fn shared_of_a_struct_clone_stays_one_value() {
+    let o = Options {
+        trace_drops: true,
+        ..Options::default()
+    };
+    let src = format!(
+        "{HEAD}{}",
+        f(
+            "t() -> Int",
+            "none",
+            "let c = Shared.new(mk(7));\nlet d = c.clone();\nreturn 0;"
+        )
+    );
+    let r = run_with(&src, "t", &[], &o).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(r.drops.as_slice(), ["Probe { id: 7 }"], "{:?}", r.drops);
+}
+
+// ---- ADR 0006 決定 3 の条件 2: Shared と別の共有所有の型の間に暗黙の変換がない ----
+
+#[test]
+fn no_implicit_conversion_between_shared_and_another_shared_type() {
+    // テスト用に定義した別の共有所有の型（`Cell` を 1 つ持つ構造体）。
+    let defs =
+        "module m.a\n  targets server\n  trust none\n\nstruct MyShared {\n  c: Cell<Int>,\n}\n\n";
+    let use_shared = f(
+        "take(c: &Shared<Cell<Int>>) -> Int",
+        "state",
+        "return c.get();",
+    );
+    let use_mine = f("mine(m: &MyShared) -> Int", "none", "return 0;");
+    let to_shared = f("a(m: &MyShared) -> Int", "state", "return take(m);");
+    let to_mine = f(
+        "b() -> Int",
+        "state",
+        "let s = Shared.new(Cell.new(1));\nreturn mine(&s);",
+    );
+    let ok = format!("{defs}{use_shared}{use_mine}");
+    sigil::check::check_file(&sigil::parse(&ok).unwrap()).unwrap();
+    for bad in [to_shared, to_mine] {
+        let src = format!("{ok}{bad}");
+        let r = sigil::check::check_file(&sigil::parse(&src).unwrap());
+        assert!(r.is_err(), "型エラーになるはず:\n{src}");
+    }
+}

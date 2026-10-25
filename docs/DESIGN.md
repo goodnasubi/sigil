@@ -44,7 +44,7 @@
 | 論点 | 状態 | 決める時期（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)） |
 |---|---|---|
 | 構文の基本形 | **決定**: 波括弧 + 契約節（[ADR 0002](decisions/0002-syntax-family.md)） | — |
-| コンパイラを書く言語と P0 の段階分け | **提案**: Rust（ネイティブ出力は Cranelift）、M0〜M6（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)） | — |
+| コンパイラを書く言語と P0 の段階分け | **決定**: Rust（ネイティブ出力は Cranelift）、M0〜M6（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)） | — |
 | 総称型の括弧・本体の値の返し方 | 未決 | M0 の前 |
 | サンプルの未確定の表記（`old(...)`、篩型の `where` と `self`、`Port.check`、モジュールの宣言） | 未決 | M0 の前 |
 | 仕様の表現と、人間への示し方 | 未決 | M0 の前（最小限）。画面での示し方は P2 |
@@ -54,7 +54,7 @@
 | 効果（副作用）の扱い | **決定**: 固定カテゴリの静的宣言と、推論結果との完全一致検査（[ADR 0004](decisions/0004-effects.md)） | — |
 | 異常停止・無限ループを効果に数えるか | 未決 | M1 の前 |
 | モジュールの単位と出力先の指定 | 未決 | M1 の前 |
-| 出力先（ネイティブ・WebAssembly・JavaScript）とコンパイラ構成 | 未決（実装言語とネイティブのバックエンドは ADR 0006 で提案） | M5 の前（ネイティブ）。WebAssembly・JavaScript は P2 の前 |
+| 出力先（ネイティブ・WebAssembly・JavaScript）とコンパイラ構成 | 未決（実装言語とネイティブのバックエンドは ADR 0006 で決定） | M5 の前（ネイティブ）。WebAssembly・JavaScript は P2 の前 |
 | Python 連携の方式（束縛の生成、境界での値の受け渡し） | 未決 | P3 の前 |
 | 資源の解放時期の意味論（出力先によらず同じにする方法） | 未決 | P2 の前 |
 | UI の記述モデル（React の置き換え方） | 未決 | P2 の前 |

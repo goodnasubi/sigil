@@ -640,3 +640,72 @@ fn reachable_arms_still_pass() {
         "  return match o {\n    Some(0) => 1,\n    Some(x) => x,\n    None => 0,\n  };",
     );
 }
+
+// ---------- 関数の値の別名と入れ物（ADR 0011 決定 10） ----------
+
+#[test]
+fn alias_of_closure_keeps_effects() {
+    // let d = c; d(1)
+    let f = fx(
+        "f() -> Int",
+        "none",
+        "  let c = |x| emit(x);\n  let d = c;\n  return d(1);",
+    );
+    assert_eq!(kind(&f), ErrorKind::EffectMissing);
+}
+
+#[test]
+fn alias_of_function_item_keeps_effects() {
+    // let c = emit; c(1)
+    let f = fx("f() -> Int", "none", "  let c = emit;\n  return c(1);");
+    assert_eq!(kind(&f), ErrorKind::EffectMissing);
+    let g = fx("f() -> Int", "console", "  let c = emit;\n  return c(1);");
+    ok(&g);
+}
+
+#[test]
+fn alias_of_parameter_inherits_of() {
+    let bad = fx(
+        "k(f: fn(Int) -> Int) -> Int",
+        "none",
+        "  let g = f;\n  return g(1);",
+    );
+    assert_eq!(kind(&bad), ErrorKind::EffectMissing);
+    let good = fx(
+        "k(f: fn(Int) -> Int) -> Int",
+        "of(f)",
+        "  let g = f;\n  return g(1);",
+    );
+    ok(&good);
+}
+
+#[test]
+fn function_in_tuple_is_rejected() {
+    let f = fx(
+        "f() -> Int",
+        "none",
+        "  let c = |x| emit(x);\n  let t = (c, 1);\n  let (h, n) = t;\n  return h(n);",
+    );
+    assert_eq!(kind(&f), ErrorKind::FnTypePosition);
+}
+
+#[test]
+fn function_in_option_is_rejected() {
+    let f = fx(
+        "f() -> Int",
+        "none",
+        "  let c = |x| emit(x);\n  let o = Some(c);\n  match o {\n    Some(h) => {\n      return h(1);\n    }\n    None => {\n      return 0;\n    }\n  }\n  return 1;",
+    );
+    assert_eq!(kind(&f), ErrorKind::FnTypePosition);
+}
+
+#[test]
+fn function_returned_from_generic_call_is_rejected() {
+    let id = fx("id<T>(x: T) -> T", "none", "  return x;");
+    let f = fx(
+        "f() -> Int",
+        "none",
+        "  let c = |x| emit(x);\n  let d = id(c);\n  return d(1);",
+    );
+    assert_eq!(kind(&format!("{id}\n{f}")), ErrorKind::FnTypePosition);
+}

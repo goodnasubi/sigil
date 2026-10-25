@@ -1460,6 +1460,7 @@ impl Ck {
                 let vt = self.expr(value);
                 self.defer = false;
                 let vt = vt?;
+                self.fn_value_form(value, &vt)?;
                 if closure {
                     if let Pattern::Bind(n) = pattern {
                         let effs = std::mem::take(&mut self.last_closure);
@@ -1467,6 +1468,14 @@ impl Ck {
                     } else {
                         // 束縛されないクロージャは呼べない。効果は起こらない。
                         self.last_closure.clear();
+                    }
+                } else if matches!(self.zonk(&vt), Ty::Fn(..))
+                    && matches!(strip_paren(value), Expr::Name(_))
+                {
+                    // 別名は元の関数の効果を引き継ぐ（引数の別名なら `of(f)` のまま）。
+                    if let Pattern::Bind(n) = pattern {
+                        let effs = self.fn_effects(value);
+                        self.local_eff.insert(n.clone(), effs);
                     }
                 }
                 self.span = s.span;
@@ -1915,6 +1924,52 @@ impl Ck {
 
     /// `hint` は、クロージャの引数の型を文脈から決めるための期待される関数の型。
     fn expr_hint(&mut self, e: &Expr, hint: Option<&Ty>) -> R<Ty> {
+        let t = self.expr_hint_inner(e, hint)?;
+        // 関数の値は入れ物（組・借用・構造体・列挙型・List など）に入れられない
+        // （ADR 0011 決定 10）。入れると効果の追跡が漏れる。
+        if matches!(
+            e,
+            Expr::Tuple(..) | Expr::Call { .. } | Expr::StructLit { .. }
+        ) && self.nested_fn(&self.zonk(&t))
+        {
+            return self.err(
+                ErrorKind::FnTypePosition,
+                "関数の値は、組・構造体・列挙型・Option・Result・List などの中に入れられない（M1 では let の束縛・関数の引数・直接の呼び出しだけ）",
+            );
+        }
+        Ok(t)
+    }
+
+    /// 関数の型が、入れ物の中に入っているか。
+    fn nested_fn(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Tuple(ts) | Ty::Named(_, ts) => ts.iter().any(|x| self.has_fn(x)),
+            Ty::Ref(_, x) => self.has_fn(x),
+            _ => false,
+        }
+    }
+
+    fn has_fn(&self, t: &Ty) -> bool {
+        matches!(t, Ty::Fn(..)) || self.nested_fn(t)
+    }
+
+    /// 関数の型の式は、名前・クロージャ・値の構築子だけ。
+    fn fn_value_form(&self, e: &Expr, t: &Ty) -> R<()> {
+        if matches!(self.zonk(t), Ty::Fn(..))
+            && !matches!(
+                strip_paren(e),
+                Expr::Name(_) | Expr::Closure { .. } | Expr::Field { .. }
+            )
+        {
+            return self.err(
+                ErrorKind::FnTypePosition,
+                "関数の値は、名前かクロージャとしてだけ受け渡せる（呼び出しや分岐の結果として返せない）",
+            );
+        }
+        Ok(())
+    }
+
+    fn expr_hint_inner(&mut self, e: &Expr, hint: Option<&Ty>) -> R<Ty> {
         match e {
             Expr::Int(s) => {
                 if s.parse::<i64>().is_err() {
@@ -2584,6 +2639,8 @@ impl Ck {
                             .iter()
                             .filter_map(|t| match t {
                                 EffTerm::Cat(c) => Some(Atom::Cat(c.clone())),
+                                // TODO: 関数の型を入れ子にできるようにしたら、
+                                // ここで `of(..)` を実引数の効果へ展開する必要がある。
                                 EffTerm::Of(_) => None,
                             })
                             .collect()
@@ -2614,6 +2671,7 @@ impl Ck {
             self.defer = false;
             let t = t?;
             self.span = sp;
+            self.fn_value_form(a, &t)?;
             let of_this = eff
                 .terms
                 .iter()

@@ -610,15 +610,55 @@ fn refinement_declarations() {
     );
 }
 
-// ---- 範囲外（黙って通さない） ----
+// ---- 標準ライブラリ（仮の範囲。src/stdlib.rs） ----
 
 #[test]
-fn unsupported_is_explicit() {
-    let is_unsupported = |items: String| assert_eq!(kind(&items), ErrorKind::Unsupported);
-    // 標準ライブラリの関数・メソッドは後続の PR で扱う（黙って通さない）。
-    is_unsupported(func("f(x: String) -> Int", "  return x.len();"));
-    is_unsupported(func("f(x: List<Int>) -> Int", "  return x.len();"));
-    is_unsupported(func("f() -> List<Int>", "  return List.new();"));
+fn std_methods_and_functions_typecheck() {
+    body_ok("f(x: String) -> Int", "  return x.len();");
+    body_ok("f(x: &List<Int>) -> Int", "  return x.len();");
+    body_ok("f(x: &List<Int>) -> Int", "  return len(x);");
+    body_ok("f() -> List<Int>", "  return List.new();");
+    body_ok(
+        "f(xs: &mut List<Int>)",
+        "  xs.push(1);\n  let n = xs.len();\n  let g = xs.get(0);\n  let e = xs.is_empty();",
+    );
+    body_ok(
+        "f(o: Option<Int>) -> Int",
+        "  let a = o.is_some();\n  return o.unwrap_or(0);",
+    );
+    body_ok(
+        "f(r: Result<Int, String>) -> Option<Int>",
+        "  let a = r.is_ok();\n  return r.ok();",
+    );
+    body_ok(
+        "f(s: String) -> Result<Int, ParseError>",
+        "  return parse_int(trim(s));",
+    );
+}
+
+#[test]
+fn std_method_type_errors() {
+    assert_eq!(
+        body_kind("f(x: &mut List<Int>)", "  x.push(1.5);"),
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(
+        body_kind("f(x: String) -> Int", "  return x.nothing();"),
+        ErrorKind::NoSuchMember
+    );
+    assert_eq!(
+        body_kind("f() -> Int", "  return List.nothing();"),
+        ErrorKind::NoSuchMember
+    );
+}
+
+#[test]
+fn user_fn_shadows_std_fn() {
+    ok(&format!(
+        "{}{}",
+        func("len(x: Int) -> Int", "  return x;"),
+        func("g() -> Int", "  return len(3);")
+    ));
 }
 
 #[test]
@@ -638,27 +678,18 @@ fn syntax_errors_come_first() {
 }
 
 #[test]
-fn examples_stop_only_at_the_standard_library() {
-    // 05 は標準ライブラリを使わないので通る。残りの 4 つは標準ライブラリの関数・型・メソッドで止まる
-    // （PR4 で標準ライブラリの型を入れるまで）。誤った型エラーではなく、その名前で止まること。
-    let src = std::fs::read_to_string("examples/05-control/control.sigil").unwrap();
-    check(&src).unwrap();
-    for (p, name) in [
-        ("examples/01-average/c-brace.sigil", "len"),
-        ("examples/02-read-port/c-brace.sigil", "empty"),
-        ("examples/03-ownership/ownership.sigil", "max_by"),
-        ("examples/04-effects/effects.sigil", "Shared"),
+fn all_five_examples_check() {
+    for p in [
+        "examples/01-average/c-brace.sigil",
+        "examples/02-read-port/c-brace.sigil",
+        "examples/03-ownership/ownership.sigil",
+        "examples/04-effects/effects.sigil",
+        "examples/05-control/control.sigil",
     ] {
         let src = std::fs::read_to_string(p).unwrap();
-        let e = check(&src).unwrap_err();
-        assert!(
-            matches!(
-                e.kind,
-                ErrorKind::Unsupported | ErrorKind::UnknownName | ErrorKind::UnknownType
-            ),
-            "{p}: {e}"
-        );
-        assert!(e.to_string().contains(name), "{p}: {e}");
+        if let Err(e) = check(&src) {
+            panic!("{p}: {e}");
+        }
     }
 }
 

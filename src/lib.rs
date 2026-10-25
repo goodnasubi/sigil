@@ -11,6 +11,7 @@ pub mod fmt;
 pub mod lexer;
 pub mod parser;
 pub mod spec;
+pub mod stdlib;
 
 pub use error::{Error, ErrorKind, Phase, Span};
 pub use parser::{parse, parse_with_comments, Parsed};

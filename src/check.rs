@@ -164,7 +164,18 @@ struct Local {
 }
 
 /// 標準の前置きの型。利用者は同じ名前の型を宣言できない。
-const PRELUDE_TYPES: &[&str] = &["List", "Option", "Result", "Map", "Set", "Path", "IoError"];
+const PRELUDE_TYPES: &[&str] = &[
+    "List",
+    "Option",
+    "Result",
+    "Map",
+    "Set",
+    "Path",
+    "IoError",
+    "ParseError",
+    "Shared",
+    "Cell",
+];
 /// 型名を付けずに書く値（`Option`・`Result` の値）。
 const PRELUDE_VALUES: &[(&str, &str)] = &[
     ("Some", "Option"),
@@ -214,6 +225,8 @@ struct Ck {
     skipped: Option<Ty>,
     table: EffectTable,
     prims: Vec<Primitive>,
+    /// 標準の自由関数の名前（利用者が同名の関数を宣言すると外れる）。
+    std_fns: HashSet<String>,
     /// モジュールの `targets`。
     targets: Vec<String>,
     /// 効果の推論の枠（先頭が関数の本体、クロージャごとに積む）。
@@ -253,6 +266,7 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
         skipped: None,
         table: opts.table.clone(),
         prims: opts.primitives.clone(),
+        std_fns: HashSet::new(),
         targets: file.module.targets.clone(),
         eff_stack: vec![vec![]],
         fn_params: vec![],
@@ -306,14 +320,8 @@ impl Ck {
                 variants: vec![("Ok".into(), vec![t()]), ("Err".into(), vec![e()])],
             },
         );
-        for (n, k) in [
-            ("List", 1),
-            ("Set", 1),
-            ("Map", 2),
-            ("Path", 0),
-            ("IoError", 0),
-        ] {
-            self.types.insert(n.into(), TypeDef::Opaque(k));
+        for (n, k) in crate::stdlib::OPAQUE_TYPES {
+            self.types.insert((*n).into(), TypeDef::Opaque(*k));
         }
     }
 
@@ -788,11 +796,16 @@ impl Ck {
             }
         }
         // 4. 関数とメソッドのシグネチャ
+        self.register_std()?;
         self.register_primitives()?;
         for item in &file.items {
             match item {
                 Item::Fn(f) => {
                     self.span = f.span;
+                    // 標準の関数と同じ名前の関数は、利用者のものが優先される。
+                    if self.std_fns.remove(&f.name) {
+                        self.fns.remove(&f.name);
+                    }
                     if self.fns.contains_key(&f.name) {
                         return self.err(
                             ErrorKind::DuplicateDefinition,
@@ -802,7 +815,7 @@ impl Ck {
                     let sig = self.signature(f, None, &[])?;
                     self.fns.insert(f.name.clone(), sig);
                 }
-                Item::Impl(i) => self.register_impl(i)?,
+                Item::Impl(i) => self.register_impl(i, false)?,
                 _ => {}
             }
         }
@@ -830,19 +843,23 @@ impl Ck {
         Ok(())
     }
 
-    fn register_impl(&mut self, i: &ImplDecl) -> R<()> {
+    fn register_impl(&mut self, i: &ImplDecl, std: bool) -> R<()> {
         self.span = i.span;
         let outer = self.generics(&i.generics, true)?;
         self.tparams = outer.iter().map(|(n, _)| n.clone()).collect();
         let ity = self.resolve(&i.ty, Pos::Other);
         self.tparams.clear();
-        let Ty::Named(tn, _) = ity? else {
-            return self.err(
-                ErrorKind::TypeMismatch,
-                "`impl` は構造体・列挙型・篩型に付ける",
-            );
+        let tn = match ity? {
+            Ty::Named(tn, _) => tn,
+            Ty::Str if std => "String".to_string(),
+            _ => {
+                return self.err(
+                    ErrorKind::TypeMismatch,
+                    "`impl` は構造体・列挙型・篩型に付ける",
+                )
+            }
         };
-        if PRELUDE_TYPES.contains(&tn.as_str()) {
+        if !std && PRELUDE_TYPES.contains(&tn.as_str()) {
             return self.err(
                 ErrorKind::TypeMismatch,
                 format!("`impl` は型を宣言したモジュールの中にだけ書ける（標準の型 `{tn}` には付けられない）"),
@@ -991,6 +1008,50 @@ impl Ck {
             }
         }
         Ok(out)
+    }
+
+    /// 標準ライブラリの最小部分（`stdlib.rs` の表）を関数とメソッドの表に入れる。
+    fn register_std(&mut self) -> R<()> {
+        let saved = self.span;
+        for (sig, effects) in crate::stdlib::FREE_FNS {
+            let (name, s) = self.std_sig(&crate::stdlib::free_source(sig, effects))?;
+            self.std_fns.insert(name.clone());
+            self.fns.insert(name, s);
+        }
+        for (ns, sig, effects) in crate::stdlib::NAMESPACED_FNS {
+            let (name, s) = self.std_sig(&crate::stdlib::free_source(sig, effects))?;
+            self.fns.insert(format!("{ns}.{name}"), s);
+        }
+        for (head, fns) in crate::stdlib::IMPLS {
+            let file = self.std_parse(&crate::stdlib::impl_source(head, fns))?;
+            if let Some(Item::Impl(i)) = file.items.first() {
+                self.register_impl(i, true)?;
+            }
+        }
+        self.span = saved;
+        Ok(())
+    }
+
+    fn std_parse(&self, src: &str) -> R<File> {
+        parse(src).map_err(|e| {
+            Error::new(
+                ErrorKind::Unsupported,
+                self.span,
+                format!(
+                    "標準ライブラリの表が読めない（処理系の誤り）: {}\n{src}",
+                    e.message
+                ),
+            )
+        })
+    }
+
+    fn std_sig(&mut self, src: &str) -> R<(String, Sig)> {
+        let file = self.std_parse(src)?;
+        let Some(Item::Fn(f)) = file.items.first() else {
+            return self.err(ErrorKind::Unsupported, "標準ライブラリの表が読めない");
+        };
+        let sig = self.signature(f, None, &[])?;
+        Ok((f.name.clone(), sig))
     }
 
     /// 仮の関数（標準ライブラリが入るまでのテスト用）を関数の表に入れる。
@@ -1515,7 +1576,7 @@ impl Ck {
                 }
                 if *mutable && matches!(self.zonk(&fin), Ty::Fn(..)) {
                     return self.err(
-                        ErrorKind::FnTypePosition,
+                        ErrorKind::FnValueReassign,
                         "関数の型の変数は `let mut` で宣言できない（関数の値の再代入では効果を追えない。`let` で束縛し直す）",
                     );
                 }
@@ -1533,7 +1594,7 @@ impl Ck {
                 };
                 if matches!(self.zonk(&tt), Ty::Fn(..)) {
                     return self.err(
-                        ErrorKind::FnTypePosition,
+                        ErrorKind::FnValueReassign,
                         "関数の値は再代入できない（引数への代入も同じ。`let` で束縛し直す）",
                     );
                 }
@@ -2516,6 +2577,20 @@ impl Ck {
                 self.apply(ft, args, &format!("`{n}`"), eff)
             }
             Expr::Field { expr, name } => {
+                // 名前空間の関数: `fs.read(p)`・`console.log(x)`。
+                if let Expr::Name(ns) = &**expr {
+                    let key = format!("{ns}.{name}");
+                    if self.lookup(ns).is_none() && self.fns.contains_key(&key) {
+                        let sig = self.fns[&key].clone();
+                        let what = format!("`{key}`");
+                        let ft = self.fn_type(&sig, &what)?;
+                        let eff = Eff {
+                            terms: sig.effects.clone(),
+                            ..Eff::default()
+                        };
+                        return self.apply(ft, args, &what, eff);
+                    }
+                }
                 if let Some(tn) = self.type_path(expr) {
                     match self.types.get(&tn).cloned() {
                         Some(TypeDef::Enum { variants, .. })
@@ -2528,8 +2603,13 @@ impl Ck {
                             let ft = self.check_fn_type(&tn, &base);
                             return self.apply(ft, args, &format!("`{tn}.check`"), Eff::default());
                         }
-                        Some(TypeDef::Opaque(_)) => {
-                            return self.unsupported(&format!("標準ライブラリの `{tn}.{name}`"));
+                        Some(TypeDef::Opaque(_))
+                            if !self.methods.contains_key(&(tn.clone(), name.clone())) =>
+                        {
+                            return self.err(
+                                ErrorKind::NoSuchMember,
+                                format!("標準の型 `{tn}` に `{name}` という関数・値がない"),
+                            );
                         }
                         _ => {}
                     }
@@ -2558,6 +2638,7 @@ impl Ck {
                 let rt = self.peel(&rt0);
                 let (tn, _) = match &rt {
                     Ty::Named(tn, a) => (tn.clone(), a.clone()),
+                    Ty::Str => ("String".to_string(), vec![]),
                     Ty::Var(_) => {
                         return self.err(
                             ErrorKind::CannotInfer,
@@ -2578,11 +2659,6 @@ impl Ck {
                     }
                 };
                 let Some(sig) = self.methods.get(&(tn.clone(), name.clone())).cloned() else {
-                    if PRELUDE_TYPES.contains(&tn.as_str()) {
-                        return self.unsupported(&format!(
-                            "標準ライブラリの型 `{tn}` のメソッド `{name}`"
-                        ));
-                    }
                     return self.err(
                         ErrorKind::NoSuchMember,
                         format!("型 `{tn}` にメソッド `{name}` がない"),

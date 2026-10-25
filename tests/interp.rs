@@ -433,3 +433,100 @@ fn refinement_check_is_none_out_of_range() {
     assert_eq!(value(&items, "f", &[Arg::Int(0)]), "None");
     assert_eq!(value(&items, "f", &[Arg::Int(65536)]), "None");
 }
+
+// ---- 入口の引数の型合わせ ----
+
+#[test]
+fn int_argument_is_converted_for_a_float_parameter() {
+    let f = func(
+        "k(a: Float, b: Float) -> Float",
+        "none",
+        "none",
+        "return a / b;",
+    );
+    assert_eq!(value(&f, "k", &[Arg::Int(1), Arg::Int(0)]), "inf");
+    assert_eq!(value(&f, "k", &[Arg::Int(1), Arg::Float(2.0)]), "0.5");
+    let l = func(
+        "s(xs: &List<Float>) -> Float",
+        "none",
+        "none",
+        "return xs.sum();",
+    );
+    assert_eq!(value(&l, "s", &[Arg::List(vec![])]), "0.0");
+    assert_eq!(
+        value(&l, "s", &[Arg::List(vec![Arg::Int(1), Arg::Float(2.5)])]),
+        "3.5"
+    );
+}
+
+#[test]
+fn mismatched_argument_types_are_entry_errors() {
+    let f = func("k(a: Int, b: Bool) -> Int", "none", "none", "return a;");
+    for args in [
+        [Arg::Float(1.0), Arg::Bool(true)],
+        [Arg::Int(1), Arg::Int(1)],
+    ] {
+        let e = run(&program(&f), "k", &args).unwrap_err();
+        assert!(matches!(e.error, RunError::Entry(_)), "{}", e.error);
+    }
+}
+
+#[test]
+fn out_of_range_integer_literal_is_an_entry_error_on_the_command_line() {
+    let bin = env!("CARGO_BIN_EXE_sigil");
+    let dir = std::env::temp_dir().join(format!("sigil-interp-lit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("p.sigil");
+    let f = func("k(a: Float) -> Float", "none", "none", "return a;");
+    std::fs::write(&file, program(&f)).unwrap();
+    let run_cli = |a: &str| {
+        std::process::Command::new(bin)
+            .args(["run", file.to_str().unwrap(), "k", a])
+            .output()
+            .unwrap()
+    };
+    let out = run_cli("99999999999999999999");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("入口の指定が誤り"));
+    assert_eq!(run_cli("3").status.code(), Some(0));
+    assert_eq!(run_cli("1e30").status.code(), Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- 呼び出しを伴わない深い値 ----
+
+const CHAIN: &str = "enum L {\n  Nil,\n  Cons(Int, L),\n}\n\n";
+
+fn chain_fn(n: i64, tail: &str) -> String {
+    CHAIN.to_string()
+        + &func(
+            "build() -> Int",
+            "none",
+            "none",
+            &format!(
+                "let mut l = L.Nil;\nlet mut i = 0;\nwhile i < {n} {{\n    l = L.Cons(i, l);\n    i = i + 1;\n}}\n{tail}"
+            ),
+        )
+}
+
+#[test]
+fn very_deep_value_is_dropped_without_overflowing_the_host_stack() {
+    let items = chain_fn(3_000_000, "return 1;");
+    assert_eq!(value(&items, "build", &[]), "1");
+}
+
+#[test]
+fn comparing_very_deep_values_stops_instead_of_overflowing_the_host_stack() {
+    let items = chain_fn(
+        100_000,
+        "let mut m = L.Nil;\nlet mut j = 0;\nwhile j < 100000 {\n    m = L.Cons(j, m);\n    j = j + 1;\n}\nif l == m {\n    return 1;\n}\nreturn 0;",
+    );
+    let opts = Options {
+        stack_bytes: 1024 * 1024,
+    };
+    let e = run_with(&program(&items), "build", &[], &opts).unwrap_err();
+    match e.error {
+        RunError::Stop(s) => assert_eq!(s.kind, StopKind::StackExhausted),
+        other => panic!("{other}"),
+    }
+}

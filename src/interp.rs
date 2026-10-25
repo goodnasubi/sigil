@@ -119,8 +119,8 @@ impl fmt::Display for RunError {
         match self {
             RunError::Check(e) => write!(f, "{e}"),
             RunError::Stop(s) => write!(f, "{s}"),
-            RunError::Unsupported(m) => write!(f, "未対応: {m}"),
-            RunError::Entry(m) => write!(f, "入口の指定が誤り: {m}"),
+            RunError::Unsupported(m) => write!(f, " 未対応: {m}"),
+            RunError::Entry(m) => write!(f, " 入口の指定が誤り: {m}"),
         }
     }
 }
@@ -224,14 +224,31 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
             args.len()
         ))));
     }
-    let argv: Vec<Value> = args.iter().map(to_value).collect();
+    let mut argv = Vec::with_capacity(args.len());
+    for (p, a) in decl.params.iter().zip(args) {
+        match coerce(a, &p.ty) {
+            Ok(v) => argv.push(v),
+            Err(m) => {
+                return Err(fail(RunError::Entry(format!(
+                    "引数 {} の型が合わない: {m}",
+                    p.name
+                ))))
+            }
+        }
+    }
     let result = it.call_decl(decl, argv);
     let output = std::mem::take(&mut it.out);
     match result {
-        Ok(v) => Ok(Outcome {
-            value: v.show(true),
-            output,
-        }),
+        Ok(v) => {
+            let value = v.show(true);
+            if let Err(Abort::Stop(s)) = it.after_deep() {
+                return Err(Failure {
+                    error: RunError::Stop(s),
+                    output,
+                });
+            }
+            Ok(Outcome { value, output })
+        }
         Err(Abort::Stop(s)) => Err(Failure {
             error: RunError::Stop(s),
             output,
@@ -244,6 +261,52 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
             error: RunError::Unsupported("関数の外への return".into()),
             output,
         }),
+    }
+}
+
+fn arg_name(a: &Arg) -> &'static str {
+    match a {
+        Arg::Int(_) => "整数",
+        Arg::Float(_) => "小数",
+        Arg::Bool(_) => "真偽値",
+        Arg::Str(_) => "文字列",
+        Arg::List(_) => "一覧",
+    }
+}
+
+/// 入口の引数を、宣言の型に合わせて値にする。`Float` の位置の整数は `Float` にする。
+/// 組み込みの型（`Int`・`Float`・`Bool`・`String`・`List<T>`）に合わないものは誤りとする。
+/// それ以外の型（構造体・篩型など）は、与えられた値をそのまま渡す。
+fn coerce(a: &Arg, ty: &Type) -> Result<Value, String> {
+    let ty = match ty {
+        Type::Ref { inner, .. } => inner,
+        t => t,
+    };
+    let Type::Path { path, args } = ty else {
+        return Ok(to_value(a));
+    };
+    let name = path.last().map(String::as_str).unwrap_or("");
+    let mismatch = || Err(format!("{name} が要るが、{}が渡された", arg_name(a)));
+    match (name, a) {
+        ("Int", Arg::Int(n)) => Ok(Value::Int(*n)),
+        ("Float", Arg::Float(x)) => Ok(Value::Float(*x)),
+        ("Float", Arg::Int(n)) => Ok(Value::Float(*n as f64)),
+        ("Bool", Arg::Bool(b)) => Ok(Value::Bool(*b)),
+        ("String", Arg::Str(x)) => Ok(Value::Str(x.as_str().into())),
+        ("List", Arg::List(xs)) => {
+            let elem = args.first();
+            let mut items = Vec::with_capacity(xs.len());
+            for x in xs {
+                items.push(match elem {
+                    Some(t) => coerce(x, t)?,
+                    None => to_value(x),
+                });
+            }
+            let float = matches!(elem, Some(Type::Path { path, .. }) if path.last().map(String::as_str) == Some("Float"));
+            Ok(Value::List(Rc::new(ListVal { items, float })))
+        }
+        ("Int" | "Float" | "Bool" | "String" | "List", _) => mismatch(),
+        _ => Ok(to_value(a)),
     }
 }
 
@@ -304,6 +367,86 @@ struct VariantVal {
     enum_name: Rc<str>,
     name: Rc<str>,
     args: Vec<Value>,
+}
+
+/// 深く入れ子になった値（`Cons(1, Cons(2, ...))` を何百万段もつないだもの）を、再帰せずに破棄する。
+/// 既定の `Drop` は Rc の入れ子の深さだけ再帰し、ホストのスタックを溢れさせる。
+fn drain(mut stack: Vec<Value>) {
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::List(rc) => {
+                if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                    stack.append(&mut inner.items);
+                }
+            }
+            Value::Struct(rc) => {
+                if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                    stack.extend(
+                        std::mem::take(&mut inner.fields)
+                            .into_iter()
+                            .map(|(_, x)| x),
+                    );
+                }
+            }
+            Value::Variant(rc) => {
+                if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                    stack.append(&mut inner.args);
+                }
+            }
+            Value::Tuple(rc) => {
+                if let Ok(inner) = Rc::try_unwrap(rc) {
+                    stack.extend(inner);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for ListVal {
+    fn drop(&mut self) {
+        if !self.items.is_empty() {
+            drain(std::mem::take(&mut self.items));
+        }
+    }
+}
+
+impl Drop for StructVal {
+    fn drop(&mut self) {
+        if !self.fields.is_empty() {
+            drain(
+                std::mem::take(&mut self.fields)
+                    .into_iter()
+                    .map(|(_, x)| x)
+                    .collect(),
+            );
+        }
+    }
+}
+
+impl Drop for VariantVal {
+    fn drop(&mut self) {
+        if !self.args.is_empty() {
+            drain(std::mem::take(&mut self.args));
+        }
+    }
+}
+
+thread_local! {
+    /// 実行中のスレッドのスタックの基準と予算。表示・比較のような呼び出しを伴わない再帰も、これで止める。
+    static STACK_LIMIT: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, usize::MAX)) };
+    static DEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// スタックの予算を超えたら印を立てて真を返す。呼び出し側が `Interp::after_deep` で停止に変える。
+fn deep() -> bool {
+    let (base, budget) = STACK_LIMIT.with(|c| c.get());
+    if base.abs_diff(stack_addr()) > budget {
+        DEEP.with(|d| d.set(true));
+        true
+    } else {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -444,6 +587,9 @@ fn fmt_float(f: f64) -> String {
 impl Value {
     /// 表示。`quote` が偽なら、最上位の文字列だけ引用符を付けない（`console.log` 用）。
     fn show(&self, quote: bool) -> String {
+        if deep() {
+            return String::new();
+        }
         match self {
             Value::Unit => "()".into(),
             Value::Int(n) => n.to_string(),
@@ -506,6 +652,9 @@ impl Value {
 }
 
 fn values_eq(a: &Value, b: &Value) -> bool {
+    if deep() {
+        return false;
+    }
     match (a, b) {
         (Value::Unit, Value::Unit) | (Value::ParseError, Value::ParseError) => true,
         (Value::Int(x), Value::Int(y)) => x == y,
@@ -534,6 +683,9 @@ fn seq_eq(a: &[Value], b: &[Value]) -> bool {
 }
 
 fn cmp_val(a: &Value, b: &Value) -> Option<Ordering> {
+    if deep() {
+        return None;
+    }
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
@@ -716,12 +868,15 @@ impl<'a> Interp<'a> {
                 }
             }
         }
+        let base = stack_addr();
+        STACK_LIMIT.with(|c| c.set((base, opts.stack_bytes / 4 * 3)));
+        DEEP.with(|d| d.set(false));
         Interp {
             prog,
             frames: vec![],
             out: String::new(),
             line: 0,
-            base: stack_addr(),
+            base,
             budget: opts.stack_bytes / 4 * 3,
         }
     }
@@ -740,6 +895,15 @@ impl<'a> Interp<'a> {
             during: None,
             detail: detail.to_string(),
         })
+    }
+
+    /// 表示・比較の途中でスタックの予算を超えていたら、スタック枯渇の停止にする。
+    fn after_deep(&self) -> R<()> {
+        if DEEP.with(|d| d.replace(false)) {
+            Err(self.stop(StopKind::StackExhausted, "値の入れ子が深すぎる"))
+        } else {
+            Ok(())
+        }
     }
 
     fn check_stack(&self) -> R<()> {
@@ -1286,10 +1450,14 @@ impl<'a> Interp<'a> {
     fn binop(&self, op: BinOp, l: Value, r: Value) -> R<Value> {
         use BinOp::*;
         match op {
-            Eq => return Ok(Value::Bool(values_eq(&l, &r))),
-            Ne => return Ok(Value::Bool(!values_eq(&l, &r))),
+            Eq | Ne => {
+                let e = values_eq(&l, &r);
+                self.after_deep()?;
+                return Ok(Value::Bool(if op == Eq { e } else { !e }));
+            }
             Lt | Le | Gt | Ge => {
                 let o = cmp_val(&l, &r);
+                self.after_deep()?;
                 return Ok(Value::Bool(match op {
                     Lt => o == Some(Ordering::Less),
                     Le => matches!(o, Some(Ordering::Less | Ordering::Equal)),
@@ -1443,7 +1611,9 @@ impl<'a> Interp<'a> {
         match (ns, name) {
             ("console", "log") if a.len() == 1 => {
                 let v = deref(a.remove(0));
-                self.out.push_str(&v.show(false));
+                let text = v.show(false);
+                self.after_deep()?;
+                self.out.push_str(&text);
                 self.out.push('\n');
                 Ok(Value::Unit)
             }
@@ -1606,6 +1776,7 @@ impl<'a> Interp<'a> {
                         None => true,
                         Some((bk, _)) => {
                             let o = cmp_val(&k, bk);
+                            self.after_deep()?;
                             if name == "max_by" {
                                 o == Some(Ordering::Greater)
                             } else {
@@ -1643,6 +1814,7 @@ impl<'a> Interp<'a> {
                 let mut best = &items[0];
                 for x in &items[1..] {
                     let o = cmp_val(x, best);
+                    self.after_deep()?;
                     let better = if name == "min" {
                         o == Some(Ordering::Less)
                     } else {

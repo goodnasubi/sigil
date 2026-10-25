@@ -48,26 +48,33 @@ fn write_atomic(path: &str, content: &str) -> std::io::Result<()> {
     result
 }
 
-fn parse_arg(s: &str) -> sigil::interp::Arg {
+fn parse_arg(s: &str) -> Result<sigil::interp::Arg, String> {
     use sigil::interp::Arg;
     if s == "true" || s == "false" {
-        return Arg::Bool(s == "true");
+        return Ok(Arg::Bool(s == "true"));
     }
     if let Ok(i) = s.parse::<i64>() {
-        return Arg::Int(i);
+        return Ok(Arg::Int(i));
+    }
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("整数 {s} が Int の範囲外"));
     }
     if let Ok(f) = s.parse::<f64>() {
-        return Arg::Float(f);
+        return Ok(Arg::Float(f));
     }
     if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
         let items = if inner.trim().is_empty() {
             Vec::new()
         } else {
-            inner.split(',').map(|x| parse_arg(x.trim())).collect()
+            inner
+                .split(',')
+                .map(|x| parse_arg(x.trim()))
+                .collect::<Result<_, _>>()?
         };
-        return Arg::List(items);
+        return Ok(Arg::List(items));
     }
-    Arg::Str(s.to_string())
+    Ok(Arg::Str(s.to_string()))
 }
 
 /// 異常停止の終了コード（ADR 0006 の M3 の記録）。種類によらず同じ値。
@@ -190,7 +197,17 @@ fn main() -> ExitCode {
             let Some(src) = read(path) else {
                 return ExitCode::FAILURE;
             };
-            let call: Vec<sigil::interp::Arg> = args[3..].iter().map(|a| parse_arg(a)).collect();
+            let call = match args[3..]
+                .iter()
+                .map(|a| parse_arg(a))
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(c) => c,
+                Err(m) => {
+                    eprintln!("{path}: 入口の指定が誤り: {m}");
+                    return ExitCode::FAILURE;
+                }
+            };
             match sigil::interp::run(&src, &args[2], &call) {
                 Ok(out) => {
                     print!("{}", out.output);

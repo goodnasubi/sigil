@@ -3,7 +3,7 @@
 // 参照を二級に限る規則（構造体に参照を持てない、参照の返却は借用の引数が 1 つのときだけ）を示す。
 
 module examples.ownership
-  targets server, browser
+  targets browser, server
   trust none
 
 struct Account {

@@ -2,7 +2,7 @@
 // 純粋関数。シグネチャの後に 4 つの契約節を固定順で並べ、本体を波括弧で囲む。
 
 module examples.average
-  targets server, browser
+  targets browser, server
   trust none
 
 fn average(xs: List<Float>) -> Float

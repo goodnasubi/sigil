@@ -46,8 +46,9 @@
 | 構文の基本形 | **決定**: 波括弧 + 契約節（[ADR 0002](decisions/0002-syntax-family.md)） | — |
 | コンパイラを書く言語と P0 の段階分け | **決定**: Rust（ネイティブ出力は Cranelift）、M0〜M6（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)） | — |
 | 総称型の括弧・本体の値の返し方 | **決定**: 型の位置の `<>`、`return` 必須（[ADR 0008](decisions/0008-m0-notation.md)） | — |
-| サンプルの未確定の表記（`old(...)`、篩型の `where` と `self`、`Port.check`、モジュールの宣言） | **決定**: `old(式)`、`where` + `self`、`T.check(v) -> Option<T>`、`module` の宣言（`targets`・`trust` の 2 節）（[ADR 0008](decisions/0008-m0-notation.md)） | — |
+| サンプルの未確定の表記（`old(...)`、篩型の `where` と `self`、`Port.check`、モジュールの宣言） | **決定**: `old(式)`、`where` + `self`、`T.check(v) -> Option<T>`、`module` の宣言（`targets`・`trust` の 2 節）、`if` は文で値は `match`、効果の並べ方（[ADR 0008](decisions/0008-m0-notation.md)） | — |
 | 仕様の表現と、人間への示し方 | **決定**（最小限）: `sigil spec` は日本語の定型文、条件の式はソースの表記のまま（[ADR 0008](decisions/0008-m0-notation.md)）。式の訳し方・画面での示し方・機械向けの形式は未決 | 機械向けの形式は M6 の前。画面での示し方は P2 |
+| 字句と文法の全体仕様（文字列・コメント・識別子・演算子の優先順位など） | 未決 | M0 の前 |
 | 型システムの範囲 | 未決 | M1 の前 |
 | 所有権・借用の規則 | **決定**: 参照を二級に限る（ライフタイム注釈なし）（[ADR 0003](decisions/0003-ownership-and-borrowing.md)） | — |
 | 契約（事前・事後条件）の検査方法（静的 / 実行時） | **決定**: P0 は実行時検査のみ（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)）。静的検査の範囲と時期は未決 | 静的検査は P0 の完了後 |

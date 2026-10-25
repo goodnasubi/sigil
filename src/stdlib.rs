@@ -1,8 +1,12 @@
 //! 標準ライブラリの最小部分のシグネチャと効果の表（M1）。
 //!
-//! 効果を持たない部分の一覧は ADR 0013 の決定 2 が正式に決めたもの（M3 でインタプリタが本体を持つ）。
-//! 効果を持つ部分（`Path`・`IoError`・`console`・`fs`・`Shared`・`Cell`）は、標準ライブラリの分割を
-//! 決める ADR（M4 の前）まで暫定。この表は本体を持たず、シグネチャと効果だけを持つ。型検査器はこの表を `Sigil` のシグネチャとして読み、利用者の宣言と同じ表に入れる。
+//! 効果を持たない部分の一覧は ADR 0013 の決定 2 が、効果を持つ部分（`Path`・`IoError`・`console`・`fs`・
+//! `Shared`・`Cell`）を含む全体の層への振り分けは ADR 0014 の決定 2 が正式に決めたもの（M3 でインタプリタが
+//! 本体を持つ）。この表は本体を持たず、シグネチャと効果だけを持つ。型検査器はこの表を `Sigil` のシグネチャとして読み、利用者の宣言と同じ表に入れる。
+//!
+//! 層（ADR 0014 の決定 2・4）: 各表の行に `Layer` の列を持つ。`Core` は OS に依存しない部分（仮のモジュール
+//! `std.core`、`targets bare, browser, server`）、`Os` は OS の機能に意味が依存する部分（`std.os`、`targets browser, server`）。
+//! 行を層の間で移すのは 1 語の変更だが、`Os` の行の集合は単体テストで ADR の一覧に固定してある。
 //!
 //! 表の書き方:
 //! - 自由関数（`FREE_FNS`）: 名前空間のない関数。`Copyable` な値だけを受け取るものに限る。
@@ -18,30 +22,50 @@
 //! 仮の決めごと（標準ライブラリの最小部分を決める ADR まで暫定）:
 //! - `List` の取り出しは参照を返す（`get`: `Option<&T>`。ADR 0012 の決定 3）。
 
+/// 標準ライブラリの層（ADR 0014 の決定 2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// OS に依存しない部分（メモリの確保は使う）。
+    Core,
+    /// OS の機能に意味が依存する部分。
+    Os,
+}
+
 /// (シグネチャ, 効果)。効果は `effects` 節の中身（`none`・`console`・`of(f)` など）。
 pub type Entry = (&'static str, &'static str);
 
 /// 標準の型で、中身を見せないもの（名前, 型引数の数）。
-pub const OPAQUE_TYPES: &[(&str, usize)] = &[
-    ("List", 1),
-    ("Path", 0),
-    ("IoError", 0),
-    ("ParseError", 0),
-    ("Shared", 1),
-    ("Cell", 1),
+pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
+    ("List", 1, Layer::Core),
+    ("Path", 0, Layer::Os),
+    ("IoError", 0, Layer::Os),
+    ("ParseError", 0, Layer::Core),
+    ("Shared", 1, Layer::Core),
+    ("Cell", 1, Layer::Core),
 ];
 
 /// 名前空間のない関数。読むだけの操作はメソッドに移したので、`Copyable` な値の関数だけが残る。
-pub const FREE_FNS: &[Entry] = &[
-    ("to_float(n: Int) -> Float", "none"),
-    ("to_int(x: Float) -> Option<Int>", "none"),
+pub const FREE_FNS: &[(Layer, &str, &str)] = &[
+    (Layer::Core, "to_float(n: Int) -> Float", "none"),
+    (Layer::Core, "to_int(x: Float) -> Option<Int>", "none"),
 ];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
-pub const NAMESPACED_FNS: &[(&str, &str, &str)] = &[
-    ("console", "log<T: Displayable>(x: &T)", "console"),
-    ("fs", "read(p: &Path) -> Result<String, IoError>", "fs.read"),
+pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (
+        Layer::Os,
+        "console",
+        "log<T: Displayable>(x: &T)",
+        "console",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "read(p: &Path) -> Result<String, IoError>",
+        "fs.read",
+    ),
+    (
+        Layer::Os,
         "fs",
         "write(p: &Path, s: &String) -> Result<Unit, IoError>",
         "fs.write",
@@ -55,8 +79,9 @@ pub const REQUIRES: &[(&str, &str)] = &[
 ];
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
-pub const IMPLS: &[(&str, &[Entry])] = &[
+pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
     (
+        Layer::Core,
         "<T> List<T>",
         &[
             ("new() -> List<T>", "none"),
@@ -84,18 +109,21 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
         ],
     ),
     (
+        Layer::Core,
         "<T: Numeric> List<T>",
         &[("sum(self: &List<T>) -> T", "none")],
     ),
     (
+        Layer::Core,
         "<T: Comparable> List<T>",
         &[
             ("min(self: &List<T>) -> &T", "none"),
             ("max(self: &List<T>) -> &T", "none"),
         ],
     ),
-    ("Int", &[("min_value() -> Int", "none")]),
+    (Layer::Core, "Int", &[("min_value() -> Int", "none")]),
     (
+        Layer::Core,
         "<T> Option<T>",
         &[
             ("is_some(self: &Option<T>) -> Bool", "none"),
@@ -112,6 +140,7 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
         ],
     ),
     (
+        Layer::Core,
         "<T, E> Result<T, E>",
         &[
             ("is_ok(self: &Result<T, E>) -> Bool", "none"),
@@ -129,6 +158,7 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
         ],
     ),
     (
+        Layer::Core,
         "String",
         &[
             ("len(self: &String) -> Int", "none"),
@@ -142,6 +172,7 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
         ],
     ),
     (
+        Layer::Os,
         "Path",
         &[
             ("new(s: &String) -> Path", "none"),
@@ -151,13 +182,23 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
             ("parent(self: &Path) -> Option<Path>", "none"),
         ],
     ),
-    ("<T> Cell<T>", &[("new(value: T) -> Cell<T>", "none")]),
-    ("<T> Shared<T>", &[("new(value: T) -> Shared<T>", "none")]),
     (
+        Layer::Core,
+        "<T> Cell<T>",
+        &[("new(value: T) -> Cell<T>", "none")],
+    ),
+    (
+        Layer::Core,
+        "<T> Shared<T>",
+        &[("new(value: T) -> Shared<T>", "none")],
+    ),
+    (
+        Layer::Core,
         "<T: Copyable> Shared<Cell<T>>",
         &[("get(self: &Shared<Cell<T>>) -> T", "state")],
     ),
     (
+        Layer::Core,
         "<T> Shared<Cell<T>>",
         &[("set(self: &Shared<Cell<T>>, value: T)", "state")],
     ),
@@ -173,16 +214,20 @@ fn clauses(sig: &str, effects: &str) -> String {
     )
 }
 
-/// 型検査器が読む `Sigil` のソース。自由関数と名前空間の関数は `fn` の並び、メソッドは `impl` の並び。
-pub fn free_source(sig: &str, effects: &str) -> String {
-    format!(
-        "module std.std\n  targets browser, server\n  trust base\n\nfn {sig}{}",
-        clauses(sig, effects)
-    )
+fn module_head(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Core => "module std.core\n  targets bare, browser, server\n  trust base\n\n",
+        Layer::Os => "module std.os\n  targets browser, server\n  trust base\n\n",
+    }
 }
 
-pub fn impl_source(head: &str, fns: &[Entry]) -> String {
-    let mut s = String::from("module std.std\n  targets browser, server\n  trust base\n\n");
+/// 型検査器が読む `Sigil` のソース。自由関数と名前空間の関数は `fn` の並び、メソッドは `impl` の並び。
+pub fn free_source(layer: Layer, sig: &str, effects: &str) -> String {
+    format!("{}fn {sig}{}", module_head(layer), clauses(sig, effects))
+}
+
+pub fn impl_source(layer: Layer, head: &str, fns: &[Entry]) -> String {
+    let mut s = String::from(module_head(layer));
     s.push_str(&format!("impl{} {{\n", head_with_space(head)));
     for (sig, effects) in fns {
         s.push_str(&format!("fn {sig}{}", clauses(sig, effects)));
@@ -197,5 +242,113 @@ fn head_with_space(head: &str) -> String {
         head.to_string()
     } else {
         format!(" {head}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::effects::EffectTable;
+    use std::collections::BTreeSet;
+
+    /// 型名・`ns.name`・`Type.name` の形で名前を集める。
+    fn names(layer: Layer) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        let fn_name = |sig: &str| sig.split(['(', '<']).next().unwrap().to_string();
+        for (n, _, l) in OPAQUE_TYPES {
+            if *l == layer {
+                out.insert((*n).to_string());
+            }
+        }
+        for (l, sig, _) in FREE_FNS {
+            if *l == layer {
+                out.insert(fn_name(sig));
+            }
+        }
+        for (l, ns, sig, _) in NAMESPACED_FNS {
+            if *l == layer {
+                out.insert(format!("{ns}.{}", fn_name(sig)));
+            }
+        }
+        for (l, head, fns) in IMPLS {
+            if *l == layer {
+                let ty = head.rsplit('>').next().unwrap().trim();
+                let ty = ty.split('<').next().unwrap();
+                for (sig, _) in *fns {
+                    out.insert(format!("{ty}.{}", fn_name(sig)));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn os_layer_is_exactly_the_adr_list() {
+        // ADR 0014 決定 2 の OS 層。行を層の間で移すには ADR を改める。
+        let want: BTreeSet<String> = [
+            "console.log",
+            "fs.read",
+            "fs.write",
+            "Path",
+            "Path.new",
+            "Path.is_empty",
+            "Path.join",
+            "Path.file_name",
+            "Path.parent",
+            "IoError",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(names(Layer::Os), want);
+    }
+
+    fn mentions_os_type(sig: &str) -> bool {
+        sig.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == "Path" || w == "IoError")
+    }
+
+    #[test]
+    fn core_rows_do_not_mention_os_types() {
+        for (l, sig, _) in FREE_FNS {
+            assert!(*l != Layer::Core || !mentions_os_type(sig), "{sig}");
+        }
+        for (l, _, sig, _) in NAMESPACED_FNS {
+            assert!(*l != Layer::Core || !mentions_os_type(sig), "{sig}");
+        }
+        for (l, head, fns) in IMPLS {
+            if *l == Layer::Core {
+                assert!(!mentions_os_type(head), "{head}");
+                for (sig, _) in *fns {
+                    assert!(!mentions_os_type(sig), "{sig}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn core_rows_effects_allowed_on_bare() {
+        let table = EffectTable::standard();
+        let mut effects: Vec<&str> = vec![];
+        effects.extend(FREE_FNS.iter().filter(|r| r.0 == Layer::Core).map(|r| r.2));
+        effects.extend(
+            NAMESPACED_FNS
+                .iter()
+                .filter(|r| r.0 == Layer::Core)
+                .map(|r| r.3),
+        );
+        for (l, _, fns) in IMPLS {
+            if *l == Layer::Core {
+                effects.extend(fns.iter().map(|(_, e)| *e));
+            }
+        }
+        for e in effects {
+            if e == "none" || e.starts_with("of(") {
+                continue;
+            }
+            for atom in e.split(',').map(str::trim) {
+                assert!(table.allowed_on(atom, "bare"), "{atom}");
+            }
+        }
     }
 }

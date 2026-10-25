@@ -1,6 +1,7 @@
 //! ADR 0014 の PR1: 出力先 `bare` と効果の表の `bare` の列。
 
 use sigil::effects::EffectTable;
+use sigil::interp::{run, Arg};
 use sigil::{check::check, parse, ErrorKind};
 
 const GOOD_FN: &str = "fn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return x;\n}\n";
@@ -118,4 +119,215 @@ fn hosted_targets_still_allow_console() {
     let t = EffectTable::standard();
     assert!(t.allowed_on("console", "server") && t.allowed_on("console", "browser"));
     assert!(t.allowed_on("fs.read", "server") && !t.allowed_on("fs.read", "browser"));
+}
+
+// ---- 参照（ADR 0014 決定 4）----
+
+fn with(targets: &str, trust: &str, items: &str) -> String {
+    format!("module m.a\n  targets {targets}\n  trust {trust}\n\n{items}")
+}
+
+fn func(sig: &str, effects: &str, body: &str) -> String {
+    format!(
+        "fn {sig}\n  intent \"x\"\n  requires none\n  ensures none\n  effects {effects}\n{{\n{body}\n}}\n\n"
+    )
+}
+
+fn kind_of(src: &str) -> ErrorKind {
+    match check(src) {
+        Ok(()) => panic!("エラーになるはずが成功した:\n{src}"),
+        Err(e) => e.kind,
+    }
+}
+
+fn ok(src: &str) {
+    if let Err(e) = check(src) {
+        panic!("{e}\n{src}");
+    }
+}
+
+fn core_kind(items: &str) -> ErrorKind {
+    kind_of(&with("bare", "none", items))
+}
+
+fn core_msg(items: &str) -> String {
+    check(&with("bare", "none", items)).unwrap_err().message
+}
+
+#[test]
+fn core_rejects_console_log() {
+    // `effects console` を宣言しても、`OsItemInCore` が先に出る。
+    for effects in ["none", "console"] {
+        let items = func("f() -> Int", effects, "  console.log(&1);\n  return 0;");
+        assert_eq!(core_kind(&items), ErrorKind::OsItemInCore, "{effects}");
+    }
+    let m = core_msg(&func(
+        "f() -> Int",
+        "none",
+        "  console.log(&1);\n  return 0;",
+    ));
+    assert!(
+        m.contains("console.log") && m.contains("std.os") && m.contains("bare"),
+        "{m}"
+    );
+}
+
+#[test]
+fn core_rejects_fs_read_and_write() {
+    let read = func(
+        "f() -> Int",
+        "fs.read",
+        "  let s = \"a\";\n  let r = fs.read(&s);\n  return 0;",
+    );
+    assert_eq!(core_kind(&read), ErrorKind::OsItemInCore);
+    let write = func(
+        "f() -> Int",
+        "fs.write",
+        "  let s = \"a\";\n  let r = fs.write(&s, &s);\n  return 0;",
+    );
+    assert_eq!(core_kind(&write), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_rejects_path_param() {
+    let items = func("f(p: &Path) -> Bool", "none", "  return true;");
+    assert_eq!(core_kind(&items), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_rejects_ioerror_in_return() {
+    let items = func("f() -> Result<Int, IoError>", "none", "  return Ok(1);");
+    assert_eq!(core_kind(&items), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_rejects_path_new() {
+    let items = func(
+        "f() -> Int",
+        "none",
+        "  let s = \"a\";\n  let p = Path.new(&s);\n  return 0;",
+    );
+    assert_eq!(core_kind(&items), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_rejects_path_annotation() {
+    let items = func(
+        "f() -> Int",
+        "none",
+        "  let p: Option<Path> = None;\n  return 0;",
+    );
+    assert_eq!(core_kind(&items), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_rejects_os_type_in_struct_and_enum() {
+    assert_eq!(
+        core_kind("struct S {\n  p: Path,\n}\n\n"),
+        ErrorKind::OsItemInCore
+    );
+    assert_eq!(
+        core_kind("enum E {\n  A(IoError),\n}\n\n"),
+        ErrorKind::OsItemInCore
+    );
+}
+
+#[test]
+fn core_rejects_os_type_in_fn_type() {
+    let a = func("f(g: fn(&Path) -> Bool) -> Bool", "none", "  return true;");
+    assert_eq!(core_kind(&a), ErrorKind::OsItemInCore);
+    let b = func(
+        "f(g: fn(Int) -> Option<IoError>) -> Bool",
+        "none",
+        "  return true;",
+    );
+    assert_eq!(core_kind(&b), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_rejects_os_type_in_closure() {
+    let items = func(
+        "f(xs: &List<Int>) -> List<Int>",
+        "none",
+        "  return xs.map(|x| {\n    let p: Option<Path> = None;\n    return x;\n  });",
+    );
+    assert_eq!(core_kind(&items), ErrorKind::OsItemInCore);
+}
+
+#[test]
+fn core_with_server_still_rejects() {
+    let items = func("f() -> Int", "console", "  console.log(&1);\n  return 0;");
+    assert_eq!(
+        kind_of(&with("bare, server", "none", &items)),
+        ErrorKind::OsItemInCore
+    );
+}
+
+#[test]
+fn core_trust_base_still_rejects() {
+    let items = func("f() -> Int", "console", "  console.log(&1);\n  return 0;");
+    assert_eq!(
+        kind_of(&with("bare", "base", &items)),
+        ErrorKind::OsItemInCore
+    );
+}
+
+// ---- 通る例 ----
+
+#[test]
+fn core_allows_core_items() {
+    let items = func(
+        "f(xs: &List<Int>, s: &String) -> Int",
+        "none",
+        "  let ys = xs.map(|x| x + 1);\n  let n = ys.len() + s.len();\n  let o = Some(n);\n  let r = s.parse_int();\n  let t = s.trim();\n  let m = Int.min_value();\n  let c = ys.clone();\n  let k = to_int(to_float(n));\n  return o.unwrap_or(m) + r.unwrap_or(0) + t.len() + c.len() + k.unwrap_or(0);",
+    );
+    ok(&with("bare", "none", &items));
+}
+
+#[test]
+fn example_01_is_core() {
+    let src = std::fs::read_to_string("examples/01-average/c-brace.sigil").unwrap();
+    assert!(src.contains("targets bare, browser, server"));
+    ok(&src);
+    let o = run(
+        &src,
+        "average",
+        &[Arg::List(vec![
+            Arg::Float(1.0),
+            Arg::Float(2.0),
+            Arg::Float(4.5),
+        ])],
+    )
+    .unwrap();
+    assert_eq!(o.value, "2.5");
+}
+
+#[test]
+fn hosted_passes_console_fn_to_core_hof() {
+    let items = func(
+        "f(xs: &List<Int>) -> List<Int>",
+        "console",
+        "  return xs.map(|x| {\n    console.log(&x);\n    return x;\n  });",
+    );
+    ok(&with("server", "none", &items));
+}
+
+#[test]
+fn core_generic_accepts_path_type_arg() {
+    let items = func(
+        "f() -> Int",
+        "none",
+        "  let s = \"a\";\n  let p = Path.new(&s);\n  let mut xs = List.new();\n  xs.push(p);\n  let o: Option<Path> = None;\n  let g = xs.get(0);\n  return xs.len();",
+    );
+    ok(&with("server", "none", &items));
+}
+
+#[test]
+fn hosted_modules_unchanged() {
+    let items = func(
+        "f() -> Int",
+        "console, fs.read",
+        "  let s = \"a\";\n  let p = Path.new(&s);\n  console.log(&1);\n  let r = fs.read(&p);\n  return 0;",
+    );
+    ok(&with("server", "none", &items));
 }

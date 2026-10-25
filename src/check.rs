@@ -310,7 +310,21 @@ struct Pending {
     span: Span,
 }
 
+/// 標準ライブラリの OS 層の項目の名前（ADR 0014 の決定 4。鍵は `types`・`fns`・`methods` の表と同じ形）。
+#[derive(Default)]
+struct OsItems {
+    /// 型名（`"Path"`）。
+    types: HashSet<String>,
+    /// 名前空間の関数（`"console.log"`）。
+    fns: HashSet<String>,
+    /// メソッドと型に付く関数（`("Path", "new")`）。
+    methods: HashSet<(String, String)>,
+}
+
 struct Ck {
+    /// `targets` に `bare` を含む核のモジュールか（ADR 0014 の決定 1）。標準ライブラリの表を読む間は偽にする。
+    core: bool,
+    os_items: OsItems,
     types: HashMap<String, TypeDef>,
     fns: HashMap<String, Sig>,
     methods: HashMap<(String, String), Sig>,
@@ -458,6 +472,8 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
 
 fn analyze(file: &File, opts: &Options) -> R<Ck> {
     let mut ck = Ck {
+        core: file.module.targets.iter().any(|t| t == "bare"),
+        os_items: OsItems::default(),
         types: HashMap::new(),
         fns: HashMap::new(),
         methods: HashMap::new(),
@@ -557,8 +573,11 @@ impl Ck {
                 variants: vec![("Ok".into(), vec![t()]), ("Err".into(), vec![e()])],
             },
         );
-        for (n, k) in crate::stdlib::OPAQUE_TYPES {
+        for (n, k, layer) in crate::stdlib::OPAQUE_TYPES {
             self.types.insert((*n).into(), TypeDef::Opaque(*k));
+            if *layer == crate::stdlib::Layer::Os {
+                self.os_items.types.insert((*n).into());
+            }
         }
     }
 
@@ -1136,6 +1155,31 @@ impl Ck {
         Ok(())
     }
 
+    /// `impl` の型の名前（`impl<T> List<T>` なら `List`）。標準ライブラリの表の鍵に使う。
+    fn impl_type_name(&self, i: &ImplDecl) -> String {
+        match &i.ty {
+            Type::Path { path, .. } => path.join("."),
+            _ => String::new(),
+        }
+    }
+
+    /// 型 `tn` の `name`（型に付く関数またはメソッド）が OS 層か。型そのものが OS 層でもそう扱う。
+    fn os_item_type_fn(&self, tn: &str, name: &str) -> bool {
+        self.os_items.types.contains(tn)
+            || self
+                .os_items
+                .methods
+                .contains(&(tn.to_string(), name.to_string()))
+    }
+
+    /// 核のモジュールで OS 層の項目を名指ししたときのエラー（ADR 0014 の決定 4）。
+    fn os_in_core<T>(&self, name: &str) -> R<T> {
+        self.err(
+            ErrorKind::OsItemInCore,
+            format!("`{name}` は標準ライブラリの OS 層（std.os）にあり、`targets` に `bare` を持つモジュールからは使えない（このモジュールを OS なしで使わないなら `targets` から `bare` を外す）"),
+        )
+    }
+
     fn register_impl(&mut self, i: &ImplDecl, std: bool) -> R<()> {
         self.span = i.span;
         let outer = self.generics(&i.generics, true)?;
@@ -1321,20 +1365,33 @@ impl Ck {
     /// 標準ライブラリの最小部分（`stdlib.rs` の表）を関数とメソッドの表に入れる。
     fn register_std(&mut self) -> R<()> {
         let saved = self.span;
-        for (sig, effects) in crate::stdlib::FREE_FNS {
-            let (name, s) = self.std_sig(&crate::stdlib::free_source(sig, effects))?;
+        // 表のシグネチャは OS 層の型を名指しする。核の検査（`OsItemInCore`）は利用者のコードにだけかける。
+        let core = std::mem::replace(&mut self.core, false);
+        for (layer, sig, effects) in crate::stdlib::FREE_FNS {
+            let (name, s) = self.std_sig(&crate::stdlib::free_source(*layer, sig, effects))?;
             self.fns.insert(name, s);
         }
-        for (ns, sig, effects) in crate::stdlib::NAMESPACED_FNS {
-            let (name, s) = self.std_sig(&crate::stdlib::free_source(sig, effects))?;
-            self.fns.insert(format!("{ns}.{name}"), s);
+        for (layer, ns, sig, effects) in crate::stdlib::NAMESPACED_FNS {
+            let (name, s) = self.std_sig(&crate::stdlib::free_source(*layer, sig, effects))?;
+            let key = format!("{ns}.{name}");
+            if *layer == crate::stdlib::Layer::Os {
+                self.os_items.fns.insert(key.clone());
+            }
+            self.fns.insert(key, s);
         }
-        for (head, fns) in crate::stdlib::IMPLS {
-            let file = self.std_parse(&crate::stdlib::impl_source(head, fns))?;
+        for (layer, head, fns) in crate::stdlib::IMPLS {
+            let file = self.std_parse(&crate::stdlib::impl_source(*layer, head, fns))?;
             if let Some(Item::Impl(i)) = file.items.first() {
                 self.register_impl(i, true)?;
+                if *layer == crate::stdlib::Layer::Os {
+                    let tn = self.impl_type_name(i);
+                    for f in &i.fns {
+                        self.os_items.methods.insert((tn.clone(), f.name.clone()));
+                    }
+                }
             }
         }
+        self.core = core;
         self.span = saved;
         Ok(())
     }
@@ -1401,6 +1458,12 @@ impl Ck {
                     );
                 }
                 let n = path[0].as_str();
+                if self.core
+                    && !self.tparams.iter().any(|p| p == n)
+                    && self.os_items.types.contains(n)
+                {
+                    return self.os_in_core(n);
+                }
                 let arity = if self.tparams.iter().any(|p| p == n) {
                     0
                 } else {
@@ -4123,6 +4186,9 @@ impl Ck {
                 if let Expr::Name(ns) = &**expr {
                     let key = format!("{ns}.{name}");
                     if self.lookup(ns).is_none() && self.fns.contains_key(&key) {
+                        if self.core && self.os_items.fns.contains(&key) {
+                            return self.os_in_core(&key);
+                        }
                         let sig = self.fns[&key].clone();
                         let what = format!("`{key}`");
                         let ft = self.fn_type(&sig, &what)?;
@@ -4134,6 +4200,9 @@ impl Ck {
                     }
                 }
                 if let Some(tn) = self.type_path(expr) {
+                    if self.core && self.os_item_type_fn(&tn, name) {
+                        return self.os_in_core(&format!("{tn}.{name}"));
+                    }
                     match self.types.get(&tn).cloned() {
                         Some(TypeDef::Enum { variants, .. })
                             if variants.iter().any(|(v, _)| v == name) =>
@@ -4208,6 +4277,9 @@ impl Ck {
                         ))
                     }
                 };
+                if self.core && clone_sig.is_none() && self.os_item_type_fn(&tn, name) {
+                    return self.os_in_core(&format!("{tn}.{name}"));
+                }
                 let Some(sig) =
                     clone_sig.or_else(|| self.methods.get(&(tn.clone(), name.clone())).cloned())
                 else {

@@ -141,6 +141,8 @@ M3 に着手する前に、次の 4 点が決まっていない。
 
 `Path`（`is_empty`）・`IoError`・`console.log`・`fs.read`・`fs.write`・`Shared`（`new`）・`Cell`（`new`）・`Shared<Cell<T>>`（`get`・`set`）は、M1〜M2 の表のまま暫定とし、M4 の前の「標準ライブラリの分割」の ADR（ADR 0006 の決定 4）で、核と OS 依存部分への置き場所とあわせて正式に決める。`Path` の値の作り方もそこで決める。
 
+> **追記（[ADR 0014](0014-core-and-os-split.md) 決定 2）**: 置き場所を正式に決めた。`Shared`・`Cell`・`Shared<Cell<T>>` は核、`console.log`・`fs.read`・`fs.write`・`Path` とその関数・`IoError` は OS 層。シグネチャと意味は M4 の実装のまま。
+
 ### 理由
 
 - 観点 1: 一覧の各関数の意味（範囲外・空・重複・空白・行の区切り）を M3 の前に決めるので、M3 のインタプリタの本体と M5 の出力が同じ意味になり、仕様の読み手が出力先によって違う結果を見ることがない。

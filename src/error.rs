@@ -77,6 +77,7 @@ pub enum ErrorKind {
     Unsupported,
     UnknownName,
     UnknownType,
+    OsItemInCore,
     DuplicateDefinition,
     TypeMismatch,
     OperandTypes,
@@ -169,6 +170,7 @@ impl ErrorKind {
             Unsupported
             | UnknownName
             | UnknownType
+            | OsItemInCore
             | DuplicateDefinition
             | TypeMismatch
             | OperandTypes

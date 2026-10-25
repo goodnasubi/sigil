@@ -45,6 +45,7 @@ fn module_spec(m: &ModuleDecl) -> String {
         .targets
         .iter()
         .map(|t| match t.as_str() {
+            "bare" => "実行環境なし",
             "browser" => "ブラウザ",
             "server" => "サーバー",
             other => other,

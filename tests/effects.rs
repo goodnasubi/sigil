@@ -414,7 +414,7 @@ fn gpu_options(targets: Targets) -> Options {
 #[test]
 fn adding_a_table_row_is_enough() {
     // 条件 4: 表に 1 行足すだけで、宣言・推論・照合が働く
-    let o = gpu_options(Targets::ALL);
+    let o = gpu_options(Targets::HOSTED);
     let good = fx("f(n: Int) -> Int", "gpu.draw", "  return draw(n);");
     assert_eq!(run(&o, "server", &good), Ok(()));
     let missing = fx("f(n: Int) -> Int", "none", "  return draw(n);");
@@ -431,7 +431,7 @@ fn adding_a_table_row_is_enough() {
 #[test]
 fn of_f_works_for_an_added_category() {
     // 条件 5
-    let o = gpu_options(Targets::ALL);
+    let o = gpu_options(Targets::HOSTED);
     let a = apply_all();
     let call = |eff: &str| {
         format!(
@@ -455,7 +455,7 @@ fn state_subcategory_is_included_in_state() {
     // 条件 6: state の下位を足すと、`effects state` はそれを含む
     let o = Options {
         copy_override: vec![],
-        table: EffectTable::standard().with("state.cell", Targets::ALL),
+        table: EffectTable::standard().with("state.cell", Targets::HOSTED),
         primitives: vec![
             prim("tick() -> Int", &["state"]),
             prim("bump() -> Int", &["state.cell"]),

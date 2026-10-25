@@ -323,10 +323,7 @@ fn depth_limit() {
 fn assign_targets() {
     let b = |s: &str| fnsrc(&GOOD_FN.replace("return x;", &format!("{s}\n  return x;")));
     assert_eq!(kind(&b("Foo.bar = 1;")), ErrorKind::InvalidAssignTarget);
-    assert!(matches!(
-        kind(&b("x.B = 1;")),
-        ErrorKind::InvalidAssignTarget | ErrorKind::BadNameForm
-    ));
+    assert_eq!(kind(&b("x.B = 1;")), ErrorKind::InvalidAssignTarget);
     assert_eq!(kind(&b("f(x) = 1;")), ErrorKind::InvalidAssignTarget);
     ok(&b("x.a.b = 1;"));
 }
@@ -461,4 +458,46 @@ fn tuples_positive() {
             .replace("return x;", "return (x, x);"),
     ));
     assert_eq!(kind(&ret("()")), ErrorKind::BadTuple);
+}
+
+#[test]
+fn depth_limit_chains() {
+    // else-if、後置の連鎖、二項演算の連鎖も深さに数える（AST の Drop と再帰を抑える）。
+    let n = 5000;
+    let mut s = String::from("if a { return x; }");
+    for _ in 0..n {
+        s.push_str(" else if a { return x; }");
+    }
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("return x;", &s))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("x{}", ".a".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("x{}", "(1)".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("x{}", "?".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("x{}", " + 1".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    assert_eq!(
+        kind(&ret(&format!("x{}", " || y".repeat(n)))),
+        ErrorKind::TooDeep
+    );
+    ok(&ret(&format!("x{}", ".a".repeat(50))));
+}
+
+#[test]
+fn ref_of_ref_nested() {
+    assert_eq!(kind(&ret("& &x")), ErrorKind::RefOfRef);
+    let t = fnsrc(&GOOD_FN.replace("x: Int", "x: & &Int"));
+    assert_eq!(kind(&t), ErrorKind::RefOfRef);
 }

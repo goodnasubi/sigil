@@ -117,10 +117,10 @@ fn assign_to_by_value_param_and_immutable_let() {
 #[test]
 fn let_mut_of_reference() {
     assert_eq!(
-        body_kind("f(n: Int)", "  let mut r = &n;"),
+        body_kind("f(xs: &List<Int>)", "  let mut r = xs.get(0);"),
         ErrorKind::LetMutRef
     );
-    body_ok("f(n: Int)", "  let r = &n;");
+    body_ok("f(xs: &List<Int>)", "  let r = xs.get(0);");
 }
 
 #[test]
@@ -616,7 +616,6 @@ fn refinement_declarations() {
 fn std_methods_and_functions_typecheck() {
     body_ok("f(x: String) -> Int", "  return x.len();");
     body_ok("f(x: &List<Int>) -> Int", "  return x.len();");
-    body_ok("f(x: &List<Int>) -> Int", "  return len(x);");
     body_ok("f() -> List<Int>", "  return List.new();");
     body_ok(
         "f(xs: &mut List<Int>)",
@@ -632,7 +631,7 @@ fn std_methods_and_functions_typecheck() {
     );
     body_ok(
         "f(s: String) -> Result<Int, ParseError>",
-        "  return parse_int(trim(s));",
+        "  return s.trim().parse_int();",
     );
 }
 
@@ -653,7 +652,31 @@ fn std_method_type_errors() {
 }
 
 #[test]
-fn user_fn_shadows_std_fn() {
+fn std_free_fn_names_are_reserved() {
+    // 標準の自由関数 `to_float` は予約名（ADR 0012 の決定 5）。上書きは構文の段階で弾かれる
+    assert_eq!(
+        kind(&func("to_float(x: Int) -> Float", "  return 1.0;")),
+        ErrorKind::ReservedNameDefined
+    );
+    for name in [
+        "Displayable",
+        "Path",
+        "IoError",
+        "ParseError",
+        "Shared",
+        "Cell",
+        "Set",
+        "Map",
+    ] {
+        assert_eq!(
+            kind(&format!("struct {name} {{\n  x: Int,\n}}\n")),
+            ErrorKind::ReservedNameDefined,
+            "{name}"
+        );
+    }
+    // `to_float` は呼べる
+    body_ok("f(n: Int) -> Float", "  return to_float(n);");
+    // 標準の自由関数でない名前は、これまでどおり定義できる
     ok(&format!(
         "{}{}",
         func("len(x: Int) -> Int", "  return x;"),
@@ -881,9 +904,11 @@ fn derived_properties_follow_the_adr_table() {
         "{ACCOUNT}{send}{}",
         func("g(a: Account)", "  go(a);")
     ));
+    // 参照を型引数に渡す書き方は、ADR 0012 の決定 1 の参照の位置の規則でなくなった
+    // （`go(&a)` は `BorrowPosition`）。
     assert_eq!(
         kind(&format!("{send}{}", func("g(a: Int)", "  go(&a);"))),
-        ErrorKind::ConstraintUnsatisfied
+        ErrorKind::BorrowPosition
     );
     // Copyable は導出されない: 構造体・列挙型は Copyable でない
     assert_eq!(

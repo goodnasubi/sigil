@@ -44,6 +44,15 @@ pub const RESERVED_NAMES: &[&str] = &[
     "Numeric",
     "Sendable",
     "Shareable",
+    "Displayable",
+    "Path",
+    "IoError",
+    "ParseError",
+    "Shared",
+    "Cell",
+    "Set",
+    "Map",
+    "to_float",
 ];
 
 /// 出力先（ADR 0008 の決定 6。P0 で書けるもの）。
@@ -60,8 +69,18 @@ pub fn parse(src: &str) -> Result<File, Error> {
 }
 
 pub fn parse_with_comments(src: &str) -> Result<Parsed, Error> {
+    parse_inner(src, false)
+}
+
+/// 標準ライブラリの表（`src/stdlib.rs`）を読む。標準の名前を定義するので、予約名の検査をしない。
+pub fn parse_std(src: &str) -> Result<File, Error> {
+    parse_inner(src, true).map(|p| p.file)
+}
+
+fn parse_inner(src: &str, allow_reserved: bool) -> Result<Parsed, Error> {
     let lexed = lex(src)?;
     let mut p = Parser {
+        allow_reserved,
         toks: lexed.tokens,
         pos: 0,
         no_struct: false,
@@ -109,6 +128,8 @@ fn is_upper_start(s: &str) -> bool {
 }
 
 struct Parser {
+    /// 予約名の定義を許す（標準ライブラリの表を読むときだけ）。
+    allow_reserved: bool,
     toks: Vec<Token>,
     pos: usize,
     /// 条件・`match` の対象の中では構造体の値を括弧なしで書けない。
@@ -305,8 +326,8 @@ impl Parser {
         }
     }
 
-    fn check_not_reserved(s: &str, span: Span, what: &str) -> R<()> {
-        if RESERVED_NAMES.contains(&s) {
+    fn check_not_reserved(&self, s: &str, span: Span, what: &str) -> R<()> {
+        if !self.allow_reserved && RESERVED_NAMES.contains(&s) {
             Err(Error::new(
                 ErrorKind::ReservedNameDefined,
                 span,
@@ -321,7 +342,7 @@ impl Parser {
     fn snake_def(&mut self, what: &str) -> R<String> {
         let (s, span) = self.ident_raw(what)?;
         Self::check_snake(&s, span, what)?;
-        Self::check_not_reserved(&s, span, what)?;
+        self.check_not_reserved(&s, span, what)?;
         Ok(s)
     }
 
@@ -336,7 +357,7 @@ impl Parser {
     fn camel_def(&mut self, what: &str) -> R<String> {
         let (s, span) = self.ident_raw(what)?;
         Self::check_camel(&s, span, what)?;
-        Self::check_not_reserved(&s, span, what)?;
+        self.check_not_reserved(&s, span, what)?;
         Ok(s)
     }
 

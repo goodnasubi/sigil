@@ -92,6 +92,10 @@ pub enum ErrorKind {
     BorrowMutOfImmutable,
     BorrowOfNonPlace,
     LetMutRef,
+    RefTypePosition,
+    RefReturnBorrowCount,
+    BorrowPosition,
+    MatchBorrowForm,
     RedundantAnnotation,
     OldNotCopyable,
     MissingReturn,
@@ -165,6 +169,10 @@ impl ErrorKind {
             | BorrowMutOfImmutable
             | BorrowOfNonPlace
             | LetMutRef
+            | RefTypePosition
+            | RefReturnBorrowCount
+            | BorrowPosition
+            | MatchBorrowForm
             | RedundantAnnotation
             | OldNotCopyable
             | MissingReturn

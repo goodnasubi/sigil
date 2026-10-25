@@ -7,9 +7,9 @@ module examples.average
 
 fn average(xs: List<Float>) -> Float
   intent "数値列の算術平均を返す"
-  requires len(xs) > 0
-  ensures min(xs) <= result && result <= max(xs)
+  requires xs.len() > 0
+  ensures xs.min() <= result && result <= xs.max()
   effects none
 {
-  return sum(xs) / to_float(len(xs));
+  return xs.sum() / to_float(xs.len());
 }

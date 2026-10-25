@@ -336,13 +336,13 @@ fn let_bound_closures_carry_their_effects() {
     ok(&fx(
         "f(n: Int) -> Int",
         "console",
-        "  let h = |x| emit(x);\n  return h(n);",
+        "  let h = move |x| emit(x);\n  return h(n);",
     ));
     assert_eq!(
         kind(&fx(
             "f(n: Int) -> Int",
             "none",
-            "  let h = |x| emit(x);\n  return h(n);"
+            "  let h = move |x| emit(x);\n  return h(n);"
         )),
         ErrorKind::EffectMissing
     );
@@ -353,7 +353,7 @@ fn let_bound_closures_carry_their_effects() {
             fx(
                 "g(n: Int) -> Int",
                 "none",
-                "  let h = |x| emit(x);\n  return apply_all(h, n);"
+                "  let h = move |x| emit(x);\n  return apply_all(h, n);"
             )
         )),
         ErrorKind::EffectMissing
@@ -362,7 +362,7 @@ fn let_bound_closures_carry_their_effects() {
     ok(&fx(
         "f(n: Int) -> Int",
         "none",
-        "  let h = |x| emit(x);\n  return n;",
+        "  let h = move |x| emit(x);\n  return n;",
     ));
 }
 
@@ -649,7 +649,7 @@ fn alias_of_closure_keeps_effects() {
     let f = fx(
         "f() -> Int",
         "none",
-        "  let c = |x| emit(x);\n  let d = c;\n  return d(1);",
+        "  let c = move |x| emit(x);\n  let d = c;\n  return d(1);",
     );
     assert_eq!(kind(&f), ErrorKind::EffectMissing);
 }
@@ -684,7 +684,7 @@ fn function_in_tuple_is_rejected() {
     let f = fx(
         "f() -> Int",
         "none",
-        "  let c = |x| emit(x);\n  let t = (c, 1);\n  let (h, n) = t;\n  return h(n);",
+        "  let c = move |x| emit(x);\n  let t = (c, 1);\n  let (h, n) = t;\n  return h(n);",
     );
     assert_eq!(kind(&f), ErrorKind::FnTypePosition);
 }
@@ -694,7 +694,7 @@ fn function_in_option_is_rejected() {
     let f = fx(
         "f() -> Int",
         "none",
-        "  let c = |x| emit(x);\n  let o = Some(c);\n  match o {\n    Some(h) => {\n      return h(1);\n    }\n    None => {\n      return 0;\n    }\n  }\n  return 1;",
+        "  let c = move |x| emit(x);\n  let o = Some(c);\n  match o {\n    Some(h) => {\n      return h(1);\n    }\n    None => {\n      return 0;\n    }\n  }\n  return 1;",
     );
     assert_eq!(kind(&f), ErrorKind::FnTypePosition);
 }
@@ -705,7 +705,7 @@ fn function_returned_from_generic_call_is_rejected() {
     let f = fx(
         "f() -> Int",
         "none",
-        "  let c = |x| emit(x);\n  let d = id(c);\n  return d(1);",
+        "  let c = move |x| emit(x);\n  let d = id(c);\n  return d(1);",
     );
     assert_eq!(kind(&format!("{id}\n{f}")), ErrorKind::FnTypePosition);
 }

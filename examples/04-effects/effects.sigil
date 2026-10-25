@@ -18,20 +18,20 @@ fn add_tax(price: Int, rate_percent: Int) -> Int
 // 効果あり: ファイルを読み、ログを出す。
 fn load_prices(path: Path) -> Result<List<Int>, IoError>
   intent "価格の一覧をファイルから読む"
-  requires !empty(path)
+  requires !path.is_empty()
   ensures none
   effects console, fs.read
 {
-  console.log("loading prices");
-  let text = fs.read(path)?;
-  return Ok(text.lines().map(|line| parse_int(line).unwrap_or(0)));
+  console.log(&"loading prices");
+  let text = fs.read(&path)?;
+  return Ok(text.lines().map(|line| line.parse_int().unwrap_or(0)));
 }
 
 // 関数を引数にとる関数: 引数 f の効果を引き継ぐ。
 fn apply_all(xs: &List<Int>, f: fn(Int) -> Int) -> List<Int>
   intent "一覧の各要素に f を適用した一覧を返す"
   requires none
-  ensures len(result) == len(xs)
+  ensures result.len() == xs.len()
   effects of(f)
 {
   return xs.map(f);
@@ -41,7 +41,7 @@ fn apply_all(xs: &List<Int>, f: fn(Int) -> Int) -> List<Int>
 fn with_tax(prices: &List<Int>) -> List<Int>
   intent "すべての価格に 10% の税を加える"
   requires none
-  ensures len(result) == len(prices)
+  ensures result.len() == prices.len()
   effects none
 {
   return apply_all(&prices, |p| add_tax(p, 10));
@@ -64,7 +64,7 @@ fn count_up(counter: &Shared<Cell<Int>>)
 //   requires none
 //   ensures none
 //   effects none                   // エラー: 本体は fs.read を起こすのに宣言していない
-// { return fs.read(path); }
+// { return fs.read(&path); }
 //
 // fn bad_extra(x: Int) -> Int
 //   intent "2 倍にする"
@@ -82,4 +82,4 @@ fn count_up(counter: &Shared<Cell<Int>>)
 //   requires none
 //   ensures none
 //   effects fs.read                // エラー: fs.read はサーバーでだけ使える
-// { return fs.read(path); }
+// { return fs.read(&path); }

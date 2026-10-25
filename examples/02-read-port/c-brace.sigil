@@ -17,12 +17,12 @@ enum ConfigError {
 
 fn read_port(path: Path) -> Result<Port, ConfigError>
   intent "設定ファイルの内容を整数として読み、ポート番号として返す"
-  requires !empty(path)
+  requires !path.is_empty()
   ensures none
   effects fs.read
 {
-  let text = fs.read(path).map_err(ConfigError.Io)?;
-  return match parse_int(trim(text)) {
+  let text = fs.read(&path).map_err(ConfigError.Io)?;
+  return match text.trim().parse_int() {
     Ok(n) => Port.check(n).ok_or(ConfigError.OutOfRange(n)),
     Err(_) => Err(ConfigError.NotANumber(text)),
   };

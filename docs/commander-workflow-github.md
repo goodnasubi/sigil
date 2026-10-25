@@ -193,9 +193,14 @@ tools: Bash, Read, Grep, Glob, Skill
     "deny": [
       "Bash(git push --force:*)", "Bash(git push -f:*)"
     ]
-  }
+  },
+  "effortLevel": "medium"
 }
 ```
+
+- `effortLevel` はセッションの既定エフォート。保険として置く。
+- モデルのバージョンを書くキー（claude-opus-5-5 など）は、モデルの世代交代で古くなるので使わない。サブエージェントの model / effort は、別名（opus・sonnet・haiku）で、定義ファイルの frontmatter と Agent ツールの呼び出しごとの指定に書く。
+- サブエージェントのエフォートの優先順位（高い順）: 環境変数 CLAUDE_CODE_EFFORT_LEVEL、Agent ツールの呼び出しごとの effort、定義ファイル（.claude/agents/*.md）の effort、セッションのエフォート。`effortLevel` の位置が、この順位のどこに入るかは公式ドキュメントに明記されていない。
 
 ### 3.4 GitHub 側の設定
 

@@ -334,6 +334,7 @@ struct Ck {
     skipped: Option<Ty>,
     table: EffectTable,
     prims: Vec<Primitive>,
+    copy_override: Vec<(String, bool)>,
     /// モジュールの `targets`。
     targets: Vec<String>,
     /// 効果の推論の枠（先頭が関数の本体、クロージャごとに積む）。
@@ -472,6 +473,7 @@ fn analyze(file: &File, opts: &Options) -> R<Ck> {
         skipped: None,
         table: opts.table.clone(),
         prims: opts.primitives.clone(),
+        copy_override: opts.copy_override.clone(),
         targets: file.module.targets.clone(),
         eff_stack: vec![vec![]],
         fn_params: vec![],
@@ -781,6 +783,14 @@ impl Ck {
                     }
                     _ => Some(false),
                 },
+                Some(TypeDef::Struct { .. } | TypeDef::Enum { .. })
+                    if p == Prop::Copyable && self.copy_override.iter().any(|(k, _)| *k == n) =>
+                {
+                    self.copy_override
+                        .iter()
+                        .find(|(k, _)| *k == n)
+                        .map(|(_, v)| *v)
+                }
                 Some(TypeDef::Struct { .. } | TypeDef::Enum { .. }) => match p {
                     Prop::Copyable | Prop::Comparable | Prop::Numeric | Prop::Displayable => {
                         Some(false)
@@ -2186,9 +2196,7 @@ impl Ck {
         if self.contract {
             if let Some((root, _)) = place_path(e) {
                 let ty = self.zonk(t);
-                if self.lookup(&root).is_some()
-                    && !matches!(ty, Ty::Fn(..))
-                    && self.holds(&ty, Prop::Copyable, 0) == Some(false)
+                if self.lookup(&root).is_some() && self.holds(&ty, Prop::Copyable, 0) == Some(false)
                 {
                     return self.err(
                         ErrorKind::ContractMove,
@@ -2209,10 +2217,6 @@ impl Ck {
             return Ok(());
         }
         let ty = self.zonk(t);
-        // 関数の値の受け渡しはクロージャの規則（後続の PR）で扱う。型が決まらないものは移動にしない。
-        if matches!(ty, Ty::Fn(..)) {
-            return Ok(());
-        }
         match self.holds(&ty, Prop::Copyable, 0) {
             Some(false) => {}
             None => {
@@ -2914,8 +2918,7 @@ impl Ck {
                 let t = if self.by_ref {
                     Ty::Ref(false, Box::new(t))
                 } else {
-                    if !matches!(t, Ty::Fn(..)) && self.holds(&t, Prop::Copyable, 0) == Some(false)
-                    {
+                    if self.holds(&t, Prop::Copyable, 0) == Some(false) {
                         self.pat_moves = true;
                     }
                     t
@@ -3496,8 +3499,7 @@ impl Ck {
         for (c, ty, mode) in done {
             match mode {
                 CapMode::Move => {
-                    if matches!(ty, Ty::Fn(..)) {
-                    } else if self.holds(&ty, Prop::Copyable, 0).is_none() {
+                    if self.holds(&ty, Prop::Copyable, 0).is_none() {
                         // 型が決まってから、使用を調べ直す
                         if !self.is_outer(&c.name) {
                             let at = self.span;

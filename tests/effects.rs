@@ -15,6 +15,7 @@ fn prim(sig: &str, effects: &[&str]) -> Primitive {
 
 fn std_options() -> Options {
     Options {
+        copy_override: vec![],
         table: EffectTable::standard(),
         primitives: vec![
             prim("emit(n: Int) -> Int", &["console"]),
@@ -404,6 +405,7 @@ fn declared_only_effects_are_also_checked_against_targets() {
 
 fn gpu_options(targets: Targets) -> Options {
     Options {
+        copy_override: vec![],
         table: EffectTable::standard().with("gpu.draw", targets),
         primitives: vec![prim("draw(n: Int) -> Int", &["gpu.draw"])],
     }
@@ -452,6 +454,7 @@ fn of_f_works_for_an_added_category() {
 fn state_subcategory_is_included_in_state() {
     // 条件 6: state の下位を足すと、`effects state` はそれを含む
     let o = Options {
+        copy_override: vec![],
         table: EffectTable::standard().with("state.cell", Targets::ALL),
         primitives: vec![
             prim("tick() -> Int", &["state"]),
@@ -491,6 +494,7 @@ fn added_category_can_be_server_only() {
 #[test]
 fn primitive_names_must_be_unique_and_valid() {
     let dup = Options {
+        copy_override: vec![],
         table: EffectTable::standard(),
         primitives: vec![prim("emit(n: Int) -> Int", &["console"]); 2],
     };
@@ -499,6 +503,7 @@ fn primitive_names_must_be_unique_and_valid() {
         Err(ErrorKind::DuplicateDefinition)
     );
     let bad = Options {
+        copy_override: vec![],
         table: EffectTable::standard(),
         primitives: vec![prim("emit(n: Int) -> Int", &["nope"])],
     };

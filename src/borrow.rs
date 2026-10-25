@@ -352,4 +352,14 @@ mod tests {
         assert!(m.dead_of("r").is_some());
         assert_eq!(m.held("r"), vec![("x".to_string(), false)]);
     }
+
+    // 移動の判定（`UseAfterMove`）は貸しではなく移動の追跡の仕事。移動は貸しを作らず、
+    // 貸しのない保持者を使っても衝突にならない。tests/borrow_pairs.rs の同名の試験の対。
+    #[test]
+    fn moves_are_not_loans() {
+        let ev = [Event::Move("a".into()), u("a"), Event::Read("a".into())];
+        assert!(regions(&ev).is_empty());
+        let ev = [b("r", "x", false), Event::Move("a".into()), u("r")];
+        assert!(regions(&ev).is_empty());
+    }
 }

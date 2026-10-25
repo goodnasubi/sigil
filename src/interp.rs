@@ -131,6 +131,8 @@ impl fmt::Display for RunError {
 pub struct Outcome {
     pub value: String,
     pub output: String,
+    /// `Options::trace_drops` のときの、構造体の値の破棄の記録（破棄の順に、破棄の時点の表示）。
+    pub drops: Vec<String>,
 }
 
 /// 実行の失敗。異常停止の前に出力があれば `output` に残る。
@@ -138,6 +140,8 @@ pub struct Outcome {
 pub struct Failure {
     pub error: RunError,
     pub output: String,
+    /// `Outcome::drops` と同じ。異常停止の前に破棄した値も含む。
+    pub drops: Box<Vec<String>>,
 }
 
 impl fmt::Display for Failure {
@@ -149,12 +153,16 @@ impl fmt::Display for Failure {
 pub struct Options {
     /// 実行するスレッドのスタックの大きさ。この 3/4 を使い切ると `StackExhausted` で停止する。
     pub stack_bytes: usize,
+    /// 構造体の値が破棄された順序を `drops` に記録する（ADR 0006 の条件 9 のテスト用）。
+    /// 記録中は、名前だけの値の使用を移動として扱い、`clone` は構造体を複製する。
+    pub trace_drops: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Options {
             stack_bytes: 256 * 1024 * 1024,
+            trace_drops: false,
         }
     }
 }
@@ -196,6 +204,7 @@ fn fail(error: RunError) -> Failure {
     Failure {
         error,
         output: String::new(),
+        drops: Box::default(),
     }
 }
 
@@ -215,6 +224,7 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
     let file = File { module, items };
     crate::check::check_file(&file).map_err(|e| fail(RunError::Check(e)))?;
     let mut it = Interp::new(&file, opts);
+    DROP_LOG.with(|l| *l.borrow_mut() = opts.trace_drops.then(Vec::new));
     let Some(decl) = it.prog.fns.get(func).copied() else {
         return Err(fail(RunError::Entry(format!("関数 {func} がない"))));
     };
@@ -239,28 +249,32 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
     }
     let result = it.call_decl(decl, argv);
     let output = std::mem::take(&mut it.out);
-    match result {
+    let res = match result {
         Ok(v) => {
             let value = v.show(true);
-            if let Err(Abort::Stop(s)) = it.after_deep() {
-                return Err(Failure {
-                    error: RunError::Stop(s),
-                    output,
-                });
+            // 戻り値は表示した後に破棄する（破棄の記録に含める）。
+            drop(v);
+            match it.after_deep() {
+                Err(Abort::Stop(s)) => Err((RunError::Stop(s), output)),
+                _ => Ok((value, output)),
             }
-            Ok(Outcome { value, output })
         }
-        Err(Abort::Stop(s)) => Err(Failure {
-            error: RunError::Stop(s),
+        Err(Abort::Stop(s)) => Err((RunError::Stop(s), output)),
+        Err(Abort::Unsupported(m)) => Err((RunError::Unsupported(m), output)),
+        Err(Abort::Return(_)) => Err((RunError::Unsupported("関数の外への return".into()), output)),
+    };
+    drop(it);
+    let drops = DROP_LOG.with(|l| l.borrow_mut().take()).unwrap_or_default();
+    match res {
+        Ok((value, output)) => Ok(Outcome {
+            value,
             output,
+            drops,
         }),
-        Err(Abort::Unsupported(m)) => Err(Failure {
-            error: RunError::Unsupported(m),
+        Err((error, output)) => Err(Failure {
+            error,
             output,
-        }),
-        Err(Abort::Return(_)) => Err(Failure {
-            error: RunError::Unsupported("関数の外への return".into()),
-            output,
+            drops: Box::new(drops),
         }),
     }
 }
@@ -361,6 +375,8 @@ struct ListVal {
 struct StructVal {
     name: Rc<str>,
     fields: Vec<(Rc<str>, Value)>,
+    /// 破棄の記録を済ませた（`drain` が先に記録した）印。
+    logged: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -370,33 +386,119 @@ struct VariantVal {
     args: Vec<Value>,
 }
 
+fn show_struct(s: &StructVal) -> String {
+    let xs: Vec<String> = s
+        .fields
+        .iter()
+        .map(|(k, v)| format!("{k}: {}", v.show(true)))
+        .collect();
+    format!("{} {{ {} }}", s.name, xs.join(", "))
+}
+
+/// 破棄の記録（`Options::trace_drops`）。構造体の値が破棄された時点の表示を、破棄の順に残す。
+fn log_drop(s: &StructVal) {
+    let _ = DROP_LOG.try_with(|l| {
+        if l.borrow().is_some() {
+            let text = show_struct(s);
+            if let Some(v) = l.borrow_mut().as_mut() {
+                v.push(text);
+            }
+        }
+    });
+}
+
+/// `Copyable` な値か（値の位置で複製され、移動しない）。記録中の移動の判定に使う。
+fn is_copy_value(v: &Value) -> bool {
+    match v {
+        Value::Unit
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Bool(_)
+        | Value::ParseError
+        | Value::Closure(_)
+        | Value::Named(_)
+        | Value::Ctor(..)
+        | Value::MutRef(_) => true,
+        Value::Str(_) | Value::List(_) | Value::Struct(_) => false,
+        Value::Tuple(t) => t.iter().all(is_copy_value),
+        Value::Variant(x) => {
+            matches!(&*x.enum_name, "Option" | "Result") && x.args.iter().all(is_copy_value)
+        }
+    }
+}
+
+/// 構造体・一覧・列挙・組を作り直して複製する（記録中の `clone` は、破棄される値を 2 つにする）。
+fn deep_clone(v: &Value) -> Value {
+    match v {
+        Value::Tuple(t) => Value::Tuple(Rc::new(t.iter().map(deep_clone).collect())),
+        Value::List(l) => Value::List(Rc::new(ListVal {
+            items: l.items.iter().map(deep_clone).collect(),
+            float: l.float,
+        })),
+        Value::Struct(s) => Value::Struct(Rc::new(StructVal {
+            name: s.name.clone(),
+            fields: s
+                .fields
+                .iter()
+                .map(|(k, x)| (k.clone(), deep_clone(x)))
+                .collect(),
+            logged: false,
+        })),
+        Value::Variant(x) => Value::Variant(Rc::new(VariantVal {
+            enum_name: x.enum_name.clone(),
+            name: x.name.clone(),
+            args: x.args.iter().map(deep_clone).collect(),
+        })),
+        other => other.clone(),
+    }
+}
+
+fn tracing() -> bool {
+    DROP_LOG.try_with(|l| l.borrow().is_some()).unwrap_or(false)
+}
+
 /// 深く入れ子になった値（`Cons(1, Cons(2, ...))` を何百万段もつないだもの）を、再帰せずに破棄する。
 /// 既定の `Drop` は Rc の入れ子の深さだけ再帰し、ホストのスタックを溢れさせる。
+/// 破棄の順序は Rust と同じ（値そのもの、次にフィールド・要素を宣言の順）にする（ADR 0006 の条件 9）。
+/// 子を逆順に積み、後入れ先出しで取り出すと、先頭の子から順に破棄される。
 fn drain(mut stack: Vec<Value>) {
+    stack.reverse();
     while let Some(v) = stack.pop() {
         match v {
             Value::List(rc) => {
                 if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                    let n = stack.len();
                     stack.append(&mut inner.items);
+                    stack[n..].reverse();
                 }
             }
             Value::Struct(rc) => {
                 if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                    if !inner.logged {
+                        log_drop(&inner);
+                        inner.logged = true;
+                    }
+                    let n = stack.len();
                     stack.extend(
                         std::mem::take(&mut inner.fields)
                             .into_iter()
                             .map(|(_, x)| x),
                     );
+                    stack[n..].reverse();
                 }
             }
             Value::Variant(rc) => {
                 if let Ok(mut inner) = Rc::try_unwrap(rc) {
+                    let n = stack.len();
                     stack.append(&mut inner.args);
+                    stack[n..].reverse();
                 }
             }
             Value::Tuple(rc) => {
                 if let Ok(inner) = Rc::try_unwrap(rc) {
+                    let n = stack.len();
                     stack.extend(inner);
+                    stack[n..].reverse();
                 }
             }
             _ => {}
@@ -414,6 +516,10 @@ impl Drop for ListVal {
 
 impl Drop for StructVal {
     fn drop(&mut self) {
+        if !self.logged {
+            log_drop(self);
+            self.logged = true;
+        }
         if !self.fields.is_empty() {
             drain(
                 std::mem::take(&mut self.fields)
@@ -437,6 +543,8 @@ thread_local! {
     /// 実行中のスレッドのスタックの基準と予算。表示・比較のような呼び出しを伴わない再帰も、これで止める。
     static STACK_LIMIT: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, usize::MAX)) };
     static DEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// `Some` のあいだ、構造体の破棄を記録する。
+    static DROP_LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 /// スタックの予算を超えたら印を立てて真を返す。呼び出し側が `Interp::after_deep` で停止に変える。
@@ -611,14 +719,7 @@ impl Value {
                 let xs: Vec<String> = l.items.iter().map(|v| v.show(true)).collect();
                 format!("[{}]", xs.join(", "))
             }
-            Value::Struct(s) => {
-                let xs: Vec<String> = s
-                    .fields
-                    .iter()
-                    .map(|(k, v)| format!("{k}: {}", v.show(true)))
-                    .collect();
-                format!("{} {{ {} }}", s.name, xs.join(", "))
-            }
+            Value::Struct(s) => show_struct(s),
             Value::Variant(v) => {
                 let head = if &*v.enum_name == "Option" || &*v.enum_name == "Result" {
                     v.name.to_string()
@@ -939,10 +1040,46 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// スコープを抜ける。宣言の逆順に値を破棄する（ADR 0006 の条件 9）。
     fn pop_scope(&mut self) {
         if let Some(f) = self.frames.last_mut() {
-            f.scopes.pop();
+            if let Some(mut sc) = f.scopes.pop() {
+                while sc.pop().is_some() {}
+            }
         }
+    }
+
+    /// 関数の枠を抜ける。戻り値・`old` の写しを先に手放し、内側のスコープから外側へ、各スコープでは宣言の逆順に破棄する。
+    fn release_frame(&mut self) {
+        if let Some(mut f) = self.frames.pop() {
+            f.result = None;
+            f.self_val = None;
+            f.olds.clear();
+            while let Some(mut sc) = f.scopes.pop() {
+                while sc.pop().is_some() {}
+            }
+        }
+    }
+
+    /// 値の位置で使う式を評価する。破棄の記録中は、`Copyable` でない値を持つ変数の名前だけの式を移動とし、
+    /// 変数の中身を空にする（移動元が残って破棄が遅れないようにする）。
+    fn eval_move(&mut self, e: &Expr) -> R<Value> {
+        let mut inner = e;
+        while let Expr::Paren(i) = inner {
+            inner = i;
+        }
+        if let Expr::Name(n) = inner {
+            if tracing() {
+                if let Some(slot) = self.lookup(n) {
+                    let copy = is_copy_value(&slot.borrow());
+                    if !copy {
+                        let v = std::mem::replace(&mut *slot.borrow_mut(), Value::Unit);
+                        return Ok(v);
+                    }
+                }
+            }
+        }
+        self.eval(e)
     }
 
     fn bind(&mut self, name: &str, v: Value) {
@@ -972,7 +1109,7 @@ impl<'a> Interp<'a> {
         if self.frames.len() == 1 {
             self.exit_at = (d.name.clone(), self.line);
         }
-        self.frames.pop();
+        self.release_frame();
         self.line = saved_line;
         r
     }
@@ -1065,7 +1202,7 @@ impl<'a> Interp<'a> {
                 Err(e) => Err(e),
             },
         };
-        self.frames.pop();
+        self.release_frame();
         self.line = saved_line;
         r
     }
@@ -1112,7 +1249,7 @@ impl<'a> Interp<'a> {
             StmtKind::Let {
                 pattern, ty, value, ..
             } => {
-                let mut v = self.eval(value)?;
+                let mut v = self.eval_move(value)?;
                 if let Some(t) = ty {
                     v = hint(v, t);
                 }
@@ -1126,7 +1263,7 @@ impl<'a> Interp<'a> {
                 Ok(())
             }
             StmtKind::Assign { target, value } => {
-                let v = self.val(value)?;
+                let v = deref(self.eval_move(value)?);
                 let (slot, path) = self.resolve_place(target)?;
                 let done = with_path(&mut slot.borrow_mut(), &path, |x| *x = v);
                 if done.is_none() {
@@ -1137,7 +1274,7 @@ impl<'a> Interp<'a> {
             StmtKind::Expr(e) => self.eval(e).map(|_| ()),
             StmtKind::Return(e) => {
                 let v = match e {
-                    Some(e) => self.val(e)?,
+                    Some(e) => deref(self.eval_move(e)?),
                     None => Value::Unit,
                 };
                 Err(Abort::Return(v))
@@ -1273,7 +1410,7 @@ impl<'a> Interp<'a> {
             Expr::Tuple(es) => {
                 let mut xs = vec![];
                 for x in es {
-                    xs.push(self.val(x)?);
+                    xs.push(deref(self.eval_move(x)?));
                 }
                 Value::Tuple(Rc::new(xs))
             }
@@ -1298,7 +1435,7 @@ impl<'a> Interp<'a> {
                 };
                 let mut vals = vec![];
                 for (k, x) in fields {
-                    vals.push((k.clone(), self.val(x)?));
+                    vals.push((k.clone(), deref(self.eval_move(x)?)));
                 }
                 let Some(decl) = self.prog.structs.get(name).copied() else {
                     return unsupported(format!("構造体 {name}"));
@@ -1313,6 +1450,7 @@ impl<'a> Interp<'a> {
                 Value::Struct(Rc::new(StructVal {
                     name: name.as_str().into(),
                     fields: ordered,
+                    logged: false,
                 }))
             }
             Expr::Match {
@@ -1533,7 +1671,7 @@ impl<'a> Interp<'a> {
     fn eval_args(&mut self, args: &[Expr]) -> R<Vec<Value>> {
         let mut out = vec![];
         for a in args {
-            out.push(self.eval(a)?);
+            out.push(self.eval_move(a)?);
         }
         Ok(out)
     }
@@ -1644,7 +1782,7 @@ impl<'a> Interp<'a> {
         let saved = self.line;
         self.line = t.span.line;
         let r = self.val(&t.cond);
-        self.frames.pop();
+        self.release_frame();
         self.line = saved;
         match r? {
             Value::Bool(true) => Ok(some(v)),
@@ -1659,6 +1797,16 @@ impl<'a> Interp<'a> {
         let user = recv_val
             .type_name()
             .and_then(|t| self.prog.methods.get(&(t, name.to_string())).copied());
+        if matches!(recv, Expr::Name(_))
+            && user.is_some_and(|d| {
+                d.params
+                    .first()
+                    .is_some_and(|p| !matches!(p.ty, Type::Ref { .. }))
+            })
+        {
+            // 値で受け取る `self` は移動する（記録中は移動元を空にする）。
+            self.eval_move(recv)?;
+        }
         let needs_mut = match user {
             Some(d) => matches!(
                 d.params.first().map(|p| &p.ty),
@@ -1733,7 +1881,7 @@ impl<'a> Interp<'a> {
         }
         let recv = deref(recv);
         if name == "clone" && args.is_empty() {
-            return Ok(recv);
+            return Ok(if tracing() { deep_clone(&recv) } else { recv });
         }
         match &recv {
             Value::List(l) => self.list_method(name, l, args),

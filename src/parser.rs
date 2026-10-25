@@ -95,7 +95,9 @@ struct Parser {
 }
 
 /// 式・型・パターン・ブロックの入れ子の深さの上限。
-const MAX_DEPTH: usize = 128;
+/// `.`・`(...)`・`?` の連鎖、二項演算の連鎖、`else if` の連鎖も 1 つにつき 1 段と数える
+/// （構文木の深さを抑え、木をたどる再帰と `Drop` のスタックあふれを防ぐ）。
+const MAX_DEPTH: usize = 256;
 
 fn describe(t: &Tok) -> String {
     match t {
@@ -375,6 +377,7 @@ impl Parser {
                 break;
             }
         }
+        let targets_line = self.span().line;
         self.module_clause("targets")?;
         let mut targets: Vec<(String, Span)> = Vec::new();
         loop {
@@ -413,6 +416,7 @@ impl Parser {
                 ));
             }
         }
+        let trust_line = self.span().line;
         self.module_clause("trust")?;
         let trust = match self.tok() {
             Tok::Kw("none") => Trust::None,
@@ -425,6 +429,8 @@ impl Parser {
             targets: targets.into_iter().map(|(s, _)| s).collect(),
             trust,
             span,
+            targets_line,
+            trust_line,
         })
     }
 
@@ -506,16 +512,19 @@ impl Parser {
         let generics = self.generics()?;
         self.expect_punct("{")?;
         let fields = self.comma_sep("}", |p| {
+            let line = p.span().line;
             let name = p.snake_plain("フィールド名")?;
             p.expect_punct(":")?;
             let ty = p.ty()?;
-            Ok(Field { name, ty })
+            Ok(Field { name, ty, line })
         })?;
+        let end_line = self.toks[self.pos - 1].span.line;
         Ok(StructDecl {
             name,
             generics,
             fields,
             span,
+            end_line,
         })
     }
 
@@ -527,6 +536,7 @@ impl Parser {
         self.expect_punct("{")?;
         let open = self.span();
         let variants = self.comma_sep("}", |p| {
+            let line = p.span().line;
             let name = p.camel_def("列挙型の値の名前")?;
             let fields = if p.eat_punct("(") {
                 let ts = p.comma_sep(")", |p| p.ty())?;
@@ -537,7 +547,7 @@ impl Parser {
             } else {
                 Vec::new()
             };
-            Ok(Variant { name, fields })
+            Ok(Variant { name, fields, line })
         })?;
         if variants.is_empty() {
             return Err(Error::new(
@@ -546,11 +556,13 @@ impl Parser {
                 "列挙型は値を 1 つ以上持つ",
             ));
         }
+        let end_line = self.toks[self.pos - 1].span.line;
         Ok(EnumDecl {
             name,
             generics,
             variants,
             span,
+            end_line,
         })
     }
 
@@ -580,6 +592,8 @@ impl Parser {
             None
         };
 
+        let mut clause_lines = [0u32; 4];
+        clause_lines[0] = self.span().line;
         self.expect_clause("intent")?;
         let intent_span = self.span();
         let intent = match self.tok().clone() {
@@ -597,6 +611,7 @@ impl Parser {
             ));
         }
 
+        clause_lines[1] = self.span().line;
         self.expect_clause("requires")?;
         let requires = if self.eat_kw("none") {
             None
@@ -604,6 +619,7 @@ impl Parser {
             Some(self.expr()?)
         };
 
+        clause_lines[2] = self.span().line;
         self.expect_clause("ensures")?;
         let ensures = if self.eat_kw("none") {
             None
@@ -617,6 +633,7 @@ impl Parser {
             Some(e?)
         };
 
+        clause_lines[3] = self.span().line;
         self.expect_clause("effects")?;
         let mut effects = Vec::new();
         if !self.eat_kw("none") {
@@ -640,6 +657,7 @@ impl Parser {
             effects,
             body,
             span,
+            clause_lines,
         })
     }
 
@@ -687,6 +705,12 @@ impl Parser {
             Tok::Punct("&") => {
                 self.bump();
                 let mutable = self.eat_kw("mut");
+                if self.at_punct("&") || self.at_punct("&&") {
+                    return Err(self.err(
+                        ErrorKind::RefOfRef,
+                        "参照の参照 `& &T` は書けない（ADR 0003）",
+                    ));
+                }
                 Ok(Type::Ref {
                     mutable,
                     inner: Box::new(self.ty()?),
@@ -738,6 +762,7 @@ impl Parser {
     // ---- 文 ----
 
     fn block_inner(&mut self) -> R<Block> {
+        let open_line = self.span().line;
         self.expect_punct("{")?;
         let saved = self.no_struct;
         self.no_struct = false;
@@ -751,7 +776,11 @@ impl Parser {
         let end_line = self.span().line;
         self.bump();
         self.no_struct = saved;
-        Ok(Block { stmts, end_line })
+        Ok(Block {
+            stmts,
+            open_line,
+            end_line,
+        })
     }
 
     fn cond_expr(&mut self) -> R<Expr> {
@@ -839,7 +868,10 @@ impl Parser {
         Ok(Stmt { kind, span })
     }
 
+    /// `else if` の連鎖は 1 つにつき入れ子の深さを 1 段進める。
     fn if_stmt(&mut self) -> R<IfStmt> {
+        self.enter()?;
+        let line = self.span().line;
         self.bump();
         let cond = self.cond_expr()?;
         let then = self.block()?;
@@ -852,7 +884,9 @@ impl Parser {
         } else {
             None
         };
+        self.depth -= 1;
         Ok(IfStmt {
+            line,
             cond,
             then,
             otherwise,
@@ -866,6 +900,7 @@ impl Parser {
         self.expect_punct("{")?;
         let mut arms = Vec::new();
         while !self.at_punct("}") {
+            let line = self.span().line;
             let pattern = self.pattern()?;
             self.expect_punct("=>")?;
             if !self.at_punct("{") {
@@ -881,8 +916,13 @@ impl Parser {
                     "文の `match` の腕の後に `,` は付けない",
                 ));
             }
-            arms.push(StmtArm { pattern, body });
+            arms.push(StmtArm {
+                pattern,
+                body,
+                line,
+            });
         }
+        let end_line = self.span().line;
         self.bump();
         if arms.is_empty() {
             return Err(Error::new(
@@ -891,7 +931,11 @@ impl Parser {
                 "`match` は腕を 1 つ以上持つ",
             ));
         }
-        Ok(StmtKind::Match { scrutinee, arms })
+        Ok(StmtKind::Match {
+            scrutinee,
+            arms,
+            end_line,
+        })
     }
 
     // ---- パターン ----
@@ -1005,7 +1049,10 @@ impl Parser {
         } else {
             return Ok(lhs);
         };
+        let mut links = 0;
         while self.at_punct(tok) {
+            self.enter()?;
+            links += 1;
             self.bump();
             let rhs = self.cmp_expr()?;
             lhs = Expr::Binary {
@@ -1014,6 +1061,7 @@ impl Parser {
                 rhs: Box::new(rhs),
             };
         }
+        self.depth -= links;
         if self.at_punct(other) {
             return Err(self.err(
                 ErrorKind::MixedAndOr,
@@ -1057,12 +1105,18 @@ impl Parser {
 
     fn add_expr(&mut self) -> R<Expr> {
         let mut lhs = self.mul_expr()?;
+        let mut links = 0;
         loop {
             let op = match self.tok() {
                 Tok::Punct("+") => BinOp::Add,
                 Tok::Punct("-") => BinOp::Sub,
-                _ => return Ok(lhs),
+                _ => {
+                    self.depth -= links;
+                    return Ok(lhs);
+                }
             };
+            self.enter()?;
+            links += 1;
             self.bump();
             let rhs = self.mul_expr()?;
             lhs = Expr::Binary {
@@ -1075,13 +1129,19 @@ impl Parser {
 
     fn mul_expr(&mut self) -> R<Expr> {
         let mut lhs = self.prefix()?;
+        let mut links = 0;
         loop {
             let op = match self.tok() {
                 Tok::Punct("*") => BinOp::Mul,
                 Tok::Punct("/") => BinOp::Div,
                 Tok::Punct("%") => BinOp::Rem,
-                _ => return Ok(lhs),
+                _ => {
+                    self.depth -= links;
+                    return Ok(lhs);
+                }
             };
+            self.enter()?;
+            links += 1;
             self.bump();
             let rhs = self.prefix()?;
             lhs = Expr::Binary {
@@ -1103,6 +1163,12 @@ impl Parser {
                 } else {
                     UnOp::Ref
                 };
+                if self.at_punct("&") || self.at_punct("&&") {
+                    return Err(self.err(
+                        ErrorKind::RefOfRef,
+                        "参照の参照 `& &x` は書けない（ADR 0003。必要なら `&(&x)` と書く）",
+                    ));
+                }
                 let expr = Box::new(self.prefix()?);
                 return Ok(Expr::Unary { op, expr });
             }
@@ -1121,7 +1187,12 @@ impl Parser {
 
     fn postfix(&mut self) -> R<Expr> {
         let mut e = self.primary()?;
+        let mut links = 0;
         loop {
+            if self.at_punct(".") || self.at_punct("(") || self.at_punct("?") {
+                self.enter()?;
+                links += 1;
+            }
             if self.eat_punct(".") {
                 let name = self.name_ref("フィールド名・メソッド名")?;
                 e = Expr::Field {
@@ -1148,6 +1219,7 @@ impl Parser {
                 break;
             }
         }
+        self.depth -= links;
         if self.at_punct("{") {
             if let Some(path) = as_type_path(&e) {
                 if !self.no_struct {
@@ -1321,7 +1393,7 @@ impl Parser {
         self.no_struct = false;
         let arms = self.value_arms();
         self.no_struct = saved;
-        let arms = arms?;
+        let (arms, end_line) = arms?;
         if arms.is_empty() {
             return Err(Error::new(
                 ErrorKind::EmptyMatch,
@@ -1332,12 +1404,14 @@ impl Parser {
         Ok(Expr::Match {
             scrutinee: Box::new(scrutinee),
             arms,
+            end_line,
         })
     }
 
-    fn value_arms(&mut self) -> R<Vec<ExprArm>> {
+    fn value_arms(&mut self) -> R<(Vec<ExprArm>, u32)> {
         let mut arms = Vec::new();
         while !self.at_punct("}") {
+            let line = self.span().line;
             let pattern = self.pattern()?;
             self.expect_punct("=>")?;
             if self.at_punct("{") {
@@ -1347,50 +1421,63 @@ impl Parser {
                 ));
             }
             let body = self.expr()?;
-            arms.push(ExprArm { pattern, body });
+            arms.push(ExprArm {
+                pattern,
+                body,
+                line,
+            });
             if !self.eat_punct(",") {
                 break;
             }
         }
+        let end_line = self.span().line;
         self.expect_punct("}")?;
-        Ok(arms)
+        Ok((arms, end_line))
     }
 }
 
 /// 代入の左辺: 変数、またはフィールドの連なり。
 fn is_place(e: &Expr) -> bool {
-    match e {
-        Expr::Name(n) => !is_upper_start(n),
-        Expr::Field { expr, name } => !is_upper_start(name) && is_place(expr),
-        _ => false,
+    let mut cur = e;
+    loop {
+        match cur {
+            Expr::Name(n) => return !is_upper_start(n),
+            Expr::Field { expr, name } if !is_upper_start(name) => cur = expr,
+            _ => return false,
+        }
     }
 }
 
 fn is_call_stmt(e: &Expr) -> bool {
-    match e {
-        Expr::Call { .. } => true,
-        Expr::Try(inner) => is_call_stmt(inner),
-        _ => false,
+    let mut cur = e;
+    loop {
+        match cur {
+            Expr::Call { .. } => return true,
+            Expr::Try(inner) => cur = inner,
+            _ => return false,
+        }
     }
 }
 
 /// 名前と `.` の連なりで、最後の部分が大文字始まりなら、構造体の値のパス。
 fn as_type_path(e: &Expr) -> Option<Vec<String>> {
-    fn go(e: &Expr, out: &mut Vec<String>) -> bool {
-        match e {
+    let mut v = Vec::new();
+    let mut cur = e;
+    loop {
+        match cur {
             Expr::Name(n) => {
-                out.push(n.clone());
-                true
+                v.push(n.clone());
+                break;
             }
-            Expr::Field { expr, name } if go(expr, out) => {
-                out.push(name.clone());
-                true
+            Expr::Field { expr, name } => {
+                v.push(name.clone());
+                cur = expr;
             }
-            _ => false,
+            _ => return None,
         }
     }
-    let mut v = Vec::new();
-    if go(e, &mut v) && v.last().is_some_and(|s| is_upper_start(s)) {
+    v.reverse();
+    if v.last().is_some_and(|s| is_upper_start(s)) {
         Some(v)
     } else {
         None

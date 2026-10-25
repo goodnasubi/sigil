@@ -17,6 +17,9 @@ pub struct ModuleDecl {
     pub targets: Vec<String>,
     pub trust: Trust,
     pub span: Span,
+    /// `targets`・`trust` の節を書いた行（整形器がコメントを置くため）。
+    pub targets_line: u32,
+    pub trust_line: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,7 @@ pub enum Trust {
     Base,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Type(TypeDecl),
@@ -55,12 +59,15 @@ pub struct StructDecl {
     pub generics: Vec<Generic>,
     pub fields: Vec<Field>,
     pub span: Span,
+    /// 閉じ波括弧の行。
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
     pub ty: Type,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,12 +76,15 @@ pub struct EnumDecl {
     pub generics: Vec<Generic>,
     pub variants: Vec<Variant>,
     pub span: Span,
+    /// 閉じ波括弧の行。
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub name: String,
     pub fields: Vec<Type>,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -91,6 +101,8 @@ pub struct FnDecl {
     pub effects: Vec<Effect>,
     pub body: Block,
     pub span: Span,
+    /// `intent`・`requires`・`ensures`・`effects` の各節の行。
+    pub clause_lines: [u32; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,7 +139,9 @@ pub enum Type {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
-    /// 閉じ波括弧の行（整形器が空行を扱うため）。
+    /// 開き波括弧の行。
+    pub open_line: u32,
+    /// 閉じ波括弧の行（整形器が空行・コメントを扱うため）。
     pub end_line: u32,
 }
 
@@ -160,11 +174,15 @@ pub enum StmtKind {
     Match {
         scrutinee: Expr,
         arms: Vec<StmtArm>,
+        /// 閉じ波括弧の行。
+        end_line: u32,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct IfStmt {
+    /// `if` の行。
+    pub line: u32,
     pub cond: Expr,
     pub then: Block,
     pub otherwise: Option<Box<Else>>,
@@ -180,12 +198,14 @@ pub enum Else {
 pub struct StmtArm {
     pub pattern: Pattern,
     pub body: Block,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExprArm {
     pub pattern: Pattern,
     pub body: Expr,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -275,6 +295,8 @@ pub enum Expr {
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<ExprArm>,
+        /// 閉じ波括弧の行。
+        end_line: u32,
     },
     Closure {
         is_move: bool,

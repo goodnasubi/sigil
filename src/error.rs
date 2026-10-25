@@ -109,7 +109,14 @@ pub enum ErrorKind {
     TypeArgCount,
     CannotInfer,
     NotExhaustive,
+    UnreachableArm,
     TryOperand,
+    UnknownEffect,
+    OfNotParam,
+    EffectMissing,
+    EffectExtra,
+    EffectTarget,
+    GlobalValue,
     PatternMismatch,
     InfiniteType,
     // --- 整形 ---
@@ -174,6 +181,12 @@ impl ErrorKind {
             | TypeArgCount
             | CannotInfer
             | NotExhaustive
+            | UnreachableArm
+            | UnknownEffect
+            | OfNotParam
+            | EffectMissing
+            | EffectExtra
+            | EffectTarget
             | TryOperand
             | PatternMismatch
             | InfiniteType => Phase::Check,

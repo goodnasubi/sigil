@@ -15,15 +15,21 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
+use crate::effects::{EffectTable, Options, Primitive};
 use crate::error::{Error, ErrorKind, Span};
-use crate::exhaustive::{missing, Ctor, P};
+use crate::exhaustive::{missing, useful, Ctor, P};
 use crate::parser::parse;
 
 type R<T> = Result<T, Error>;
 
 /// ソースを構文解析してから型検査する。最初のエラーを返す。
 pub fn check(src: &str) -> R<()> {
-    check_file(&parse(src)?)
+    check_with(src, &Options::default())
+}
+
+/// 効果のカテゴリ表や仮の関数（標準ライブラリが入るまで）を指定して検査する。
+pub fn check_with(src: &str, opts: &Options) -> R<()> {
+    check_file_with(&parse(src)?, opts)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,7 +123,35 @@ struct Sig {
     params: Vec<(String, Ty)>,
     ret: Ty,
     effects_none: bool,
+    /// 宣言した効果（`of(f)` は引数の位置で持つ）。
+    effects: Vec<EffTerm>,
     has_self: bool,
+}
+
+/// シグネチャの効果の 1 項。
+#[derive(Debug, Clone, PartialEq)]
+enum EffTerm {
+    /// カテゴリ名（`fs`・`console` など。下位を含む）。
+    Cat(String),
+    /// `of(f)`: 引数の位置（`self` を含む）。
+    Of(usize),
+}
+
+/// 推論した効果の 1 つ。
+#[derive(Debug, Clone, PartialEq)]
+enum Atom {
+    Cat(String),
+    /// 関数を受け取る引数 `f` の効果（`of(f)`）。
+    Of(String),
+}
+
+/// 呼び出しで起こる効果。
+#[derive(Default)]
+struct Eff {
+    terms: Vec<EffTerm>,
+    /// 呼び出す関数が持つ引数の数のずれ（メソッドは `self` の分だけ 1）。
+    off: usize,
+    extra: Vec<Atom>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,9 +212,27 @@ struct Ck {
     annots: Vec<(Span, Ty)>,
     skip: Option<usize>,
     skipped: Option<Ty>,
+    table: EffectTable,
+    prims: Vec<Primitive>,
+    /// モジュールの `targets`。
+    targets: Vec<String>,
+    /// 効果の推論の枠（先頭が関数の本体、クロージャごとに積む）。
+    eff_stack: Vec<Vec<Atom>>,
+    /// 関数の型の引数（`of(f)` の `f` になれる）。
+    fn_params: Vec<String>,
+    /// `let` で束縛したクロージャの効果。
+    local_eff: HashMap<String, Vec<Atom>>,
+    /// 次のクロージャの効果を、親の枠に足さずに `last_closure` へ取っておく。
+    defer: bool,
+    last_closure: Vec<Atom>,
+    inferred: Vec<Atom>,
 }
 
 pub fn check_file(file: &File) -> R<()> {
+    check_file_with(file, &Options::default())
+}
+
+pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
     let mut ck = Ck {
         types: HashMap::new(),
         fns: HashMap::new(),
@@ -199,6 +251,15 @@ pub fn check_file(file: &File) -> R<()> {
         annots: vec![],
         skip: None,
         skipped: None,
+        table: opts.table.clone(),
+        prims: opts.primitives.clone(),
+        targets: file.module.targets.clone(),
+        eff_stack: vec![vec![]],
+        fn_params: vec![],
+        local_eff: HashMap::new(),
+        defer: false,
+        last_closure: vec![],
+        inferred: vec![],
     };
     ck.prelude();
     ck.run(file)
@@ -727,6 +788,7 @@ impl Ck {
             }
         }
         // 4. 関数とメソッドのシグネチャ
+        self.register_primitives()?;
         for item in &file.items {
             match item {
                 Item::Fn(f) => {
@@ -881,13 +943,84 @@ impl Ck {
             None => Ty::Unit,
             Some(t) => self.resolve(t, Pos::Other)?,
         };
+        let effects = self.effect_terms(&f.effects, &params)?;
         Ok(Sig {
             generics,
             params,
             ret,
             effects_none: f.effects.is_empty(),
+            effects,
             has_self,
         })
+    }
+
+    /// `effects` 節の名前を調べる（ADR 0010 決定 12）。
+    fn effect_terms(&self, effects: &[Effect], params: &[(String, Ty)]) -> R<Vec<EffTerm>> {
+        let mut out = vec![];
+        for e in effects {
+            match e {
+                Effect::Category(path) => {
+                    let name = path.join(".");
+                    if !self.table.valid(&name) {
+                        let hint = if name == "browser" {
+                            "（`browser` は実行対象の語で、効果ではない。DOM は `dom`、保存領域は `browser.storage`）"
+                        } else {
+                            ""
+                        };
+                        return self.err(
+                            ErrorKind::UnknownEffect,
+                            format!("効果 `{name}` は、効果のカテゴリの表にない{hint}"),
+                        );
+                    }
+                    out.push(EffTerm::Cat(name));
+                }
+                Effect::Of(x) => {
+                    match params
+                        .iter()
+                        .position(|(n, t)| n == x && matches!(t, Ty::Fn(..)))
+                    {
+                        Some(i) => out.push(EffTerm::Of(i)),
+                        None => {
+                            return self.err(
+                                ErrorKind::OfNotParam,
+                                format!("`of({x})` の `{x}` は、関数の型の引数でなければならない"),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 仮の関数（標準ライブラリが入るまでのテスト用）を関数の表に入れる。
+    fn register_primitives(&mut self) -> R<()> {
+        for p in self.prims.clone() {
+            let src = format!(
+                "module p.p\n  targets server\n  trust none\n\nfn {}\n  intent \"p\"\n  requires none\n  ensures none\n  effects none\n{{\n}}\n",
+                p.signature
+            );
+            let file = parse(&src)?;
+            let Some(Item::Fn(f)) = file.items.first() else {
+                continue;
+            };
+            if self.fns.contains_key(&f.name) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("仮の関数 `{}` が二重にある", f.name),
+                );
+            }
+            let mut sig = self.signature(f, None, &[])?;
+            let fx: Vec<Effect> = p
+                .effects
+                .iter()
+                .map(|e| Effect::Category(e.split('.').map(str::to_string).collect()))
+                .collect();
+            sig.effects = self.effect_terms(&fx, &sig.params)?;
+            sig.effects_none = fx.is_empty();
+            self.fns.insert(f.name.clone(), sig);
+        }
+        Ok(())
     }
 
     fn resolve(&self, t: &Type, pos: Pos) -> R<Ty> {
@@ -1037,6 +1170,17 @@ impl Ck {
         self.refine = false;
         self.result = None;
         self.ret = Ty::Unit;
+        self.eff_stack = vec![vec![]];
+        self.fn_params.clear();
+        self.local_eff.clear();
+        self.defer = false;
+    }
+
+    fn add_eff(&mut self, a: Atom) {
+        let top = self.eff_stack.last_mut().expect("effect frame");
+        if !top.contains(&a) {
+            top.push(a);
+        }
     }
 
     fn has_var(&self, t: &Ty) -> bool {
@@ -1127,6 +1271,8 @@ impl Ck {
         self.skip = None;
         self.annots.clear();
         self.body_once(f, sig)?;
+        self.span = f.span;
+        self.match_effects(f, sig)?;
         // 型注釈の要否: 注釈を 1 つ外して検査し直し、同じ型に決まれば冗長
         let annots = self.annots.clone();
         for (i, (span, declared)) in annots.iter().enumerate() {
@@ -1146,6 +1292,55 @@ impl Ck {
         Ok(())
     }
 
+    /// 宣言した効果と、本体から推論した効果の照合（ADR 0004 の規則 3・ADR 0006 の条件 11）。
+    fn match_effects(&self, f: &FnDecl, sig: &Sig) -> R<()> {
+        let mut declared: Vec<String> = vec![];
+        for t in &sig.effects {
+            match t {
+                EffTerm::Cat(n) => declared.extend(self.table.atoms(n)),
+                EffTerm::Of(i) => declared.push(format!("of({})", sig.params[*i].0)),
+            }
+        }
+        let mut inferred: Vec<String> = vec![];
+        for a in &self.inferred {
+            match a {
+                Atom::Cat(n) => inferred.extend(self.table.atoms(n)),
+                Atom::Of(x) => inferred.push(format!("of({x})")),
+            }
+        }
+        for t in &self.targets {
+            for e in declared.iter().chain(&inferred) {
+                if !e.starts_with("of(") && !self.table.allowed_on(e, t) {
+                    return self.err(
+                        ErrorKind::EffectTarget,
+                        format!(
+                            "効果 `{e}` は、実行対象 `{t}` では使えない（モジュールの `targets` に `{t}` がある）"
+                        ),
+                    );
+                }
+            }
+        }
+        if let Some(e) = inferred.iter().find(|e| !declared.contains(e)) {
+            return self.err(
+                ErrorKind::EffectMissing,
+                format!(
+                    "関数 `{}` の本体は効果 `{e}` を起こすが、`effects` 節に書かれていない（足す）",
+                    f.name
+                ),
+            );
+        }
+        if let Some(e) = declared.iter().find(|e| !inferred.contains(e)) {
+            return self.err(
+                ErrorKind::EffectExtra,
+                format!(
+                    "関数 `{}` の `effects` 節に効果 `{e}` があるが、本体は起こさない（取り除く）",
+                    f.name
+                ),
+            );
+        }
+        Ok(())
+    }
+
     fn body_once(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
         self.span = f.span;
         self.begin();
@@ -1161,7 +1356,15 @@ impl Ck {
             );
         }
         self.scopes = vec![scope];
+        self.fn_params = sig
+            .params
+            .iter()
+            .filter(|(_, t)| matches!(t, Ty::Fn(..)))
+            .map(|(n, _)| n.clone())
+            .collect();
         self.ret = sig.ret.clone();
+        // 契約の式は効果の推論に数えない（捨てる枠で検査する）
+        self.eff_stack.push(vec![]);
         if let Some(r) = &f.requires {
             self.expect(&Ty::Bool, r, "`requires`")?;
         }
@@ -1171,7 +1374,9 @@ impl Ck {
             self.result = None;
             r?;
         }
+        self.eff_stack.pop();
         self.block(&f.body)?;
+        self.inferred = self.eff_stack[0].clone();
         self.span = f.span;
         if sig.ret != Ty::Unit && !block_returns(&f.body) {
             return self.err(
@@ -1250,7 +1455,20 @@ impl Ck {
                 ty,
                 value,
             } => {
-                let vt = self.expr(value)?;
+                let closure = matches!(strip_paren(value), Expr::Closure { .. });
+                self.defer = closure;
+                let vt = self.expr(value);
+                self.defer = false;
+                let vt = vt?;
+                if closure {
+                    if let Pattern::Bind(n) = pattern {
+                        let effs = std::mem::take(&mut self.last_closure);
+                        self.local_eff.insert(n.clone(), effs);
+                    } else {
+                        // 束縛されないクロージャは呼べない。効果は起こらない。
+                        self.last_closure.clear();
+                    }
+                }
                 self.span = s.span;
                 let fin = match ty {
                     None => vt,
@@ -1594,18 +1812,39 @@ impl Ck {
         }
     }
 
+    fn enum_shapes(&self, ty: &str) -> Vec<(String, usize)> {
+        match self.types.get(ty) {
+            Some(TypeDef::Enum { variants, .. }) => variants
+                .iter()
+                .map(|(n, fs)| (n.clone(), fs.len()))
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    /// 前の腕がすべて覆う値にしか当たらない腕はエラー（ADR 0011 の決定 9 の追記）。
+    fn unreachable_arms(&self, pats: &[&Pattern]) -> R<()> {
+        let rows: Vec<Vec<P>> = pats.iter().map(|p| vec![self.to_p(p)]).collect();
+        let enums = |ty: &str| self.enum_shapes(ty);
+        for i in 1..rows.len() {
+            if !useful(&rows[..i], &rows[i], &enums) {
+                return self.err(
+                    ErrorKind::UnreachableArm,
+                    format!(
+                        "`match` の第 {} 腕は、前の腕がすでに覆っているので到達できない（取り除く）",
+                        i + 1
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// `match` の腕がすべての値を覆うか（ADR 0011 の決定 9）。
     fn exhaustive(&self, pats: &[&Pattern]) -> R<()> {
+        self.unreachable_arms(pats)?;
         let rows: Vec<Vec<P>> = pats.iter().map(|p| vec![self.to_p(p)]).collect();
-        let enums = |ty: &str| -> Vec<(String, usize)> {
-            match self.types.get(ty) {
-                Some(TypeDef::Enum { variants, .. }) => variants
-                    .iter()
-                    .map(|(n, fs)| (n.clone(), fs.len()))
-                    .collect(),
-                _ => vec![],
-            }
-        };
+        let enums = |ty: &str| self.enum_shapes(ty);
         match missing(&rows, 1, &enums) {
             None => Ok(()),
             Some(w) => self.err(
@@ -1771,6 +2010,8 @@ impl Ck {
                 );
             }
         }
+        let defer = std::mem::take(&mut self.defer);
+        self.eff_stack.push(vec![]);
         self.scopes.push(HashMap::new());
         let mut pts = vec![];
         for (i, p) in params.iter().enumerate() {
@@ -1831,6 +2072,14 @@ impl Ck {
         };
         self.ret = saved;
         self.scopes.pop();
+        let effs = self.eff_stack.pop().unwrap_or_default();
+        if defer {
+            self.last_closure = effs;
+        } else {
+            for a in effs {
+                self.add_eff(a);
+            }
+        }
         res?;
         Ok(Ty::Fn(pts, Box::new(r)))
     }
@@ -2130,10 +2379,10 @@ impl Ck {
     }
 
     /// 関数の型 `ft` の値を `args` で呼ぶ。
-    fn apply(&mut self, ft: Ty, args: &[Expr], what: &str) -> R<Ty> {
+    fn apply(&mut self, ft: Ty, args: &[Expr], what: &str, eff: Eff) -> R<Ty> {
         match self.shallow(&ft) {
             Ty::Fn(ps, r) => {
-                self.args(&ps, args, what)?;
+                self.args(&ps, args, what, &eff)?;
                 Ok(*r)
             }
             Ty::Var(_) => self.err(
@@ -2154,7 +2403,7 @@ impl Ck {
                     return match self.fns.get(n).cloned() {
                         Some(sig) if sig.effects_none => {
                             let ft = self.fn_type(&sig, &format!("関数 `{n}`"))?;
-                            self.apply(ft, args, &format!("関数 `{n}`"))
+                            self.apply(ft, args, &format!("関数 `{n}`"), Eff::default())
                         }
                         Some(_) => self.err(
                             ErrorKind::RefinementEffect,
@@ -2179,7 +2428,25 @@ impl Ck {
                     );
                 }
                 let ft = self.name(n)?;
-                self.apply(ft, args, &format!("`{n}`"))
+                let eff = if self.lookup(n).is_some() {
+                    if self.fn_params.contains(&n.to_string()) {
+                        Eff {
+                            extra: vec![Atom::Of(n.clone())],
+                            ..Eff::default()
+                        }
+                    } else {
+                        Eff {
+                            extra: self.local_eff.get(n).cloned().unwrap_or_default(),
+                            ..Eff::default()
+                        }
+                    }
+                } else {
+                    self.fns.get(n).map_or_else(Eff::default, |sig| Eff {
+                        terms: sig.effects.clone(),
+                        ..Eff::default()
+                    })
+                };
+                self.apply(ft, args, &format!("`{n}`"), eff)
             }
             Expr::Field { expr, name } => {
                 if let Some(tn) = self.type_path(expr) {
@@ -2188,11 +2455,11 @@ impl Ck {
                             if variants.iter().any(|(v, _)| v == name) =>
                         {
                             let ft = self.variant_value(&tn, name)?;
-                            return self.apply(ft, args, &format!("`{tn}.{name}`"));
+                            return self.apply(ft, args, &format!("`{tn}.{name}`"), Eff::default());
                         }
                         Some(TypeDef::Alias(base)) if name == "check" => {
                             let ft = self.check_fn_type(&tn, &base);
-                            return self.apply(ft, args, &format!("`{tn}.check`"));
+                            return self.apply(ft, args, &format!("`{tn}.check`"), Eff::default());
                         }
                         Some(TypeDef::Opaque(_)) => {
                             return self.unsupported(&format!("標準ライブラリの `{tn}.{name}`"));
@@ -2213,7 +2480,11 @@ impl Ck {
                     }
                     let what = format!("`{tn}.{name}`");
                     let ft = self.fn_type(&sig, &what)?;
-                    return self.apply(ft, args, &what);
+                    let eff = Eff {
+                        terms: sig.effects.clone(),
+                        ..Eff::default()
+                    };
+                    return self.apply(ft, args, &what, eff);
                 }
                 // メソッド呼び出し x.m(...)
                 let rt0 = self.expr(expr)?;
@@ -2282,7 +2553,12 @@ impl Ck {
                     .iter()
                     .map(|(_, t)| substitute(t, &m))
                     .collect();
-                self.args(&ps, args, &what)?;
+                let eff = Eff {
+                    terms: sig.effects.clone(),
+                    off: 1,
+                    ..Eff::default()
+                };
+                self.args(&ps, args, &what, &eff)?;
                 Ok(substitute(&sig.ret, &m))
             }
             _ => self.err(
@@ -2292,7 +2568,33 @@ impl Ck {
         }
     }
 
-    fn args(&mut self, params: &[Ty], args: &[Expr], what: &str) -> R<()> {
+    /// 引数として渡された関数の効果。
+    fn fn_effects(&self, a: &Expr) -> Vec<Atom> {
+        match strip_paren(a) {
+            Expr::Name(n) => {
+                if self.lookup(n).is_some() {
+                    if self.fn_params.contains(n) {
+                        vec![Atom::Of(n.clone())]
+                    } else {
+                        self.local_eff.get(n).cloned().unwrap_or_default()
+                    }
+                } else {
+                    self.fns.get(n).map_or_else(Vec::new, |sig| {
+                        sig.effects
+                            .iter()
+                            .filter_map(|t| match t {
+                                EffTerm::Cat(c) => Some(Atom::Cat(c.clone())),
+                                EffTerm::Of(_) => None,
+                            })
+                            .collect()
+                    })
+                }
+            }
+            _ => vec![],
+        }
+    }
+
+    fn args(&mut self, params: &[Ty], args: &[Expr], what: &str, eff: &Eff) -> R<()> {
         if params.len() != args.len() {
             return self.err(
                 ErrorKind::ArgCount,
@@ -2304,9 +2606,26 @@ impl Ck {
             );
         }
         let sp = self.span;
+        let mut gained: Vec<Atom> = vec![];
         for (i, (p, a)) in params.iter().zip(args).enumerate() {
-            let t = self.expr_hint(a, Some(p))?;
+            let closure = matches!(strip_paren(a), Expr::Closure { .. });
+            self.defer = closure;
+            let t = self.expr_hint(a, Some(p));
+            self.defer = false;
+            let t = t?;
             self.span = sp;
+            let of_this = eff
+                .terms
+                .iter()
+                .any(|t| matches!(t, EffTerm::Of(j) if *j == i + eff.off));
+            if closure {
+                let ce = std::mem::take(&mut self.last_closure);
+                if of_this {
+                    gained.extend(ce);
+                }
+            } else if of_this {
+                gained.extend(self.fn_effects(a));
+            }
             if !self.coerce(p, &t, a) {
                 let hint = if matches!(self.shallow(p), Ty::Ref(..))
                     && !matches!(self.shallow(&t), Ty::Ref(..))
@@ -2325,6 +2644,14 @@ impl Ck {
                     ),
                 );
             }
+        }
+        for t in &eff.terms {
+            if let EffTerm::Cat(c) = t {
+                self.add_eff(Atom::Cat(c.clone()));
+            }
+        }
+        for a in eff.extra.iter().cloned().chain(gained) {
+            self.add_eff(a);
         }
         Ok(())
     }
@@ -2383,6 +2710,13 @@ impl Ck {
             );
         }
         Ok(ty)
+    }
+}
+
+fn strip_paren(e: &Expr) -> &Expr {
+    match e {
+        Expr::Paren(i) => strip_paren(i),
+        e => e,
     }
 }
 

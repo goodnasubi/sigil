@@ -4,6 +4,7 @@
 
 pub mod ast;
 pub mod check;
+pub mod effects;
 pub mod error;
 pub mod exhaustive;
 pub mod fmt;

@@ -377,6 +377,12 @@ impl Parser {
                 Tok::Kw("enum") => items.push(Item::Enum(self.enum_decl()?)),
                 Tok::Kw("fn") => items.push(Item::Fn(self.fn_decl(false)?)),
                 Tok::Kw("impl") => items.push(Item::Impl(self.impl_decl()?)),
+                Tok::Kw("let") => {
+                    return Err(self.err(
+                        ErrorKind::GlobalValue,
+                        "大域の値（`let`）は宣言できない（P0 は大域の可変な値を持たない。ADR 0006 の決定 3 の条件 12）",
+                    ));
+                }
                 _ => {
                     return Err(self.unexpected("`type`・`struct`・`enum`・`fn`・`impl` のいずれか"))
                 }

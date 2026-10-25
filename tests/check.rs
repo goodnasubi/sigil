@@ -1,6 +1,7 @@
 //! 型検査（M1 の最初の一区切り。ADR 0011）のテスト。
 
-use sigil::check::check;
+use sigil::check::{check, check_with};
+use sigil::effects::{EffectTable, Options, Primitive};
 use sigil::ErrorKind;
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
@@ -37,6 +38,24 @@ fn body_kind(sig: &str, body: &str) -> ErrorKind {
 
 fn body_ok(sig: &str, body: &str) {
     ok(&func(sig, body));
+}
+
+fn prim(sig: &str, effects: &[&str]) -> Primitive {
+    Primitive {
+        signature: sig.to_string(),
+        effects: effects.iter().map(|e| e.to_string()).collect(),
+    }
+}
+
+/// 標準ライブラリが入るまでの、効果のある仮の関数。
+fn emit_options() -> Options {
+    Options {
+        table: EffectTable::standard(),
+        primitives: vec![
+            prim("emit(n: Int) -> Bool", &["console"]),
+            prim("read_file(p: String) -> String", &["fs.read"]),
+        ],
+    }
 }
 
 const ACCOUNT: &str = "struct Account {\n  balance: Int,\n  owner: String,\n}\n";
@@ -321,7 +340,8 @@ fn function_values_as_args() {
     ok(&format!(
         "{}{}{}",
         func("inc(x: Int) -> Int", "  return x + 1;"),
-        func("apply(g: fn(Int) -> Int, v: Int) -> Int", "  return g(v);"),
+        func("apply(g: fn(Int) -> Int, v: Int) -> Int", "  return g(v);")
+            .replace("effects none", "effects of(g)"),
         func("main2() -> Int", "  return apply(inc, 1);")
     ));
 }
@@ -571,11 +591,10 @@ fn refinement_declarations() {
         kind("type A = &Int where self == 1;\n"),
         ErrorKind::RefinementBase
     );
+    // 効果のある関数は篩型の条件で呼べない（仮の関数 `emit` は `console` を起こす）
+    let src = prog("type A = Int where emit(self);\n");
     assert_eq!(
-        kind(&format!(
-            "{}type A = Int where g(self);\n",
-            func("g(n: Int) -> Bool", "  return true;").replace("effects none", "effects console")
-        )),
+        check_with(&src, &emit_options()).unwrap_err().kind,
         ErrorKind::RefinementEffect
     );
     assert_eq!(
@@ -1005,7 +1024,8 @@ fn generic_enum_variants() {
     // 値としての構築子（関数の値）
     ok(&format!(
         "{maybe}{}{}",
-        func("apply<T, U>(x: T, f: fn(T) -> U) -> U", "  return f(x);"),
+        func("apply<T, U>(x: T, f: fn(T) -> U) -> U", "  return f(x);")
+            .replace("effects none", "effects of(f)"),
         func("g() -> Maybe<Int>", "  return apply(4, Maybe.Just);")
     ));
 }
@@ -1229,7 +1249,8 @@ fn closures_get_types_from_context() {
     ));
     ok(&format!(
         "{}{}",
-        func("apply(g: fn(Int) -> Int, v: Int) -> Int", "  return g(v);"),
+        func("apply(g: fn(Int) -> Int, v: Int) -> Int", "  return g(v);")
+            .replace("effects none", "effects of(g)"),
         func("f(n: Int) -> Int", "  return apply(|y| y + n, 1);")
     ));
     assert_eq!(

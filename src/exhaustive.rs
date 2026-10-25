@@ -65,6 +65,67 @@ fn default_matrix(rows: &[Vec<P>]) -> Vec<Vec<P>> {
         .collect()
 }
 
+fn signature(
+    used: &[Ctor],
+    enums: &dyn Fn(&str) -> Vec<(String, usize)>,
+) -> Option<Vec<(Ctor, usize)>> {
+    match used.first() {
+        Some(Ctor::Variant { ty, .. }) => Some(
+            enums(ty)
+                .into_iter()
+                .map(|(name, ar)| {
+                    (
+                        Ctor::Variant {
+                            ty: ty.clone(),
+                            name,
+                        },
+                        ar,
+                    )
+                })
+                .collect(),
+        ),
+        Some(Ctor::Bool(_)) => Some(vec![(Ctor::Bool(false), 0), (Ctor::Bool(true), 0)]),
+        Some(Ctor::Tuple(k)) => Some(vec![(Ctor::Tuple(*k), *k)]),
+        _ => None,
+    }
+}
+
+/// 行列 `rows` に覆われていない値を、ベクトル `q` が表すか（腕が到達できるかの判定）。
+pub fn useful(rows: &[Vec<P>], q: &[P], enums: &dyn Fn(&str) -> Vec<(String, usize)>) -> bool {
+    let Some((head, rest)) = q.split_first() else {
+        return rows.is_empty();
+    };
+    match head {
+        P::Ctor(c, args) => {
+            let spec = specialize(rows, c, args.len());
+            let mut v = args.clone();
+            v.extend_from_slice(rest);
+            useful(&spec, &v, enums)
+        }
+        P::Wild => {
+            let mut used: Vec<Ctor> = vec![];
+            for r in rows {
+                if let P::Ctor(c, _) = &r[0] {
+                    if !used.contains(c) {
+                        used.push(c.clone());
+                    }
+                }
+            }
+            match signature(&used, enums) {
+                Some(sig) if sig.iter().all(|(c, _)| used.contains(c)) => {
+                    sig.iter().any(|(c, ar)| {
+                        let spec = specialize(rows, c, *ar);
+                        let mut v = vec![P::Wild; *ar];
+                        v.extend_from_slice(rest);
+                        useful(&spec, &v, enums)
+                    })
+                }
+                _ => useful(&default_matrix(rows), rest, enums),
+            }
+        }
+    }
+}
+
 /// 列数 `n` の行列が網羅していなければ、取りこぼす値の一例（各列の表示）を返す。
 /// `enums(型名)` は、列挙型の値の名前と中身の数の一覧。
 pub fn missing(
@@ -83,25 +144,7 @@ pub fn missing(
             }
         }
     }
-    let sig: Option<Vec<(Ctor, usize)>> = match used.first() {
-        Some(Ctor::Variant { ty, .. }) => Some(
-            enums(ty)
-                .into_iter()
-                .map(|(name, ar)| {
-                    (
-                        Ctor::Variant {
-                            ty: ty.clone(),
-                            name,
-                        },
-                        ar,
-                    )
-                })
-                .collect(),
-        ),
-        Some(Ctor::Bool(_)) => Some(vec![(Ctor::Bool(false), 0), (Ctor::Bool(true), 0)]),
-        Some(Ctor::Tuple(k)) => Some(vec![(Ctor::Tuple(*k), *k)]),
-        _ => None,
-    };
+    let sig = signature(&used, enums);
     let Some(sig) = sig else {
         let def = default_matrix(rows);
         return missing(&def, n - 1, enums).map(|w| {

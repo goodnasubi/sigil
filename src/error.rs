@@ -96,6 +96,7 @@ pub enum ErrorKind {
     OldNotCopyable,
     MissingReturn,
     FnTypePosition,
+    FnValueReassign,
     RecursiveType,
     RefinementBase,
     RefinementName,
@@ -168,6 +169,7 @@ impl ErrorKind {
             | OldNotCopyable
             | MissingReturn
             | FnTypePosition
+            | FnValueReassign
             | RecursiveType
             | RefinementBase
             | RefinementName

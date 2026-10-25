@@ -44,7 +44,7 @@ fn with_tax(prices: &List<Int>) -> List<Int>
   ensures len(result) == len(prices)
   effects none
 {
-  return apply_all(prices, |p| add_tax(p, 10));
+  return apply_all(&prices, |p| add_tax(p, 10));
 }
 
 // 共有所有の型を通した書き換えは state 効果になる。

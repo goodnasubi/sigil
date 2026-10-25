@@ -108,11 +108,12 @@ Sigilはみんなで育てるオープンソースの秘密基地です。
 Sigil（シジル）は、Java・React・Node.js に代わる言語を目指して開発する、AI 専用の汎用プログラミング言語です。
 コードは AI が書き、AI が保守します。人間は **仕様だけ** をレビューします。
 
-> **ステータス:** 設計段階（構想・文書化）。処理系はまだありません。
+> **ステータス:** 設計段階が中心で、処理系（Rust 製）は M0〜M1 まで実装済みです。M0 は構文解析・`sigil fmt`・`sigil spec`、M1 は型検査と効果の検査（標準ライブラリは仮の最小範囲 `src/stdlib.rs`）で、5 つの例が `sigil check` を通ります。M2 以降（所有権・借用の検査など）は未着手です。
 > P0（言語の核）の実装の進め方（Rust で書くコンパイラ、段階 M0〜M6）を [ADR 0006](docs/decisions/0006-p0-scope-and-bootstrap.md) で決めました。
 > 並行処理のモデル（中断を効果として扱う構造化並行処理）を [ADR 0007](docs/decisions/0007-concurrency-model.md) で決めました。
 > M0 の前に決める表記（`old`・篩型・モジュールの宣言・`sigil spec` の出力など）を [ADR 0008](docs/decisions/0008-m0-notation.md) で決めました。
 > 字句と文法の全体仕様（コメント・識別子・予約語・リテラル・演算子の優先順位・正規形）を [ADR 0009](docs/decisions/0009-lexical-and-grammar.md) で決めました。
+> `sigil fmt` の仕様と M0 の補足を [ADR 0010](docs/decisions/0010-fmt-and-m0-addendum.md) で、型システムの範囲（所有権と借用の表記、型引数、篩型、関数の値の制限など）を [ADR 0011](docs/decisions/0011-type-system-scope.md) で決めました。
 
 ## 目標
 

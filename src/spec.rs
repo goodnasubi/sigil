@@ -173,7 +173,7 @@ fn effects_spec(f: &FnDecl) -> String {
 }
 
 fn intent_text(s: &str) -> String {
-    if s.chars().any(|c| c.is_control()) {
+    if s.chars().any(crate::fmt::needs_u_escape) {
         let e = crate::fmt::escape_str(s);
         e[1..e.len() - 1].to_string()
     } else {

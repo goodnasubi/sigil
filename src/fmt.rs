@@ -175,6 +175,11 @@ fn is_format_char(c: char) -> bool {
 }
 
 /// 文字列リテラルの正規形（ADR 0009 の決定 6）。
+/// 文字列リテラル内で `\u{..}` 形式にしなければならない文字か。
+pub(crate) fn needs_u_escape(c: char) -> bool {
+    c.is_control() || is_format_char(c) || (c.is_whitespace() && c != ' ')
+}
+
 pub fn escape_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -185,7 +190,7 @@ pub fn escape_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
-            c if c.is_control() || is_format_char(c) || (c.is_whitespace() && c != ' ') => {
+            c if needs_u_escape(c) => {
                 out.push_str(&format!("\\u{{{:X}}}", c as u32));
             }
             c => out.push(c),

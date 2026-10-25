@@ -56,7 +56,7 @@ pub const RESERVED_NAMES: &[&str] = &[
 ];
 
 /// 出力先（ADR 0008 の決定 6。P0 で書けるもの）。
-pub const TARGETS: &[&str] = &["browser", "server"];
+pub const TARGETS: &[&str] = &["bare", "browser", "server"];
 
 #[derive(Debug, Clone)]
 pub struct Parsed {
@@ -442,7 +442,10 @@ impl Parser {
                 return Err(Error::new(
                     ErrorKind::UnknownTarget,
                     sp,
-                    format!("出力先 `{s}` は P0 で書けない（書けるのは browser・server）"),
+                    format!(
+                        "出力先 `{s}` は P0 で書けない（書けるのは {}）",
+                        TARGETS.join("・")
+                    ),
                 ));
             }
             if let Some((prev, _)) = targets.last() {

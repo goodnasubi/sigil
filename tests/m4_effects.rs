@@ -389,6 +389,7 @@ fn no_implicit_conversion_between_shared_and_another_shared_type() {
     for bad in [to_shared, to_mine] {
         let src = format!("{ok}{bad}");
         let r = sigil::check::check_file(&sigil::parse(&src).unwrap());
-        assert!(r.is_err(), "型エラーになるはず:\n{src}");
+        let e = r.expect_err(&format!("型エラーになるはず:\n{src}"));
+        assert_eq!(e.kind, sigil::ErrorKind::TypeMismatch, "{e}\n{src}");
     }
 }

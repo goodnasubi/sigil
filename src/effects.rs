@@ -6,27 +6,39 @@
 /// カテゴリを使える実行対象。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Targets {
+    pub bare: bool,
     pub server: bool,
     pub browser: bool,
 }
 
 impl Targets {
-    pub const ALL: Targets = Targets {
+    /// ブラウザとサーバーで使える（実行環境なしでは使えない）。ADR 0004 の表の「すべて」はこの意味（ADR 0014 決定 3）。
+    pub const HOSTED: Targets = Targets {
+        bare: false,
+        server: true,
+        browser: true,
+    };
+    /// 実行環境なしを含むすべての出力先で使える（`state` だけ。ADR 0014 決定 3）。
+    pub const ANY: Targets = Targets {
+        bare: true,
         server: true,
         browser: true,
     };
     pub const SERVER: Targets = Targets {
+        bare: false,
         server: true,
         browser: false,
     };
     pub const BROWSER: Targets = Targets {
+        bare: false,
         server: false,
         browser: true,
     };
 
-    /// 実行対象の語（`server`・`browser`）で使えるか。
+    /// 実行対象の語（`bare`・`server`・`browser`）で使えるか。
     pub fn allows(&self, target: &str) -> bool {
         match target {
+            "bare" => self.bare,
             "server" => self.server,
             "browser" => self.browser,
             _ => false,
@@ -45,23 +57,23 @@ impl EffectTable {
     pub fn standard() -> EffectTable {
         use Targets as T;
         let rows = [
-            ("console", T::ALL),
+            ("console", T::HOSTED),
             ("fs.read", T::SERVER),
             ("fs.write", T::SERVER),
-            ("net.client", T::ALL),
+            ("net.client", T::HOSTED),
             ("net.server", T::SERVER),
             ("db", T::SERVER),
-            ("clock", T::ALL),
-            ("random", T::ALL),
+            ("clock", T::HOSTED),
+            ("random", T::HOSTED),
             ("env", T::SERVER),
             ("process", T::SERVER),
             ("dom", T::BROWSER),
             ("browser.storage", T::BROWSER),
-            ("state", T::ALL),
-            ("foreign", T::ALL),
-            ("task.spawn", T::ALL),
-            ("task.suspend", T::ALL),
-            ("task.share", T::ALL),
+            ("state", T::ANY),
+            ("foreign", T::HOSTED),
+            ("task.spawn", T::HOSTED),
+            ("task.suspend", T::HOSTED),
+            ("task.share", T::HOSTED),
         ];
         let mut t = EffectTable { cats: vec![] };
         for (n, ts) in rows {

@@ -501,3 +501,51 @@ fn ref_of_ref_nested() {
     let t = fnsrc(&GOOD_FN.replace("x: Int", "x: & &Int"));
     assert_eq!(kind(&t), ErrorKind::RefOfRef);
 }
+
+// ---- M1: ADR 0011 の構文の拡張 ----
+
+#[test]
+fn impl_syntax() {
+    let m = "  fn m(self: &mut A, n: Int)\n    intent \"x\"\n    requires none\n    ensures none\n    effects none\n  {\n    self.n = n;\n  }\n";
+    ok(&fnsrc(&format!("impl A {{\n{m}}}\n")));
+    ok(&fnsrc(&format!(
+        "impl<T: Equatable + Sendable> A<T> {{\n{m}}}\n"
+    )));
+    // `self` は `impl` の中の最初の引数だけ
+    assert!(parse(&fnsrc("fn f(n: Int, self: A)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\n")).is_err());
+    assert!(parse(&fnsrc("fn f(self: A)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\n")).is_err());
+}
+
+#[test]
+fn reserved_property_names() {
+    for n in [
+        "Unit",
+        "Copyable",
+        "Equatable",
+        "Comparable",
+        "Numeric",
+        "Sendable",
+        "Shareable",
+    ] {
+        assert_eq!(
+            kind(&fnsrc(&format!("struct {n} {{\n  x: Int,\n}}\n"))),
+            ErrorKind::ReservedNameDefined,
+            "{n}"
+        );
+    }
+}
+
+#[test]
+fn let_syntax() {
+    let f = |b: &str| fnsrc(&GOOD_FN.replace("  return x;", b));
+    ok(&f("  let a: Int = 1;\n  return x;"));
+    ok(&f("  let (a, b) = (1, 2);\n  return x;"));
+    ok(&f("  let (a, (_, b)): (Int, (Int, Int)) = t;\n  return x;"));
+    assert_eq!(
+        kind(&f("  let mut (a, b) = (1, 2);\n  return x;")),
+        ErrorKind::NotInP0
+    );
+    // 空の組・要素 1 つの組の分解は書けない
+    assert!(parse(&f("  let () = t;\n  return x;")).is_err());
+    assert!(parse(&f("  let (a) = t;\n  return x;")).is_err());
+}

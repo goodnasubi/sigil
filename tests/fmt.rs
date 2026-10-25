@@ -379,3 +379,68 @@ fn cli_writes_atomically_and_keeps_permissions() {
     assert_eq!(std::fs::read_to_string(&g).unwrap(), "fn");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// ---- M1: ADR 0011 の構文の拡張と `-> Unit` の除去 ----
+
+#[test]
+fn messy_has_expected_output() {
+    let src = std::fs::read_to_string("tests/data/messy.sigil").unwrap();
+    let want = std::fs::read_to_string("tests/data/messy.expected.sigil").unwrap();
+    assert_eq!(fmt(&src), want);
+    assert!(!want.contains("-> Unit"));
+    assert!(check(&want).unwrap().is_none());
+}
+
+#[test]
+fn unit_return_type_is_removed() {
+    let with = format!(
+        "{HEAD}fn g()\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{}}\n"
+    );
+    let src = with.replace("fn g()", "fn g() -> Unit");
+    expect(&src, &with);
+    // 末尾の `return;` も取り除かれる
+    let src2 = src.replace("{}", "{\n  return;\n}");
+    expect(&src2, &with);
+    // 関数の型
+    expect(
+        &format!("{HEAD}fn a(f: fn(Int) -> Unit)\n  intent \"x\"\n  requires none\n  ensures none\n  effects of(f)\n{{}}\n"),
+        &format!("{HEAD}fn a(f: fn(Int))\n  intent \"x\"\n  requires none\n  ensures none\n  effects of(f)\n{{}}\n"),
+    );
+    // 型引数の `Unit` は残る
+    unchanged(&format!(
+        "{HEAD}fn s() -> Result<Unit, E>\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return Ok(Unit);\n}}\n"
+    ));
+}
+
+#[test]
+fn constraints_are_sorted_and_deduplicated() {
+    let f = |c: &str| {
+        format!("{HEAD}fn a<T: {c}>(x: T)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{}}\n")
+    };
+    expect(&f("Sendable + Equatable"), &f("Equatable + Sendable"));
+    expect(
+        &f("Sendable + Equatable + Sendable"),
+        &f("Equatable + Sendable"),
+    );
+    unchanged(&f("Comparable + Equatable"));
+}
+
+#[test]
+fn let_annotation_and_destructuring() {
+    unchanged(&body("  let a: Int = 1;\n  let mut b: Float = 1.5;\n  let (c, d) = (1, 2);\n  let (_, (e, f)) = (1, (2, 3));\n  return x;\n"));
+    expect(
+        &body("  let a:Int=1;\n  let ( c ,d )=t;\n  return x;\n"),
+        &body("  let a: Int = 1;\n  let (c, d) = t;\n  return x;\n"),
+    );
+}
+
+#[test]
+fn impl_blocks() {
+    let m = "  fn get(self: &Account) -> Int\n    intent \"x\"\n    requires none\n    ensures none\n    effects none\n  {\n    return self.balance;\n  }\n";
+    unchanged(&format!("{HEAD}impl Account {{\n{m}}}\n"));
+    unchanged(&format!("{HEAD}impl<T> Box<T> {{\n{m}}}\n"));
+    expect(
+        &format!("{HEAD}impl Account {{\n  fn get(self: &Account) -> Int\n    intent \"x\"\n    requires none\n    ensures none\n    effects none\n  {{ return self.balance; }}\n}}\n"),
+        &format!("{HEAD}impl Account {{\n{m}}}\n"),
+    );
+}

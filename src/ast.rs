@@ -35,6 +35,18 @@ pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     Fn(FnDecl),
+    Impl(ImplDecl),
+}
+
+/// `impl 型 { fn ... }`（ADR 0011 の決定 6。型に直接付けるメソッド）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplDecl {
+    pub generics: Vec<Generic>,
+    pub ty: Type,
+    pub fns: Vec<FnDecl>,
+    pub span: Span,
+    /// 閉じ波括弧の行。
+    pub end_line: u32,
 }
 
 /// 篩型 `type Port = Int where 条件;`
@@ -49,8 +61,8 @@ pub struct TypeDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Generic {
     pub name: String,
-    /// `T: Sendable` の制約（パス）。
-    pub bound: Option<Vec<String>>,
+    /// `T: Equatable + Sendable` の制約（`+` でつないだ性質の名前。書かれた順）。
+    pub bounds: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -155,7 +167,10 @@ pub struct Stmt {
 pub enum StmtKind {
     Let {
         mutable: bool,
-        name: String,
+        /// 束縛・`_`・組の入れ子だけ（ADR 0011 の決定 7）。
+        pattern: Pattern,
+        /// 型注釈（`let x: T = ...`）。
+        ty: Option<Type>,
         value: Expr,
     },
     Assign {

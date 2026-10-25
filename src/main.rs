@@ -194,7 +194,7 @@ fn main() -> ExitCode {
         }
         Some("run") if args.len() >= 3 => {
             // テスト用の差し替え（ADR 0004 の規則 7）。`--fs-double 仮のパス=実ファイル` で、
-            // `fs.read(&仮のパス)` が実ファイルの内容を返す。指定がなければ `fs.read` は未対応。
+            // `fs.read(&仮のパス)` が実ファイルの内容を返す。指定がなければ実ファイルを読み書きする。同じ仮のパスの重複指定は使い方の誤り（終了コード 2）。
             let mut doubles: Vec<(String, String)> = vec![];
             let mut i = 1;
             while args.get(i).map(String::as_str) == Some("--fs-double") {
@@ -202,6 +202,10 @@ fn main() -> ExitCode {
                     eprintln!("--fs-double には 仮のパス=実ファイル が要る");
                     return ExitCode::from(2);
                 };
+                if doubles.iter().any(|(d, _)| d == k) {
+                    eprintln!("--fs-double の仮のパス {k} が重複している");
+                    return ExitCode::from(2);
+                }
                 doubles.push((k.to_string(), v.to_string()));
                 i += 2;
             }

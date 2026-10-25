@@ -64,18 +64,6 @@ fn read_port_empty_path_violates_requires() {
 }
 
 #[test]
-fn without_a_double_fs_read_is_unsupported() {
-    let e = go(
-        &[PORT],
-        "read_port",
-        &[Arg::Str("/etc/port".into())],
-        &Options::default(),
-    )
-    .unwrap_err();
-    assert!(matches!(e.error, RunError::Unsupported(_)), "{e}");
-}
-
-#[test]
 fn load_prices_reads_lines_and_logs() {
     let o = files(&[("p.txt", "10\n20\nx\n30\n")]);
     let r = go(&[EFFECTS], "load_prices", &[Arg::Str("p.txt".into())], &o).unwrap();
@@ -122,9 +110,14 @@ fn cli_fs_double_runs_read_port() {
         String::from_utf8_lossy(&o.stdout),
         "Err(ConfigError.OutOfRange(99999))\n"
     );
+    // 差し替えがなければ実ファイルを読む（`/etc/port` はない）。
     let o = std::process::Command::new(bin)
-        .args(["run", ex, "read_port", "/etc/port"])
+        .args(["run", ex, "read_port", "/nonexistent-sigil-dir/port"])
         .output()
         .unwrap();
-    assert_eq!(o.status.code(), Some(1));
+    assert!(o.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout),
+        "Err(ConfigError.Io(IoError.NotFound(\"/nonexistent-sigil-dir/port\")))\n"
+    );
 }

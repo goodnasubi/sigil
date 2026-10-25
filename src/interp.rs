@@ -5,7 +5,7 @@
 //! - 異常停止（契約違反・`Int` の桁あふれ・0 での除算と剰余・標準の関数の `requires` 違反・スタックの枯渇）。
 //!   どれもプログラムからは捕まえられず、`Stop` として報告する。終了コードは種類によらず `STOP_EXIT_CODE`。
 //! - 実行の歩数に上限は設けない（ADR 0013 の決定 1）。スタックの枯渇だけは検出して異常停止にする。
-//! - `console.log` は出力を文字列に溜める（M4 で本物の入出力に替える）。`fs.read` はテスト用の差し替え（`Options::fs_files`）だけ。実際のファイルと `fs.write` は M4。
+//! - `console.log` は出力を文字列に溜める（M4 で本物の入出力に替える）。`fs.read`・`fs.write` は既定で実ファイル（M4）。`Options::fs_files` を渡すと、その表だけを読み書きする差し替えになる。
 //!
 //! 値の持ち方:
 //! - 共有借用 `&x` は、その時点の値の写し（`Rc` の複製）。借用の間は元の値が変わらないことを検査器が保証する。
@@ -157,8 +157,8 @@ pub struct Options {
     /// 記録中は、名前だけの値の使用を移動として扱い、`clone` は構造体を複製する。
     pub trace_drops: bool,
     /// `fs.read` のテスト用の差し替え（ADR 0004 の規則 7）。`Some` のとき、`fs.read(&p)` は
-    /// この表（パス -> 内容）を引き、ない `p` は `Err(IoError.NotFound(p))` を返す。
-    /// `None`（既定）のときは実際のファイルを読まず、未対応として停止する（実ファイルは M4）。
+    /// この表（パス -> 内容）を引き、ない `p` は `Err(IoError.NotFound(p))` を返す。`fs.write` は表を書き換える。
+    /// `None`（既定）のときは実際のファイルを読み書きする。
     pub fs_files: Option<std::collections::BTreeMap<String, String>>,
 }
 
@@ -363,6 +363,8 @@ enum Value {
     ParseError,
     /// `Cell<T>`（`Shared<Cell<T>>` の実体。共有するので `Rc` の中身を書き換える）。
     Cell(Rc<std::cell::RefCell<Value>>),
+    /// `Shared<Cell<T>>`。`Rc` を共有するので、`clone` は同じ `Cell` を指す（`Cell` 単体の `clone` は独立した複製）。
+    Shared(Rc<Value>),
     Closure(Rc<ClosureVal>),
     /// 名前で参照した関数。
     Named(Rc<str>),
@@ -426,7 +428,9 @@ fn is_copy_value(v: &Value) -> bool {
         | Value::Named(_)
         | Value::Ctor(..)
         | Value::MutRef(_) => true,
-        Value::Str(_) | Value::List(_) | Value::Struct(_) | Value::Cell(_) => false,
+        Value::Str(_) | Value::List(_) | Value::Struct(_) | Value::Cell(_) | Value::Shared(_) => {
+            false
+        }
         Value::Tuple(t) => t.iter().all(is_copy_value),
         Value::Variant(x) => {
             matches!(&*x.enum_name, "Option" | "Result") && x.args.iter().all(is_copy_value)
@@ -456,8 +460,26 @@ fn deep_clone(v: &Value) -> Value {
             name: x.name.clone(),
             args: x.args.iter().map(deep_clone).collect(),
         })),
+        // `Cell` 単体の複製は独立する（ADR 0006 の M4 の記録）。`Shared` は同じ `Cell` を指したまま。
+        Value::Cell(c) => Value::Cell(Rc::new(RefCell::new(deep_clone(&c.borrow())))),
         other => other.clone(),
     }
+}
+
+/// 値の中に `Cell` が（`Shared` の外に）あるか。あれば `clone` は `Rc` の共有でなく複製を作る。
+fn contains_cell(v: &Value) -> bool {
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::Cell(_) => return true,
+            Value::Tuple(t) => stack.extend(t.iter()),
+            Value::List(l) => stack.extend(l.items.iter()),
+            Value::Struct(s) => stack.extend(s.fields.iter().map(|(_, x)| x)),
+            Value::Variant(x) => stack.extend(x.args.iter()),
+            _ => {}
+        }
+    }
+    false
 }
 
 fn tracing() -> bool {
@@ -511,6 +533,11 @@ fn drain(mut stack: Vec<Value>) {
             Value::Cell(rc) => {
                 if let Ok(inner) = Rc::try_unwrap(rc) {
                     stack.push(inner.into_inner());
+                }
+            }
+            Value::Shared(rc) => {
+                if let Ok(inner) = Rc::try_unwrap(rc) {
+                    stack.push(inner);
                 }
             }
             _ => {}
@@ -604,6 +631,16 @@ fn some(v: Value) -> Value {
 
 fn none() -> Value {
     variant("Option", "None", vec![])
+}
+
+/// `fs` の失敗を `IoError` の腕（`NotFound`・`PermissionDenied`・`Other`。どれもパスを持つ）にする。
+fn io_error(kind: std::io::ErrorKind, path: Rc<str>) -> Value {
+    let name = match kind {
+        std::io::ErrorKind::NotFound => "NotFound",
+        std::io::ErrorKind::PermissionDenied => "PermissionDenied",
+        _ => "Other",
+    };
+    variant("IoError", name, vec![Value::Str(path)])
 }
 
 fn ok(v: Value) -> Value {
@@ -747,6 +784,7 @@ impl Value {
             }
             Value::ParseError => "ParseError".into(),
             Value::Cell(c) => format!("Cell({})", c.borrow().show(true)),
+            Value::Shared(x) => format!("Shared({})", x.show(true)),
             Value::Closure(_) | Value::Named(_) | Value::Ctor(..) => "<関数>".into(),
             Value::MutRef(_) => deref(self.clone()).show(quote),
         }
@@ -790,6 +828,7 @@ fn values_eq(a: &Value, b: &Value) -> bool {
             x.enum_name == y.enum_name && x.name == y.name && seq_eq(&x.args, &y.args)
         }
         (Value::Cell(x), Value::Cell(y)) => Rc::ptr_eq(x, y) || values_eq(&x.borrow(), &y.borrow()),
+        (Value::Shared(x), Value::Shared(y)) => Rc::ptr_eq(x, y) || values_eq(x, y),
         _ => false,
     }
 }
@@ -1788,22 +1827,48 @@ impl<'a> Interp<'a> {
                 deref(a.remove(0)),
             )))),
             // `Shared<T>` は共有の所有。値は `Rc` で共有されるので、そのまま包まずに返す。
-            ("Shared", "new") if a.len() == 1 => Ok(deref(a.remove(0))),
-            ("fs", "read") if a.len() == 1 => match &self.fs {
-                None => unsupported(
-                    "fs.read（実際のファイルは M4。テスト用の差し替えは Options::fs_files）",
-                ),
-                Some(files) => {
-                    let Value::Str(p) = deref(a.remove(0)) else {
-                        return unsupported("fs.read の引数");
-                    };
-                    Ok(match files.get(&*p) {
-                        Some(text) => ok(Value::Str(text.as_str().into())),
-                        None => err(variant("IoError", "NotFound", vec![Value::Str(p)])),
-                    })
-                }
+            // `Cell` を包むときだけ `Shared` の印を付ける（`clone` で共有を保つため）。
+            ("Shared", "new") if a.len() == 1 => Ok(match deref(a.remove(0)) {
+                c @ Value::Cell(_) => Value::Shared(Rc::new(c)),
+                other => other,
+            }),
+            ("Path", "new") if a.len() == 1 => match deref(a.remove(0)) {
+                v @ Value::Str(_) => Ok(v),
+                _ => unsupported("Path.new の引数"),
             },
-            ("fs", "write") => unsupported("fs.write（M4 で扱う）"),
+            ("fs", "read") if a.len() == 1 => {
+                let Value::Str(p) = deref(a.remove(0)) else {
+                    return unsupported("fs.read の引数");
+                };
+                // 差し替えの表があればそれだけを引く。なければ実ファイル。
+                Ok(match &self.fs {
+                    Some(files) => match files.get(&*p) {
+                        Some(text) => ok(Value::Str(text.as_str().into())),
+                        None => err(io_error(std::io::ErrorKind::NotFound, p)),
+                    },
+                    None => match std::fs::read_to_string(&*p) {
+                        Ok(text) => ok(Value::Str(text.into())),
+                        Err(e) => err(io_error(e.kind(), p)),
+                    },
+                })
+            }
+            ("fs", "write") if a.len() == 2 => {
+                let s = deref(a.remove(1));
+                let p = deref(a.remove(0));
+                let (Value::Str(p), Value::Str(s)) = (p, s) else {
+                    return unsupported("fs.write の引数");
+                };
+                Ok(match &mut self.fs {
+                    Some(files) => {
+                        files.insert(p.to_string(), s.to_string());
+                        ok(Value::Unit)
+                    }
+                    None => match std::fs::write(&*p, s.as_bytes()) {
+                        Ok(()) => ok(Value::Unit),
+                        Err(e) => err(io_error(e.kind(), p)),
+                    },
+                })
+            }
             _ => unsupported(format!("{ns}.{name}")),
         }
     }
@@ -1915,11 +1980,16 @@ impl<'a> Interp<'a> {
         }
         let recv = deref(recv);
         if name == "clone" && args.is_empty() {
-            return Ok(if tracing() { deep_clone(&recv) } else { recv });
+            return Ok(if tracing() || contains_cell(&recv) {
+                deep_clone(&recv)
+            } else {
+                recv
+            });
         }
         match &recv {
             Value::List(l) => self.list_method(name, l, args),
             Value::Str(s) => str_method(name, s, args),
+            Value::Shared(inner) => self.builtin_method(name, (**inner).clone(), args),
             Value::Cell(c) => match (name, args.len()) {
                 ("get", 0) => Ok(c.borrow().clone()),
                 ("set", 1) => {
@@ -2094,6 +2164,14 @@ impl<'a> Interp<'a> {
 }
 
 fn str_method(name: &str, s: &Rc<str>, a: Vec<Value>) -> R<Value> {
+    // `Path` は実行時には文字列。`join` は `std::path::Path::join`（絶対パスを渡すとそれに置き換わる）。
+    if name == "join" {
+        let [Value::Str(other)] = a.as_slice() else {
+            return unsupported("Path.join の引数");
+        };
+        let joined = std::path::Path::new(&**s).join(&**other);
+        return Ok(Value::Str(joined.to_string_lossy().as_ref().into()));
+    }
     if !a.is_empty() {
         return unsupported(format!("String.{name}"));
     }
@@ -2115,6 +2193,14 @@ fn str_method(name: &str, s: &Rc<str>, a: Vec<Value>) -> R<Value> {
                 float: false,
             })))
         }
+        "file_name" => Ok(std::path::Path::new(&**s)
+            .file_name()
+            .map_or_else(none, |n| {
+                some(Value::Str(n.to_string_lossy().as_ref().into()))
+            })),
+        "parent" => Ok(std::path::Path::new(&**s).parent().map_or_else(none, |n| {
+            some(Value::Str(n.to_string_lossy().as_ref().into()))
+        })),
         "parse_int" => {
             let digits = s.strip_prefix('-').unwrap_or(s);
             let valid = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());

@@ -338,9 +338,6 @@ fn example_effects_pure_functions() {
 
 #[test]
 fn unsupported_and_entry_errors_are_not_abnormal_stops() {
-    let src = example("02-read-port/c-brace.sigil");
-    let e = run(&src, "read_port", &[Arg::Str("p".into())]).unwrap_err();
-    assert!(matches!(e.error, RunError::Unsupported(_)), "{}", e.error);
     let e = run(
         &program(&func("f() -> Int", "none", "none", "return 1;")),
         "nope",

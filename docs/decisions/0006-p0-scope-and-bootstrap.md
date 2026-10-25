@@ -166,7 +166,17 @@
   1. （実施済み）ADR 0013 の完了条件のテスト（`tests/m3_stdlib.rs`）
   2. （実施済み）決定 3 の条件 9（破棄の順序）のテスト（`tests/m3_drop_order.rs`）と、借用区間の部品の対のテスト（`tests/borrow_pairs.rs`。`src/borrow.rs` の単体テストと名前が一致することも確かめる）
   3. （実施済み）標準ライブラリの補完（`Cell`・`Shared<Cell<T>>`）と、`fs.read` のテスト用の差し替え（`02-read-port` の `read_port`、`04-effects` の `load_prices`・`count_up` の実行。`tests/m3_fs_cell.rs`）
-  4. M4 に回すもの: 実際のファイルの `fs.read`・`fs.write`、`Path` の操作など（`console.log`・`Cell`・`Shared` と、差し替えた `fs.read` は実行できる）
+  4. （M4 の効果操作で実施）実際のファイルの `fs.read`・`fs.write`、`Path` の操作（下の「M4 の記録（効果操作）」）
+
+**M4 の記録（効果操作）**
+
+- **実ファイルの `fs.read`・`fs.write`**: `Options::fs_files` が `None`（既定）のとき、`fs.read(&p)` は実ファイルを UTF-8 の文字列として読み、`fs.write(&p, &s)` は `p` を作成または上書きする（`std::fs`）。`Options::fs_files` が `Some` のときは従来どおり表だけを使い、`fs.write` は表を書き換える（実ファイルには触れない）。差し替えの表と実ファイルは混ぜない。
+- **`IoError` の腕**: 失敗は `Err(IoError.NotFound(パス))`・`Err(IoError.PermissionDenied(パス))`・`Err(IoError.Other(パス))` のいずれかで、`std::io::ErrorKind` の `NotFound`・`PermissionDenied`・それ以外に対応する。`IoError` は不透明型のままで、プログラムから腕を取り出す手段はまだない（`ConfigError.Io` に包んで運ぶだけ）。OS のエラーメッセージは含めない（環境で変わり、テストが不安定になるため）。UTF-8 でないファイルの読み込みは `Other`。
+- **`Path`**: 実行時の表現は `String` のまま。`Path.new(s: &String) -> Path`、`join(self: &Path, name: &String) -> Path`、`file_name(self: &Path) -> Option<String>`、`parent(self: &Path) -> Option<Path>` を加えた（効果は `none`）。意味は Rust の `std::path::Path` に従う（`join` に絶対パスを渡すとそれに置き換わる。`/` の `parent`・`file_name` は `None`。`a` の `parent` は空のパス）。区切りは実行環境の OS のものを使う。パスの存在確認や正規化など、ファイルシステムを引く操作は加えていない。
+- **`Cell` の複製（決定）**: `Cell` 単体の `clone` は独立した複製を作る（中身も複製する）。`Shared<Cell<T>>` の `clone` は、同じ `Cell` を指す（共有の所有を増やす）。`Shared.new(cell)` は `Cell` を `Value::Shared` で包んで両者を区別する。構造体・一覧・列挙・組が `Shared` の外に `Cell` を持つとき、その値の `clone` は `Cell` も複製する。`Shared` の中の `Cell` は複製せず共有を保つ。`trace_drops` の記録中の `clone`（`deep_clone`）も同じ規則で、`Cell` 単体の `clone` は破棄される値を 2 つにし、`Shared` の `clone` は 1 つのままにする。
+- **`--fs-double` の重複**: 同じ仮のパスを 2 回指定すると使い方の誤りとして終了コード 2 で止まる（後勝ちにも先勝ちにもしない）。
+- **残した制限**: `deep_clone` は再帰で、何万段も入れ子になった `Cell` 入りの値の `clone` はホストのスタックを使う（破棄は反復化済み）。`fs` は同期で、ファイルの読み書きの途中で中断した部分の書き込みは戻さない。`console.log` の出力は文字列に溜めたまま（本物の標準出力は未実装）。
+
 
 **M4**
 

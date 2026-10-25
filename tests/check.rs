@@ -904,11 +904,10 @@ fn derived_properties_follow_the_adr_table() {
         "{ACCOUNT}{send}{}",
         func("g(a: Account)", "  go(a);")
     ));
-    // 参照を型引数に渡す書き方は、ADR 0012 の決定 1 の参照の位置の規則でなくなった
-    // （`go(&a)` は `BorrowPosition`）。
+    // 参照を型引数に渡せる（ADR 0012 の決定 1 の 4）が、参照は Sendable でない
     assert_eq!(
         kind(&format!("{send}{}", func("g(a: Int)", "  go(&a);"))),
-        ErrorKind::BorrowPosition
+        ErrorKind::ConstraintUnsatisfied
     );
     // Copyable は導出されない: 構造体・列挙型は Copyable でない
     assert_eq!(

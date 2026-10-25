@@ -111,7 +111,6 @@ fn borrow_only_as_call_argument() {
     assert_eq!(kind(&func("f(n: Int)", "  let r = &n;")), k);
     assert_eq!(kind(&func("f(n: Int)", "  let mut r = &mut n;")), k);
     assert_eq!(kind(&func("f(m: &Int, n: Int) -> &Int", "  return &n;")), k);
-    assert_eq!(kind(&func("f(n: Int)", "  let o = Some(&n);")), k);
     assert_eq!(kind(&func("f(n: Int)", "  let t = (&n, 1);")), k);
     // 呼び出しの引数ならよい
     ok(&format!(
@@ -188,10 +187,8 @@ fn match_on_borrow_forms_other_than_shared_place() {
         )),
         k
     );
-    assert_eq!(
-        kind(&func("f() -> Int", &format!("  match &Some(1) {arms}"))),
-        k
-    );
+    // 一時的な値の借用は、文の終わりまで（ADR 0012 の決定 1 の 3）
+    ok(&func("f() -> Int", &format!("  match &Some(1) {arms}")));
 }
 
 // ---- 標準ライブラリ（決定 2・4・6） ----

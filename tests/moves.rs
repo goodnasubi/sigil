@@ -474,3 +474,57 @@ fn shadowing_names_in_sibling_scopes_do_not_leak() {
         "  if c {\n    let a = open(1);\n    let n = close(a);\n  }\n  if c {\n    let a = open(2);\n    return balance_of(&a);\n  }\n  return 0;",
     );
 }
+
+// ---- PR #28 のレビューから ----
+
+#[test]
+fn move_of_outer_variable_in_nested_loop() {
+    // 内側のループの本体で外側の変数を移動し、再代入しないまま周の終わりに届く
+    assert_eq!(
+        kind(
+            "f(a: Account, n: Int)",
+            "  let mut i = 0;\n  while i < n {\n    let mut j = 0;\n    while j < n {\n      let x = close(a);\n      j = j + 1;\n    }\n    i = i + 1;\n  }"
+        ),
+        MovedInLoop
+    );
+    // 移動した後に抜ける（return）なら次の周には届かない
+    ok(
+        "f(a: Account, n: Int) -> Int",
+        "  let mut i = 0;\n  while i < n {\n    let mut j = 0;\n    while j < n {\n      return close(a);\n    }\n    i = i + 1;\n  }\n  return 0;",
+    );
+}
+
+#[test]
+fn move_in_while_condition() {
+    // 条件式は周ごとに評価されるので、条件の中の移動は次の周で二重になる
+    assert_eq!(
+        kind(
+            "f(a: Account) -> Int",
+            "  while close(a) > 0 {\n    let x = 1;\n  }\n  return 0;"
+        ),
+        MovedInLoop
+    );
+    // 条件の中で移動して、本体の中で再代入すれば、次の周でも使える
+    ok(
+        "f(a: Account) -> Int",
+        "  let mut b = a;\n  while close(b) > 0 {\n    b = open(1);\n  }\n  return 0;",
+    );
+}
+
+#[test]
+fn same_value_twice_in_struct_literal() {
+    // 構造体リテラルで同じ値を 2 回渡すと、2 回目は移動済み
+    let t = "struct Pair {\n  a: String,\n  b: String,\n}\n";
+    let s = format!(
+        "{HEAD}{t}{}",
+        func("f(s: String) -> Pair", "  return Pair { a: s, b: s };")
+    );
+    assert_eq!(check(&s).unwrap_err().kind, UseAfterMove);
+    // Copyable な値なら何度でも渡せる
+    let t2 = "struct P2 {\n  a: Int,\n  b: Int,\n}\n";
+    let s2 = format!(
+        "{HEAD}{t2}{}",
+        func("f(n: Int) -> P2", "  return P2 { a: n, b: n };")
+    );
+    check(&s2).unwrap();
+}

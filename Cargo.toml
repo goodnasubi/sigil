@@ -1,0 +1,18 @@
+[package]
+name = "sigil"
+version = "0.0.0"
+edition = "2021"
+description = "Sigil 言語の処理系（M0: 字句解析・構文解析）"
+license = "MIT"
+publish = false
+
+[lib]
+name = "sigil"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sigil"
+path = "src/main.rs"
+
+# 外部依存なし（ADR 0006: 依存クレートの追加は人間の承認が要る）
+[dependencies]

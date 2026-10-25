@@ -244,23 +244,19 @@ fn main() -> ExitCode {
             };
             match sigil::interp::run_with(&src, &args[2], &call, &opts) {
                 Ok(out) => {
-                    print!("{}", out.output);
                     println!("{}", out.value);
                     ExitCode::SUCCESS
                 }
-                Err(f) => {
-                    print!("{}", f.output);
-                    match f.error {
-                        sigil::interp::RunError::Stop(s) => {
-                            eprintln!("{path}: {s}");
-                            ExitCode::from(EXIT_ABNORMAL_STOP)
-                        }
-                        e => {
-                            eprintln!("{path}:{e}");
-                            ExitCode::FAILURE
-                        }
+                Err(f) => match f.error {
+                    sigil::interp::RunError::Stop(s) => {
+                        eprintln!("{path}: {s}");
+                        ExitCode::from(EXIT_ABNORMAL_STOP)
                     }
-                }
+                    e => {
+                        eprintln!("{path}:{e}");
+                        ExitCode::FAILURE
+                    }
+                },
             }
         }
         _ => {

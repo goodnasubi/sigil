@@ -1,0 +1,28 @@
+module examples.effect_check
+  targets server
+  trust none
+
+// 例 04 のテスト用の入口。effects.sigil と合わせて実行する（`Shared` と `Cell` を渡す関数 `count_up`、純粋な `with_tax` を呼ぶ）。
+fn bump_twice() -> Int
+  intent "x"
+  requires none
+  ensures none
+  effects state
+{
+  let c = Shared.new(Cell.new(5));
+  count_up(&c);
+  count_up(&c);
+  return c.get();
+}
+
+fn tax() -> List<Int>
+  intent "x"
+  requires none
+  ensures none
+  effects none
+{
+  let mut xs = List.new();
+  xs.push(100);
+  xs.push(250);
+  return with_tax(&xs);
+}

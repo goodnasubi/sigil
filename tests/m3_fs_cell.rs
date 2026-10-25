@@ -14,6 +14,7 @@ fn files(xs: &[(&str, &str)]) -> Options {
         .collect();
     Options {
         fs_files: Some(m),
+        capture_console: true,
         ..Options::default()
     }
 }
@@ -73,7 +74,7 @@ fn load_prices_reads_lines_and_logs() {
     assert_eq!(r.value, "Err(IoError.NotFound(\"q\"))");
 }
 
-const ENTRY: &str = "module examples.effect_check\n  targets server\n  trust none\n\nfn bump_twice() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects state\n{\n  let c = Shared.new(Cell.new(5));\n  count_up(&c);\n  count_up(&c);\n  return c.get();\n}\n\nfn tax() -> List<Int>\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut xs = List.new();\n  xs.push(100);\n  xs.push(250);\n  return with_tax(&xs);\n}\n";
+const ENTRY: &str = include_str!("../examples/04-effects/entry.sigil");
 
 #[test]
 fn count_up_shares_the_cell() {

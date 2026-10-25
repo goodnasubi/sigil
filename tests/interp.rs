@@ -530,3 +530,21 @@ fn comparing_very_deep_values_stops_instead_of_overflowing_the_host_stack() {
         other => panic!("{other}"),
     }
 }
+
+#[test]
+fn stack_exhaustion_while_showing_the_result_keeps_the_position() {
+    let items = chain_fn(100_000, "return l;");
+    let items = items.replace("build() -> Int", "build() -> L");
+    let opts = Options {
+        stack_bytes: 1024 * 1024,
+    };
+    let e = run_with(&program(&items), "build", &[], &opts).unwrap_err();
+    match e.error {
+        RunError::Stop(s) => {
+            assert_eq!(s.kind, StopKind::StackExhausted);
+            assert_eq!(s.func, "build", "関数名が空にならない");
+            assert!(s.line > 0, "行が 0 にならない");
+        }
+        other => panic!("{other}"),
+    }
+}

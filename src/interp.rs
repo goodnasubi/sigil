@@ -14,6 +14,7 @@
 //! - 集合・構造体・組は `Rc` で持ち、書き換えるときに複製する（書き込み時複製）。
 //!
 //! 既知の制限（後続の PR で扱う）:
+//! - 深い入れ子の値の破棄の反復化は、一覧・構造体・列挙・組の入れ子だけが対象。`Slot`・`MutRef`・クロージャの環境を通した深い入れ子の破棄は反復化の対象外（ホストのスタックを使う）。
 //! - 値の破棄の順序（ADR 0006 の条件 9）は未実装。破棄の記録を持つ型がまだなく、インタプリタは値を `Rc` で解放する。
 //! - 空の `List<Float>` の `sum` が `0.0` になるよう、一覧に `Float` の印を持たせる。印は関数の引数・戻り値・`let` の型注釈から付く。
 
@@ -779,6 +780,8 @@ struct Interp<'a> {
     frames: Vec<Frame>,
     out: String,
     line: u32,
+    /// 入口の関数が戻った時点の名前と行。戻り値の表示中の停止（フレームが空）の位置に使う。
+    exit_at: (String, u32),
     base: usize,
     budget: usize,
 }
@@ -876,6 +879,7 @@ impl<'a> Interp<'a> {
             frames: vec![],
             out: String::new(),
             line: 0,
+            exit_at: (String::new(), 0),
             base,
             budget: opts.stack_bytes / 4 * 3,
         }
@@ -884,14 +888,14 @@ impl<'a> Interp<'a> {
     // --- 停止 ---
 
     fn stop(&self, kind: StopKind, detail: &str) -> Abort {
+        let (func, line) = match self.frames.last() {
+            Some(f) => (f.name.clone(), self.line),
+            None => self.exit_at.clone(),
+        };
         Abort::Stop(Stop {
             kind,
-            func: self
-                .frames
-                .last()
-                .map(|f| f.name.clone())
-                .unwrap_or_default(),
-            line: self.line,
+            func,
+            line,
             during: None,
             detail: detail.to_string(),
         })
@@ -965,6 +969,9 @@ impl<'a> Interp<'a> {
         frame.scopes.push(scope);
         self.frames.push(frame);
         let r = self.run_decl(d);
+        if self.frames.len() == 1 {
+            self.exit_at = (d.name.clone(), self.line);
+        }
         self.frames.pop();
         self.line = saved_line;
         r

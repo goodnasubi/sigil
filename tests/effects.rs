@@ -174,7 +174,7 @@ fn methods_carry_effects() {
 
 #[test]
 fn parent_category_includes_children() {
-    let both = "  let a = read_file(p);\n  return write_file(p);";
+    let both = "  let a = read_file(p);\n  return write_file(a);";
     ok(&fx("f(p: String) -> Int", "fs", both));
     ok(&fx("f(p: String) -> Int", "fs.read, fs.write", both));
     // 親を書くと下位すべてを含むので、片方だけ起こす本体には余分

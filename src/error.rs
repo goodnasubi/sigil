@@ -96,6 +96,9 @@ pub enum ErrorKind {
     RefReturnBorrowCount,
     BorrowPosition,
     MatchBorrowForm,
+    UseAfterMove,
+    MoveFromRef,
+    MovedInLoop,
     RedundantAnnotation,
     OldNotCopyable,
     MissingReturn,
@@ -173,6 +176,9 @@ impl ErrorKind {
             | RefReturnBorrowCount
             | BorrowPosition
             | MatchBorrowForm
+            | UseAfterMove
+            | MoveFromRef
+            | MovedInLoop
             | RedundantAnnotation
             | OldNotCopyable
             | MissingReturn

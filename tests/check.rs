@@ -1089,7 +1089,7 @@ fn generic_enum_variants() {
 #[test]
 fn generic_impl_methods() {
     let stack = format!(
-        "struct Stack<T> {{\n  top: T,\n  size: Int,\n}}\nimpl<T> Stack<T> {{\n  fn peek(self: &Stack<T>) -> T\n{CL}  {{\n    return self.top;\n  }}\n  fn single(x: T) -> Stack<T>\n{CL}  {{\n    return Stack {{ top: x, size: 1 }};\n  }}\n}}\n"
+        "struct Stack<T> {{\n  top: T,\n  size: Int,\n}}\nimpl<T: Copyable> Stack<T> {{\n  fn peek(self: &Stack<T>) -> T\n{CL}  {{\n    return self.top;\n  }}\n  fn single(x: T) -> Stack<T>\n{CL}  {{\n    return Stack {{ top: x, size: 1 }};\n  }}\n}}\n"
     );
     let src = format!(
         "{stack}{}",

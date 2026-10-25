@@ -208,3 +208,153 @@ fn parse_error_is_error() {
     assert!(format("fn").is_err());
     assert!(check("fn").is_err());
 }
+
+// ---- レビュー指摘の回帰テスト ----
+
+#[test]
+fn stmt_start_match_keeps_parens() {
+    let s = body("  (match x { 1 => 2, _ => 3 }).g();\n  return x;\n");
+    let want = body("  (match x {\n    1 => 2,\n    _ => 3,\n  }).g();\n  return x;\n");
+    expect(&s, &want);
+    unchanged(&body(
+        "  (match x {\n    1 => 2,\n    _ => 3,\n  }).g().h();\n  return x;\n",
+    ));
+    // 先頭でなければ括弧は不要
+    expect(
+        &body("  let y = (match x { 1 => 2, _ => 3 }).g();\n  return y;\n"),
+        &body("  let y = match x {\n    1 => 2,\n    _ => 3,\n  }.g();\n  return y;\n"),
+    );
+}
+
+#[test]
+fn doc_comments_kept() {
+    unchanged(&body("  /// doc\n  return x;\n"));
+    unchanged(&body("  //// four\n  return x;\n"));
+    unchanged(&body("  //  two spaces\n  return x;\n"));
+    expect(
+        &body("  //!x\n  return x;\n"),
+        &body("  // !x\n  return x;\n"),
+    );
+    expect(
+        &body("  return x;  ///d   \n"),
+        &body("  return x;  ///d\n"),
+    );
+}
+
+#[test]
+fn deep_output_is_explicit_error() {
+    // 入力が上限内で通る最大の入れ子について、成功するか明示エラーであること。
+    let ok_depth = |mk: &dyn Fn(usize) -> String| {
+        (1..=256)
+            .rev()
+            .find(|&n| sigil::parse(&body(&format!("  return {};\n", mk(n)))).is_ok())
+            .unwrap()
+    };
+    // 不要な括弧は消えるので、出力は浅くなって成功する。
+    let mk = |n: usize| format!("{}x{}", "(".repeat(n), ")".repeat(n));
+    let n = ok_depth(&mk);
+    assert!(n >= 100, "{n}");
+    assert_eq!(
+        format(&body(&format!("  return {};\n", mk(n)))).unwrap(),
+        body("  return x;\n")
+    );
+    // 必要な括弧は残る。成功するなら再整形で変わらず、失敗なら FmtVerify か TooDeep。
+    let mk = |n: usize| format!("{}1{}", "(1 + ".repeat(n), ")".repeat(n));
+    let n = ok_depth(&mk);
+    match format(&body(&format!("  return {};\n", mk(n)))) {
+        Ok(out) => assert_eq!(fmt(&out), out),
+        Err(err) => assert!(
+            err.kind == sigil::ErrorKind::TooDeep || err.kind == sigil::ErrorKind::FmtVerify
+        ),
+    }
+}
+
+#[test]
+fn long_chains_do_not_break_verification() {
+    for n in [100, 200, 254] {
+        let ops = format!("x{}", " + 1".repeat(n));
+        let r = format(&body(&format!("  return {ops};\n")));
+        if let Ok(out) = r {
+            assert_eq!(fmt(&out), out);
+        }
+        let mut s = String::from("  if a {\n    return 1;\n  }");
+        for _ in 0..n {
+            s.push_str(" else if a {\n    return 1;\n  }");
+        }
+        s.push('\n');
+        let src = body(&s);
+        if let Ok(src) = parse_ok(&src) {
+            if let Ok(out) = format(&src) {
+                assert_eq!(fmt(&out), out);
+            }
+        }
+    }
+}
+
+fn parse_ok(s: &str) -> Result<String, ()> {
+    sigil::parse(s).map(|_| s.to_string()).map_err(|_| ())
+}
+
+#[test]
+fn trailing_comment_on_removed_line_not_moved_to_neighbour() {
+    let src = format!(
+        "{HEAD}fn g()\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let a = 1;\n  return;  // bye\n}}\n"
+    );
+    let want = format!(
+        "{HEAD}fn g()\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let a = 1;\n  // bye\n}}\n"
+    );
+    expect(&src, &want);
+}
+
+#[test]
+fn trailing_comments_not_concatenated() {
+    let src = fnsrc("fs.read,  // a\n    fs.write  // b", "  return x;\n");
+    let out = fmt(&src);
+    assert_eq!(out.matches("//").count(), 2, "{out}");
+    assert!(!out.lines().any(|l| l.matches("//").count() > 1), "{out}");
+    assert_eq!(fmt(&out), out);
+}
+
+#[test]
+fn fold_keeps_comment_count() {
+    let src = fnsrc("fs.read, fs.write", "  return x;  // r\n");
+    let out = fmt(&src);
+    assert!(out.contains("return x;  // r"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_writes_atomically_and_keeps_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("sigil-fmt-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("a.sigil");
+    std::fs::write(&f, body("  //x\n  return x;\n")).unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
+        .args(["fmt", f.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        body("  // x\n  return x;\n")
+    );
+    assert_eq!(
+        std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    // 一時ファイルが残らない
+    let n = std::fs::read_dir(&dir).unwrap().count();
+    assert_eq!(n, 1);
+    // 構文エラーのファイルは変更しない
+    let g = dir.join("b.sigil");
+    std::fs::write(&g, "fn").unwrap();
+    let st = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
+        .args(["fmt", g.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(!st.success());
+    assert_eq!(std::fs::read_to_string(&g).unwrap(), "fn");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

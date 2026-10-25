@@ -15,6 +15,39 @@ fn read(path: &str) -> Option<String> {
     }
 }
 
+/// 同じディレクトリの一時ファイルに書き、fsync してから rename で置き換える。
+/// パーミッションは元のファイルから引き継ぐ。失敗しても元のファイルは変わらない。
+fn write_atomic(path: &str, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let resolved = std::fs::canonicalize(path)?; // シンボリックリンクは先を置き換える
+    let target = resolved.as_path();
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let perms = std::fs::metadata(target)?.permissions();
+    let tmp = dir.join(format!(".{name}.sigil-fmt-{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.set_permissions(perms)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn done(failed: bool) -> ExitCode {
     if failed {
         ExitCode::FAILURE
@@ -75,7 +108,7 @@ fn main() -> ExitCode {
                     match sigil::fmt::format(&src) {
                         Ok(out) => {
                             if out != src {
-                                if let Err(e) = std::fs::write(path, &out) {
+                                if let Err(e) = write_atomic(path, &out) {
                                     eprintln!("{path}: 書けない: {e}");
                                     failed = true;
                                     continue;

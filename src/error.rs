@@ -13,6 +13,7 @@ pub struct Span {
 pub enum Phase {
     Lex,
     Syntax,
+    Fmt,
 }
 
 /// エラーの種類。テストと将来の機械可読な出力のために安定した名前を持つ。
@@ -70,6 +71,9 @@ pub enum ErrorKind {
     BadTuple,
     NotInP0,
     TooDeep,
+    // --- 整形 ---
+    /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
+    FmtVerify,
 }
 
 impl ErrorKind {
@@ -93,6 +97,7 @@ impl ErrorKind {
             | CompoundAssign
             | RangeOperator
             | PathSeparator => Phase::Lex,
+            FmtVerify => Phase::Fmt,
             _ => Phase::Syntax,
         }
     }
@@ -120,6 +125,7 @@ impl fmt::Display for Error {
         let phase = match self.kind.phase() {
             Phase::Lex => "字句エラー",
             Phase::Syntax => "構文エラー",
+            Phase::Fmt => "整形エラー",
         };
         write!(
             f,

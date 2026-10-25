@@ -431,7 +431,7 @@ fn of_f_works_for_an_added_category() {
     // 条件 5
     let o = gpu_options(Targets::ALL);
     let a = apply_all();
-    let call = move |eff: &str| {
+    let call = |eff: &str| {
         format!(
             "{a}{}",
             fx(

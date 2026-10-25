@@ -1633,6 +1633,15 @@ impl Ck {
             let mut captures = vec![];
             for (name, ty, mode) in raw.caps {
                 let z = self.zonk(&ty);
+                // 型が決まらなかったので移動とみなしたものが、決まってみると `Copyable` だった
+                let mode = if mode == CapMode::Move
+                    && !matches!(z, Ty::Fn(..))
+                    && self.holds(&z, Prop::Copyable, 0) == Some(true)
+                {
+                    CapMode::Copy
+                } else {
+                    mode
+                };
                 let seen = match mode {
                     CapMode::Ref => Ty::Ref(false, Box::new(z.clone())),
                     CapMode::RefMut => Ty::Ref(true, Box::new(z.clone())),
@@ -3461,8 +3470,9 @@ impl Ck {
             let by_value = escaping || is_move;
             let mode = if by_value && !has_ref {
                 match self.holds(&ty, Prop::Copyable, 0) {
-                    Some(false) => CapMode::Move,
-                    _ => CapMode::Copy,
+                    Some(true) => CapMode::Copy,
+                    // 型が決まらないものは、移動とみなす（`consume` と同じ保守的な扱い）
+                    _ => CapMode::Move,
                 }
             } else if by_value && escaping {
                 return self.err(
@@ -3486,7 +3496,17 @@ impl Ck {
         for (c, ty, mode) in done {
             match mode {
                 CapMode::Move => {
-                    if !matches!(ty, Ty::Fn(..)) {
+                    if matches!(ty, Ty::Fn(..)) {
+                    } else if self.holds(&ty, Prop::Copyable, 0).is_none() {
+                        // 型が決まってから、使用を調べ直す
+                        if !self.is_outer(&c.name) {
+                            let at = self.span;
+                            self.flow
+                                .maybe
+                                .entry(c.name.clone())
+                                .or_insert((at, ty.clone()));
+                        }
+                    } else {
                         self.record_move(&c.name, &c.name)?;
                     }
                 }

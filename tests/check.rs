@@ -276,7 +276,7 @@ fn method_reads_and_static_fn() {
 
 #[test]
 fn impl_errors() {
-    let m = move |sig: &str| {
+    let m = |sig: &str| {
         format!("{ACCOUNT}impl Account {{\n  fn {sig}\n{CL}  {{\n    return;\n  }}\n}}\n")
     };
     assert_eq!(

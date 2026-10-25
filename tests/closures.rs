@@ -11,7 +11,7 @@ use ErrorKind::{
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 
-const DEFS: &str = "fn pick(a: &Account) -> &Account\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return a;\n}\nfn mk() -> Account\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Account { balance: 1, owner: \"a\" };\n}\nfn make() -> List<Account>\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return List.new();\n}\ntype Port = Int where 1 <= self && self <= 65535;\nstruct Account {\n  balance: Int,\n  owner: String,\n}\nfn eat(s: String) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\nfn size(s: &String) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\nfn show(n: &Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn both(a: &mut Int, b: &Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn base(n: &Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn base_mut(n: &mut Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn run(f: fn(Int) -> Int, n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects of(f)\n{\n  return f(n);\n}\nfn run_mut(f: fn(Int) -> Int, a: &mut Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects of(f)\n{\n  return f(1);\n}\n";
+const DEFS: &str = "fn pick(a: &Account) -> &Account\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return a;\n}\nfn mk() -> Account\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Account { balance: 1, owner: \"a\" };\n}\nfn make() -> List<Account>\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return List.new();\n}\ntype Port = Int where 1 <= self && self <= 65535;\nstruct Account {\n  balance: Int,\n  owner: String,\n}\nfn eat(s: String) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\nfn size(s: &String) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\nfn show(n: &Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn both(a: &mut Int, b: &Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn base(n: &Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn base_mut(n: &mut Int)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return;\n}\nfn anyv<T>() -> T\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return anyv();\n}\nfn rdg<T>(a: &T) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\nfn run(f: fn(Int) -> Int, n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects of(f)\n{\n  return f(n);\n}\nfn run_mut(f: fn(Int) -> Int, a: &mut Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects of(f)\n{\n  return f(1);\n}\n";
 
 fn func(sig: &str, body: &str) -> String {
     format!(
@@ -291,5 +291,26 @@ fn checks_run_inside_closures() {
     ok(
         "f(a: Account) -> Int",
         "  return run(|k| { let mut xs = make(); let r = xs.get(0); let b = r.is_some(); xs.push(mk()); return k; }, 1);",
+    );
+}
+
+#[test]
+fn unresolved_capture_is_treated_as_move() {
+    // 型が決まらない値を move のクロージャがとらえたら、移動の疑いとして記録する
+    let body =
+        "  let x = anyv();\n  let g = move |a| a + rdg(&x);\n  let w = eat(x);\n  return g(1) + w;";
+    assert_eq!(kind("f() -> Int", body), UseAfterMove);
+    // 型が決まっていても同じ結果
+    assert_eq!(
+        kind(
+            "f() -> Int",
+            "  let x: String = anyv();\n  let g = move |a| a + rdg(&x);\n  let w = eat(x);\n  return g(1) + w;"
+        ),
+        UseAfterMove
+    );
+    // 決まってみると Copyable なら通る
+    ok(
+        "f() -> Int",
+        "  let x = anyv();\n  let g = move |a| a + rdg(&x);\n  let w = x;\n  return g(1) + w + x;",
     );
 }

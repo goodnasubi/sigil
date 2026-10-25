@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n（M0 の途中。spec は未実装）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する";
 
 fn read(path: &str) -> Option<String> {
     match std::fs::read(path)
@@ -126,6 +126,22 @@ fn main() -> ExitCode {
                 }
             }
             done(failed)
+        }
+        Some("spec") if args.len() == 2 => {
+            let path = &args[1];
+            let Some(src) = read(path) else {
+                return ExitCode::FAILURE;
+            };
+            match sigil::spec::spec(&src) {
+                Ok(out) => {
+                    print!("{out}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{path}:{e}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         _ => {
             eprintln!("{USAGE}");

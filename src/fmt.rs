@@ -228,6 +228,22 @@ const PARENTS: &[(&str, &[&str])] = &[
     ("task", &["task.share", "task.spawn", "task.suspend"]),
 ];
 
+/// 式を正規形の文字列の行として返す（`sigil spec` が条件の式をソースの表記で示すため）。
+pub(crate) fn expr_lines(e: &Expr) -> Vec<String> {
+    let mut p = Printer::new("", &[]);
+    p.nl(0, 0);
+    p.expr(e, 0, false, 0);
+    p.lines.into_iter().map(|l| l.text).collect()
+}
+
+/// 型を正規形の文字列にする。
+pub(crate) fn type_text(t: &Type) -> String {
+    let mut p = Printer::new("", &[]);
+    p.nl(0, 0);
+    p.ty(t);
+    p.lines.remove(0).text
+}
+
 /// 効果の並びの正規形（ADR 0008 の決定 8）。
 pub fn normalize_effects(effects: &[Effect], params: &[Param]) -> Vec<String> {
     let mut ofs: Vec<(usize, String)> = Vec::new();

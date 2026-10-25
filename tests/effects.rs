@@ -712,7 +712,11 @@ fn function_returned_from_generic_call_is_rejected() {
 
 #[test]
 fn function_variable_cannot_be_let_mut() {
-    let f = fx("f() -> Int", "none", "  let mut c = |x| x;\n  return c(1);");
+    let f = fx(
+        "f() -> Int",
+        "none",
+        "  let mut c = move |x| x;\n  return c(1);",
+    );
     assert_eq!(kind(&f), ErrorKind::FnValueReassign);
 }
 
@@ -721,13 +725,13 @@ fn function_value_cannot_be_reassigned() {
     let a = fx(
         "f() -> Int",
         "none",
-        "  let mut c = |x| x;\n  c = emit;\n  return c(1);",
+        "  let mut c = move |x| x;\n  c = emit;\n  return c(1);",
     );
     assert_eq!(kind(&a), ErrorKind::FnValueReassign);
     let b = fx(
         "k(f: fn(Int) -> Int) -> Int",
         "none",
-        "  let c = |x| x;\n  c = f;\n  return c(1);",
+        "  let c = move |x| x;\n  c = f;\n  return c(1);",
     );
     assert_eq!(kind(&b), ErrorKind::FnValueReassign);
     let p = fx(
@@ -742,7 +746,7 @@ fn function_value_cannot_be_reassigned() {
         fx(
             "f() -> Int",
             "none",
-            "  let mut c = |x| x;\n  c = emit;\n  return apply_all(c, 1);"
+            "  let mut c = move |x| x;\n  c = emit;\n  return apply_all(c, 1);"
         )
     );
     assert_eq!(kind(&g), ErrorKind::FnValueReassign);

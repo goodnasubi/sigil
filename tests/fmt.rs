@@ -106,8 +106,8 @@ fn return_unit_removed() {
 #[test]
 fn closure_single_return() {
     expect(
-        &body("  let c = |y| { return y + 1; };\n  return x;\n"),
-        &body("  let c = |y| y + 1;\n  return x;\n"),
+        &body("  let c = move |y| { return y + 1; };\n  return x;\n"),
+        &body("  let c = move |y| y + 1;\n  return x;\n"),
     );
 }
 

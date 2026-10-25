@@ -64,11 +64,11 @@ fn main()
 
   deposit(&mut a, 50);  // 書き換える
   let b = balance_of(&a);  // 読む（Int は暗黙に複製される）
-  console.log(b);
+  console.log(&b);
 
   let refund = close(a);  // 受け取る: a はここで移動する
   // balance_of(&a);  // コンパイルエラー: 移動した後の a は使えない
-  console.log(refund);
+  console.log(&refund);
 }
 
 // 以下はコンパイルエラーになる例（ADR 0003 の規則 3）。

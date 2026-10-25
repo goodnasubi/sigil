@@ -14,7 +14,7 @@
   意図: 価格の一覧をファイルから読む
   引数: path を受け取る（Path）
   戻り値: Result<List<Int>, IoError>
-  事前条件: !empty(path)
+  事前条件: !path.is_empty()
   事後条件: なし
   効果: コンソールに出力する、ファイルを読む
 
@@ -23,7 +23,7 @@
   引数: xs を読む（List<Int>）、f を受け取る（fn(Int) -> Int）
   戻り値: List<Int>
   事前条件: なし
-  事後条件: len(result) == len(xs)
+  事後条件: result.len() == xs.len()
   効果: f の効果
 
 関数 with_tax
@@ -31,7 +31,7 @@
   引数: prices を読む（List<Int>）
   戻り値: List<Int>
   事前条件: なし
-  事後条件: len(result) == len(prices)
+  事後条件: result.len() == prices.len()
   効果: なし
 
 関数 count_up

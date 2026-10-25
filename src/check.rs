@@ -83,6 +83,7 @@ enum Prop {
     Numeric,
     Sendable,
     Shareable,
+    Displayable,
 }
 
 const PROPS: &[(&str, Prop)] = &[
@@ -92,6 +93,7 @@ const PROPS: &[(&str, Prop)] = &[
     ("Numeric", Prop::Numeric),
     ("Sendable", Prop::Sendable),
     ("Shareable", Prop::Shareable),
+    ("Displayable", Prop::Displayable),
 ];
 
 impl Prop {
@@ -186,8 +188,17 @@ const PRELUDE_VALUES: &[(&str, &str)] = &[
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pos {
-    /// 関数・メソッドの引数の型（関数の型を書ける唯一の位置）。
+    /// 関数・メソッドの引数の型（関数の型を書ける唯一の位置）。一番外に参照を書ける。
     Param,
+    /// 関数の型の引数の型。一番外に参照を書ける（`fn(&T) -> K`）。
+    FnParam,
+    /// 戻り値の型。一番外と、一番外の `Option<…>` の中に参照を書ける。
+    Ret,
+    /// 戻り値の一番外の `Option<…>` の型引数。参照を書ける。
+    RetOpt,
+    /// 篩型の基の型。参照は書けるが、そのあと `RefinementBase` で弾く。
+    Base,
+    /// それ以外（構造体のフィールド・列挙子の値・型引数・`let` の注釈など）。参照を書けない。
     Other,
 }
 
@@ -225,8 +236,6 @@ struct Ck {
     skipped: Option<Ty>,
     table: EffectTable,
     prims: Vec<Primitive>,
-    /// 標準の自由関数の名前（利用者が同名の関数を宣言すると外れる）。
-    std_fns: HashSet<String>,
     /// モジュールの `targets`。
     targets: Vec<String>,
     /// 効果の推論の枠（先頭が関数の本体、クロージャごとに積む）。
@@ -237,6 +246,10 @@ struct Ck {
     local_eff: HashMap<String, Vec<Atom>>,
     /// 次のクロージャの効果を、親の枠に足さずに `last_closure` へ取っておく。
     defer: bool,
+    /// 次に評価する `&e` が、呼び出しの引数の位置にある（`args` が立て、`unary` が取る）。
+    ref_ok: bool,
+    /// `match` の対象が参照（`&x` か、参照を含む値）で、腕の束縛が参照になる。
+    by_ref: bool,
     last_closure: Vec<Atom>,
     inferred: Vec<Atom>,
 }
@@ -266,12 +279,13 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
         skipped: None,
         table: opts.table.clone(),
         prims: opts.primitives.clone(),
-        std_fns: HashSet::new(),
         targets: file.module.targets.clone(),
         eff_stack: vec![vec![]],
         fn_params: vec![],
         local_eff: HashMap::new(),
         defer: false,
+        ref_ok: false,
+        by_ref: false,
         last_closure: vec![],
         inferred: vec![],
     };
@@ -496,7 +510,7 @@ impl Ck {
             Ty::Bool | Ty::Unit => Some(!matches!(p, Prop::Comparable | Prop::Numeric)),
             Ty::Str => Some(!matches!(p, Prop::Copyable | Prop::Numeric)),
             Ty::Tuple(ts) => match p {
-                Prop::Comparable | Prop::Numeric => Some(false),
+                Prop::Comparable | Prop::Numeric | Prop::Displayable => Some(false),
                 _ => all(ts.iter().map(|t| self.holds(t, p, d))),
             },
             Ty::Ref(m, i) => match p {
@@ -524,7 +538,9 @@ impl Ck {
                     _ => Some(false),
                 },
                 Some(TypeDef::Struct { .. } | TypeDef::Enum { .. }) => match p {
-                    Prop::Copyable | Prop::Comparable | Prop::Numeric => Some(false),
+                    Prop::Copyable | Prop::Comparable | Prop::Numeric | Prop::Displayable => {
+                        Some(false)
+                    }
                     _ => all(self
                         .component_types(&n, &args)
                         .iter()
@@ -720,7 +736,7 @@ impl Ck {
             match item {
                 Item::Type(t) => {
                     self.span = t.span;
-                    let base = self.resolve(&t.base, Pos::Other)?;
+                    let base = self.resolve(&t.base, Pos::Base)?;
                     if self.contains_bad_base(&base) {
                         return self.err(
                             ErrorKind::RefinementBase,
@@ -802,10 +818,6 @@ impl Ck {
             match item {
                 Item::Fn(f) => {
                     self.span = f.span;
-                    // 標準の関数と同じ名前の関数は、利用者のものが優先される。
-                    if self.std_fns.remove(&f.name) {
-                        self.fns.remove(&f.name);
-                    }
                     if self.fns.contains_key(&f.name) {
                         return self.err(
                             ErrorKind::DuplicateDefinition,
@@ -958,8 +970,22 @@ impl Ck {
         }
         let ret = match &f.ret {
             None => Ty::Unit,
-            Some(t) => self.resolve(t, Pos::Other)?,
+            Some(t) => self.resolve(t, Pos::Ret)?,
         };
+        if contains_ref(&ret) {
+            let n = params
+                .iter()
+                .filter(|(_, t)| contains_ref_outside_fn(t))
+                .count();
+            if n != 1 {
+                return self.err(
+                    ErrorKind::RefReturnBorrowCount,
+                    format!(
+                        "参照を返せるのは、借用の引数（型のどこかに参照を含む引数。受け手を含む）がちょうど 1 つの関数だけだが、{n} 個ある（ADR 0003 の規則 3）"
+                    ),
+                );
+            }
+        }
         let effects = self.effect_terms(&f.effects, &params)?;
         Ok(Sig {
             generics,
@@ -1015,7 +1041,6 @@ impl Ck {
         let saved = self.span;
         for (sig, effects) in crate::stdlib::FREE_FNS {
             let (name, s) = self.std_sig(&crate::stdlib::free_source(sig, effects))?;
-            self.std_fns.insert(name.clone());
             self.fns.insert(name, s);
         }
         for (ns, sig, effects) in crate::stdlib::NAMESPACED_FNS {
@@ -1033,7 +1058,7 @@ impl Ck {
     }
 
     fn std_parse(&self, src: &str) -> R<File> {
-        parse(src).map_err(|e| {
+        crate::parser::parse_std(src).map_err(|e| {
             Error::new(
                 ErrorKind::Unsupported,
                 self.span,
@@ -1132,18 +1157,33 @@ impl Ck {
                     "Bool" => Ty::Bool,
                     "String" => Ty::Str,
                     "Unit" => Ty::Unit,
-                    _ => Ty::Named(
-                        n.to_string(),
-                        args.iter()
-                            .map(|a| self.resolve(a, Pos::Other))
-                            .collect::<R<_>>()?,
-                    ),
+                    _ => {
+                        let apos = if pos == Pos::Ret && n == "Option" {
+                            Pos::RetOpt
+                        } else {
+                            Pos::Other
+                        };
+                        Ty::Named(
+                            n.to_string(),
+                            args.iter()
+                                .map(|a| self.resolve(a, apos))
+                                .collect::<R<_>>()?,
+                        )
+                    }
                 })
             }
-            Type::Ref { mutable, inner } => Ok(Ty::Ref(
-                *mutable,
-                Box::new(self.resolve(inner, Pos::Other)?),
-            )),
+            Type::Ref { mutable, inner } => {
+                if pos == Pos::Other {
+                    return self.err(
+                        ErrorKind::RefTypePosition,
+                        "参照 `&T`・`&mut T` を書けるのは、引数の型の一番外、関数の型の引数の一番外、戻り値の型の一番外と一番外の `Option<…>` の中だけ（構造体のフィールド・列挙子の値・型引数・`let` の注釈には書けない。ADR 0012 の決定 1）",
+                    );
+                }
+                Ok(Ty::Ref(
+                    *mutable,
+                    Box::new(self.resolve(inner, Pos::Other)?),
+                ))
+            }
             Type::Tuple(ts) => Ok(Ty::Tuple(
                 ts.iter()
                     .map(|t| self.resolve(t, Pos::Other))
@@ -1158,7 +1198,7 @@ impl Ck {
                 }
                 let ps = params
                     .iter()
-                    .map(|t| self.resolve(t, Pos::Other))
+                    .map(|t| self.resolve(t, Pos::FnParam))
                     .collect::<R<_>>()?;
                 let r = match ret {
                     None => Ty::Unit,
@@ -1568,10 +1608,10 @@ impl Ck {
                         }
                     }
                 };
-                if *mutable && matches!(self.shallow(&fin), Ty::Ref(..)) {
+                if *mutable && contains_ref(&self.zonk(&fin)) {
                     return self.err(
                         ErrorKind::LetMutRef,
-                        "型が参照の変数は `let mut` で宣言できない（参照を別の参照で束縛し直す操作はない）",
+                        "型が参照を含む変数（`&T`・`Option<&T>` など）は `let mut` で宣言できない（参照を別の参照で束縛し直す操作はない）",
                     );
                 }
                 if *mutable && matches!(self.zonk(&fin), Ty::Fn(..)) {
@@ -1631,6 +1671,24 @@ impl Ck {
                         }
                         Ok(())
                     }
+                    Some(e) if contains_ref(&self.zonk(&ret)) => {
+                        // 参照を返す関数（ADR 0012 の決定 1）。`return 場所;` は場所への参照を返す
+                        // ので、型は参照を外して比べる。どの場所を返せるかは所有権の検査で調べる。
+                        let t = self.expr(e)?;
+                        let (want, got) =
+                            (strip_refs(&self.zonk(&ret)), strip_refs(&self.zonk(&t)));
+                        if !self.coerce(&want, &got, e) {
+                            return self.err(
+                                ErrorKind::TypeMismatch,
+                                format!(
+                                    "戻り値は `{}` でなければならないが、`{}` である",
+                                    self.sh(&ret),
+                                    self.sh(&t)
+                                ),
+                            );
+                        }
+                        Ok(())
+                    }
                     Some(e) => self.expect(&ret, e, "戻り値"),
                 }
             }
@@ -1642,14 +1700,17 @@ impl Ck {
             StmtKind::Match {
                 scrutinee, arms, ..
             } => {
-                let st = self.expr(scrutinee)?;
+                let (st, by_ref) = self.scrutinee(scrutinee)?;
                 let st = self.peel(&st);
                 let sp = s.span;
                 let mut pats = vec![];
                 for a in arms {
                     self.span = sp;
                     self.scopes.push(HashMap::new());
-                    self.pat(&a.pattern, &st)?;
+                    self.by_ref = by_ref;
+                    let r = self.pat(&a.pattern, &st);
+                    self.by_ref = false;
+                    r?;
                     self.block(&a.body)?;
                     self.scopes.pop();
                     pats.push(&a.pattern);
@@ -1783,11 +1844,56 @@ impl Ck {
     }
 
     /// パターンを型 `t` に合わせ、束縛する名前を現在のスコープに宣言する。
+    /// `match` の対象の型と、腕の束縛が参照になるか（ADR 0012 の決定 1 の 3）。
+    /// `match &x` は所有する場所だけに書ける。参照の名前（`Option<&T>` の変数を含む）と、
+    /// それを通して届く場所は `match x` と書く。`&mut` は対象にできない。
+    fn scrutinee(&mut self, e: &Expr) -> R<(Ty, bool)> {
+        if let Expr::Unary { op, expr } = e {
+            if matches!(op, UnOp::Ref | UnOp::RefMut) {
+                if *op == UnOp::RefMut {
+                    return self.err(
+                        ErrorKind::MatchBorrowForm,
+                        "`match` の対象に `&mut` は書けない（`&` で借りるか、`match x` と書く）",
+                    );
+                }
+                let Some(root) = place_root(expr).map(str::to_string) else {
+                    return self.err(
+                        ErrorKind::MatchBorrowForm,
+                        "`match &e` の `e` は変数かそのフィールドでなければならない",
+                    );
+                };
+                let t = self.expr(expr)?;
+                if self
+                    .lookup(&root)
+                    .is_some_and(|l| contains_ref(&self.zonk(&l.ty)))
+                {
+                    return self.err(
+                        ErrorKind::MatchBorrowForm,
+                        format!(
+                            "`{root}` は参照（または参照を含む値）なので、`&` を外して `match` の対象に直接書く（`match {root}`）。腕の束縛は参照になる"
+                        ),
+                    );
+                }
+                return Ok((t, true));
+            }
+        }
+        let t = self.expr(e)?;
+        let by_ref = contains_ref(&self.zonk(&t));
+        Ok((t, by_ref))
+    }
+
     fn pat(&mut self, p: &Pattern, t: &Ty) -> R<()> {
         let t = self.peel(t);
         match p {
             Pattern::Wild => Ok(()),
-            Pattern::Bind(n) => self.declare(n, t, false),
+            Pattern::Bind(n) => {
+                let t = if self.by_ref {
+                    Ty::Ref(false, Box::new(t))
+                } else {
+                    t
+                };
+                self.declare(n, t, false)
+            }
             Pattern::Int(s) | Pattern::NegInt(s) => {
                 let text = if matches!(p, Pattern::NegInt(_)) {
                     format!("-{s}")
@@ -2089,14 +2195,17 @@ impl Ck {
             Expr::Match {
                 scrutinee, arms, ..
             } => {
-                let st = self.expr(scrutinee)?;
+                let (st, by_ref) = self.scrutinee(scrutinee)?;
                 let st = self.peel(&st);
                 let sp = self.span;
                 let r = self.fresh();
                 let mut pats = vec![];
                 for (i, a) in arms.iter().enumerate() {
                     self.scopes.push(HashMap::new());
-                    self.pat(&a.pattern, &st)?;
+                    self.by_ref = by_ref;
+                    let pr = self.pat(&a.pattern, &st);
+                    self.by_ref = false;
+                    pr?;
                     let t = self.expr(&a.body)?;
                     self.span = sp;
                     if i == 0 {
@@ -2337,6 +2446,12 @@ impl Ck {
             }
             UnOp::Ref | UnOp::RefMut => {
                 let mutable = op == UnOp::RefMut;
+                if !std::mem::take(&mut self.ref_ok) {
+                    return self.err(
+                        ErrorKind::BorrowPosition,
+                        "`&`・`&mut` で借りられるのは、参照の引数への実引数と `match` の対象だけ（`let r = &x;` や戻り値・フィールドの値には書けない。ADR 0012 の決定 1）",
+                    );
+                }
                 let t = self.expr(inner)?;
                 if mutable {
                     let Some(root) = place_root(inner).map(str::to_string) else {
@@ -2755,8 +2870,16 @@ impl Ck {
         for (i, (p, a)) in params.iter().zip(args).enumerate() {
             let closure = matches!(strip_paren(a), Expr::Closure { .. });
             self.defer = closure;
+            self.ref_ok = matches!(
+                a,
+                Expr::Unary {
+                    op: UnOp::Ref | UnOp::RefMut,
+                    ..
+                }
+            ) && matches!(self.shallow(p), Ty::Ref(..));
             let t = self.expr_hint(a, Some(p));
             self.defer = false;
+            self.ref_ok = false;
             let t = t?;
             self.span = sp;
             self.fn_value_form(a, &t)?;
@@ -2863,6 +2986,38 @@ fn strip_paren(e: &Expr) -> &Expr {
     match e {
         Expr::Paren(i) => strip_paren(i),
         e => e,
+    }
+}
+
+/// 型から参照を外した形。
+fn strip_refs(t: &Ty) -> Ty {
+    match t {
+        Ty::Ref(_, i) => strip_refs(i),
+        Ty::Named(n, a) => Ty::Named(n.clone(), a.iter().map(strip_refs).collect()),
+        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(strip_refs).collect()),
+        Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(strip_refs).collect(), Box::new(strip_refs(r))),
+        t => t.clone(),
+    }
+}
+
+/// 型のどこかに参照を含むか。
+fn contains_ref(t: &Ty) -> bool {
+    match t {
+        Ty::Ref(..) => true,
+        Ty::Named(_, a) => a.iter().any(contains_ref),
+        Ty::Tuple(ts) => ts.iter().any(contains_ref),
+        Ty::Fn(ps, r) => ps.iter().any(contains_ref) || contains_ref(r),
+        _ => false,
+    }
+}
+
+/// 関数の型の中を数えずに、型のどこかに参照を含むか（借用の引数の判定）。
+fn contains_ref_outside_fn(t: &Ty) -> bool {
+    match t {
+        Ty::Ref(..) => true,
+        Ty::Named(_, a) => a.iter().any(contains_ref_outside_fn),
+        Ty::Tuple(ts) => ts.iter().any(contains_ref_outside_fn),
+        _ => false,
     }
 }
 

@@ -27,10 +27,10 @@ fn ok(src: &str) {
 
 #[test]
 fn console_log_needs_console() {
-    ok(&fx("server", "f(n: Int)", "console", "  console.log(n);"));
+    ok(&fx("server", "f(n: Int)", "console", "  console.log(&n);"));
     // 宣言の不足
     assert_eq!(
-        kind(&fx("server", "f(n: Int)", "none", "  console.log(n);")),
+        kind(&fx("server", "f(n: Int)", "none", "  console.log(&n);")),
         ErrorKind::EffectMissing
     );
     // 宣言の余分
@@ -42,7 +42,7 @@ fn console_log_needs_console() {
 
 #[test]
 fn fs_read_is_rejected_in_browser_modules() {
-    let body = "  let r = fs.read(p);\n  return r.is_ok();";
+    let body = "  let r = fs.read(&p);\n  return r.is_ok();";
     ok(&fx("server", "f(p: Path) -> Bool", "fs.read", body));
     assert_eq!(
         kind(&fx("browser", "f(p: Path) -> Bool", "fs.read", body)),
@@ -96,7 +96,8 @@ fn std_higher_order_methods_inherit_the_effect_of_the_argument() {
         "none",
         pure,
     ));
-    let noisy = "  let g = |x| {\n    console.log(x);\n    return x;\n  };\n  return xs.map(g);";
+    let noisy =
+        "  let g = move |x| {\n    console.log(&x);\n    return x;\n  };\n  return xs.map(g);";
     assert_eq!(
         kind(&fx(
             "server",
@@ -137,7 +138,7 @@ fn ok_unit_and_try_operator_with_std_results() {
             "server",
             "f(p: Path) -> Result<String, ParseError>",
             "fs.read",
-            "  let s = fs.read(p)?;\n  return Ok(s);"
+            "  let s = fs.read(&p)?;\n  return Ok(s);"
         )),
         ErrorKind::TryOperand
     );
@@ -145,7 +146,7 @@ fn ok_unit_and_try_operator_with_std_results() {
         "server",
         "f(p: Path) -> Result<String, IoError>",
         "fs.read",
-        "  let s = fs.read(p)?;\n  return Ok(s);",
+        "  let s = fs.read(&p)?;\n  return Ok(s);",
     ));
 }
 
@@ -155,6 +156,6 @@ fn std_fns_with_comparable_bounds() {
         "server",
         "f(xs: &List<Float>) -> Float",
         "none",
-        "  return min(xs);",
+        "  return xs.min();",
     ));
 }

@@ -5,14 +5,18 @@
 //! 本体を持たない。型検査器はこの表を `Sigil` のシグネチャとして読み、利用者の宣言と同じ表に入れる。
 //!
 //! 表の書き方:
-//! - 自由関数（`FREE_FNS`）: 名前空間のない関数。利用者が同じ名前の関数を宣言すると、そちらが優先される。
-//! - 名前空間の関数（`NAMESPACED_FNS`）: `fs.read(p)`・`console.log(x)` のように呼ぶ。
+//! - 自由関数（`FREE_FNS`）: 名前空間のない関数。`Copyable` な値だけを受け取るものに限る。
+//!   標準の自由関数の名前は予約名で、利用者は同じ名前の関数を宣言できない（ADR 0012 の決定 5）。
+//! - 名前空間の関数（`NAMESPACED_FNS`）: `fs.read(&p)`・`console.log(&x)` のように呼ぶ。
 //! - メソッドと型に付く関数（`IMPLS`）: `impl` の見出し（型引数と型）と、その中の関数。
 //!
-//! 仮の決めごと（後の ADR で見直す）:
-//! - `List` の取り出しは参照を返す（`get`: `Option<&T>`）。
-//! - `console.log` は型引数に制約を付けず、どの型の値も受け取る（表示の性質は決めていない）。
-//! - 読むだけの関数は、`&T` ではなく値の型で受け取る（式の中で参照の変数は参照先の値を表すため。ADR 0011 決定 4）。
+//! 規則（ADR 0012 の決定 6）:
+//! - 読むだけの操作は `&T` の受け手のメソッドにする（`xs.len()`）。受け手は自動で借用される。
+//! - 値を複製して返す操作は `T: Copyable` を要求する。
+//! - 値を決められない入力は `requires` で除く（`REQUIRES`）。本体は M3 まで持たない。
+//!
+//! 仮の決めごと（標準ライブラリの最小部分を決める ADR まで暫定）:
+//! - `List` の取り出しは参照を返す（`get`: `Option<&T>`。ADR 0012 の決定 3）。
 
 /// (シグネチャ, 効果)。効果は `effects` 節の中身（`none`・`console`・`of(f)` など）。
 pub type Entry = (&'static str, &'static str);
@@ -29,27 +33,24 @@ pub const OPAQUE_TYPES: &[(&str, usize)] = &[
     ("Cell", 1),
 ];
 
-/// 名前空間のない関数。
-pub const FREE_FNS: &[Entry] = &[
-    ("len<T>(xs: List<T>) -> Int", "none"),
-    ("min<T: Comparable>(xs: List<T>) -> T", "none"),
-    ("max<T: Comparable>(xs: List<T>) -> T", "none"),
-    ("sum<T: Numeric>(xs: List<T>) -> T", "none"),
-    ("to_float(n: Int) -> Float", "none"),
-    ("empty(p: Path) -> Bool", "none"),
-    ("trim(s: String) -> String", "none"),
-    ("parse_int(s: String) -> Result<Int, ParseError>", "none"),
-];
+/// 名前空間のない関数。読むだけの操作はメソッドに移したので、`Copyable` な値の関数だけが残る。
+pub const FREE_FNS: &[Entry] = &[("to_float(n: Int) -> Float", "none")];
 
-/// 名前空間の関数（名前空間, シグネチャ, 効果）。
+/// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
 pub const NAMESPACED_FNS: &[(&str, &str, &str)] = &[
-    ("console", "log<T>(x: T)", "console"),
-    ("fs", "read(p: Path) -> Result<String, IoError>", "fs.read"),
+    ("console", "log<T: Displayable>(x: &T)", "console"),
+    ("fs", "read(p: &Path) -> Result<String, IoError>", "fs.read"),
     (
         "fs",
-        "write(p: Path, s: String) -> Result<Unit, IoError>",
+        "write(p: &Path, s: &String) -> Result<Unit, IoError>",
         "fs.write",
     ),
+];
+
+/// シグネチャ（`Entry` の最初の要素）に対応する `requires` 節。ない関数は `none`。
+pub const REQUIRES: &[(&str, &str)] = &[
+    ("min(self: &List<T>) -> T", "self.len() > 0"),
+    ("max(self: &List<T>) -> T", "self.len() > 0"),
 ];
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
@@ -67,6 +68,17 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
                 "max_by<K: Comparable>(self: &List<T>, key: fn(&T) -> K) -> Option<&T>",
                 "of(key)",
             ),
+        ],
+    ),
+    (
+        "<T: Numeric> List<T>",
+        &[("sum(self: &List<T>) -> T", "none")],
+    ),
+    (
+        "<T: Comparable + Copyable> List<T>",
+        &[
+            ("min(self: &List<T>) -> T", "none"),
+            ("max(self: &List<T>) -> T", "none"),
         ],
     ),
     (
@@ -109,28 +121,40 @@ pub const IMPLS: &[(&str, &[Entry])] = &[
             ("is_empty(self: &String) -> Bool", "none"),
             ("trim(self: &String) -> String", "none"),
             ("lines(self: &String) -> List<String>", "none"),
+            (
+                "parse_int(self: &String) -> Result<Int, ParseError>",
+                "none",
+            ),
         ],
     ),
+    ("Path", &[("is_empty(self: &Path) -> Bool", "none")]),
     ("<T> Cell<T>", &[("new(value: T) -> Cell<T>", "none")]),
     ("<T> Shared<T>", &[("new(value: T) -> Shared<T>", "none")]),
     (
+        "<T: Copyable> Shared<Cell<T>>",
+        &[("get(self: &Shared<Cell<T>>) -> T", "state")],
+    ),
+    (
         "<T> Shared<Cell<T>>",
-        &[
-            ("get(self: &Shared<Cell<T>>) -> T", "state"),
-            ("set(self: &Shared<Cell<T>>, value: T)", "state"),
-        ],
+        &[("set(self: &Shared<Cell<T>>, value: T)", "state")],
     ),
 ];
 
-fn clauses(effects: &str) -> String {
-    format!("\n  intent \"s\"\n  requires none\n  ensures none\n  effects {effects}\n{{\n}}\n")
+fn clauses(sig: &str, effects: &str) -> String {
+    let requires = REQUIRES
+        .iter()
+        .find(|(s, _)| *s == sig)
+        .map_or("none", |(_, r)| r);
+    format!(
+        "\n  intent \"s\"\n  requires {requires}\n  ensures none\n  effects {effects}\n{{\n}}\n"
+    )
 }
 
 /// 型検査器が読む `Sigil` のソース。自由関数と名前空間の関数は `fn` の並び、メソッドは `impl` の並び。
 pub fn free_source(sig: &str, effects: &str) -> String {
     format!(
         "module std.std\n  targets browser, server\n  trust base\n\nfn {sig}{}",
-        clauses(effects)
+        clauses(sig, effects)
     )
 }
 
@@ -138,7 +162,7 @@ pub fn impl_source(head: &str, fns: &[Entry]) -> String {
     let mut s = String::from("module std.std\n  targets browser, server\n  trust base\n\n");
     s.push_str(&format!("impl{} {{\n", head_with_space(head)));
     for (sig, effects) in fns {
-        s.push_str(&format!("fn {sig}{}", clauses(effects)));
+        s.push_str(&format!("fn {sig}{}", clauses(sig, effects)));
     }
     s.push_str("}\n");
     s

@@ -660,6 +660,13 @@ impl Parser {
         self.bump();
         let name_span = self.span();
         let name = self.snake_def("関数名")?;
+        if in_impl && name == "clone" && !self.allow_reserved {
+            return Err(Error::new(
+                ErrorKind::ReservedNameDefined,
+                name_span,
+                "`clone` は標準のメソッド名なので、`impl` の中で定義できない",
+            ));
+        }
         if name == "check" {
             return Err(Error::new(
                 ErrorKind::ReservedNameDefined,

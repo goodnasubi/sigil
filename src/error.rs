@@ -43,7 +43,6 @@ pub enum ErrorKind {
     ReservedWordAsName,
     BadNameForm,
     ReservedNameDefined,
-    CloneOfCopyable,
     ModuleMissing,
     ModuleDuplicate,
     ModuleClauseMissing,
@@ -139,6 +138,7 @@ pub enum ErrorKind {
     GlobalValue,
     PatternMismatch,
     InfiniteType,
+    CloneOfCopyable,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -228,7 +228,8 @@ impl ErrorKind {
             | EffectTarget
             | TryOperand
             | PatternMismatch
-            | InfiniteType => Phase::Check,
+            | InfiniteType
+            | CloneOfCopyable => Phase::Check,
             _ => Phase::Syntax,
         }
     }

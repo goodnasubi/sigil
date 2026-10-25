@@ -340,3 +340,31 @@ fn function_values_have_no_clone() {
         ErrorKind::NoSuchMember
     );
 }
+
+// ---- 借用の関数値の名前の寿命（レビュー修正） ----
+
+fn sibling_reuse(inner: &str) -> String {
+    format!(
+        "{inner}\n  let s = \"a\";\n  let h = move |x| x + s.len();\n  let a = h;\n  let b = h;\n  return 0;"
+    )
+}
+
+#[test]
+fn borrowed_fn_name_does_not_outlive_its_scope() {
+    let bodies = [
+        "  if true {\n    let h = g;\n  }",
+        "  if true {\n    let h = g;\n  } else {\n    let h = g;\n  }",
+        "  if false {\n    let z = 0;\n  } else {\n    let h = g;\n  }",
+        "  match Option.Some(1) {\n    Option.Some(_) => {\n      let h = g;\n    }\n    Option.None => {\n      let h = g;\n    }\n  }",
+        "  let mut i = 0;\n  while i < 1 {\n    let h = g;\n    i = i + 1;\n  }",
+        "  let c = move |y| {\n    let h = g;\n    return y;\n  };",
+    ];
+    for b in bodies {
+        let body = sibling_reuse(b);
+        assert_eq!(
+            fkind("f(g: fn(Int) -> Int) -> Int", "of(g)", &body),
+            ErrorKind::UseAfterMove,
+            "{body}"
+        );
+    }
+}

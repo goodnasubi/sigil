@@ -1161,12 +1161,6 @@ impl Ck {
         }
         for f in &i.fns {
             self.span = f.span;
-            if !std && f.name == "clone" {
-                return self.err(
-                    ErrorKind::ReservedNameDefined,
-                    "`clone` は標準のメソッド名なので、`impl` の中で定義できない",
-                );
-            }
             let key = (tn.clone(), f.name.clone());
             if self.methods.contains_key(&key) {
                 return self.err(
@@ -1421,7 +1415,7 @@ impl Ck {
                             None => {
                                 return self.err(
                                     ErrorKind::UnknownType,
-                                    format!("型 `{n}` が見つからない（標準ライブラリの型は、後続の PR で扱う）"),
+                                    format!("型 `{n}` が見つからない（この版の標準ライブラリにある型は ADR 0013 の決定 2 の一覧に限る）"),
                                 )
                             }
                         },
@@ -1934,8 +1928,15 @@ impl Ck {
         Ok(())
     }
 
+    /// 見えなくなった名前を `fn_borrowed` から外す。
+    fn sync_borrowed(&mut self) {
+        let live: HashSet<&String> = self.scopes.iter().flat_map(|s| s.keys()).collect();
+        self.fn_borrowed.retain(|k| live.contains(k));
+    }
+
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.sync_borrowed();
         // 見えなくなった変数の移動の記録は捨てる
         let live: HashSet<&String> = self.scopes.iter().flat_map(|s| s.keys()).collect();
         self.flow
@@ -2836,6 +2837,8 @@ impl Ck {
     fn declare(&mut self, n: &str, ty: Ty, mutable: bool) -> R<()> {
         self.shadow_check(n)?;
         self.forget(n);
+        // 新しい束縛は、別名と分かるまで借用の関数値ではない
+        self.fn_borrowed.remove(n);
         self.scopes.last_mut().expect("scope").insert(
             n.to_string(),
             Local {
@@ -2959,6 +2962,7 @@ impl Ck {
             self.scopes.push(HashMap::new());
             let r = self.pat(p, st);
             self.scopes.pop();
+            self.sync_borrowed();
             r?;
         }
         self.span = sp;
@@ -3543,6 +3547,7 @@ impl Ck {
         };
         self.ret = saved;
         self.scopes.pop();
+        self.sync_borrowed();
         self.flow = outer_flow;
         self.log.truncate(log_mark);
         self.res.clear();
@@ -4088,7 +4093,7 @@ impl Ck {
                     return self.err(
                         ErrorKind::UnknownName,
                         format!(
-                            "関数 `{n}` が見つからない（標準ライブラリの関数は、後続の PR で扱う）"
+                            "関数 `{n}` が見つからない（この版の標準ライブラリにある関数は ADR 0013 の決定 2 の一覧に限る）"
                         ),
                     );
                 }

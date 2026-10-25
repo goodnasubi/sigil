@@ -109,7 +109,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 コードは AI が書き、AI が保守します。人間は **仕様だけ** をレビューします。
 
 > **ステータス:** 設計段階（構想・文書化）。処理系はまだありません。
-> P0（言語の核）の実装の進め方（Rust で書くコンパイラ、段階 M0〜M5）を [ADR 0006](docs/decisions/0006-p0-scope-and-bootstrap.md) で提案しています。
+> P0（言語の核）の実装の進め方（Rust で書くコンパイラ、段階 M0〜M6）を [ADR 0006](docs/decisions/0006-p0-scope-and-bootstrap.md) で提案しています。
 
 ## 目標
 

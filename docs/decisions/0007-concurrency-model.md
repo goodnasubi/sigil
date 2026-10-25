@@ -4,7 +4,7 @@
 
 ## 背景
 
-[ADR 0006](0006-p0-scope-and-bootstrap.md) は、並行処理のモデルを P1（サーバー）の前に本 ADR で決めるとし、P0 が満たすべき 11 の条件（決定 3）と、本 ADR に引き継ぐ未決点を挙げた。
+[ADR 0006](0006-p0-scope-and-bootstrap.md) は、並行処理のモデルを P1（サーバー）の前に本 ADR で決めるとし、P0 が満たすべき 11 の条件（決定 3）と、本 ADR に引き継ぐ未決点を挙げた（本 ADR で条件 12 を追加する。決定 6）。
 [ADR 0003](0003-ownership-and-borrowing.md) は `Send` / `Sync` に相当する区別を、[ADR 0004](0004-effects.md) は `async` を効果とするかを、それぞれ並行処理の ADR に回している。
 本 ADR では次の 6 点を決める。
 

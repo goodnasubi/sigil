@@ -1,7 +1,7 @@
 // 例 04: 効果の宣言と一致検査（ADR 0004）
 // effects 節には本体が起こしうる効果を過不足なく書く。コンパイラが推論した効果と一致しなければエラー。
 
-module examples.effects
+module examples.effect_check
   targets server
   trust none
 

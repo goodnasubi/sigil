@@ -62,7 +62,7 @@
 | フロントエンドとバックエンドの間の通信の記述方法 | 未決 | P2 の前 |
 | 並行処理のモデル | **決定**: 中断を効果（`task.*`）として扱う構造化並行処理、`Sendable`・`Shareable` の導出（[ADR 0007](decisions/0007-concurrency-model.md)）。P0 が満たすべき条件は ADR 0006 | 実装は P1（ブラウザ向けは P2） |
 | 長期目標と段階計画 | **決定**: P0〜P7（[ADR 0005](decisions/0005-long-term-goals.md)） | — |
-| 標準ライブラリの分割（実行環境なしの核 / OS 依存部分） | 未決（M1〜M2 の暫定の表が従う規則（読むだけの操作は `&T` の受け手のメソッド、`console.log` は `Displayable` を `&T` で読む、標準の自由関数の名前は上書きできない）は [ADR 0012](decisions/0012-ownership-check-and-stdlib.md) で決定。効果を持たない部分の正式な一覧（`clone`・`get_mut`・`find`・`min_by` を加え、`unwrap`・`Box`・`position` は置かない。列挙型を通る型の再帰を許す）は [ADR 0013](decisions/0013-termination-stdlib-and-function-values.md) で決定） | 分割と効果を持つ部分の正式な一覧は M4 の前 |
+| 標準ライブラリの分割（実行環境なしの核 / OS 依存部分） | **決定**（[ADR 0014](decisions/0014-core-and-os-split.md)）。経緯: 未決（M1〜M2 の暫定の表が従う規則（読むだけの操作は `&T` の受け手のメソッド、`console.log` は `Displayable` を `&T` で読む、標準の自由関数の名前は上書きできない）は [ADR 0012](decisions/0012-ownership-check-and-stdlib.md) で決定。効果を持たない部分の正式な一覧（`clone`・`get_mut`・`find`・`min_by` を加え、`unwrap`・`Box`・`position` は置かない。列挙型を通る型の再帰を許す）は [ADR 0013](decisions/0013-termination-stdlib-and-function-values.md) で決定） | 決定済み（M4） |
 | 信頼基盤の宣言方法と、検査を外した箇所の契約の書き方 | 未決（モジュールの宣言の `trust base` は [ADR 0008](decisions/0008-m0-notation.md) で決定） | M4 の前 |
 | Python の置き換えに必要なすぐ実行できる形態（スクリプト・対話） | 未決 | P3 の前 |
 

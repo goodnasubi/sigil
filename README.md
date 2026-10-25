@@ -115,6 +115,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 > 字句と文法の全体仕様（コメント・識別子・予約語・リテラル・演算子の優先順位・正規形）を [ADR 0009](docs/decisions/0009-lexical-and-grammar.md) で決めました。
 > `sigil fmt` の仕様と M0 の補足を [ADR 0010](docs/decisions/0010-fmt-and-m0-addendum.md) で、型システムの範囲（所有権と借用の表記、型引数、篩型、関数の値の制限など）を [ADR 0011](docs/decisions/0011-type-system-scope.md) で決めました。
 > 所有権の検査の細目と標準ライブラリの規則を [ADR 0012](docs/decisions/0012-ownership-check-and-stdlib.md) で、M3 の前に決める論点（停止を効果に数えないこと、標準ライブラリの正式な一覧、関数の値の渡し方、借用区間の部品）を [ADR 0013](docs/decisions/0013-termination-stdlib-and-function-values.md) で決めました。
+> 標準ライブラリの核と OS 依存部分の分割（出力先 `bare`、層ごとの標準ライブラリの表、核のモジュールからの OS 層の参照の検査）を [ADR 0014](docs/decisions/0014-core-and-os-split.md) で決めました。
 
 ## 目標
 

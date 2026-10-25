@@ -245,6 +245,7 @@ fn main() -> ExitCode {
             };
             match sigil::interp::run_with(&src, &args[2], &call, &opts) {
                 Ok(out) => {
+                    // 標準出力が閉じていても（Broken pipe など）パニックせず、黙って終える。
                     let _ = writeln!(std::io::stdout(), "{}", out.value);
                     ExitCode::SUCCESS
                 }

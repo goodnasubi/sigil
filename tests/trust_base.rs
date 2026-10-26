@@ -416,3 +416,17 @@ fn user_std_module_name_rejected_cli() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("std"), "{err}");
 }
+
+#[test]
+fn trust_base_allowed_with_option_build_cli() {
+    let src = base(&ufn("f(n: Int) -> Int", "none", "  return n + 1;"));
+    let p = temp_file("c.sigil", &src);
+    let out = temp_file("c.out", "");
+    let (code, _, err) = sigil_bin(&["build", &p, "f", "-o", &out]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("trust base"), "{err}");
+    let (code, _, err) = sigil_bin(&["build", "--trust-base", "m.a", &p, "f", "-o", &out]);
+    assert_eq!(code, 0, "{err}");
+    let o = std::process::Command::new(&out).arg("41").output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "42");
+}

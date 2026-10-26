@@ -1285,6 +1285,20 @@ fn coerce(a: &Arg, ty: &Type) -> Result<Val, String> {
     }
 }
 
+/// ソースを検査して、入口の関数から SIR にする（ネイティブ出力の入口。`sigil build`）。
+pub fn lower_sources(srcs: &[&str], func: &str) -> Result<Program, RunError> {
+    let file = crate::interp::merge_sources(srcs).map_err(|f| f.error)?;
+    let typed = crate::check::typed(&file).map_err(RunError::Check)?;
+    let found = file
+        .items
+        .iter()
+        .any(|i| matches!(i, Item::Fn(d) if d.name == func));
+    if !found {
+        return Err(RunError::Entry(format!("関数 {func} がない")));
+    }
+    crate::lower::lower(&typed, func).map_err(|e| RunError::Unsupported(e.0))
+}
+
 pub fn run(src: &str, func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
     run_sources_with(&[src], func, args, &Options::captured())
 }

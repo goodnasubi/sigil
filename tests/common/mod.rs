@@ -4,6 +4,8 @@
 //! 値・出力・破棄の記録・停止の報告が食い違えば失敗させる（`StackExhausted` は種類だけを比べる）。
 #![allow(dead_code)]
 
+pub mod native;
+
 use sigil::interp::{self, Arg, Failure, Options, Outcome, RunError, StopKind};
 use sigil::ir_eval;
 
@@ -47,6 +49,7 @@ pub fn run(src: &str, func: &str, args: &[Arg]) -> Res {
     let a = interp::run(src, func, args);
     let b = ir_eval::run(src, func, args);
     compare(func, &a, &b);
+    native::check(&[src], func, args, &Options::captured(), &a);
     a
 }
 
@@ -54,6 +57,7 @@ pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
     let a = interp::run_with(src, func, args, opts);
     let b = ir_eval::run_with(src, func, args, opts);
     compare(func, &a, &b);
+    native::check(&[src], func, args, opts, &a);
     a
 }
 
@@ -61,6 +65,7 @@ pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
     let a = interp::run_sources(srcs, func, args);
     let b = ir_eval::run_sources(srcs, func, args);
     compare(func, &a, &b);
+    native::check(srcs, func, args, &Options::captured(), &a);
     a
 }
 
@@ -68,5 +73,6 @@ pub fn run_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options)
     let a = interp::run_sources_with(srcs, func, args, opts);
     let b = ir_eval::run_sources_with(srcs, func, args, opts);
     compare(func, &a, &b);
+    native::check(srcs, func, args, opts, &a);
     a
 }

@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod args;
 #[path = "../../../src/shared/text.rs"]
 mod text;
+mod val;
 
 /// 異常停止の終了コード（ADR 0006 の M3 の記録）。
 pub const EXIT_ABNORMAL_STOP: i32 = 70;

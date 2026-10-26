@@ -1,6 +1,6 @@
 # 0015: M5 の範囲と、ネイティブ出力のコンパイラ構成（中間表現・ランタイム・リンカ）
 
-- **状態**: 承認（2026-10-25。所有者の委任を受けて Claude が決定。範囲は PR1〜PR3 のみ。依存の追加（Cranelift）・ビルド環境・CI は未承認で人間判断待ち）
+- **状態**: 承認（2026-10-25。所有者の委任を受けて Claude が決定。範囲は PR1〜PR3 のみ。依存の追加（Cranelift）・ビルド環境・CI は未承認で人間判断待ち）。2026-10-26 に所有者が承認した: PR4 以降の実装、Cranelift 依存（cranelift-codegen・cranelift-frontend・cranelift-module・cranelift-object の 4 クレート、最新安定版）の追加、ビルド環境（cc + glibc の静的リンク）、PR6 の前の CI の追加（CI は別 PR）
 
 ## 背景
 

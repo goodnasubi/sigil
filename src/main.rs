@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る。未実装の構文は BuildUnsupported で止める）";
 
 fn read(path: &str) -> Option<String> {
     match std::fs::read(path)
@@ -232,6 +232,38 @@ fn main() -> ExitCode {
                         ExitCode::FAILURE
                     }
                 },
+            }
+        }
+        Some("build") if args.len() >= 4 => {
+            let mut trace = false;
+            let mut rest: Vec<&String> = args[1..].iter().collect();
+            if rest.first().map(|s| s.as_str()) == Some("--trace-drops") {
+                trace = true;
+                rest.remove(0);
+            }
+            let n = rest.len();
+            if n < 4 || rest[n - 2].as_str() != "-o" {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            let out = rest[n - 1].clone();
+            let func = rest[n - 3].clone();
+            let files = &rest[..n - 3];
+            let mut srcs = vec![];
+            for path in files {
+                let Some(s) = read(path) else {
+                    return ExitCode::FAILURE;
+                };
+                srcs.push(s);
+            }
+            let refs: Vec<&str> = srcs.iter().map(String::as_str).collect();
+            let opts = sigil::codegen::Opts { trace_drops: trace };
+            match sigil::native::build(&refs, &func, &opts, std::path::Path::new(&out)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{}:{e}", files[0]);
+                    ExitCode::FAILURE
+                }
             }
         }
         _ => {

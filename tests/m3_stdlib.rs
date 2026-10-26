@@ -3,7 +3,7 @@
 
 mod common;
 use common::run;
-use sigil::interp::Arg;
+use sigil::exec::Arg;
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 

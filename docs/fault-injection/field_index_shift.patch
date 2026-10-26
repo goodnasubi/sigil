@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..cbbdf8d 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1690,5 +1690,5 @@ impl<'a> L<'a> {
+                 let (bp, bt) = self.expr_place(expr)?;
+                 let (i, ft) = self.field_info(&bt, name)?;
+-                Ok(Some((bp.field(i), ft)))
++                Ok(Some((bp.field(i ^ 1), ft)))
+             }
+             _ => Ok(None),

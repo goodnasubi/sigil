@@ -1,7 +1,7 @@
 //! 関数 1 つ分の出力（SIR の基本ブロック → Cranelift）。値の持ち方は親モジュールの説明を見よ。
 
 use super::{norm, rt_spec, Cg, CgError, W};
-use crate::interp::StopKind;
+use crate::exec::StopKind;
 use crate::ir::{
     AggKind, ArithOp, BinOp, Builtin, Callee, Const, Func, Operand, Place, Proj, Rvalue, Stmt,
     Term, Ty, TypeKind, UnOp,
@@ -527,7 +527,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let (w, ty, c, moved) = self.raw_a(op);
         let v = self.finish(w, &ty, c, hint);
         if let Some(a) = moved {
-            // 移動した元は空にする（インタープリタの `Empty` と同じ）。
+            // 移動した元は空にする（SIR の評価器の `Empty` と同じ）。
             let z = self.ic(0);
             self.st(z, a, 0);
         }

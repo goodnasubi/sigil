@@ -8,7 +8,7 @@
 
 mod common;
 use common::run_with;
-use sigil::interp::{Arg, Options, RunError, StopKind};
+use sigil::exec::{Arg, Options, RunError, StopKind};
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 
@@ -363,4 +363,19 @@ fn without_tracing_nothing_is_recorded() {
     );
     let o = run_with(&src, "t", &[], &Options::default()).unwrap();
     assert!(o.drops.is_empty());
+}
+
+/// ADR 0018 の決定 4（誤りの埋め込みで見つかった穴）: 1 つの文の中の 2 つの一時値は、作った逆順に破棄される。
+#[test]
+fn two_temporaries_in_one_statement_drop_in_reverse_creation_order() {
+    let (v, d) = ok(
+        &f(
+            "t() -> Int",
+            "let a = mk(1);\nlet n = mk(5).id + mk(6).id;\nreturn n;",
+        ),
+        "t",
+        &[],
+    );
+    assert_eq!(v, "11");
+    assert_eq!(ids(&d), [6, 5, 1]);
 }

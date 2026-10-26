@@ -2,7 +2,7 @@
 //!
 //! `console.log`・`fs.read`・`fs.write`・`Path` の操作と `IoError` の分類。`runtime/core` には依存せず、
 //! 文字列は `(ptr, len)` の UTF-8 で受け渡す。返す文字列の領域はこの crate の `sigil_rt_os_buf_free` で解放する。
-//! `Path` の意味と `IoError` の分類は `src/shared/path.rs` をインタプリタと共有する。
+//! `Path` の意味と `IoError` の分類は `src/shared/path.rs` を SIR の評価器と共有する。
 
 use std::io::Write;
 

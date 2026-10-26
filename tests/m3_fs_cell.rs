@@ -3,7 +3,7 @@
 
 mod common;
 use common::run_sources_with;
-use sigil::interp::{Arg, Failure, Options, Outcome, RunError};
+use sigil::exec::{Arg, Failure, Options, Outcome, RunError};
 use std::collections::BTreeMap;
 
 const PORT: &str = include_str!("../examples/02-read-port/c-brace.sigil");

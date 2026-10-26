@@ -1,9 +1,8 @@
-//! ADR 0015 の決定 1: 例 01〜05 と小さな単位の事例を、インタープリタと SIR の評価器の両方で実行して突き合わせる。
-//! 突き合わせるのは値・出力・破棄の記録・停止の報告（`StackExhausted` は種類だけ）。
+//! ADR 0015 の決定 1: 例 01〜05 と小さな単位の事例を、SIR の検証器・SIR の評価器・ネイティブの実行ファイルで試験する（`common::run*`）。
 mod common;
 
 use common::{run, run_sources, run_sources_with, run_with};
-use sigil::interp::{Arg, Options, RunError, StopKind};
+use sigil::exec::{Arg, Options, RunError, StopKind};
 
 fn example(path: &str) -> String {
     std::fs::read_to_string(format!("{}/examples/{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -25,7 +24,7 @@ fn files(pairs: &[(&str, &str)]) -> Options {
 }
 
 #[test]
-fn sir_eval_matches_interp() {
+fn sir_examples_run() {
     // 例 01
     let avg = example("01-average/c-brace.sigil");
     run(&avg, "average", &[floats(&[1.0, 2.0, 3.0, 4.0])]).unwrap();

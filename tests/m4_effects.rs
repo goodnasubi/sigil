@@ -3,7 +3,7 @@
 
 mod common;
 use common::run_with;
-use sigil::interp::{Arg, Options};
+use sigil::exec::{Arg, Options};
 use std::path::PathBuf;
 use std::process::Command;
 

@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..5ead73b 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -785,5 +785,5 @@ impl<'a> L<'a> {
+     /// `mark` 以降の登録を逆順に破棄する（登録簿は変えない）。
+     fn drop_from(&mut self, mark: usize) {
+-        for i in (mark..self.fb.reg.len()).rev() {
++        for i in mark..self.fb.reg.len() {
+             let l = self.fb.reg[i].0;
+             self.emit(Stmt::Drop(Place::local(l)));

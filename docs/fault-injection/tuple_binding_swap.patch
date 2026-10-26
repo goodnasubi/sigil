@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..aa35a8c 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1319,5 +1319,5 @@ impl<'a> L<'a> {
+                 for (i, sp) in ps.iter().enumerate() {
+                     let t = ts.get(i).cloned().unwrap_or(ir::Ty::Unit);
+-                    self.pat_bind(sp, &place.field(i), &t, by_ref)?;
++                    self.pat_bind(sp, &place.field(i ^ 1), &t, by_ref)?;
+                 }
+             }

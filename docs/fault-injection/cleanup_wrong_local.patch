@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..4b58c47 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -757,5 +757,5 @@ impl<'a> L<'a> {
+         let next = self.cleanup_at(n - 1);
+         let b = self.new_block();
+-        let l = self.fb.reg[n - 1].0;
++        let l = self.fb.reg[0].0;
+         self.fb.blocks[b].stmts.push(Stmt::Drop(Place::local(l)));
+         self.fb.blocks[b].term = Some(Term::Goto(next));

@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..78465b6 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1344,5 +1344,5 @@ impl<'a> L<'a> {
+ 
+     fn place_op(&self, e: &a::Expr, p: &Place, ty: &ir::Ty) -> Operand {
+-        if self.moved(e) && !trivial(ty) {
++        if false && self.moved(e) && !trivial(ty) {
+             Operand::Move(p.clone())
+         } else {

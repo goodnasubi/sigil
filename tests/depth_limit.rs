@@ -4,7 +4,7 @@
 //! `check`・`fmt`・lowering・`run`（SIR の評価器）・`build`（ネイティブ）を、2 MiB のスタックの
 //! スレッド（Rust のテストの既定）で通す。上限の 1 つ上は `TooDeep` になる。
 
-use sigil::interp::{Arg, Options};
+use sigil::exec::{Arg, Options};
 use sigil::{parse, ErrorKind};
 
 const HEAD: &str = "module m.d\n  targets server\n  trust none\n\n";

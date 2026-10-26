@@ -3,7 +3,7 @@
 use sigil::effects::EffectTable;
 mod common;
 use common::run;
-use sigil::interp::Arg;
+use sigil::exec::Arg;
 use sigil::{check::check, parse, ErrorKind};
 
 const GOOD_FN: &str = "fn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return x;\n}\n";
@@ -356,9 +356,9 @@ fn core_file(targets: &str, trust: &str, name: &str) -> String {
 
 fn mismatch(a: &str, b: &str) {
     for srcs in [[a, b], [b, a]] {
-        match sigil::interp::run_sources(&srcs, "g", &[]) {
+        match sigil::ir_eval::run_sources(&srcs, "g", &[]) {
             Err(f) => match f.error {
-                sigil::interp::RunError::Check(e) => {
+                sigil::exec::RunError::Check(e) => {
                     assert_eq!(e.kind, ErrorKind::ModuleMismatch, "{e}")
                 }
                 other => panic!("RunError::Check のはず: {other}"),
@@ -392,13 +392,13 @@ fn run_sources_rejects_mismatched_name_and_trust() {
 fn run_sources_accepts_same_module() {
     let a = core_file("bare", "none", "m.a");
     let b = "module m.a\n  targets bare\n  trust none\n\nfn k() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return g();\n}\n";
-    let o = sigil::interp::run_sources(&[&a, b], "k", &[]).unwrap();
+    let o = sigil::ir_eval::run_sources(&[&a, b], "k", &[]).unwrap();
     assert_eq!(o.value, "1");
 }
 
 #[test]
 fn run_sources_rejects_mismatched_targets_only() {
-    let e = sigil::interp::run_sources(
+    let e = sigil::ir_eval::run_sources(
         &[
             &core_file("bare", "none", "m.a"),
             &core_file("server", "none", "m.a"),
@@ -407,5 +407,5 @@ fn run_sources_rejects_mismatched_targets_only() {
         &[],
     )
     .unwrap_err();
-    assert!(matches!(e.error, sigil::interp::RunError::Check(_)));
+    assert!(matches!(e.error, sigil::exec::RunError::Check(_)));
 }

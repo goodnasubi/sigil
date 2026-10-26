@@ -1,0 +1,14 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..bcba1a6 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1095,5 +1095,8 @@ impl<'a> L<'a> {
+     fn early_return(&mut self) {
+         let base = self.fb.body_base;
+-        self.drop_from(base);
++        for i in (base..self.fb.reg.len().saturating_sub(1)).rev() {
++            let l = self.fb.reg[i].0;
++            self.emit(Stmt::Drop(Place::local(l)));
++        }
+         let epi = self.fb.epilogue;
+         self.goto(epi);

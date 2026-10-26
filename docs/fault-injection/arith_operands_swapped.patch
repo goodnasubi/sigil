@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..f1e572f 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1644,5 +1644,5 @@ impl<'a> L<'a> {
+                     _ => ArithOp::Rem,
+                 };
+-                Ok(self.checked(aop, a_, b_, ""))
++                Ok(self.checked(aop, b_, a_, ""))
+             }
+             ir::Ty::Float => Ok(self.fresh(Rvalue::Binary(cmp_op(op), a_, b_), ir::Ty::Float)),

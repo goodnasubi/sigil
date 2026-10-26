@@ -1,0 +1,15 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..ae219f3 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -2006,5 +2006,9 @@ impl<'a> L<'a> {
+             );
+         }
+-        self.early_return();
++        {
++            let epi = self.fb.epilogue;
++            self.goto(epi);
++            self.dead();
++        }
+         self.fb.cur = ok;
+         let (_, _, fs) = self.variant_of(&ity, if is_option { "Some" } else { "Ok" })?;

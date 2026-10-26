@@ -165,9 +165,9 @@ fn check_files(texts: &[&str], opts: &crate::effects::Options) -> Option<(usize,
         off += t.matches('\n').count() + 1;
     }
     let refs: Vec<&str> = padded.iter().map(String::as_str).collect();
-    let err = match crate::interp::merge_sources(&refs) {
+    let err = match crate::exec::merge_sources(&refs) {
         Err(f) => match f.error {
-            crate::interp::RunError::Check(e) => e,
+            crate::exec::RunError::Check(e) => e,
             _ => return None,
         },
         Ok(file) => crate::check::check_file_with(&file, opts).err()?,

@@ -47,7 +47,7 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: test（インタープリタ・SIR・ネイティブを突き合わせる）
+      - name: test（検証器・SIR 評価器・ネイティブを突き合わせる）
         run: cargo test
 
       - name: ネイティブの突き合わせ件数（飛ばしの上限を検査）

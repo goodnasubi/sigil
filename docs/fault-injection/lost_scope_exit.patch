@@ -1,0 +1,10 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..e74c9d6 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -797,5 +797,4 @@ impl<'a> L<'a> {
+ 
+     fn exit_scope(&mut self, mark: usize) {
+-        self.drop_from(mark);
+         self.fb.reg.truncate(mark);
+         self.fb.reg_blocks.truncate(mark);

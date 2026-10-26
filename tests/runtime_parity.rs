@@ -1,8 +1,8 @@
 //! ADR 0015 の決定 6（PR3）: 暫定ランタイム（`runtime/core`・`runtime/os`）の表示・文字列・パスの関数が、
-//! インタープリタと同じ結果を返すこと。
+//! SIR の評価器と同じ結果を返すこと。
 //!
 //! 埋め込んだ `.a`（`sigil::runtime_lib`）を、C の小さなドライバと `cc -static -no-pie` でリンクして走らせ、
-//! 同じ入力をインタープリタで評価した結果と突き合わせる。`cc` がなければ飛ばす。
+//! 同じ入力を SIR の評価器で評価した結果と突き合わせる。`cc` がなければ飛ばす。
 //! 加えて、2 つのランタイムの crate 自身の単体テスト（`cargo test --manifest-path`）も走らせる。
 
 mod common;
@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 
-/// 1 つの式をインタープリタで評価して表示を返す。
+/// 1 つの式を SIR の評価器で評価して表示を返す。
 fn ev(ty: &str, body: &str) -> String {
     let src = format!(
         "{HEAD}fn f() -> {ty}\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{body}\n}}\n\n"
@@ -261,7 +261,7 @@ fn check_all(exe: &PathBuf) {
             ),
         );
         let joined = rt(exe, &["join", a, b]);
-        // join の結果の末尾の名前が、インタープリタの file_name と一致する。
+        // join の結果の末尾の名前が、SIR の評価器の file_name と一致する。
         let name = rt(exe, &["file_name", joined.trim_matches('"')]);
         assert_eq!(
             name,
@@ -304,7 +304,7 @@ fn check_all(exe: &PathBuf) {
 }
 
 #[test]
-fn runtime_matches_interpreter_core_then_os() {
+fn runtime_matches_sir_eval_core_then_os() {
     if !have_cc() {
         return;
     }
@@ -314,7 +314,7 @@ fn runtime_matches_interpreter_core_then_os() {
 }
 
 #[test]
-fn runtime_matches_interpreter_os_then_core() {
+fn runtime_matches_sir_eval_os_then_core() {
     if !have_cc() {
         return;
     }

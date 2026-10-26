@@ -617,14 +617,10 @@ pub fn check_module(file: &File, externs: &[Item], opts: &Options) -> R<()> {
 }
 
 /// 標準の名前空間の頭（`fs`・`console`・`raw`）と `std`。モジュール名の最初の部分には使えない（ADR 0021 の 2-2b の決め）。
-pub fn std_heads() -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = vec!["std", "raw"];
-    for (_, ns, _, _) in crate::stdlib::NAMESPACED_FNS {
-        if !v.contains(ns) {
-            v.push(ns);
-        }
-    }
-    v
+pub fn std_heads() -> &'static [&'static str] {
+    // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
+    // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
+    &["console", "fs", "raw", "std"]
 }
 
 /// 標準の前置きの名前（型・値）と名前空間の頭か。`use` で取り込む名前に使えない。
@@ -5580,5 +5576,18 @@ fn main() -> Int
         assert!(!t.moves.contains(&addr(lhs)) && !t.moves.contains(&addr(rhs)));
         // ほかの移動は `pair` の `(a, b)` の二つ(`T` は Copyable と限らない)
         assert_eq!(t.moves.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod std_heads_tests {
+    #[test]
+    fn every_stdlib_namespace_is_reserved() {
+        for (_, ns, _, _) in crate::stdlib::NAMESPACED_FNS {
+            assert!(
+                super::std_heads().contains(ns),
+                "{ns} は ADR 0021 の予約一覧にない"
+            );
+        }
     }
 }

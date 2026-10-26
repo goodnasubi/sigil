@@ -22,6 +22,20 @@
 | [04-effects](04-effects/) | 税込み価格の計算・価格ファイルの読み込み | 効果の宣言と一致検査、`of(f)` による引き継ぎ、`state` 効果（[ADR 0004](../docs/decisions/0004-effects.md)） |
 | [05-control](05-control/) | 範囲の数の合計・符号・加算する関数 | 文としての `if`・`while`、値を選ぶ `match`、`move` 付きクロージャ（[ADR 0008](../docs/decisions/0008-m0-notation.md)） |
 
+## 実行のしかた
+
+`sigil run` / `check` / `build` は、モジュールの名前と根からのパスが一致するファイルだけを扱います（根は既定でカレントディレクトリ、`--root <dir>` で変更。[ADR 0021](../docs/decisions/0021-module-unit-and-visibility.md)）。サンプルの `module` の名前は、このリポジトリの配置とは一致しない（たとえば `01-average` のディレクトリ名は識別子ではない）ので、`examples/` の下からそのまま実行はできません。根の下に名前どおりのパスで複製して実行します。
+
+```bash
+root=$(mktemp -d)
+mkdir -p "$root/examples"
+cp examples/05-control/control.sigil "$root/examples/control.sigil"   # module examples.control
+sigil check --root "$root" "$root/examples/control.sigil"
+sigil run --root "$root" "$root/examples/control.sigil" sign 5   # 1 を表示
+```
+
+サンプルの名前とパスは言語サーバーの試験と `effects.spec` の golden が固定しているので、ファイルは動かさずに複製して使います。
+
 ## 採用した構文（候補 C）の約束
 
 - 関数はシグネチャの後に `intent` → `requires` → `ensures` → `effects` の 4 節を、この順にすべて書く。空の節は `none` と書く。

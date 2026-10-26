@@ -235,3 +235,75 @@ fn cli_run_and_build_link_modules_and_match() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 取り込んだ関数 `step` と同じ綴りの局所束縛（引数・クロージャの引数・match の腕）は、取り込みの名前を隠す。
+/// 隠しが外れると `step` が `lib.a.step` に書き換わり、検査か結果で落ちる。
+fn shadow_sources(body: &str, sig: &str) -> [String; 2] {
+    let main = module(
+        "app.main",
+        "\nuse lib.a.step;\n",
+        &format!(
+            "{}\n{}",
+            func(sig, "none", body),
+            func(
+                "pub fn main(n: Int) -> Int",
+                "none",
+                "  return step(n) + probe(n);"
+            )
+        ),
+    );
+    let a = module(
+        "lib.a",
+        "",
+        &func("pub fn step(n: Int) -> Int", "none", "  return n * 7;"),
+    );
+    [main, a]
+}
+
+fn run_shadow(body: &str, sig: &str) -> String {
+    let [m, a] = shadow_sources(body, sig);
+    let r = common::run_sources(&[&m, &a], "main", &[Arg::Int(1)]).unwrap();
+    r.value
+}
+
+#[test]
+fn fn_param_shadows_an_imported_function_name() {
+    // 引数 `step` は整数。取り込みの `step(n)` は 7、probe は 1 + 1。
+    assert_eq!(
+        run_shadow("  return step + 1;", "fn probe(step: Int) -> Int"),
+        "9"
+    );
+}
+
+#[test]
+fn closure_param_shadows_an_imported_function_name() {
+    assert_eq!(
+        run_shadow(
+            "  let f = move |step| step + 10;\n  return f(n);",
+            "fn probe(n: Int) -> Int"
+        ),
+        "18"
+    );
+}
+
+#[test]
+fn match_expression_arm_binding_shadows_an_imported_function_name() {
+    assert_eq!(
+        run_shadow(
+            "  return match Some(n) {\n    Some(step) => step + 1000,\n    None => 0,\n  };",
+            "fn probe(n: Int) -> Int"
+        ),
+        "1008"
+    );
+}
+
+#[test]
+fn match_statement_arm_binding_shadows_an_imported_function_name() {
+    assert_eq!(
+        run_shadow(
+            "  match Some(n) {\n    Some(step) => {\n      return step + 100;\n    }\n    None => {\n      return 0;\n    }\n  }\n  return 0;",
+            "fn probe(n: Int) -> Int"
+        ),
+        "108"
+    );
+}

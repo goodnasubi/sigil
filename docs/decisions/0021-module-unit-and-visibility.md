@@ -9,7 +9,7 @@
 ### 現状（main `1914f1e`）
 
 - 各ファイルの先頭に `module 名前` + `targets` + `trust` の宣言がちょうど 1 つある（[ADR 0008](0008-m0-notation.md) の決定 6）。ファイルの位置とモジュール名の対応は決めていない。
-- モジュールどうしの参照（`import` に当たるもの）はない。`sigil check` と `run`・`build` は複数のファイルを受け取るが、宣言（名前・`targets`・`trust`）がすべて同じファイルだけを 1 つに合わせる（`exec::merge_sources`、食い違えば `ModuleMismatch`。[ADR 0014](0014-core-and-os-split.md) の決定 4）。
+- モジュールどうしの参照（`import` に当たるもの）はない。`sigil check` と `run`・`build` は複数のファイルを受け取るが、宣言（名前・`targets`・`trust`）がすべて同じファイルだけを 1 つに合わせる（`exec::merge_sources`、食い違えば `ModuleMismatch`。[ADR 0014](0014-core-and-os-split.md) の決定 4）。**【2-2c で廃止。`merge_sources`・`ModuleMismatch` はもうない。下の「2-2c の実装の記録」を参照】**
 - 公開の範囲の区別はない。合わせたファイルの宣言は、すべて互いに見える。
 - 標準ライブラリは `src/stdlib.rs` の表で、1 つの仮のモジュール `std.std` として常に見える。`std`・`std.*` は予約で、`--trust-base` に挙げても許されない（[ADR 0016](0016-trust-base-declaration.md) の決定 3）。
 - 言語サーバー（[ADR 0019](0019-m6-machine-spec-and-language-server.md) の PR2）は、同じディレクトリで宣言が同じファイルを「組」として検査する。これは本 ADR までの仮の決め方で、変更のたびに組の全ファイルを検査し直す（規模の方針は ADR 2-1 で決めるとした）。
@@ -210,3 +210,10 @@
   - `examples/04-effects` は同じモジュールを 2 ファイルに分けていたので、試験では `tests/data/effects_main.sigil`（入口、`use` で取り込む）と `effects.sigil` の `pub` 版（`common::effects_pair()`）に組み替えた。LSP の試験と `effects.spec` の golden は元の `entry.sigil` を使うので変えていない。
 - **未対応として止めるもの（結ぶとき）**: 入口でないモジュールの `trust base`、異なるモジュールの同名の型（`struct`・`enum`・`type`。型の名前は平らなため）。どちらも `Unsupported` で、黙って誤動作させない。型の改名は後続で扱う。
 - **試験**: `tests/modules_2c.rs`（3 モジュールの同名の `helper` を呼び分け、値・出力を固定し、SIR の検証器・評価器・ネイティブの一致を `common::run_sources` で確かめる。記号にモジュール名が出ること、未対応の経路、CLI の `--root` と cwd の既定）。ADR 0018 決定 4 の故障注入として、(1) 改名を外す、(2) 局所変数の隠しを無視する、(3) 定義の改名を外す、のそれぞれで `modules_2c` が落ちることを確かめてから戻した。CLI を使う既存の試験は、ファイルをモジュール名どおりのパスに置いて `--root` を渡す形に直した。
+- **故障注入の追加（レビュー対応）**: 局所束縛の隠しを 1 つずつ外した。(4) 関数の引数の隠し、(5) クロージャの引数の隠し、(6) `match` 式の腕の束縛の隠し、(7) `match` 文の腕の束縛の隠し。それぞれ `modules_2c` の対応する試験（`fn_param_` / `closure_param_` / `match_expression_arm_binding_` / `match_statement_arm_binding_shadows_an_imported_function_name`）だけが落ちることを確かめて戻した。試験は取り込んだ `step` と同じ綴りを束縛し、隠しが外れると `lib.a.step` に書き換わって結果が変わる。
+- **`--root` 既定 = cwd の帰結**: 根の外のファイルや、`module` の名前とパスが合わないファイルは `check`・`run`・`build` で動かない（`ModulePathMismatch`）。リポジトリの `examples/` は、`module examples.average` のようにパス（`examples/average.sigil`）と合わない名前が多く、`examples/01-average` のように識別子でないディレクトリもあるので、そのままでは根から実行できない。例のモジュール名とパスは golden・LSP の試験が固定しているので変えず、`examples/README.md` と `README.md` に `--root` 付きの実行例（根の下に名前どおりのパスで置く）を書いた。
+- **再検査のエラーの出どころ**: 結合後の再検査（`typed_with`）のエラーは、結合した 1 つの `File` に対するものなので、メモリ上のソースでは `RunError::Check` にファイル名が付かない（ファイルからの実行でも、結合後の誤りは `RunError::Module` ではなくファイル名なしになる）。各モジュールの検査は結合の前に済んでいるので、ここに来るのは結合で初めて起きる誤りだけ。
+- **入口の `targets`・`trust` は全体に効く**: 結んだプログラムの `targets` と `trust` は入口のモジュールの宣言が使われ、`use` で取り込んだモジュールにも及ぶ。モジュールごとの出力先の違いは見ない（後続で扱う）。
+- **型名の衝突**: 異なるモジュールの同名の型は、使っていなくても結ぶときに `Unsupported` になりうる（#74 の既知の制約。型の名前が平らなため）。
+- **言語サーバー**: `lsp.rs` の私有の `merge_group` は 2-2d で必ず廃止する（モジュールをまたぐ解決に置き換える）。
+- **根の外のパスの診断**: 「（symlink）」は、パスの途中に symlink があるときだけ付ける。symlink でなく単に根の外のファイルなら付けない。

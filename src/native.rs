@@ -61,7 +61,11 @@ fn fresh_dir() -> std::io::Result<PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("sigil-build-{}-{nanos}", std::process::id()));
+    // 同じプロセスの複数のスレッドが同じ時刻を読むことがあるので、連番も付ける。
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("sigil-build-{}-{nanos}-{seq}", std::process::id()));
     std::fs::create_dir(&dir)?;
     Ok(dir)
 }

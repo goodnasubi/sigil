@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+
+      # ネイティブ出力のリンクに cc と glibc の静的ライブラリ(libc.a)が要る。
+      - name: ネイティブ出力の前提
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            runtime/core/target
+            runtime/os/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'runtime/core/Cargo.lock', 'runtime/os/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test
+
+      - name: test (SIGIL_NATIVE=1)
+        run: cargo test
+        env:
+          SIGIL_NATIVE: "1"
+
+      - name: ネイティブの突き合わせ件数
+        run: scripts/native-report.sh
+        env:
+          SIGIL_NATIVE: "1"
+
+      - name: runtime/core
+        working-directory: runtime/core
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: runtime/os
+        working-directory: runtime/os
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test

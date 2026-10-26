@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--trace-drops] [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
 
 fn read(path: &str) -> Option<String> {
     match std::fs::read(path)
@@ -170,8 +170,17 @@ fn main() -> ExitCode {
             // テスト用の差し替え（ADR 0004 の規則 7）。`--fs-double 仮のパス=実ファイル` で、
             // `fs.read(&仮のパス)` が実ファイルの内容を返す。指定がなければ実ファイルを読み書きする。同じ仮のパスの重複指定は使い方の誤り（終了コード 2）。
             let mut doubles: Vec<(String, String)> = vec![];
+            let mut trace = false;
             let mut i = 1;
-            while args.get(i).map(String::as_str) == Some("--fs-double") {
+            while matches!(
+                args.get(i).map(String::as_str),
+                Some("--fs-double" | "--trace-drops")
+            ) {
+                if args[i] == "--trace-drops" {
+                    trace = true;
+                    i += 1;
+                    continue;
+                }
                 let Some((k, v)) = args.get(i + 1).and_then(|a| a.split_once('=')) else {
                     eprintln!("--fs-double には 仮のパス=実ファイル が要る");
                     return ExitCode::from(2);
@@ -190,7 +199,10 @@ fn main() -> ExitCode {
             let args: Vec<String> = std::iter::once(args[0].clone())
                 .chain(args[i..].iter().cloned())
                 .collect();
-            let mut opts = sigil::interp::Options::default();
+            let mut opts = sigil::interp::Options {
+                trace_drops: trace,
+                ..Default::default()
+            };
             if !doubles.is_empty() {
                 let mut m = std::collections::BTreeMap::new();
                 for (k, v) in doubles {
@@ -216,14 +228,22 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            match sigil::interp::run_with(&src, &args[2], &call, &opts) {
+            // 実行は SIR の評価器で行う（ADR 0017）。`sigil build` の実行ファイルと同じ lowering を通る。
+            let show_drops = |drops: &[String]| {
+                for d in drops {
+                    eprintln!("drop: {d}");
+                }
+            };
+            match sigil::ir_eval::run_with(&src, &args[2], &call, &opts) {
                 Ok(out) => {
+                    show_drops(&out.drops);
                     // 標準出力が閉じていても（Broken pipe など）パニックせず、黙って終える。
                     let _ = writeln!(std::io::stdout(), "{}", out.value);
                     ExitCode::SUCCESS
                 }
                 Err(f) => match f.error {
                     sigil::interp::RunError::Stop(s) => {
+                        show_drops(&f.drops);
                         eprintln!("{path}: {s}");
                         ExitCode::from(EXIT_ABNORMAL_STOP)
                     }

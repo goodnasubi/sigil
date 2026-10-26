@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] <ファイル>    （trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--trust-base <モジュール>]... <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] [--trust-base <モジュール>]... <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] [--trust-base <モジュール>]... <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
 
 fn read_text(path: &str) -> Result<String, String> {
     std::fs::read(path)
@@ -139,9 +139,18 @@ fn main() -> ExitCode {
         Some("check") if args.len() > 1 => {
             let mut trust_base: Vec<String> = vec![];
             let mut json = false;
+            let mut root: Option<String> = None;
             let mut i = 1;
             loop {
                 match args.get(i).map(String::as_str) {
+                    Some("--root") => {
+                        let Some(r) = args.get(i + 1) else {
+                            eprintln!("--root にはディレクトリが要る");
+                            return ExitCode::from(2);
+                        };
+                        root = Some(r.clone());
+                        i += 2;
+                    }
                     Some("--trust-base") => {
                         let Some(m) = args.get(i + 1) else {
                             eprintln!("--trust-base にはモジュール名が要る");
@@ -189,7 +198,16 @@ fn main() -> ExitCode {
                         continue;
                     }
                 };
-                match sigil::check::check_with(&src, &copts) {
+                let checked = match &root {
+                    Some(r) => sigil::modpath::verify(
+                        &src,
+                        std::path::Path::new(r),
+                        std::path::Path::new(path),
+                    )
+                    .and_then(|()| sigil::check::check_with(&src, &copts)),
+                    None => sigil::check::check_with(&src, &copts),
+                };
+                match checked {
                     Ok(()) if !json => println!("{path}: ok"),
                     Ok(()) => {}
                     Err(e) if json => {
@@ -231,13 +249,45 @@ fn main() -> ExitCode {
             let code = sigil::lsp::serve(stdin.lock(), std::io::stdout().lock(), trust_base);
             ExitCode::from(code as u8)
         }
-        Some("spec") if args.len() == 2 || (args.len() == 3 && args[1] == "--json") => {
-            let json = args.len() == 3;
-            let path = &args[args.len() - 1];
+        Some("spec") if args.len() >= 2 => {
+            let mut json = false;
+            let mut root: Option<&str> = None;
+            let mut i = 1;
+            loop {
+                match args.get(i).map(String::as_str) {
+                    Some("--json") => {
+                        json = true;
+                        i += 1;
+                    }
+                    Some("--root") => {
+                        let Some(r) = args.get(i + 1) else {
+                            eprintln!("--root にはディレクトリが要る");
+                            return ExitCode::from(2);
+                        };
+                        root = Some(r);
+                        i += 2;
+                    }
+                    _ => break,
+                }
+            }
+            if args.len() != i + 1 {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            let path = &args[i];
             let Some(src) = read(path) else {
                 return ExitCode::FAILURE;
             };
-            let result = if json {
+            let result = if let Some(r) = root {
+                sigil::modpath::verify(&src, std::path::Path::new(r), std::path::Path::new(path))
+                    .and_then(|()| {
+                        if json {
+                            sigil::spec::extract(&src).map(|s| format!("{}\n", s.to_json()))
+                        } else {
+                            sigil::spec::spec(&src)
+                        }
+                    })
+            } else if json {
                 sigil::spec::extract(&src).map(|s| format!("{}\n", s.to_json()))
             } else {
                 sigil::spec::spec(&src)

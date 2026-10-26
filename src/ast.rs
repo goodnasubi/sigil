@@ -7,7 +7,16 @@ use crate::error::Span;
 #[derive(Debug, Clone, PartialEq)]
 pub struct File {
     pub module: ModuleDecl,
+    /// `use a.b.name;`（ADR 0021 の決定 3。`module` の宣言の直後に 1 名ずつ、文字の順）。
+    pub uses: Vec<UseDecl>,
     pub items: Vec<Item>,
+}
+
+/// `use app.http.server.handle;`。`path` の最後が使う名前、手前がモジュール名。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    pub path: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,6 +61,8 @@ pub struct ImplDecl {
 /// 篩型 `type Port = Int where 条件;`
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeDecl {
+    /// `pub` を付けた宣言（ADR 0021 の決定 4。付けなければ非公開）。
+    pub is_pub: bool,
     pub name: String,
     pub base: Type,
     pub cond: Expr,
@@ -67,6 +78,8 @@ pub struct Generic {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDecl {
+    /// `pub` を付けた宣言（ADR 0021 の決定 4。付けなければ非公開）。
+    pub is_pub: bool,
     pub name: String,
     pub generics: Vec<Generic>,
     pub fields: Vec<Field>,
@@ -84,6 +97,8 @@ pub struct Field {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDecl {
+    /// `pub` を付けた宣言（ADR 0021 の決定 4。付けなければ非公開）。
+    pub is_pub: bool,
     pub name: String,
     pub generics: Vec<Generic>,
     pub variants: Vec<Variant>,
@@ -111,6 +126,8 @@ pub mod clause {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
+    /// `pub` を付けた宣言（ADR 0021 の決定 4。付けなければ非公開）。
+    pub is_pub: bool,
     pub name: String,
     pub generics: Vec<Generic>,
     pub params: Vec<Param>,

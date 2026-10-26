@@ -480,12 +480,22 @@ impl<'a> Printer<'a> {
             Trust::None => "trust none",
             Trust::Base => "trust base",
         });
+        for (i, u) in f.uses.iter().enumerate() {
+            if i == 0 {
+                self.top_comments(u.span.line, false, false);
+            } else {
+                let mut first = false;
+                self.comments_before(u.span.line, 0, false, &mut first);
+            }
+            self.nl(0, u.span.line);
+            self.w(&format!("use {};", u.path.join(".")));
+        }
         for item in &f.items {
             match item {
                 Item::Type(t) => {
                     self.top_comments(t.span.line, true, false);
                     self.nl(0, t.span.line);
-                    self.w(&format!("type {} = ", t.name));
+                    self.w(&format!("{}type {} = ", pub_kw(t.is_pub), t.name));
                     self.ty(&t.base);
                     self.w(" where ");
                     self.expr(&t.cond, 0, false, 0);
@@ -524,7 +534,7 @@ impl<'a> Printer<'a> {
     fn struct_decl(&mut self, s: &StructDecl) {
         self.top_comments(s.span.line, true, false);
         self.nl(0, s.span.line);
-        self.w(&format!("struct {}", s.name));
+        self.w(&format!("{}struct {}", pub_kw(s.is_pub), s.name));
         self.generics(&s.generics);
         if s.fields.is_empty() && !self.pending_before(s.end_line) {
             self.w(" {}");
@@ -546,7 +556,7 @@ impl<'a> Printer<'a> {
     fn enum_decl(&mut self, e: &EnumDecl) {
         self.top_comments(e.span.line, true, false);
         self.nl(0, e.span.line);
-        self.w(&format!("enum {}", e.name));
+        self.w(&format!("{}enum {}", pub_kw(e.is_pub), e.name));
         self.generics(&e.generics);
         self.w(" {");
         for v in &e.variants {
@@ -601,7 +611,7 @@ impl<'a> Printer<'a> {
             self.comments_before(d.span.line, ind, false, &mut f);
         }
         self.nl(ind, d.span.line);
-        self.w(&format!("fn {}", d.name));
+        self.w(&format!("{}fn {}", pub_kw(d.is_pub), d.name));
         self.generics(&d.generics);
         self.w("(");
         for (i, p) in d.params.iter().enumerate() {
@@ -1037,5 +1047,13 @@ impl<'a> Printer<'a> {
                 }
             }
         }
+    }
+}
+
+fn pub_kw(is_pub: bool) -> &'static str {
+    if is_pub {
+        "pub "
+    } else {
+        ""
     }
 }

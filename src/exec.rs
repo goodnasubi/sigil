@@ -164,6 +164,7 @@ pub(crate) fn fail(error: RunError) -> Failure {
 pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
     let mut module = None;
     let mut items = vec![];
+    let mut uses = vec![];
     for s in srcs {
         let f = crate::parse(s).map_err(|e| fail(RunError::Check(e)))?;
         match &module {
@@ -181,12 +182,17 @@ pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
                 }
             }
         }
+        uses.extend(f.uses);
         items.extend(f.items);
     }
     let Some(module) = module else {
         return Err(fail(RunError::Entry("ソースがない".into())));
     };
-    Ok(File { module, items })
+    Ok(File {
+        module,
+        uses,
+        items,
+    })
 }
 
 /// 検査器に渡す設定（`--trust-base` を載せる）。

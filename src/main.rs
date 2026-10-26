@@ -1,13 +1,16 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] <ファイル>    （trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--trust-base <モジュール>]... <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] [--trust-base <モジュール>]... <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] <ファイル>    （trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--trust-base <モジュール>]... <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] [--trust-base <モジュール>]... <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
 
-fn read(path: &str) -> Option<String> {
-    match std::fs::read(path)
+fn read_text(path: &str) -> Result<String, String> {
+    std::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| String::from_utf8(b).map_err(|_| "UTF-8 でない".to_string()))
-    {
+}
+
+fn read(path: &str) -> Option<String> {
+    match read_text(path) {
         Ok(s) => Some(s),
         Err(e) => {
             eprintln!("{path}: 読めない: {e}");
@@ -165,9 +168,26 @@ fn main() -> ExitCode {
             let mut failed = false;
             let mut diagnostics = vec![];
             for path in &args[i..] {
-                let Some(src) = read(path) else {
-                    failed = true;
-                    continue;
+                let src = match read_text(path) {
+                    Ok(s) => s,
+                    Err(e) if json => {
+                        // 読めないファイルも診断にする（ADR 0019 決定 2。位置は null）。
+                        diagnostics.push(sigil::json::obj(vec![
+                            ("file", path.as_str().into()),
+                            ("kind", "ReadError".into()),
+                            ("phase", "read".into()),
+                            ("line", sigil::json::Value::Null),
+                            ("col", sigil::json::Value::Null),
+                            ("message", format!("読めない: {e}").into()),
+                        ]));
+                        failed = true;
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("{path}: 読めない: {e}");
+                        failed = true;
+                        continue;
+                    }
                 };
                 match sigil::check::check_with(&src, &copts) {
                     Ok(()) if !json => println!("{path}: ok"),
@@ -183,7 +203,6 @@ fn main() -> ExitCode {
                 }
             }
             if json {
-                // 読めないファイルは、これまでどおり標準エラーに出す（診断には含めない）。
                 let out = sigil::json::obj(vec![
                     ("format", 1i64.into()),
                     ("ok", (!failed).into()),
@@ -192,6 +211,25 @@ fn main() -> ExitCode {
                 let _ = writeln!(std::io::stdout(), "{out}");
             }
             done(failed)
+        }
+        Some("lsp") => {
+            let mut trust_base = vec![];
+            let mut i = 1;
+            while args.get(i).map(String::as_str) == Some("--trust-base") {
+                let Some(m) = args.get(i + 1) else {
+                    eprintln!("--trust-base にはモジュール名が要る");
+                    return ExitCode::from(2);
+                };
+                trust_base.push(m.clone());
+                i += 2;
+            }
+            if i < args.len() {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            let stdin = std::io::stdin();
+            let code = sigil::lsp::serve(stdin.lock(), std::io::stdout().lock(), trust_base);
+            ExitCode::from(code as u8)
         }
         Some("spec") if args.len() == 2 || (args.len() == 3 && args[1] == "--json") => {
             let json = args.len() == 3;

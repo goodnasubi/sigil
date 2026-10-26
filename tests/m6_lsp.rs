@@ -696,3 +696,136 @@ fn w(s: S) -> Int\n  intent \"w\"\n  requires none\n  ensures none\n  effects no
     assert_eq!(c.hover(&p, find("s.m()"), 12), None);
     assert_eq!(c.finish().1, 0);
 }
+
+#[test]
+fn lsp_hover_cross_file_and_utf16() {
+    // 開いたのは entry.sigil だけ。呼び出し先 `with_tax` は同じ組の effects.sigil にある。
+    let p = example("04-effects/entry.sigil");
+    let src = std::fs::read_to_string(&p).unwrap();
+    let other = std::fs::read_to_string(example("04-effects/effects.sigil")).unwrap();
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    c.open(&p, &src);
+    c.publishes(2);
+    let l = src
+        .lines()
+        .position(|l| l.contains("with_tax(&xs)"))
+        .unwrap() as i64;
+    let got = c.hover(&p, l, 12).unwrap();
+    assert!(got.starts_with("関数 with_tax\n"), "{got}");
+    let spec = std::fs::read_to_string(example("04-effects/effects.spec")).unwrap();
+    assert!(spec.contains(&got));
+    assert!(other.contains("fn with_tax"));
+    assert_eq!(c.finish().1, 0);
+
+    // 日本語の文字列（UTF-16 で 1 単位、UTF-8 で 3 バイト）と絵文字（UTF-16 で 2 単位）の後ろの呼び出し。
+    let dir = tmpdir("hover16");
+    let g = "fn g(n: Int) -> Int\n  intent \"g\"\n  requires none\n  ensures none\n  effects none\n{\n  return n;\n}\n\n";
+    let u = "fn u() -> Int\n  intent \"u\"\n  requires none\n  ensures none\n  effects none\n{\n  let s = \"日本語😀\"; let a = g(1);\n  return a;\n}\n";
+    let src = format!("{HEAD}{g}{u}");
+    let p = write(&dir, "m.sigil", &src);
+    let l = src.lines().position(|l| l.contains("let s =")).unwrap() as i64;
+    let line = src.lines().nth(l as usize).unwrap();
+    let chars_before: Vec<char> = line.chars().take_while(|_| true).collect();
+    let at = chars_before
+        .iter()
+        .collect::<String>()
+        .find("g(1)")
+        .unwrap();
+    let c_idx = line[..at].chars().count() as i64;
+    let u16_idx = line[..at].encode_utf16().count() as i64;
+    assert_eq!(u16_idx, c_idx + 1);
+    for (enc, ch) in [(&[][..], u16_idx), (&["utf-32"][..], c_idx)] {
+        let mut c = Client::start(&[]);
+        c.initialize(enc);
+        c.open(&p, &src);
+        c.publish();
+        let got = c.hover(&p, l, ch).unwrap_or_default();
+        assert!(got.starts_with("関数 g\n"), "{enc:?} {got}");
+        // 1 単位ずれると名前の外
+        assert_eq!(c.hover(&p, l, ch - 3), None, "{enc:?}");
+        assert_eq!(c.finish().1, 0);
+    }
+}
+
+#[test]
+fn lsp_hover_edges() {
+    let dir = tmpdir("hoveredge");
+    // 1 行の本体: `{` より右は宣言ではない（呼び出しの名前は返す）。
+    let g = "fn g(n: Int) -> Int\n  intent \"g\"\n  requires none\n  ensures none\n  effects none\n{\n  return n;\n}\n\n";
+    let one = "fn h(n: Int) -> Int\n  intent \"h\"\n  requires none\n  ensures none\n  effects none\n{ return n; }\n\n";
+    let two = "fn k(n: Int) -> Int\n  intent \"k\"\n  requires none\n  ensures none\n  effects none\n{ return g(n); }\n";
+    let src = format!("{HEAD}{g}{one}{two}");
+    let p = write(&dir, "m.sigil", &src);
+    let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).unwrap() as i64;
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    c.open(&p, &src);
+    c.publish();
+    let hl = line_of("{ return n; }");
+    assert_eq!(c.hover(&p, hl, 0), None);
+    assert_eq!(c.hover(&p, hl, 3), None);
+    assert_eq!(c.hover(&p, hl, 9), None);
+    let kl = line_of("{ return g(n); }");
+    assert_eq!(c.hover(&p, kl, 1), None);
+    let got = c.hover(&p, kl, 9).unwrap();
+    assert!(got.starts_with("関数 g\n"), "{got}");
+    // 範囲外の位置（行・列）
+    assert_eq!(c.hover(&p, 10_000, 0), None);
+    assert_eq!(c.hover(&p, kl, 10_000), None);
+    assert_eq!(c.hover(&p, -0, 10_000), None);
+    // 開いていない文書・空の文書
+    let q = write(&dir, "e.sigil", "");
+    c.open(&q, "");
+    c.publish();
+    assert_eq!(c.hover(&q, 0, 0), None);
+    assert_eq!(c.hover(&q, 5, 5), None);
+    assert_eq!(c.hover(&dir.join("nothing.sigil"), 0, 0), None);
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_hover_match_arm_and_closure_shadow() {
+    let dir = tmpdir("hovershadow");
+    let g = "fn g(n: Int) -> Int\n  intent \"g\"\n  requires none\n  ensures none\n  effects none\n{\n  return n;\n}\n\n";
+    let u = "fn u(n: Int) -> Int\n  intent \"u\"\n  requires none\n  ensures none\n  effects none\n{\n  let a = g(1);\n  match n {\n    g => {\n      let z = g(2);\n    }\n  }\n  let b = g(3);\n  return match n {\n    g => g(4),\n  };\n}\n\n\
+fn v(n: Int) -> Int\n  intent \"v\"\n  requires none\n  ensures none\n  effects none\n{\n  let k = |g| g(5);\n  let c = g(6);\n  return n;\n}\n";
+    let src = format!("{HEAD}{g}{u}");
+    let p = write(&dir, "m.sigil", &src);
+    let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).unwrap() as i64;
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    c.open(&p, &src);
+    c.publish();
+    let hit = |c: &mut Client, needle: &str| {
+        let l = line_of(needle);
+        let col = src.lines().nth(l as usize).unwrap().find("g(").unwrap() as i64;
+        c.hover(&p, l, col)
+    };
+    assert!(hit(&mut c, "let a = g(1)").is_some());
+    // 文の match の腕の束縛は、腕から match の終わりまで名前を隠す
+    assert_eq!(hit(&mut c, "let z = g(2)"), None);
+    // match の後ろでは隠さない
+    assert!(hit(&mut c, "let b = g(3)").is_some());
+    // 式の match の腕の束縛は、その腕で隠す
+    assert_eq!(hit(&mut c, "g => g(4)"), None);
+    // クロージャの引数は関数の全体で隠す（保守側）
+    assert_eq!(hit(&mut c, "|g| g(5)"), None);
+    assert_eq!(hit(&mut c, "let c = g(6)"), None);
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_hover_panic_contained() {
+    let dir = tmpdir("hoverpanic");
+    let src = format!("{HEAD}{FN_HEAD}  return n;\n}}\n");
+    let p = write(&dir, "ok.sigil", &src);
+    let mut c = Client::start(&[("SIGIL_LSP_TEST_PANIC", "return n;")]);
+    c.initialize(&[]);
+    // 注入は本文に印がある文書。診断は InternalError になるが、hover は null で、サーバーは生きている。
+    c.open(&p, &src);
+    c.publish();
+    assert_eq!(c.hover(&p, 0, 0), None);
+    assert_eq!(c.hover(&p, 4, 4), None);
+    assert_eq!(c.finish().1, 0);
+}

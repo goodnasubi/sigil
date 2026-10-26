@@ -377,7 +377,11 @@ impl<W: Write> Server<W> {
                 }
             }
             ("textDocument/hover", Some(id)) => {
-                let r = self.hover(params).unwrap_or(Value::Null);
+                // 内部の不具合（panic）は null にして、サーバーを落とさない。
+                let r = std::panic::catch_unwind(AssertUnwindSafe(|| self.hover(params)))
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Value::Null);
                 self.respond(id, r);
             }
             (_, Some(id)) => self.respond_err(id, -32601, "未対応の要求"),
@@ -393,6 +397,11 @@ impl<W: Write> Server<W> {
         let line = pos.get("line")?.as_i64()? as usize;
         let ch = pos.get("character")?.as_i64()? as usize;
         let text = self.text_of(uri)?;
+        if let Some(m) = &self.inject {
+            if text.contains(m.as_str()) {
+                panic!("注入された panic（{m}）");
+            }
+        }
         let cs: Vec<char> = text.split('\n').nth(line)?.chars().collect();
         // 位置の単位（UTF-16 の符号単位か文字数）から、文字の添字へ。
         let (mut col, mut units) = (0, 0);

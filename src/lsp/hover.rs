@@ -157,8 +157,13 @@ pub fn hover(text: &str, line: u32, col: u32, own: &Spec, all: &[Spec]) -> Optio
     // 宣言: `fn` から本体の `{` の前まで。
     for f in fns(&file) {
         let open = f.body.open_line;
-        let on_brace = line == open && is_punct(cursor_tok, "{");
-        if f.span.line <= line && line <= open && !on_brace {
+        // 本体の `{` は、開き行の最初の `{`。その位置とそれより右（1 行の本体）は宣言ではない。
+        let brace = toks
+            .iter()
+            .find(|t| t.span.line == open && matches!(&t.tok, Tok::Punct("{")))
+            .map_or(u32::MAX, |t| t.span.col);
+        let right = line == open && col >= brace;
+        if f.span.line <= line && line <= open && !right {
             return item_at(f.span).map(|i| i.text());
         }
     }

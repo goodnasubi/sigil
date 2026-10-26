@@ -4,7 +4,6 @@
 //! 書き出して、`cc -static -no-pie` でリンクする。一時ディレクトリは終わりに自分で消す。
 
 use crate::codegen::{self, CgError, Opts};
-use crate::error::{Error, ErrorKind, Span};
 use crate::interp::RunError;
 use crate::ir::Program;
 use std::fmt;
@@ -15,8 +14,6 @@ use std::process::Command;
 pub enum BuildError {
     /// 構文・型検査のエラー、入口の指定の誤りなど。
     Run(RunError),
-    /// まだ出力できない構文（`ErrorKind::BuildUnsupported`）。
-    Unsupported(Error),
     /// `cc` がない・リンクに失敗した。
     Toolchain(String),
     /// 生成の不具合・ファイルの入出力の失敗。
@@ -27,7 +24,6 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BuildError::Run(e) => write!(f, "{e}"),
-            BuildError::Unsupported(e) => write!(f, "{e}"),
             BuildError::Toolchain(m) | BuildError::Internal(m) => write!(f, " {m}"),
         }
     }
@@ -42,11 +38,7 @@ pub fn build(srcs: &[&str], func: &str, opts: &Opts, out: &Path) -> Result<(), B
 /// SIR から実行ファイルを作る。
 pub fn build_program(p: &Program, opts: &Opts, out: &Path) -> Result<(), BuildError> {
     let obj = codegen::compile(p, opts).map_err(|e| match e {
-        CgError::Unsupported { line, msg } => BuildError::Unsupported(Error::new(
-            ErrorKind::BuildUnsupported,
-            Span { line, col: 1 },
-            msg,
-        )),
+        CgError::Entry(m) => BuildError::Run(RunError::Entry(m)),
         CgError::Internal(m) => BuildError::Internal(m),
     })?;
     let dir = fresh_dir()

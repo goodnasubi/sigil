@@ -1,8 +1,7 @@
 //! ADR 0015 の決定 4・6・7（PR4）: `sigil build` が作るネイティブの実行ファイル。
 //!
-//! 構文がまだ全部は出せない（`BuildUnsupported`）間は、`SIGIL_NATIVE=1` のときだけ走る
-//! （`cc` と glibc の静的ライブラリ `libc.a` が要る）。走らない旨は標準エラーに出す。
-//! `SIGIL_NATIVE=1 cargo test` では、ほかの試験の `common::run*` も同じプログラムをネイティブで走らせて突き合わせる。
+//! `cc` と glibc の静的ライブラリ `libc.a` が要る（なければ失敗する。飛ばさない）。
+//! ほかの試験の `common::run*` も、同じプログラムをネイティブで走らせて突き合わせる。
 mod common;
 
 use common::native::{arg_text, exec, scratch, try_build};
@@ -10,14 +9,6 @@ use sigil::codegen::Opts;
 use sigil::interp::Arg;
 use sigil::native::{self, BuildError};
 use std::process::Command;
-
-fn on() -> bool {
-    if common::native::enabled() {
-        return true;
-    }
-    eprintln!("SIGIL_NATIVE=1 でないので、このテストは飛ばす");
-    false
-}
 
 fn example(path: &str) -> String {
     std::fs::read_to_string(format!("{}/examples/{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -30,13 +21,10 @@ fn floats(xs: &[f64]) -> Arg {
 /// ビルドして走らせ、インタープリタ（`common::run*`）と同じ結果かを突き合わせる（`common` が行う）。
 fn both(srcs: &[&str], func: &str, args: &[Arg]) -> String {
     let r = common::run_sources(srcs, func, args).unwrap();
-    // `common::run_sources` が SIGIL_NATIVE=1 のとき突き合わせる。ここでは、飛ばされていないことを確かめる。
+    // `common::run_sources` も突き合わせる。ここでは、飛ばされずに作れて走ることを確かめる。
     let dir = scratch("both");
     let exe = dir.join("prog");
-    assert!(
-        try_build(srcs, func, &exe, false).unwrap().is_some(),
-        "{func}: BuildUnsupported になった"
-    );
+    try_build(srcs, func, &exe, false).unwrap();
     let got = exec(&exe, args);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(got.code, Some(0), "{func}: {}", got.stderr);
@@ -46,9 +34,6 @@ fn both(srcs: &[&str], func: &str, args: &[Arg]) -> String {
 
 #[test]
 fn samples_build_and_match() {
-    if !on() {
-        return;
-    }
     let avg = example("01-average/c-brace.sigil");
     assert_eq!(
         both(&[&avg], "average", &[floats(&[1.0, 2.0, 3.0, 4.0])]),
@@ -72,15 +57,10 @@ fn samples_build_and_match() {
 
 #[test]
 fn read_port_with_real_file() {
-    if !on() {
-        return;
-    }
     let port = example("02-read-port/c-brace.sigil");
     let dir = scratch("port");
     let exe = dir.join("prog");
-    assert!(try_build(&[&port], "read_port", &exe, false)
-        .unwrap()
-        .is_some());
+    try_build(&[&port], "read_port", &exe, false).unwrap();
     let file = dir.join("p.txt");
     let path = file.to_string_lossy().into_owned();
     for (content, want) in [("8080", "Ok(8080)"), ("abc", "Err(")] {
@@ -98,9 +78,6 @@ fn read_port_with_real_file() {
 
 #[test]
 fn core_only_links_without_os_runtime() {
-    if !on() {
-        return;
-    }
     let ctl = example("05-control/control.sigil");
     let p = sigil::ir_eval::lower_sources(&[&ctl], "sum_range").unwrap();
     assert!(p.core_only, "sum_range は OS 層を使わない");
@@ -115,9 +92,6 @@ fn core_only_links_without_os_runtime() {
 
 #[test]
 fn core_only_rejects_os_link() {
-    if !on() {
-        return;
-    }
     // console を使うプログラムを core_only と偽ると、os.a がなくてリンクに失敗する（失敗が黙って通らない）。
     let own = example("03-ownership/ownership.sigil");
     let mut p = sigil::ir_eval::lower_sources(&[&own], "main").unwrap();
@@ -150,15 +124,12 @@ fn assert_static(exe: &std::path::Path) {
 
 #[test]
 fn executable_is_static() {
-    if !on() {
-        return;
-    }
     let own = example("03-ownership/ownership.sigil");
     let ctl = example("05-control/control.sigil");
     let dir = scratch("static");
     for (src, f) in [(&own, "main"), (&ctl, "sign")] {
         let exe = dir.join(f);
-        assert!(try_build(&[src], f, &exe, false).unwrap().is_some());
+        try_build(&[src], f, &exe, false).unwrap();
         assert_static(&exe);
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -166,13 +137,10 @@ fn executable_is_static() {
 
 #[test]
 fn runs_without_toolchain() {
-    if !on() {
-        return;
-    }
     let own = example("03-ownership/ownership.sigil");
     let dir = scratch("bare");
     let exe = dir.join("prog");
-    assert!(try_build(&[&own], "main", &exe, false).unwrap().is_some());
+    try_build(&[&own], "main", &exe, false).unwrap();
     // 環境変数なし・PATH なし・別のディレクトリで走る（cc も Rust もない環境の代わり）。
     let o = Command::new(&exe)
         .env_clear()
@@ -192,9 +160,6 @@ fn f(name: &str, sig: &str, body: &str) -> String {
 
 #[test]
 fn abnormal_stop_exits_70_with_report() {
-    if !on() {
-        return;
-    }
     let src = format!(
         "{HEAD}{}",
         f("d", "(x: Int, y: Int) -> Int", "return x / y;")
@@ -202,7 +167,7 @@ fn abnormal_stop_exits_70_with_report() {
     let want = common::run(&src, "d", &[Arg::Int(1), Arg::Int(0)]).unwrap_err();
     let dir = scratch("stop");
     let exe = dir.join("prog");
-    assert!(try_build(&[&src], "d", &exe, false).unwrap().is_some());
+    try_build(&[&src], "d", &exe, false).unwrap();
     let got = exec(&exe, &[Arg::Int(1), Arg::Int(0)]);
     assert_eq!(got.code, Some(70));
     assert_eq!(got.stderr.trim_end(), want.error.to_string());
@@ -212,9 +177,6 @@ fn abnormal_stop_exits_70_with_report() {
 
 #[test]
 fn cli_build_and_trace_drops() {
-    if !on() {
-        return;
-    }
     let ctl = format!(
         "{}/examples/05-control/control.sigil",
         env!("CARGO_MANIFEST_DIR")
@@ -246,5 +208,67 @@ fn cli_build_and_trace_drops() {
         String::from_utf8_lossy(&o.stderr)
     );
     assert!(dir.join("x").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 処理系のソースに `BuildUnsupported`（未実装の構文を build で止める印）を作る箇所が残っていない（M5 の完了の確かめ）。
+#[test]
+fn no_build_unsupported_left() {
+    fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, hits);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let text = std::fs::read_to_string(&p).unwrap();
+                for (i, l) in text.lines().enumerate() {
+                    if l.contains("BuildUnsupported") {
+                        hits.push(format!("{}:{}", p.display(), i + 1));
+                    }
+                }
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut hits,
+    );
+    assert!(hits.is_empty(), "BuildUnsupported が残っている: {hits:?}");
+}
+
+/// `docker` で `FROM scratch` のイメージに実行ファイルだけを置いて走らせる（手で実行する。結果は ADR 0006 の M5 の記録）。
+/// `cargo test --test m5_native -- --ignored runs_in_scratch_container`
+#[test]
+#[ignore]
+fn runs_in_scratch_container() {
+    let own = example("03-ownership/ownership.sigil");
+    let dir = scratch("docker");
+    let exe = dir.join("prog");
+    try_build(&[&own], "main", &exe, false).unwrap();
+    std::fs::write(
+        dir.join("Dockerfile"),
+        "FROM scratch\nCOPY prog /prog\nENTRYPOINT [\"/prog\"]\n",
+    )
+    .unwrap();
+    let tag = format!("sigil-scratch-test-{}", std::process::id());
+    let run = |args: &[&str]| {
+        Command::new("docker")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    };
+    let b = run(&["build", "-t", &tag, "."]);
+    assert!(b.status.success(), "{}", String::from_utf8_lossy(&b.stderr));
+    let r = run(&["run", "--rm", &tag]);
+    let _ = run(&["rmi", &tag]);
+    assert_eq!(
+        r.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&r.stdout), "150\n150\n()\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

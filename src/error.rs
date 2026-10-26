@@ -141,8 +141,6 @@ pub enum ErrorKind {
     PatternMismatch,
     InfiniteType,
     CloneOfCopyable,
-    /// `sigil build` がまだ出力できない構文・組み込み（ADR 0015 の PR4〜PR5 の間だけ残る）。
-    BuildUnsupported,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -235,8 +233,7 @@ impl ErrorKind {
             | TryOperand
             | PatternMismatch
             | InfiniteType
-            | CloneOfCopyable
-            | BuildUnsupported => Phase::Check,
+            | CloneOfCopyable => Phase::Check,
             _ => Phase::Syntax,
         }
     }

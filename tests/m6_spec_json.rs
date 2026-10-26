@@ -1,5 +1,6 @@
 //! ADR 0019 の PR1: `sigil spec --json`（仕様の機械向けの形式）。
 
+mod common;
 use sigil::json::{parse, Value};
 use sigil::spec::{extract, extract_with, spec, spec_with};
 
@@ -12,8 +13,19 @@ const CASES: &[&str] = &[
 ];
 
 fn sigil_bin(args: &[&str]) -> (i32, String, String) {
+    sigil_bin_in(None, args)
+}
+
+/// 根を明示して走らせる（既定は cwd。ADR 0021 2-2c）。
+fn sigil_bin_in(root: Option<&std::path::Path>, args: &[&str]) -> (i32, String, String) {
+    let mut full: Vec<String> = vec![args[0].to_string()];
+    if let Some(r) = root {
+        full.push("--root".into());
+        full.push(r.to_string_lossy().into_owned());
+    }
+    full.extend(args[1..].iter().map(|a| a.to_string()));
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .args(args)
+        .args(full)
         .output()
         .unwrap();
     (
@@ -44,10 +56,12 @@ fn spec_json_text_matches_spec() {
         let path = format!("{c}.sigil");
         let want = std::fs::read_to_string(format!("{c}.spec")).unwrap();
         // CLI の `--json` の出力から取り出した `text` をつないだものが、`sigil spec` の出力と一致する。
-        let (code, plain, _) = sigil_bin(&["spec", &path]);
+        let (root, staged) = common::stage_file("spec", &path);
+        let staged = staged.to_string_lossy().into_owned();
+        let (code, plain, _) = sigil_bin_in(Some(&root), &["spec", &staged]);
         assert_eq!(code, 0, "{c}");
         assert_eq!(plain, want, "{c}");
-        let (code, json, err) = sigil_bin(&["spec", "--json", &path]);
+        let (code, json, err) = sigil_bin_in(Some(&root), &["spec", "--json", &staged]);
         assert_eq!(code, 0, "{c}: {err}");
         assert!(
             json.ends_with('\n') && !json[..json.len() - 1].contains('\n'),

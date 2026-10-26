@@ -1,8 +1,8 @@
-//! 実行の入出力の型と、ソースの合わせ方（ADR 0018 の PR 1-5。インタプリタの削除で `interp` から残した部分）。
+//! 実行の入出力の型（ADR 0018 の PR 1-5。インタプリタの削除で `interp` から残した部分）。
 //!
 //! 実行そのものは SIR の評価器（`ir_eval`）とネイティブの実行ファイルが行う。ここには、両方が共有する
 //! 異常停止の報告（`Stop`・`StopKind`・`Clause`）、実行の結果（`Outcome`・`Failure`・`RunError`）、
-//! 実行の設定（`Options`）、複数のソースを 1 つにまとめる処理を置く。
+//! 実行の設定（`Options`）を置く。
 
 use crate::ast::*;
 use crate::error::Error;
@@ -73,6 +73,11 @@ pub use crate::shared_args::Arg;
 pub enum RunError {
     /// 構文または型検査のエラー（実行の前に止める）。
     Check(Error),
+    /// 複数のモジュールを辿る実行・組み立てで、あるファイルのモジュールに起きた構文・型検査のエラー。
+    Module {
+        file: std::path::PathBuf,
+        error: Error,
+    },
     Stop(Box<Stop>),
     /// 現在の範囲にない機能（`fs`・`Shared` など）。
     Unsupported(String),
@@ -84,6 +89,7 @@ impl fmt::Display for RunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RunError::Check(e) => write!(f, "{e}"),
+            RunError::Module { file, error } => write!(f, "{}:{error}", file.display()),
             RunError::Stop(s) => write!(f, "{s}"),
             RunError::Unsupported(m) => write!(f, " 未対応: {m}"),
             RunError::Entry(m) => write!(f, " 入口の指定が誤り: {m}"),
@@ -160,53 +166,18 @@ pub(crate) fn fail(error: RunError) -> Failure {
     }
 }
 
-/// `run`・`build` 用。`use` を含むソースは、複数モジュールの実行が入る（2-2c）まで明示のエラーで拒否する
-/// （黙って無視すると、取り込んだ名前が解決されないまま 1 モジュールだけが動く。ADR 0021 の決定 7）。
-pub(crate) fn merge_sources_for_run(srcs: &[&str]) -> Result<File, Failure> {
-    let f = merge_sources(srcs)?;
-    if let Some(u) = f.uses.first() {
-        return Err(fail(RunError::Check(crate::Error::new(
-            crate::ErrorKind::Unsupported,
-            u.span,
-            "`use` を含むプログラムの実行・組み立ては未対応（複数のモジュールの実行は 2-2c で入る）",
-        ))));
-    }
-    Ok(f)
-}
-
-/// 複数のソースを 1 つのファイルに合わせる（モジュールの宣言がすべて同じことを求める）。
-pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
-    let mut module = None;
-    let mut items = vec![];
-    let mut uses = vec![];
-    for s in srcs {
-        let f = crate::parse(s).map_err(|e| fail(RunError::Check(e)))?;
-        match &module {
-            None => module = Some(f.module.clone()),
-            // 最初のファイルの宣言を全体に使うので、食い違うファイルは黙って検査が外れる。
-            // 核（`bare`）の検査を迂回させないため、宣言がすべて同じことを求める（ADR 0014 決定 4）。
-            Some(m) => {
-                let d = &f.module;
-                if d.name != m.name || d.targets != m.targets || d.trust != m.trust {
-                    return Err(fail(RunError::Check(crate::Error::new(
-                        crate::ErrorKind::ModuleMismatch,
-                        d.span,
-                        "合わせるファイルのモジュールの宣言（名前・`targets`・`trust`）が最初のファイルと食い違う（宣言がすべて同じファイルだけを合わせられる）",
-                    ))));
-                }
-            }
+/// 結合の失敗を実行の失敗にする。`mem` はソースの並びから結んだとき（ファイルの名前がないので `Check`）、
+/// そうでなければファイルから結んだとき（どのファイルの診断かを `Module` に持つ）。
+pub(crate) fn link_error(e: crate::project::ProjectError, mem: bool) -> RunError {
+    use crate::project::ProjectError;
+    match e {
+        ProjectError::Diag { file, error } if mem => {
+            let _ = file;
+            RunError::Check(error)
         }
-        uses.extend(f.uses);
-        items.extend(f.items);
+        ProjectError::Diag { file, error } => RunError::Module { file, error },
+        ProjectError::Read { file, msg } => RunError::Entry(format!("{}: {msg}", file.display())),
     }
-    let Some(module) = module else {
-        return Err(fail(RunError::Entry("ソースがない".into())));
-    };
-    Ok(File {
-        module,
-        uses,
-        items,
-    })
 }
 
 /// 検査器に渡す設定（`--trust-base` を載せる）。

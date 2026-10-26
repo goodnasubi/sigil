@@ -38,6 +38,15 @@ fn absolute(p: &Path) -> PathBuf {
     }
 }
 
+/// パスの途中（末尾を含む）に symlink があるか。
+fn has_symlink_component(p: &Path) -> bool {
+    let mut cur = PathBuf::new();
+    p.components().any(|c| {
+        cur.push(c);
+        std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink())
+    })
+}
+
 fn segment_ok(s: &str) -> bool {
     let mut cs = s.chars();
     cs.next().is_some_and(|c| c.is_ascii_lowercase())
@@ -105,11 +114,14 @@ fn real_inside_root(
         return Err(format!("`{}` の実体を解決できない", file.display()));
     };
     if !raw_real.starts_with(&root_real) {
+        // 実体が字面の位置と違うときだけ symlink を経由している。そうでなければ単に根の外のファイル。
+        let via_symlink = has_symlink_component(&absolute(file));
         return Err(format!(
-            "`{}` の実体 `{}` が根 `{}` の外にある（symlink）",
+            "`{}` の実体 `{}` が根 `{}` の外にある{}",
             file.display(),
             raw_real.display(),
-            root_real.display()
+            root_real.display(),
+            if via_symlink { "（symlink）" } else { "" }
         ));
     }
     // 読み込んだ開いたファイルと、確認した実体が同じファイルか（確認と読み込みを同じ開いたファイルで。

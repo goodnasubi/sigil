@@ -29,9 +29,22 @@ impl fmt::Display for BuildError {
     }
 }
 
-/// ソース（複数ファイルは `run_sources` と同じく結合する）から実行ファイルを作る。
+/// ソースの並び（先頭が入口のモジュール。`run_sources` と同じ結び方）から実行ファイルを作る。
 pub fn build(srcs: &[&str], func: &str, opts: &Opts, out: &Path) -> Result<(), BuildError> {
     let p = crate::ir_eval::lower_sources_with(srcs, func, &opts.trust_base)
+        .map_err(BuildError::Run)?;
+    build_program(&p, opts, out)
+}
+
+/// 入口のファイルから `use` を `root` で辿って結び、実行ファイルを作る（`sigil build`）。
+pub fn build_project(
+    root: &Path,
+    entry: &Path,
+    func: &str,
+    opts: &Opts,
+    out: &Path,
+) -> Result<(), BuildError> {
+    let p = crate::ir_eval::lower_project(root, entry, func, &opts.trust_base)
         .map_err(BuildError::Run)?;
     build_program(&p, opts, out)
 }

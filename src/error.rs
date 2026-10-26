@@ -95,7 +95,6 @@ pub enum ErrorKind {
     ReservedModuleName,
     /// `unchecked` の関数の本体の外（クロージャ・契約・関数の値・節のない関数）で原始操作を使った（ADR 0016 の決定 2）。
     RawOutsideUnchecked,
-    ModuleMismatch,
     /// ファイルのパス（`--root` から）から決まるモジュール名と、`module` の宣言が違う。使えない文字・`..`・根の外もこれ（ADR 0021 の決定 1）。
     ModulePathMismatch,
     /// 大小だけが違う名前のファイルが並ぶ（大小を区別しないファイルシステムで指す先が環境で変わる。ADR 0021 の決定 1）。
@@ -213,7 +212,6 @@ impl ErrorKind {
             | TrustBaseNotAllowed
             | ReservedModuleName
             | RawOutsideUnchecked
-            | ModuleMismatch
             | ModulePathMismatch
             | ModulePathCase
             | UnresolvedUse

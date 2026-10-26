@@ -424,6 +424,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     let mut m = ObjectModule::new(ob);
 
     let mut fids = Vec::with_capacity(p.funcs.len());
+    // 入口でないモジュールの関数の名前は `<モジュール>.<関数>`（ADR 0021 の 2-2c）。
     for (i, f) in p.funcs.iter().enumerate() {
         let mut s = Signature::new(cc);
         for _ in 0..f.params.len() {
@@ -432,7 +433,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         s.returns.push(AbiParam::new(types::I64));
         s.returns.push(AbiParam::new(types::I64));
         fids.push(
-            m.declare_function(&format!("sigil_f{i}"), Linkage::Local, &s)
+            m.declare_function(&func_symbol(i, &f.name), Linkage::Local, &s)
                 .map_err(internal)?,
         );
     }
@@ -510,4 +511,20 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
 
     let product = cg.m.finish();
     product.emit().map_err(internal)
+}
+
+/// 関数のシンボル名。番号で一意になり、名前（モジュールをまたぐ関数は `<モジュール>.<関数>`）を添える
+/// （デバッガ・シンボル表で、どのモジュールの関数かが分かる）。
+pub(crate) fn func_symbol(i: usize, name: &str) -> String {
+    let n: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("sigil_f{i}_{n}")
 }

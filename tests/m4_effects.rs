@@ -306,12 +306,19 @@ fn cli_real_file_read_without_a_double() {
     let d = dir("cli-real");
     let a = d.join("port.txt");
     std::fs::write(&a, "8080").unwrap();
-    let ex = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/02-read-port/c-brace.sigil"
+    let (root, ex) = common::stage_file(
+        "real",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/02-read-port/c-brace.sigil"
+        ),
     );
     let o = Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .args(["run", ex, "read_port"])
+        .arg("run")
+        .arg("--root")
+        .arg(&root)
+        .arg(&ex)
+        .arg("read_port")
         .arg(&a)
         .output()
         .unwrap();
@@ -324,12 +331,19 @@ fn cli_real_file_read_without_a_double() {
 
 #[test]
 fn cli_console_log_writes_to_real_stdout() {
-    let ex = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/03-ownership/ownership.sigil"
+    let (root, ex) = common::stage_file(
+        "own",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/03-ownership/ownership.sigil"
+        ),
     );
     let o = Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .args(["run", ex, "main"])
+        .arg("run")
+        .arg("--root")
+        .arg(&root)
+        .arg(&ex)
+        .arg("main")
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));

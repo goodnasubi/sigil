@@ -67,6 +67,8 @@ curl -fsSL https://sigil-lang.org | sh
 sigil run welcome.sigil
 ```
 
+ファイルの先頭の `module` の名前と、根（既定はカレントディレクトリ。`--root <dir>` で変える）からのパスは一致させます。たとえば `module app.main` のファイルは `<根>/app/main.sigil` に置きます。根の外にあるファイルや、名前の合わないファイルは動きません。
+
 ---
 
 ## 🍰 カラーパレットと世界観 (Design Identity)

@@ -165,17 +165,33 @@ fn check_files(texts: &[&str], opts: &crate::effects::Options) -> Option<(usize,
         off += t.matches('\n').count() + 1;
     }
     let refs: Vec<&str> = padded.iter().map(String::as_str).collect();
-    let err = match crate::exec::merge_sources(&refs) {
-        Err(f) => match f.error {
-            crate::exec::RunError::Check(e) => e,
-            _ => return None,
-        },
+    let err = match merge_group(&refs) {
+        Err(e) => e,
         Ok(file) => crate::check::check_file_with(&file, opts).err()?,
     };
     let i = offs.iter().rposition(|&o| (err.span.line as usize) > o)?;
     let mut e = err;
     e.span.line -= offs[i] as u32;
     Some((i, e))
+}
+
+/// 同じモジュールの宣言（名前・`targets`・`trust` が同じ）を持つ組のファイルを 1 つのファイルに合わせる
+/// （組は `group` が作るので宣言は揃っている）。
+fn merge_group(srcs: &[&str]) -> Result<crate::ast::File, Error> {
+    let mut module = None;
+    let (mut items, mut uses) = (vec![], vec![]);
+    for s in srcs {
+        let f = crate::parse(s)?;
+        module.get_or_insert_with(|| f.module.clone());
+        uses.extend(f.uses);
+        items.extend(f.items);
+    }
+    let module = module.expect("組は空でない");
+    Ok(crate::ast::File {
+        module,
+        uses,
+        items,
+    })
 }
 
 /// 行頭から始まる字句の長さ（文字数）。字句が取れなければ `None`。
@@ -551,9 +567,12 @@ impl<W: Write> Server<W> {
         open.cloned().unwrap_or_else(|| path_to_uri(p))
     }
 
-    /// 同じディレクトリで同じモジュールを宣言するファイル（(URI, 中身)。パスの順）。構文エラーなら、その文書自身のエラー。
+    /// 同じディレクトリで同じモジュールの宣言（名前・`targets`・`trust`）を持つファイル（(URI, 中身)。パスの順）。構文エラーなら、その文書自身のエラー。
     fn group(&self, uri: &str, text: &str) -> Result<Vec<(String, String)>, Error> {
-        let module = crate::parse(text)?.module.name;
+        let module = crate::parse(text)?.module;
+        let same = |m: &crate::ast::ModuleDecl| {
+            m.name == module.name && m.targets == module.targets && m.trust == module.trust
+        };
         let Some(path) = uri_to_path(uri) else {
             return Ok(vec![(uri.into(), text.into())]);
         };
@@ -577,7 +596,7 @@ impl<W: Write> Server<W> {
             else {
                 continue;
             };
-            if crate::parse(&t).is_ok_and(|f| f.module.name == module) {
+            if crate::parse(&t).is_ok_and(|f| same(&f.module)) {
                 ms.push((p, u, t));
             }
         }

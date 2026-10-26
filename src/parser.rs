@@ -385,10 +385,53 @@ impl Parser {
 
     fn file(&mut self) -> R<File> {
         let module = self.module_decl()?;
+        let uses = self.use_decls()?;
         let mut items = Vec::new();
         loop {
             match self.tok() {
                 Tok::Eof => break,
+                Tok::Kw("use") => {
+                    return Err(self.err(
+                        ErrorKind::UseMisplaced,
+                        "`use` は `module` の宣言の直後にまとめて書く（宣言の後には書けない）",
+                    ));
+                }
+                Tok::Kw("pub") => {
+                    let pub_span = self.span();
+                    self.bump();
+                    let item = match self.tok() {
+                        Tok::Kw("type") => Item::Type(self.type_decl()?),
+                        Tok::Kw("struct") => Item::Struct(self.struct_decl()?),
+                        Tok::Kw("enum") => Item::Enum(self.enum_decl()?),
+                        Tok::Kw("fn") => Item::Fn(self.fn_decl(false)?),
+                        _ => {
+                            return Err(Error::new(
+                                ErrorKind::PubTarget,
+                                pub_span,
+                                "`pub` は `type`・`struct`・`enum`・`fn` の宣言にだけ付けられる（`impl` には付けず、メソッドごとに付ける）",
+                            ))
+                        }
+                    };
+                    items.push(match item {
+                        Item::Type(mut t) => {
+                            t.is_pub = true;
+                            Item::Type(t)
+                        }
+                        Item::Struct(mut s) => {
+                            s.is_pub = true;
+                            Item::Struct(s)
+                        }
+                        Item::Enum(mut e) => {
+                            e.is_pub = true;
+                            Item::Enum(e)
+                        }
+                        Item::Fn(mut f) => {
+                            f.is_pub = true;
+                            Item::Fn(f)
+                        }
+                        Item::Impl(i) => Item::Impl(i),
+                    });
+                }
                 Tok::Kw("module") => {
                     return Err(self.err(
                         ErrorKind::ModuleDuplicate,
@@ -411,7 +454,68 @@ impl Parser {
                 }
             }
         }
-        Ok(File { module, items })
+        Ok(File {
+            module,
+            uses,
+            items,
+        })
+    }
+
+    /// `use a.b.name;` を 1 行 1 名で、文字の順に（重複・順の違反はエラー。ADR 0021 の決定 3）。
+    fn use_decls(&mut self) -> R<Vec<UseDecl>> {
+        let mut uses: Vec<UseDecl> = Vec::new();
+        while self.at_kw("use") {
+            let span = self.span();
+            self.bump();
+            let mut path = Vec::new();
+            loop {
+                let (s, sp) = self.ident_raw("`use` の名前")?;
+                // 最後の部分は型の名前（CamelCase）でもよい。手前はモジュール名の部分。
+                if self.at_punct(".") {
+                    Self::check_snake(&s, sp, "モジュール名の部分")?;
+                }
+                path.push(s);
+                if !self.eat_punct(".") {
+                    break;
+                }
+            }
+            if path.len() < 2 {
+                return Err(Error::new(
+                    ErrorKind::UseForm,
+                    span,
+                    "`use` は モジュール名.名前 の形で 1 名ずつ書く（例: `use app.http.server.handle;`）",
+                ));
+            }
+            if self.at_punct("{") || self.at_punct("*") {
+                return Err(self.err(
+                    ErrorKind::UseForm,
+                    "`use` は 1 名ずつで、まとめ書き・ワイルドカード・別名は持たない（ADR 0021 の決定 3）",
+                ));
+            }
+            self.expect_punct(";")?;
+            if let Some(prev) = uses.last() {
+                if prev.path == path {
+                    return Err(Error::new(
+                        ErrorKind::UseDuplicate,
+                        span,
+                        format!("`use {}` が重複している", path.join(".")),
+                    ));
+                }
+                if prev.path > path {
+                    return Err(Error::new(
+                        ErrorKind::UseUnsorted,
+                        span,
+                        format!(
+                            "`use` は文字の順に並べる（`{}` は `{}` より前）",
+                            path.join("."),
+                            prev.path.join(".")
+                        ),
+                    ));
+                }
+            }
+            uses.push(UseDecl { path, span });
+        }
+        Ok(uses)
     }
 
     fn module_decl(&mut self) -> R<ModuleDecl> {
@@ -561,6 +665,7 @@ impl Parser {
         let cond = cond?;
         self.expect_punct(";")?;
         Ok(TypeDecl {
+            is_pub: false,
             name,
             base,
             cond,
@@ -583,6 +688,7 @@ impl Parser {
         })?;
         let end_line = self.toks[self.pos - 1].span.line;
         Ok(StructDecl {
+            is_pub: false,
             name,
             generics,
             fields,
@@ -621,6 +727,7 @@ impl Parser {
         }
         let end_line = self.toks[self.pos - 1].span.line;
         Ok(EnumDecl {
+            is_pub: false,
             name,
             generics,
             variants,
@@ -644,10 +751,13 @@ impl Parser {
         self.expect_punct("{")?;
         let mut fns = Vec::new();
         while !self.at_punct("}") {
+            let is_pub = self.eat_kw("pub");
             if !self.at_kw("fn") {
                 return Err(self.unexpected("`fn` または `}`"));
             }
-            fns.push(self.fn_decl(true)?);
+            let mut f = self.fn_decl(true)?;
+            f.is_pub = is_pub;
+            fns.push(f);
         }
         let end_line = self.span().line;
         self.bump();
@@ -793,6 +903,7 @@ impl Parser {
         self.allow_self = saved_self;
         let body = body?;
         Ok(FnDecl {
+            is_pub: false,
             name,
             generics,
             params,

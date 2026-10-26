@@ -76,12 +76,13 @@ pub const KEYWORDS: &[&str] = &[
     "false",
     "impl",
     "unchecked",
+    "use",
+    "pub",
 ];
 
 /// 将来のために予約する語。P0 では使えば字句エラー。
 pub const FUTURE_RESERVED: &[&str] = &[
-    "trait", "for", "in", "loop", "break", "continue", "use", "pub", "const", "as", "async",
-    "await",
+    "trait", "for", "in", "loop", "break", "continue", "const", "as", "async", "await",
 ];
 
 fn keyword(s: &str) -> Option<&'static str> {

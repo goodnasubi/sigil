@@ -26,7 +26,7 @@ fn adr0008_decision7_example() {
   出力先: ブラウザ, サーバー
   信頼基盤: いいえ
 
-関数 deposit
+関数 deposit（非公開）
   意図: 口座に入金する
   引数: account を書き換える（Account）、amount を受け取る（Int）
   戻り値: なし

@@ -17,6 +17,7 @@ pub mod json;
 pub mod lexer;
 pub mod lower;
 pub mod lsp;
+pub mod modpath;
 pub mod native;
 pub mod parser;
 pub mod report;

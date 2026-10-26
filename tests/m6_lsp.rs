@@ -624,7 +624,7 @@ fn lsp_hover_matches_spec() {
     // `sigil spec` の出力から `deposit` の塊（空行で区切られる）を取り出す。
     let chunk = spec
         .split("\n\n")
-        .find(|c| c.starts_with("関数 deposit\n"))
+        .find(|c| c.starts_with("関数 deposit（非公開）\n"))
         .map(|c| format!("{}\n", c.trim_end()))
         .unwrap();
     let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).unwrap() as i64;
@@ -679,7 +679,7 @@ fn w(s: S) -> Int\n  intent \"w\"\n  requires none\n  ensures none\n  effects no
     c.publish();
     let gl = line_of("fn g(");
     let gtext = c.hover(&p, gl, 3).unwrap();
-    assert!(gtext.starts_with("関数 g\n"), "{gtext}");
+    assert!(gtext.starts_with("関数 g（非公開）\n"), "{gtext}");
     // 引数 g が関数 g を隠している
     assert_eq!(c.hover(&p, line_of("let a = g(1)"), 10), None);
     // 隠していない呼び出しは返す。メソッドは `型.名前(...)` の形だけ
@@ -712,7 +712,7 @@ fn lsp_hover_cross_file_and_utf16() {
         .position(|l| l.contains("with_tax(&xs)"))
         .unwrap() as i64;
     let got = c.hover(&p, l, 12).unwrap();
-    assert!(got.starts_with("関数 with_tax\n"), "{got}");
+    assert!(got.starts_with("関数 with_tax（非公開）\n"), "{got}");
     let spec = std::fs::read_to_string(example("04-effects/effects.spec")).unwrap();
     assert!(spec.contains(&got));
     assert!(other.contains("fn with_tax"));
@@ -741,7 +741,7 @@ fn lsp_hover_cross_file_and_utf16() {
         c.open(&p, &src);
         c.publish();
         let got = c.hover(&p, l, ch).unwrap_or_default();
-        assert!(got.starts_with("関数 g\n"), "{enc:?} {got}");
+        assert!(got.starts_with("関数 g（非公開）\n"), "{enc:?} {got}");
         // 1 単位ずれると名前の外
         assert_eq!(c.hover(&p, l, ch - 3), None, "{enc:?}");
         assert_eq!(c.finish().1, 0);
@@ -769,7 +769,7 @@ fn lsp_hover_edges() {
     let kl = line_of("{ return g(n); }");
     assert_eq!(c.hover(&p, kl, 1), None);
     let got = c.hover(&p, kl, 9).unwrap();
-    assert!(got.starts_with("関数 g\n"), "{got}");
+    assert!(got.starts_with("関数 g（非公開）\n"), "{got}");
     // 範囲外の位置（行・列）
     assert_eq!(c.hover(&p, 10_000, 0), None);
     assert_eq!(c.hover(&p, kl, 10_000), None);

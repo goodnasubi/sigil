@@ -1297,7 +1297,7 @@ pub fn lower_sources_with(
     func: &str,
     trust_base: &[String],
 ) -> Result<Program, RunError> {
-    let file = crate::exec::merge_sources(srcs).map_err(|f| f.error)?;
+    let file = crate::exec::merge_sources_for_run(srcs).map_err(|f| f.error)?;
     let opts = crate::effects::Options {
         trust_base: trust_base.to_vec(),
         ..Default::default()
@@ -1350,7 +1350,7 @@ pub fn run_sources_with(
 
 fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
     use crate::exec::fail;
-    let file: File = crate::exec::merge_sources(srcs)?;
+    let file: File = crate::exec::merge_sources_for_run(srcs)?;
     let typed = crate::check::typed_with(&file, &crate::exec::check_options(opts))
         .map_err(|e| fail(RunError::Check(e)))?;
     let decl = file.items.iter().find_map(|i| match i {

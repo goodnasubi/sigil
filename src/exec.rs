@@ -160,10 +160,25 @@ pub(crate) fn fail(error: RunError) -> Failure {
     }
 }
 
+/// `run`・`build` 用。`use` を含むソースは、複数モジュールの実行が入る（2-2c）まで明示のエラーで拒否する
+/// （黙って無視すると、取り込んだ名前が解決されないまま 1 モジュールだけが動く。ADR 0021 の決定 7）。
+pub(crate) fn merge_sources_for_run(srcs: &[&str]) -> Result<File, Failure> {
+    let f = merge_sources(srcs)?;
+    if let Some(u) = f.uses.first() {
+        return Err(fail(RunError::Check(crate::Error::new(
+            crate::ErrorKind::Unsupported,
+            u.span,
+            "`use` を含むプログラムの実行・組み立ては未対応（複数のモジュールの実行は 2-2c で入る）",
+        ))));
+    }
+    Ok(f)
+}
+
 /// 複数のソースを 1 つのファイルに合わせる（モジュールの宣言がすべて同じことを求める）。
 pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
     let mut module = None;
     let mut items = vec![];
+    let mut uses = vec![];
     for s in srcs {
         let f = crate::parse(s).map_err(|e| fail(RunError::Check(e)))?;
         match &module {
@@ -181,12 +196,17 @@ pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
                 }
             }
         }
+        uses.extend(f.uses);
         items.extend(f.items);
     }
     let Some(module) = module else {
         return Err(fail(RunError::Entry("ソースがない".into())));
     };
-    Ok(File { module, items })
+    Ok(File {
+        module,
+        uses,
+        items,
+    })
 }
 
 /// 検査器に渡す設定（`--trust-base` を載せる）。

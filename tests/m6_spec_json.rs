@@ -177,6 +177,7 @@ fn spec_json_fields() {
     let Value::Obj(fs) = &mut want else { panic!() };
     // 欄の追加は `format` を上げない（unchecked の関数でないので、解決できたかの欄は偽）。
     fs.push(("unchecked_unresolved".into(), false.into()));
+    fs.push(("visibility".into(), "private".into()));
     fs.push(("text".into(), deposit.get("text").unwrap().clone()));
     let Value::Obj(mut got) = deposit.clone() else {
         panic!()
@@ -190,7 +191,7 @@ fn spec_json_fields() {
         .unwrap()
         .as_str()
         .unwrap()
-        .starts_with("関数 deposit\n  意図: 口座に入金する\n"));
+        .starts_with("関数 deposit（非公開）\n  意図: 口座に入金する\n"));
 }
 
 fn raw_opts() -> sigil::effects::Options {

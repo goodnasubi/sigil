@@ -45,6 +45,14 @@ pub enum ErrorKind {
     ReservedNameDefined,
     ModuleMissing,
     ModuleDuplicate,
+    /// `use` が `module` の宣言の直後以外にある（ADR 0021 の決定 3）。
+    UseMisplaced,
+    /// `use` の形が違う（モジュール名.名前 の 1 名でない。まとめ書き・ワイルドカード・別名）。
+    UseForm,
+    UseDuplicate,
+    UseUnsorted,
+    /// `pub` を付けられない宣言に付けた。
+    PubTarget,
     ModuleClauseMissing,
     ModuleClauseOrder,
     UnknownTarget,
@@ -88,6 +96,10 @@ pub enum ErrorKind {
     /// `unchecked` の関数の本体の外（クロージャ・契約・関数の値・節のない関数）で原始操作を使った（ADR 0016 の決定 2）。
     RawOutsideUnchecked,
     ModuleMismatch,
+    /// ファイルのパス（`--root` から）から決まるモジュール名と、`module` の宣言が違う。使えない文字・`..`・根の外もこれ（ADR 0021 の決定 1）。
+    ModulePathMismatch,
+    /// 大小だけが違う名前のファイルが並ぶ（大小を区別しないファイルシステムで指す先が環境で変わる。ADR 0021 の決定 1）。
+    ModulePathCase,
     DuplicateDefinition,
     TypeMismatch,
     OperandTypes,
@@ -186,6 +198,8 @@ impl ErrorKind {
             | ReservedModuleName
             | RawOutsideUnchecked
             | ModuleMismatch
+            | ModulePathMismatch
+            | ModulePathCase
             | DuplicateDefinition
             | TypeMismatch
             | OperandTypes

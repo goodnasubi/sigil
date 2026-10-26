@@ -133,7 +133,7 @@
 | 契約節（ADR 0002 の規則 2） | `intent` `requires` `ensures` `effects` `none` `of`、省ける 5 番目の節 `unchecked`（[ADR 0016](0016-trust-base-declaration.md) の決定 2。予約名 `raw` と合わせて ADR 0016 の PR1 で構文を、PR2 で検査を実装） |
 | 契約・篩型の中の語（ADR 0008 の決定 3・4） | `old` `result` `where` `self` |
 | 文と式 | `let` `mut` `return` `if` `else` `while` `match` `move` `true` `false` |
-| 将来のための予約（P0 では使えば構文エラー） | `trait` `impl` `for` `in` `loop` `break` `continue` `use` `pub` `const` `as` `async` `await` |
+| 将来のための予約（P0 では使えば構文エラー） | `trait` `impl` `for` `in` `loop` `break` `continue` `const` `as` `async` `await` |
 
 `async`・`await` は ADR 0007 の決定（中断の構文を持たない）により使わないが、AI が他の言語の習慣で書いたときに名前の誤りでなく「Sigil にはない構文」として報告するために予約する。`none`（契約節の空）と `None`（`Option` の値）は大小文字で別の語である。
 

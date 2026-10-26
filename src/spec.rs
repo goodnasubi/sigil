@@ -24,6 +24,8 @@ pub struct SpecItem {
     pub name: String,
     /// 宣言の始まりの位置。
     pub span: Span,
+    /// 宣言が `pub` か（ADR 0021 の決定 6）。モジュール自身は `None`。メソッドは自身の `pub`。
+    pub public: Option<bool>,
     pub body: Body,
 }
 
@@ -35,6 +37,8 @@ pub enum Body {
         trust_base: bool,
         /// 検査を外す（`unchecked`）関数の数。
         unchecked_fns: usize,
+        /// `use` した名前（`モジュール名.名前`。ファイルに書かれた順で、文字の順）。
+        uses: Vec<String>,
     },
     Type {
         base: String,
@@ -162,7 +166,9 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
     let module = SpecItem {
         name: m.name.join("."),
         span: m.span,
+        public: None,
         body: Body::Module {
+            uses: file.uses.iter().map(|u| u.path.join(".")).collect(),
             targets: m.targets.clone(),
             trust_base: m.trust == Trust::Base,
             unchecked_fns: unchecked,
@@ -174,6 +180,7 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
             Item::Type(t) => items.push(SpecItem {
                 name: t.name.clone(),
                 span: t.span,
+                public: Some(t.is_pub),
                 body: Body::Type {
                     base: type_text(&t.base),
                     cond: expr_lines(&t.cond),
@@ -182,6 +189,7 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
             Item::Struct(s) => items.push(SpecItem {
                 name: s.name.clone(),
                 span: s.span,
+                public: Some(s.is_pub),
                 body: Body::Struct {
                     generics: generic_specs(&s.generics),
                     fields: s
@@ -194,6 +202,7 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
             Item::Enum(e) => items.push(SpecItem {
                 name: e.name.clone(),
                 span: e.span,
+                public: Some(e.is_pub),
                 body: Body::Enum {
                     generics: generic_specs(&e.generics),
                     variants: e
@@ -287,6 +296,7 @@ fn fn_item(f: &FnDecl, method: bool, name: &str, gs: &[Generic], reports: &Repor
     SpecItem {
         name: name.to_string(),
         span: f.span,
+        public: Some(f.is_pub),
         body: Body::Fn {
             method,
             spec: FnSpec {
@@ -320,12 +330,30 @@ impl SpecItem {
 
     /// この項目の `sigil spec` の塊（最後に改行 1 つ、空行で終わらない）。
     pub fn text(&self) -> String {
+        let t = self.body_text();
+        let Some(public) = self.public else {
+            return t;
+        };
+        // 見出しの行の終わりに公開の別を付ける（ADR 0021 の決定 6）。
+        let label = if public {
+            "（公開）"
+        } else {
+            "（非公開）"
+        };
+        match t.split_once('\n') {
+            Some((head, rest)) => format!("{head}{label}\n{rest}"),
+            None => format!("{t}{label}"),
+        }
+    }
+
+    fn body_text(&self) -> String {
         match &self.body {
             Body::Module {
                 targets,
                 trust_base,
                 unchecked_fns,
-            } => module_text(&self.name, targets, *trust_base, *unchecked_fns),
+                uses,
+            } => module_text(&self.name, targets, *trust_base, *unchecked_fns, uses),
             Body::Type { base, cond } => format!(
                 "型 {}\n  基にする型: {}\n  条件: {}\n",
                 self.name,
@@ -366,7 +394,13 @@ impl SpecItem {
     }
 }
 
-fn module_text(name: &str, targets: &[String], trust_base: bool, unchecked: usize) -> String {
+fn module_text(
+    name: &str,
+    targets: &[String],
+    trust_base: bool,
+    unchecked: usize,
+    uses: &[String],
+) -> String {
     let targets: Vec<&str> = targets
         .iter()
         .map(|t| match t.as_str() {
@@ -376,7 +410,7 @@ fn module_text(name: &str, targets: &[String], trust_base: bool, unchecked: usiz
             other => other,
         })
         .collect();
-    format!(
+    let mut s = format!(
         "モジュール {}\n  出力先: {}\n  信頼基盤: {}\n",
         name,
         targets.join(", "),
@@ -385,7 +419,12 @@ fn module_text(name: &str, targets: &[String], trust_base: bool, unchecked: usiz
         } else {
             "いいえ".to_string()
         }
-    )
+    );
+    // `use` がないモジュールには行を足さない。
+    if !uses.is_empty() {
+        s.push_str(&format!("  使う名前: {}\n", uses.join("、")));
+    }
+    s
 }
 
 fn generics_text(gs: &[GenericSpec]) -> String {
@@ -568,12 +607,20 @@ impl SpecItem {
             ),
             ("text", self.text().into()),
         ];
+        if let Some(public) = self.public {
+            fields.push((
+                "visibility",
+                (if public { "pub" } else { "private" }).into(),
+            ));
+        }
         match &self.body {
             Body::Module {
                 targets,
                 trust_base,
                 unchecked_fns,
+                uses,
             } => {
+                fields.push(("uses", uses.clone().into()));
                 fields.push(("targets", targets.clone().into()));
                 fields.push(("trust_base", (*trust_base).into()));
                 fields.push((

@@ -93,7 +93,7 @@ impl ClosureInfo {
 
 /// ソースを検査して、クロージャごとのとらえた値の一覧を返す。
 pub fn closure_captures(src: &str) -> R<Vec<ClosureInfo>> {
-    analyze(&parse(src)?, &Options::default()).map(|ck| ck.closures)
+    analyze(&parse(src)?, &[], &Options::default()).map(|ck| ck.closures)
 }
 
 /// 関数の本体の検査中の、クロージャの枠。
@@ -177,7 +177,7 @@ pub fn typed(file: &File) -> R<Typed<'_>> {
 }
 
 pub fn typed_with<'a>(file: &'a File, opts: &Options) -> R<Typed<'a>> {
-    let ck = analyze(file, opts)?;
+    let ck = analyze(file, &[], opts)?;
     let t = ck.typed;
     Ok(Typed {
         file,
@@ -395,6 +395,10 @@ struct OsItems {
 }
 
 struct Ck {
+    /// 他のモジュールから取り込んだ宣言（シグネチャだけを登録し、本体は検査しない）。
+    externs: Vec<Item>,
+    /// 取り込んだ構造体の名前。構造体リテラルで作れない（`PrivateConstruction`）。
+    extern_types: HashSet<String>,
     /// `targets` に `bare` を含む核のモジュールか（ADR 0014 の決定 1）。標準ライブラリの表を読む間は偽にする。
     core: bool,
     os_items: OsItems,
@@ -532,7 +536,7 @@ pub fn fn_key(f: &FnDecl) -> usize {
 
 /// 検査して、関数ごとの記録を返す。`check_file_with` と同じ検査をする。
 pub fn fn_reports(file: &File, opts: &Options) -> R<HashMap<usize, FnReport>> {
-    analyze(file, opts).map(|ck| ck.reports)
+    analyze(file, &[], opts).map(|ck| ck.reports)
 }
 
 /// 移動の状態。移動した場所（`a`・`a.owner`）とその位置、そして経路が早期の戻りで終わったか。
@@ -594,11 +598,48 @@ pub fn check_file(file: &File) -> R<()> {
 }
 
 pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
-    analyze(file, opts).map(|_| ())
+    // `use` の先は `--root` がないと決まらない（黙って取り込み元を無視しない）。
+    if let Some(u) = file.uses.first() {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            u.span,
+            "`use` の先のモジュールを探す根がない（`sigil check --root <根>` で検査する）"
+                .to_string(),
+        ));
+    }
+    analyze(file, &[], opts).map(|_| ())
 }
 
-fn analyze(file: &File, opts: &Options) -> R<Ck> {
+/// 他のモジュールから取り込んだ宣言（`externs`。シグネチャだけを使い、本体は検査しない）を
+/// 加えて検査する（ADR 0021 の決定 3・5。`project` が集める）。
+pub fn check_module(file: &File, externs: &[Item], opts: &Options) -> R<()> {
+    analyze(file, externs, opts).map(|_| ())
+}
+
+/// 標準の名前空間の頭（`fs`・`console`・`raw`）と `std`。モジュール名の最初の部分には使えない（ADR 0021 の 2-2b の決め）。
+pub fn std_heads() -> &'static [&'static str] {
+    // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
+    // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
+    &["console", "fs", "raw", "std"]
+}
+
+/// 標準の前置きの名前（型・値）と名前空間の頭か。`use` で取り込む名前に使えない。
+pub fn is_std_name(n: &str) -> bool {
+    PRELUDE_TYPES.contains(&n)
+        || PRELUDE_VALUES.iter().any(|(v, _)| *v == n)
+        || std_heads().contains(&n)
+}
+
+fn analyze(file: &File, externs: &[Item], opts: &Options) -> R<Ck> {
     let mut ck = Ck {
+        externs: externs.to_vec(),
+        extern_types: externs
+            .iter()
+            .filter_map(|i| match i {
+                Item::Struct(s) => Some(s.name.clone()),
+                _ => None,
+            })
+            .collect(),
         core: file.module.targets.iter().any(|t| t == "bare"),
         os_items: OsItems::default(),
         types: HashMap::new(),
@@ -1200,12 +1241,24 @@ impl Ck {
         // 0. モジュールの宣言（ADR 0016 の決定 3・6 の補足。名前の予約が許可より先）
         self.span = file.module.span;
         let mname = file.module.name.join(".");
-        if file.module.name.first().map(String::as_str) == Some("std") {
+        if file
+            .module
+            .name
+            .first()
+            .is_some_and(|h| std_heads().contains(&h.as_str()))
+        {
             return self.err(
                 ErrorKind::ReservedModuleName,
-                format!("モジュール名 `{mname}` は標準ライブラリの名前（`std`・`std.` で始まる名前は利用者は使えない）"),
+                format!("モジュール名 `{mname}` は標準ライブラリの名前（`std`・`raw`・`fs`・`console` で始まる名前は利用者は使えない）"),
             );
         }
+        // 公開のシグネチャが非公開の型を名指ししない（ADR 0021 の決定 4）
+        if let Some((span, msg)) = crate::project::private_in_public(file) {
+            self.span = span;
+            return self.err(ErrorKind::PrivateInPublic, msg);
+        }
+        let externs = self.externs.clone();
+        let all: Vec<&Item> = externs.iter().chain(file.items.iter()).collect();
         if self.base_module && !self.allowed_base.contains(&mname) {
             return self.err(
                 ErrorKind::TrustBaseNotAllowed,
@@ -1215,7 +1268,7 @@ impl Ck {
         // 1. 型の名前と型引数
         let mut names: HashSet<String> = HashSet::new();
         let mut shells: Vec<(String, TypeDef)> = vec![];
-        for item in &file.items {
+        for item in &all {
             let (name, span, generics, shell) = match item {
                 Item::Type(t) => (Some(&t.name), t.span, &[][..], TypeDef::Alias(Ty::Unit)),
                 Item::Struct(s) => (
@@ -1267,7 +1320,7 @@ impl Ck {
             self.types.insert(n, d);
         }
         // 2. 型の中身
-        for item in &file.items {
+        for item in &all {
             match item {
                 Item::Type(t) => {
                     self.span = t.span;
@@ -1351,7 +1404,7 @@ impl Ck {
         self.register_std()?;
         self.register_raw()?;
         self.register_primitives()?;
-        for item in &file.items {
+        for item in &all {
             match item {
                 Item::Fn(f) => {
                     self.span = f.span;
@@ -4942,6 +4995,12 @@ impl Ck {
 
     fn struct_lit(&mut self, path: &[String], fields: &[(String, Expr)]) -> R<Ty> {
         let name = path.join(".");
+        if path.len() == 1 && self.extern_types.contains(&path[0]) {
+            return self.err(
+                ErrorKind::PrivateConstruction,
+                format!("構造体 `{name}` は他のモジュールで定義されていて、構造体リテラルでは作れない（定義したモジュールが `pub` で出す関数で作る。ADR 0021 の決定 4）"),
+            );
+        }
         let def = if path.len() == 1 {
             self.types.get(&path[0]).cloned()
         } else {
@@ -5517,5 +5576,18 @@ fn main() -> Int
         assert!(!t.moves.contains(&addr(lhs)) && !t.moves.contains(&addr(rhs)));
         // ほかの移動は `pair` の `(a, b)` の二つ(`T` は Copyable と限らない)
         assert_eq!(t.moves.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod std_heads_tests {
+    #[test]
+    fn every_stdlib_namespace_is_reserved() {
+        for (_, ns, _, _) in crate::stdlib::NAMESPACED_FNS {
+            assert!(
+                super::std_heads().contains(ns),
+                "{ns} は ADR 0021 の予約一覧にない"
+            );
+        }
     }
 }

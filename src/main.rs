@@ -198,24 +198,47 @@ fn main() -> ExitCode {
                         continue;
                     }
                 };
-                let checked = match &root {
-                    Some(r) => sigil::modpath::verify(
-                        &src,
-                        std::path::Path::new(r),
-                        std::path::Path::new(path),
-                    )
-                    .and_then(|()| sigil::check::check_with(&src, &copts)),
-                    None => sigil::check::check_with(&src, &copts),
+                let (file_path, checked) = match &root {
+                    Some(r) => {
+                        match sigil::project::check_project(
+                            std::path::Path::new(r),
+                            std::path::Path::new(path),
+                            &copts,
+                        ) {
+                            Ok(()) => (path.clone(), Ok(())),
+                            Err(sigil::project::ProjectError::Diag { file, error }) => {
+                                (file.display().to_string(), Err(error))
+                            }
+                            Err(sigil::project::ProjectError::Read { file, msg }) => {
+                                let f = file.display().to_string();
+                                if json {
+                                    diagnostics.push(sigil::json::obj(vec![
+                                        ("file", f.as_str().into()),
+                                        ("kind", "ReadError".into()),
+                                        ("phase", "read".into()),
+                                        ("line", sigil::json::Value::Null),
+                                        ("col", sigil::json::Value::Null),
+                                        ("message", format!("読めない: {msg}").into()),
+                                    ]));
+                                } else {
+                                    eprintln!("{f}: 読めない: {msg}");
+                                }
+                                failed = true;
+                                continue;
+                            }
+                        }
+                    }
+                    None => (path.clone(), sigil::check::check_with(&src, &copts)),
                 };
                 match checked {
                     Ok(()) if !json => println!("{path}: ok"),
                     Ok(()) => {}
                     Err(e) if json => {
-                        diagnostics.push(e.to_json(path));
+                        diagnostics.push(e.to_json(&file_path));
                         failed = true;
                     }
                     Err(e) => {
-                        eprintln!("{path}:{e}");
+                        eprintln!("{file_path}:{e}");
                         failed = true;
                     }
                 }

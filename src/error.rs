@@ -100,6 +100,22 @@ pub enum ErrorKind {
     ModulePathMismatch,
     /// 大小だけが違う名前のファイルが並ぶ（大小を区別しないファイルシステムで指す先が環境で変わる。ADR 0021 の決定 1）。
     ModulePathCase,
+    /// `use` の先のモジュールのファイルがない・その名前がない（ADR 0021 の決定 3）。
+    UnresolvedUse,
+    /// 非公開の宣言を `use` で取り込んだ（ADR 0021 の決定 4）。
+    PrivateImport,
+    /// 取り込んだ名前が、自分の宣言・別の取り込み・標準の名前と衝突する（ADR 0021 の決定 3）。
+    UseConflict,
+    /// 取り込んだのに使っていない名前（ADR 0021 の決定 3）。
+    UnusedUse,
+    /// モジュールの参照の輪（ADR 0021 の決定 3）。
+    ModuleCycle,
+    /// 取り込む側の `targets` が、取り込まれる側の `targets` に含まれない（ADR 0021 の決定 5）。
+    TargetMismatch,
+    /// 公開の宣言のシグネチャが、非公開の型を名指しする（ADR 0021 の決定 4）。
+    PrivateInPublic,
+    /// 他のモジュールの構造体を構造体リテラルで作った（ADR 0021 の決定 4）。
+    PrivateConstruction,
     DuplicateDefinition,
     TypeMismatch,
     OperandTypes,
@@ -200,6 +216,14 @@ impl ErrorKind {
             | ModuleMismatch
             | ModulePathMismatch
             | ModulePathCase
+            | UnresolvedUse
+            | PrivateImport
+            | UseConflict
+            | UnusedUse
+            | ModuleCycle
+            | TargetMismatch
+            | PrivateInPublic
+            | PrivateConstruction
             | DuplicateDefinition
             | TypeMismatch
             | OperandTypes

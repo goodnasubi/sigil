@@ -95,7 +95,11 @@ pub fn module_name_for(root: &Path, file: &Path) -> Result<Vec<String>, String> 
 ///   根の実体の下にあること。
 /// - 字面で畳んだパス（`d/link/../top.sigil` は `d/top.sigil`）が同じ実体を指すこと。
 ///   食い違うなら、`..` が symlink の先で解決されており、見かけの位置と実体が別になっている。
-fn real_inside_root(root: &Path, file: &Path) -> Result<(), String> {
+fn real_inside_root(
+    root: &Path,
+    file: &Path,
+    handle: Option<&std::fs::File>,
+) -> Result<(), String> {
     let (Ok(root_real), Ok(raw_real)) = (std::fs::canonicalize(root), std::fs::canonicalize(file))
     else {
         return Err(format!("`{}` の実体を解決できない", file.display()));
@@ -108,6 +112,17 @@ fn real_inside_root(root: &Path, file: &Path) -> Result<(), String> {
             root_real.display()
         ));
     }
+    // 読み込んだ開いたファイルと、確認した実体が同じファイルか（確認と読み込みを同じ開いたファイルで。
+    // パスで確認したあとにパスの指す先を差し替えられても、読んだ内容は確認した実体のものでなければ拒否する）。
+    if let Some(h) = handle {
+        if !same_file(h, &raw_real) {
+            return Err(format!(
+                "`{}` を開いた後に、パスの指す先が変わった（開いたファイルと確認した実体 `{}` が別のファイル）",
+                file.display(),
+                raw_real.display()
+            ));
+        }
+    }
     match std::fs::canonicalize(absolute(file)) {
         Ok(norm_real) if norm_real == raw_real => Ok(()),
         _ => Err(format!(
@@ -115,6 +130,21 @@ fn real_inside_root(root: &Path, file: &Path) -> Result<(), String> {
             file.display()
         )),
     }
+}
+
+#[cfg(unix)]
+fn same_file(h: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (h.metadata(), std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// Unix 以外では開いたファイルと実体の同一性を確かめられない（既知の制約。ADR 0021）。
+#[cfg(not(unix))]
+fn same_file(_h: &std::fs::File, _path: &Path) -> bool {
+    false
 }
 
 /// 根からファイルまでの各部分で、大小だけが違う名前が同じ場所にないことを確かめる。
@@ -147,19 +177,33 @@ fn case_collision(root: &Path, file: &Path) -> Option<String> {
 /// 構文エラーならそのエラー。`std`・`std.` で始まる宣言は、パスと一致していても `ReservedModuleName`。
 pub fn verify(src: &str, root: &Path, file: &Path) -> Result<(), Error> {
     let f = crate::parse(src)?;
+    verify_parsed(&f, root, file, None)
+}
+
+/// `verify` の、構文解析のあと。`handle` は内容を読んだ開いたファイル（あれば実体との同一性も確かめる）。
+pub fn verify_parsed(
+    f: &crate::ast::File,
+    root: &Path,
+    file: &Path,
+    handle: Option<&std::fs::File>,
+) -> Result<(), Error> {
     let span: Span = f.module.span;
     let fail = |kind: ErrorKind, msg: String| Err(Error::new(kind, span, msg));
-    // `std`・`std.…` は、宣言とパスが一致していても拒否する（検査器と同じ `ReservedModuleName`）。
-    if f.module.name.first().map(String::as_str) == Some("std") {
+    // `std`・`raw`・`fs`・`console` で始まる宣言は、宣言とパスが一致していても拒否する（検査器と同じ `ReservedModuleName`）。
+    if f.module
+        .name
+        .first()
+        .is_some_and(|h| crate::check::std_heads().contains(&h.as_str()))
+    {
         return fail(
             ErrorKind::ReservedModuleName,
             format!(
-                "モジュール名 `{}` は標準ライブラリの名前（`std`・`std.` で始まる名前は利用者は使えない）",
+                "モジュール名 `{}` は標準ライブラリの名前（`std`・`raw`・`fs`・`console` で始まる名前は利用者は使えない）",
                 f.module.name.join(".")
             ),
         );
     }
-    if let Err(m) = real_inside_root(root, file) {
+    if let Err(m) = real_inside_root(root, file, handle) {
         return fail(ErrorKind::ModulePathMismatch, m);
     }
     if let Some(m) = case_collision(root, file) {
@@ -180,4 +224,41 @@ pub fn verify(src: &str, root: &Path, file: &Path) -> Result<(), Error> {
         );
     }
     Ok(())
+}
+
+/// 読み込みの失敗（ファイルを開けない・読めない）か、言語の診断か。
+#[derive(Debug)]
+pub enum LoadError {
+    Io(String),
+    Lang(Error),
+}
+
+/// ファイルを開き、**その開いたファイルから**読み、同じ開いたファイルを実体の確認に使う
+/// （ADR 0021 の 2-2b の条件: 確認と読み込みを同じ開いたファイルで）。
+pub fn load(root: &Path, file: &Path) -> Result<(String, crate::ast::File), LoadError> {
+    load_with_hook(root, file, &mut || {})
+}
+
+/// `load` の、開いたあと・確認の前に `between` を呼ぶ版（パスの指す先の差し替えを試験するための差し込み口）。
+#[doc(hidden)]
+pub fn load_with_hook(
+    root: &Path,
+    file: &Path,
+    between: &mut dyn FnMut(),
+) -> Result<(String, crate::ast::File), LoadError> {
+    use std::io::Read;
+    let mut h = std::fs::File::open(file).map_err(|e| LoadError::Io(e.to_string()))?;
+    let mut bytes = vec![];
+    h.read_to_end(&mut bytes)
+        .map_err(|e| LoadError::Io(e.to_string()))?;
+    let src = String::from_utf8(bytes).map_err(|_| LoadError::Io("UTF-8 でない".to_string()))?;
+    between();
+    let f = crate::parse(&src).map_err(LoadError::Lang)?;
+    verify_parsed(&f, root, file, Some(&h)).map_err(LoadError::Lang)?;
+    Ok((src, f))
+}
+
+/// 標準名と衝突するため、モジュール名の先頭に使えない名前か。
+pub fn is_reserved_head(s: &str) -> bool {
+    crate::check::std_heads().contains(&s)
 }

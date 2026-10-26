@@ -53,6 +53,7 @@ pub enum ErrorKind {
     MissingClause,
     ClauseOrder,
     EmptyIntent,
+    EmptyUnchecked,
     ComparisonChain,
     MixedAndOr,
     RefOfRef,

@@ -130,7 +130,7 @@
 |---|---|
 | モジュールの宣言（ADR 0008 の決定 6） | `module` `targets` `trust` |
 | 宣言 | `fn` `type` `struct` `enum` |
-| 契約節（ADR 0002 の規則 2） | `intent` `requires` `ensures` `effects` `none` `of` |
+| 契約節（ADR 0002 の規則 2） | `intent` `requires` `ensures` `effects` `none` `of`、省ける 5 番目の節 `unchecked`（[ADR 0016](0016-trust-base-declaration.md) の決定 2。予約名 `raw` と合わせて ADR 0016 の PR1 で実装） |
 | 契約・篩型の中の語（ADR 0008 の決定 3・4） | `old` `result` `where` `self` |
 | 文と式 | `let` `mut` `return` `if` `else` `while` `match` `move` `true` `false` |
 | 将来のための予約（P0 では使えば構文エラー） | `trait` `impl` `for` `in` `loop` `break` `continue` `use` `pub` `const` `as` `async` `await` |

@@ -47,9 +47,35 @@ pub struct Lexed {
 
 /// 識別子として使えない構文の語（ADR 0009 の決定 4）。
 pub const KEYWORDS: &[&str] = &[
-    "module", "targets", "trust", "fn", "type", "struct", "enum", "intent", "requires", "ensures",
-    "effects", "none", "of", "old", "result", "where", "self", "let", "mut", "return", "if",
-    "else", "while", "match", "move", "true", "false", "impl",
+    "module",
+    "targets",
+    "trust",
+    "fn",
+    "type",
+    "struct",
+    "enum",
+    "intent",
+    "requires",
+    "ensures",
+    "effects",
+    "none",
+    "of",
+    "old",
+    "result",
+    "where",
+    "self",
+    "let",
+    "mut",
+    "return",
+    "if",
+    "else",
+    "while",
+    "match",
+    "move",
+    "true",
+    "false",
+    "impl",
+    "unchecked",
 ];
 
 /// 将来のために予約する語。P0 では使えば字句エラー。

@@ -116,6 +116,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 > `sigil fmt` の仕様と M0 の補足を [ADR 0010](docs/decisions/0010-fmt-and-m0-addendum.md) で、型システムの範囲（所有権と借用の表記、型引数、篩型、関数の値の制限など）を [ADR 0011](docs/decisions/0011-type-system-scope.md) で決めました。
 > 所有権の検査の細目と標準ライブラリの規則を [ADR 0012](docs/decisions/0012-ownership-check-and-stdlib.md) で、M3 の前に決める論点（停止を効果に数えないこと、標準ライブラリの正式な一覧、関数の値の渡し方、借用区間の部品）を [ADR 0013](docs/decisions/0013-termination-stdlib-and-function-values.md) で決めました。
 > `sigil run` を SIR の評価器に載せ替える決定（`--trace-drops` の追加を含む）を [ADR 0017](docs/decisions/0017-run-on-sir-evaluator.md) で決めました。
+> 信頼基盤の宣言方法と検査を外した箇所の契約の書き方を [ADR 0016](docs/decisions/0016-trust-base-declaration.md) で決めました（構文と表示は実装済み。検査は次の PR）。
 > 標準ライブラリの核と OS 依存部分の分割（出力先 `bare`、層ごとの標準ライブラリの表、核のモジュールからの OS 層の参照の検査）を [ADR 0014](docs/decisions/0014-core-and-os-split.md) で決めました。
 
 ## 目標

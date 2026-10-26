@@ -1395,3 +1395,11 @@ fn no_implicit_mut_to_shared() {
         func("f(n: &mut Int) -> Int", "  return read(&n);")
     ));
 }
+
+#[test]
+fn unchecked_clause_is_unsupported_until_pr2() {
+    // ADR 0016 の PR1: 節を書いたプログラムが検査なしで通る期間を作らない。
+    let items = func("f() -> Int", "  return 1;")
+        .replace("  effects none\n", "  effects none\n  unchecked \"前提\"\n");
+    assert_eq!(kind(&items), ErrorKind::Unsupported);
+}

@@ -21,12 +21,13 @@
 //! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
 
 use super::{
-    new_str, s, sigil_rt_alloc, sigil_rt_list_get, sigil_rt_list_len, sigil_rt_list_new,
-    sigil_rt_list_push, text, RtList, RtStr,
+    new_str, s, sigil_rt_alloc, sigil_rt_free, sigil_rt_list_free, sigil_rt_list_get,
+    sigil_rt_list_len, sigil_rt_list_new, sigil_rt_list_push, text, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::cmp::Ordering;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering as AOrd};
 
 const K_UNIT: i64 = 0;
 const K_INT: i64 = 1;
@@ -42,6 +43,7 @@ const K_ENUM: i64 = 10;
 const K_REF: i64 = 11;
 const K_SHARED: i64 = 12;
 const K_CELL: i64 = 13;
+const K_FN: i64 = 14;
 
 type D = *const i64;
 
@@ -89,6 +91,11 @@ unsafe fn variant(d: D, tag: i64) -> (&'static str, usize, usize) {
 }
 
 unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
+    // 移動済み（空）の値は、インタープリタと同じく `()` と表示する。
+    if w == 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH)) {
+        out.push_str("()");
+        return;
+    }
     match rd(d, 0) {
         K_UNIT => out.push_str("()"),
         K_INT => out.push_str(&w.to_string()),
@@ -192,7 +199,10 @@ unsafe fn eq(d: D, a: i64, b: i64) -> bool {
         K_FLOAT => f64::from_bits(a as u64) == f64::from_bits(b as u64),
         K_STR | K_PATH => s(a as *const RtStr) == s(b as *const RtStr),
         K_LIST => {
-            let (x, y) = (list_items(a as *const RtList), list_items(b as *const RtList));
+            let (x, y) = (
+                list_items(a as *const RtList),
+                list_items(b as *const RtList),
+            );
             x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| eq(dp(d, 1), *p, *q))
         }
         K_TUPLE => {
@@ -214,9 +224,7 @@ unsafe fn eq(d: D, a: i64, b: i64) -> bool {
             (0..nf).all(|i| eq(dp(d, fpos + i), *x.add(1 + i), *y.add(1 + i)))
         }
         K_REF => eq(dp(d, 1), *(a as *const i64), *(b as *const i64)),
-        K_SHARED | K_CELL => {
-            a == b || eq(dp(d, 1), *(a as *const i64), *(b as *const i64))
-        }
+        K_SHARED | K_CELL => a == b || eq(dp(d, 1), *(a as *const i64), *(b as *const i64)),
         _ => false,
     }
 }
@@ -236,7 +244,10 @@ unsafe fn cmp(d: D, a: i64, b: i64) -> Option<Ordering> {
         K_FLOAT => f64::from_bits(a as u64).partial_cmp(&f64::from_bits(b as u64)),
         K_STR => Some(s(a as *const RtStr).cmp(s(b as *const RtStr))),
         K_LIST => {
-            let (x, y) = (list_items(a as *const RtList), list_items(b as *const RtList));
+            let (x, y) = (
+                list_items(a as *const RtList),
+                list_items(b as *const RtList),
+            );
             for (p, q) in x.iter().zip(&y) {
                 match cmp(dp(d, 1), *p, *q)? {
                     Ordering::Equal => {}
@@ -273,13 +284,69 @@ pub unsafe extern "C" fn sigil_rt_val_cmp(d: D, a: i64, b: i64) -> i32 {
     }
 }
 
+/// 塊の前に置く 2 語の見出し。`[大きさ（と黙ったかの印）][参照の数]` の後ろに中身が続く。
+const SILENT: i64 = 1 << 62;
+const HEAD: usize = 16;
+
+/// 見出しつきの塊を作る（参照の数 1）。戻り値は中身の先頭。
+unsafe fn blk_alloc(bytes: usize) -> *mut i64 {
+    let n = bytes.max(8).div_ceil(8) * 8;
+    let h = sigil_rt_alloc(HEAD + n, 8) as *mut i64;
+    *h = n as i64;
+    *h.add(1) = 1;
+    h.add(2)
+}
+
+unsafe fn blk_free(p: *mut i64) {
+    let h = p.sub(2);
+    let n = (*h & !SILENT) as usize;
+    sigil_rt_free(h as *mut u8, HEAD + n, 8);
+}
+
+unsafe fn blk_silent(p: *mut i64) {
+    *p.sub(2) |= SILENT;
+}
+
+unsafe fn rc_inc(p: i64) {
+    *(p as *mut i64).sub(1) += 1;
+}
+
+/// 参照の数を 1 減らし、0 になったら真。
+unsafe fn rc_dec(p: i64) -> bool {
+    let r = (p as *mut i64).sub(1);
+    *r -= 1;
+    *r == 0
+}
+
+/// 生成したコードが作る塊（タプル・構造体・列挙型・`Cell`・`Shared`・クロージャ）の確保。
+///
+/// # Safety
+/// 戻り値は `sigil_rt_val_drop` が解放する。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_blk_new(bytes: usize) -> *mut u8 {
+    blk_alloc(bytes) as *mut u8
+}
+
 unsafe fn block(n: usize) -> *mut i64 {
-    sigil_rt_alloc(8 * n.max(1), 8) as *mut i64
+    blk_alloc(8 * n)
+}
+
+/// 破棄の対象になる（見出しつきの塊や列を持つ）種類。
+fn owning_kind(k: i64) -> bool {
+    matches!(
+        k,
+        K_LIST | K_TUPLE | K_STRUCT | K_ENUM | K_SHARED | K_CELL | K_FN
+    )
 }
 
 /// `deep` が真なら `clone`（`Cell` は独立した複製）、偽なら `Copy`（共有するものは共有のまま）。
+/// 共有する `Cell`・`Shared`・クロージャは参照の数を増やす。文字列は共有のまま（解放しない）。
 unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
-    match rd(d, 0) {
+    let k = rd(d, 0);
+    if w == 0 && owning_kind(k) {
+        return w;
+    }
+    match k {
         K_LIST => {
             let l = sigil_rt_list_new(8);
             for x in list_items(w as *const RtList) {
@@ -302,6 +369,9 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             for i in 0..n {
                 *o.add(i) = dup(dp(d, 4 + 3 * i + 2), *x.add(i), deep);
             }
+            if !deep {
+                blk_silent(o);
+            }
             o as i64
         }
         K_ENUM => {
@@ -312,6 +382,9 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             for i in 0..nf {
                 *o.add(1 + i) = dup(dp(d, fpos + i), *x.add(1 + i), deep);
             }
+            if !deep {
+                blk_silent(o);
+            }
             o as i64
         }
         K_CELL if deep => {
@@ -319,7 +392,102 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             *o = dup(dp(d, 1), *(w as *const i64), deep);
             o as i64
         }
+        K_CELL | K_SHARED => {
+            rc_inc(w);
+            w
+        }
+        K_FN => {
+            if *(w as *const i64).add(1) != 0 {
+                rc_inc(w);
+            }
+            w
+        }
         _ => w,
+    }
+}
+
+static TRACE: AtomicBool = AtomicBool::new(false);
+
+/// `--trace-drops`: 以後の破棄を `drop: <表示>` として標準エラーに出す。
+#[no_mangle]
+pub extern "C" fn sigil_rt_trace_on() {
+    TRACE.store(true, AOrd::Relaxed);
+}
+
+/// 値を破棄する。再帰せず、順序はインタープリタと同じ（値そのもの、次にフィールド・要素を宣言の順）。
+/// 構造体は、黙っておらず移動済みのフィールドがなければ、破棄の前に `drop: …` を出す。
+/// 文字列は解放しない（SIR は文字列の局所変数を破棄しないため、塊の中の文字列と共有されうる）。
+///
+/// # Safety
+/// `d` は記述子、`w` はその型の値（0 は移動済み）。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
+    let mut st: Vec<(D, i64)> = vec![];
+    let push = |st: &mut Vec<(D, i64)>, d: D, w: i64| {
+        if w != 0 && owning_kind(rd(d, 0)) {
+            st.push((d, w));
+        }
+    };
+    push(&mut st, d, w);
+    let trace = TRACE.load(AOrd::Relaxed);
+    while let Some((d, w)) = st.pop() {
+        match rd(d, 0) {
+            K_LIST => {
+                let l = w as *mut RtList;
+                for x in list_items(l).into_iter().rev() {
+                    push(&mut st, dp(d, 1), x);
+                }
+                sigil_rt_list_free(l);
+            }
+            K_TUPLE => {
+                let n = rd(d, 1) as usize;
+                let b = w as *mut i64;
+                for i in (0..n).rev() {
+                    push(&mut st, dp(d, 2 + i), *b.add(i));
+                }
+                blk_free(b);
+            }
+            K_STRUCT => {
+                let n = rd(d, 3) as usize;
+                let b = w as *mut i64;
+                if trace && *b.sub(2) & SILENT == 0 {
+                    let moved =
+                        (0..n).any(|i| *b.add(i) == 0 && owning_kind(rd(dp(d, 4 + 3 * i + 2), 0)));
+                    if !moved {
+                        let mut t = String::new();
+                        show_into(d, w, true, &mut t);
+                        let _ = writeln!(std::io::stderr().lock(), "drop: {t}");
+                    }
+                }
+                for i in (0..n).rev() {
+                    push(&mut st, dp(d, 4 + 3 * i + 2), *b.add(i));
+                }
+                blk_free(b);
+            }
+            K_ENUM => {
+                let b = w as *mut i64;
+                let (_, nf, fpos) = variant(d, *b);
+                for i in (0..nf).rev() {
+                    push(&mut st, dp(d, fpos + i), *b.add(1 + i));
+                }
+                blk_free(b);
+            }
+            K_CELL | K_SHARED => {
+                if rc_dec(w) {
+                    push(&mut st, dp(d, 1), *(w as *const i64));
+                    blk_free(w as *mut i64);
+                }
+            }
+            K_FN => {
+                let b = w as *mut i64;
+                let env = *b.add(1);
+                if env != 0 && rc_dec(w) {
+                    push(&mut st, *b.add(2) as D, env);
+                    blk_free(b);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -526,14 +694,21 @@ mod tests {
         unsafe {
             assert_eq!(s(sigil_rt_val_show(int.as_ptr(), -5, 1)), "-5");
             assert_eq!(
-                s(sigil_rt_val_show(float.as_ptr(), 1.5f64.to_bits() as i64, 1)),
+                s(sigil_rt_val_show(
+                    float.as_ptr(),
+                    1.5f64.to_bits() as i64,
+                    1
+                )),
                 "1.5"
             );
             let l = sigil_rt_list_new(8);
             for x in [3i64, 1, 2] {
                 sigil_rt_list_push(l, &x as *const i64 as *const u8);
             }
-            assert_eq!(s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)), "[3, 1, 2]");
+            assert_eq!(
+                s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)),
+                "[3, 1, 2]"
+            );
             assert_eq!(sigil_rt_list_best(l, int.as_ptr(), 1), 0);
             assert_eq!(sigil_rt_list_best(l, int.as_ptr(), 0), 1);
             let c = sigil_rt_val_shadow(list.as_ptr(), l as i64);

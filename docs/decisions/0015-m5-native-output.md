@@ -202,6 +202,7 @@ SIR の型を、Cranelift の段で次の表現にする。表現は実行ファ
 - 移動した値（`Stmt::Move`）は破棄しない。構造体の一部の欄だけの移動・`match` の束縛による移動・値を消費する標準のメソッドの受け手・クロージャの環境に取り込まれた値も、仕様の想定どおり、移動した値を破棄しない（インタプリタの既知の制限。決定 1 の対象外）。
 - **スタックの枯渇**: 生成した各関数の入口で、スタックの番地（Cranelift の `get_stack_pointer`）をランタイムが決めた下限と比べ、下回れば `StackExhausted` の停止として同じ `cleanup` の経路を通る。ランタイムは、インタプリタと同じく 256 MiB のスタックを持つスレッドで入口を呼び、下限をスタックの上端（スレッドの入口で読んだスタックの番地）から 192 MiB 下に置く。残りの 64 MiB は、ランタイムの関数と停止の報告・破棄の経路が使う余裕である。止まる深さは枠の大きさが違うのでインタプリタと一致しない（比べるのは停止の種類と、破棄の記録の形だけ。決定 8）。
 - **報告**: 停止の地点ごとに、インタプリタの `interp::Stop` の表示（`異常停止: 種類（関数 名前、N 行目）` と `during`）と同じ文字列を、lowering が `stop_sites` に作っておく。ランタイムはそれを標準エラーに 1 行で出す。インタプリタの表示とずれないよう、`Stop` の表示の文字列を作る関数を `interp.rs` から `src/report.rs` に移し、lowering とインタプリタが共に使う。
+- **記述子駆動の破棄（PR5 の注記）**: 生成したコードは型ごとの破棄の関数を持たない。破棄する値の型は、決定 6 の型の記述子（`val_show` と同じもの）で渡し、ランタイムの `sigil_rt_val_drop(記述子, 値)` が明示的なスタックで走査する（再帰しないので深い入れ子でもスタックを使わない）。順序はインタプリタの `drain` と同じ前順（自分が先、続いて欄・要素を宣言の順）。`--trace-drops` のときは、入口で `sigil_rt_trace_on` を呼び、`log_drop` と同じ条件（沈黙でない構造体で、空の欄がないもの）で `drop: 型名` を標準エラーに出す。集成体・Cell・Shared・クロージャの環境は `[大きさ][参照数]` の頭を持つ確保にし、`shadow`（沈黙の別名）と `Rc` の共有は参照数と沈黙の印で表す。
 - 異常停止の中の異常停止（破棄の途中の停止）はない（破棄は利用者のコードを呼ばない。P0 には利用者の破棄の処理がない）。
 
 ### 理由
@@ -243,6 +244,7 @@ SIR の型を、Cranelift の段で次の表現にする。表現は実行ファ
 
 - 生成したコードは `cranelift-object` で ELF のオブジェクト（`.o`）にする。
 - `Program.core_only`（モジュールの `targets` に `bare` がある）なら、`libsigil_rt_os.a` をリンクに渡さない。生成したコードが OS 層の関数を 1 つでも呼んでいればリンクが失敗するので、ADR 0006 の条件 10 の M5 側（核だけのプログラムが OS の機能に依存しない）は「リンクが成功する」ことで確かめられる。
+- **破棄は記述子駆動（PR5 の注記）**: ランタイムは `sigil_rt_blk_new`（頭付きの確保）・`sigil_rt_val_drop`・`sigil_rt_trace_on` を持ち、値の確保・複製・破棄を記述子から行う（決定 5 の注記）。文字列とパスは解放しない（インタプリタの `Rc` 共有に当たる所有の追跡を持たないため、プロセスの終了まで残す。性能と使用量は非目標）。
 - 出力は動的リンクを持たない ELF（`PT_INTERP`・`PT_DYNAMIC` がない）にする。
 - `cc` が見つからない・`libc.a` がないときは、`sigil build` は理由と必要な道具を示して終了コード 1 で止める。
 
@@ -317,7 +319,7 @@ ADR 0006 の M5 の完了条件を、次のテストで満たすとする。
 2. **PR2: SIR と lowering と評価器（決定 2・5）**: `src/ir.rs`・`src/lower.rs`・`src/ir_eval.rs`。単相化・契約・停止の経路・破棄の並び。`tests/m5_sir.rs` の `sir_eval_matches_interp`（決定 1 の事例）。インタプリタと評価器の食い違いは、仕様の想定に照らしてどちらが正しいかを PR に記録する。
 3. **PR3: 暫定ランタイムと意味の共有（決定 6）**: `runtime/core`・`runtime/os`、`src/shared/`、`build.rs`。ランタイムの単体テスト（表示・文字列・パスの関数がインタプリタと同じ結果）。Cranelift はまだ使わない。
 4. **PR4: Cranelift の出力とリンク（決定 4・6・7）**: `Cargo.toml` に Cranelift を足し、`src/codegen.rs`（SIR → Cranelift）と `src/native.rs`（オブジェクトの出力・ランタイムの書き出し・`cc` の呼び出し）、`sigil build`。`BuildUnsupported` で未実装の構文を止めてよい。`samples_build_and_match`・`core_only_*`・`executable_is_static`・`runs_without_toolchain`。
-5. **PR5: 差分の比較を全事例へ（決定 8）**: `tests/common/native.rs` の `both`、既存のテストの補助関数の置き換え（`SIGIL_NATIVE=1` の切替え）、`stop_kinds_match`、未実装の構文を埋める。
+5. **PR5: 差分の比較を全事例へ（決定 8）**: `tests/common/native.rs` の `both`、既存のテストの補助関数の置き換え（`SIGIL_NATIVE=1` の切替え）、`stop_kinds_match`、未実装の構文を埋める。**あわせて `Stmt::Drop`・`Stmt::Assign` の旧値の破棄の生成と解放、`--trace-drops` のネイティブ対応（破棄の順序をインタープリタと一致させる。`m3_drop_order` などが `SIGIL_NATIVE=1` で比べる）を含む。** `SIGIL_NATIVE=1 cargo test` の後に `scripts/native-report.sh` で、突き合わせた件数と飛ばした件数（理由別）を出す。既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期・停止の経路での漏れはインタプリタと厳密には揃えない（破棄の記録は揃う範囲で比べる）。
 6. **PR6: M5 の完了**: `SIGIL_NATIVE` の切替えをなくす、`no_build_unsupported_left`、`m3_drop_limits.rs` への実行ファイルの順序の記録、`runs_in_scratch_container` を手で実行した記録、ADR 0006 の M5 の記録。
 
 ## 影響

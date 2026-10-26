@@ -34,7 +34,7 @@ fn both(srcs: &[&str], func: &str, args: &[Arg]) -> String {
     let dir = scratch("both");
     let exe = dir.join("prog");
     assert!(
-        try_build(srcs, func, &exe).unwrap().is_some(),
+        try_build(srcs, func, &exe, false).unwrap().is_some(),
         "{func}: BuildUnsupported になった"
     );
     let got = exec(&exe, args);
@@ -78,7 +78,9 @@ fn read_port_with_real_file() {
     let port = example("02-read-port/c-brace.sigil");
     let dir = scratch("port");
     let exe = dir.join("prog");
-    assert!(try_build(&[&port], "read_port", &exe).unwrap().is_some());
+    assert!(try_build(&[&port], "read_port", &exe, false)
+        .unwrap()
+        .is_some());
     let file = dir.join("p.txt");
     let path = file.to_string_lossy().into_owned();
     for (content, want) in [("8080", "Ok(8080)"), ("abc", "Err(")] {
@@ -156,7 +158,7 @@ fn executable_is_static() {
     let dir = scratch("static");
     for (src, f) in [(&own, "main"), (&ctl, "sign")] {
         let exe = dir.join(f);
-        assert!(try_build(&[src], f, &exe).unwrap().is_some());
+        assert!(try_build(&[src], f, &exe, false).unwrap().is_some());
         assert_static(&exe);
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -170,7 +172,7 @@ fn runs_without_toolchain() {
     let own = example("03-ownership/ownership.sigil");
     let dir = scratch("bare");
     let exe = dir.join("prog");
-    assert!(try_build(&[&own], "main", &exe).unwrap().is_some());
+    assert!(try_build(&[&own], "main", &exe, false).unwrap().is_some());
     // 環境変数なし・PATH なし・別のディレクトリで走る（cc も Rust もない環境の代わり）。
     let o = Command::new(&exe)
         .env_clear()
@@ -200,7 +202,7 @@ fn abnormal_stop_exits_70_with_report() {
     let want = common::run(&src, "d", &[Arg::Int(1), Arg::Int(0)]).unwrap_err();
     let dir = scratch("stop");
     let exe = dir.join("prog");
-    assert!(try_build(&[&src], "d", &exe).unwrap().is_some());
+    assert!(try_build(&[&src], "d", &exe, false).unwrap().is_some());
     let got = exec(&exe, &[Arg::Int(1), Arg::Int(0)]);
     assert_eq!(got.code, Some(70));
     assert_eq!(got.stderr.trim_end(), want.error.to_string());
@@ -209,7 +211,7 @@ fn abnormal_stop_exits_70_with_report() {
 }
 
 #[test]
-fn cli_build_and_trace_drops_unsupported() {
+fn cli_build_and_trace_drops() {
     if !on() {
         return;
     }
@@ -237,8 +239,12 @@ fn cli_build_and_trace_drops_unsupported() {
         .arg(dir.join("x"))
         .output()
         .unwrap();
-    assert_eq!(o.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&o.stderr).contains("trace-drops"));
-    assert!(!dir.join("x").exists());
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(dir.join("x").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -29,9 +29,9 @@ pub const OPTION_SOME: usize = 0;
 pub const OPTION_NONE: usize = 1;
 pub const RESULT_OK: usize = 0;
 pub const RESULT_ERR: usize = 1;
-pub const IO_NOT_FOUND: usize = 0;
-pub const IO_PERMISSION_DENIED: usize = 1;
-pub const IO_OTHER: usize = 2;
+pub const IO_NOT_FOUND: usize = crate::shared_path::IO_NOT_FOUND;
+pub const IO_PERMISSION_DENIED: usize = crate::shared_path::IO_PERMISSION_DENIED;
+pub const IO_OTHER: usize = crate::shared_path::IO_OTHER;
 
 #[derive(Debug, Clone)]
 pub struct Program {

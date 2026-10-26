@@ -16,6 +16,13 @@ pub mod lexer;
 pub mod lower;
 pub mod parser;
 pub mod report;
+pub mod runtime_lib;
+#[path = "shared/args.rs"]
+pub mod shared_args;
+#[path = "shared/path.rs"]
+pub mod shared_path;
+#[path = "shared/text.rs"]
+pub mod shared_text;
 pub mod spec;
 pub mod stdlib;
 

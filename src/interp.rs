@@ -20,6 +20,9 @@
 
 use crate::ast::*;
 use crate::error::Error;
+use crate::shared_args::arg_name;
+use crate::shared_path as spath;
+use crate::shared_text::{self as stext, fmt_float};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -86,16 +89,7 @@ impl fmt::Display for Stop {
     }
 }
 
-/// 入口の関数に渡す引数。
-#[derive(Debug, Clone, PartialEq)]
-pub enum Arg {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Str(String),
-    List(Vec<Arg>),
-}
-
+pub use crate::shared_args::Arg;
 #[derive(Debug)]
 pub enum RunError {
     /// 構文または型検査のエラー（実行の前に止める）。
@@ -303,16 +297,6 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
             output,
             drops: drops.into_boxed_slice(),
         }),
-    }
-}
-
-fn arg_name(a: &Arg) -> &'static str {
-    match a {
-        Arg::Int(_) => "整数",
-        Arg::Float(_) => "小数",
-        Arg::Bool(_) => "真偽値",
-        Arg::Str(_) => "文字列",
-        Arg::List(_) => "一覧",
     }
 }
 
@@ -663,11 +647,7 @@ fn none() -> Value {
 
 /// `fs` の失敗を `IoError` の腕（`NotFound`・`PermissionDenied`・`Other`。どれもパスを持つ）にする。
 fn io_error(kind: std::io::ErrorKind, path: Rc<str>) -> Value {
-    let name = match kind {
-        std::io::ErrorKind::NotFound => "NotFound",
-        std::io::ErrorKind::PermissionDenied => "PermissionDenied",
-        _ => "Other",
-    };
+    let name = ["NotFound", "PermissionDenied", "Other"][spath::io_arm(kind)];
     variant("IoError", name, vec![Value::Path(path)])
 }
 
@@ -753,21 +733,6 @@ fn follow(slot: Slot, path: Vec<Seg>) -> (Slot, Vec<Seg>) {
         }
     }
     (slot, path)
-}
-
-fn fmt_float(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".into()
-    } else if f.is_infinite() {
-        if f > 0.0 { "inf" } else { "-inf" }.into()
-    } else {
-        let s = format!("{f}");
-        if s.contains('.') {
-            s
-        } else {
-            format!("{s}.0")
-        }
-    }
 }
 
 impl Value {
@@ -2201,17 +2166,13 @@ impl<'a> Interp<'a> {
 
 /// `Path` のメソッド。意味は `std::path::Path` に従う（実行環境の OS の区切りを使う。ADR 0006 の M4 の記録）。
 fn path_method(name: &str, p: &Rc<str>, a: Vec<Value>) -> R<Value> {
-    let std_path = std::path::Path::new(&**p);
-    let text = |x: &std::path::Path| -> Rc<str> { x.to_string_lossy().as_ref().into() };
     match (name, a.as_slice()) {
         ("is_empty", []) => Ok(Value::Bool(p.is_empty())),
-        ("join", [Value::Str(other)]) => Ok(Value::Path(text(&std_path.join(&**other)))),
-        ("file_name", []) => Ok(std_path
-            .file_name()
-            .map_or_else(none, |n| some(Value::Str(text(n.as_ref()))))),
-        ("parent", []) => Ok(std_path
-            .parent()
-            .map_or_else(none, |n| some(Value::Path(text(n))))),
+        ("join", [Value::Str(other)]) => Ok(Value::Path(spath::join(p, other).into())),
+        ("file_name", []) => {
+            Ok(spath::file_name(p).map_or_else(none, |n| some(Value::Str(n.into()))))
+        }
+        ("parent", []) => Ok(spath::parent(p).map_or_else(none, |n| some(Value::Path(n.into())))),
         _ => unsupported(format!("Path.{name}")),
     }
 }
@@ -2221,31 +2182,23 @@ fn str_method(name: &str, s: &Rc<str>, a: Vec<Value>) -> R<Value> {
         return unsupported(format!("String.{name}"));
     }
     match name {
-        "len" => Ok(Value::Int(s.chars().count() as i64)),
+        "len" => Ok(Value::Int(stext::char_len(s))),
         "is_empty" => Ok(Value::Bool(s.is_empty())),
-        "trim" => Ok(Value::Str(s.trim().into())),
+        "trim" => Ok(Value::Str(stext::trim(s).into())),
         "lines" => {
-            let mut parts: Vec<&str> = s.split('\n').collect();
-            if parts.last() == Some(&"") {
-                parts.pop();
-            }
-            let items = parts
+            let items = stext::lines(s)
                 .into_iter()
-                .map(|l| Value::Str(l.strip_suffix('\r').unwrap_or(l).into()))
+                .map(|l| Value::Str(l.into()))
                 .collect();
             Ok(Value::List(Rc::new(ListVal {
                 items,
                 float: false,
             })))
         }
-        "parse_int" => {
-            let digits = s.strip_prefix('-').unwrap_or(s);
-            let valid = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());
-            match valid.then(|| s.parse::<i64>().ok()).flatten() {
-                Some(n) => Ok(ok(Value::Int(n))),
-                None => Ok(err(Value::ParseError)),
-            }
-        }
+        "parse_int" => match stext::parse_int(s) {
+            Some(n) => Ok(ok(Value::Int(n))),
+            None => Ok(err(Value::ParseError)),
+        },
         _ => unsupported(format!("String.{name}")),
     }
 }

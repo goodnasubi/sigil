@@ -10,6 +10,9 @@
 use crate::ast::{File, Item, Type};
 use crate::interp::{Arg, Failure, Options, Outcome, RunError, Stop, StopKind};
 use crate::ir::*;
+use crate::shared_args::arg_name;
+use crate::shared_path as spath;
+use crate::shared_text::{self as stext, fmt_float};
 use std::cell::{Cell as StdCell, RefCell};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -280,21 +283,6 @@ impl Drop for Agg {
 // ---------------------------------------------------------------------------
 // 表示・比較
 
-fn fmt_float(f: f64) -> String {
-    if f.is_nan() {
-        "NaN".into()
-    } else if f.is_infinite() {
-        if f > 0.0 { "inf" } else { "-inf" }.into()
-    } else {
-        let s = format!("{f}");
-        if s.contains('.') {
-            s
-        } else {
-            format!("{s}.0")
-        }
-    }
-}
-
 fn show_agg(ts: &[TypeDef], a: &Agg) -> String {
     match a.tag {
         Tag::Tuple => {
@@ -492,12 +480,7 @@ impl<'p> M<'p> {
     }
 
     fn io_error(&self, kind: std::io::ErrorKind, path: Rc<str>) -> Val {
-        let i = match kind {
-            std::io::ErrorKind::NotFound => IO_NOT_FOUND,
-            std::io::ErrorKind::PermissionDenied => IO_PERMISSION_DENIED,
-            _ => IO_OTHER,
-        };
-        self.variant(self.io, i, vec![Val::Path(path)])
+        self.variant(self.io, spath::io_arm(kind), vec![Val::Path(path)])
     }
 
     fn stop_at(&self, id: StopId, kind: Option<StopKind>, detail: Option<&str>) -> E {
@@ -1098,30 +1081,19 @@ impl<'p> M<'p> {
                     _ => "".into(),
                 });
                 match b {
-                    StrLen => Val::Int(text.chars().count() as i64),
+                    StrLen => Val::Int(stext::char_len(&text)),
                     StrIsEmpty => Val::Bool(text.is_empty()),
-                    StrTrim => Val::Str(text.trim().into()),
-                    StrLines => {
-                        let mut parts: Vec<&str> = text.split('\n').collect();
-                        if parts.last() == Some(&"") {
-                            parts.pop();
-                        }
-                        list_of(
-                            parts
-                                .into_iter()
-                                .map(|l| Val::Str(l.strip_suffix('\r').unwrap_or(l).into()))
-                                .collect(),
-                        )
-                    }
-                    _ => {
-                        let digits = text.strip_prefix('-').unwrap_or(&text);
-                        let valid =
-                            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());
-                        match valid.then(|| text.parse::<i64>().ok()).flatten() {
-                            Some(n) => self.ok(Val::Int(n)),
-                            None => self.err(Val::ParseError),
-                        }
-                    }
+                    StrTrim => Val::Str(stext::trim(&text).into()),
+                    StrLines => list_of(
+                        stext::lines(&text)
+                            .into_iter()
+                            .map(|l| Val::Str(l.into()))
+                            .collect(),
+                    ),
+                    _ => match stext::parse_int(&text) {
+                        Some(n) => self.ok(Val::Int(n)),
+                        None => self.err(Val::ParseError),
+                    },
                 }
             }
             PathNew => {
@@ -1135,19 +1107,19 @@ impl<'p> M<'p> {
             PathJoin => {
                 let t = self.text_of(locals, &args[0]);
                 let o = self.text_of(locals, &args[1]);
-                Val::Path(path_text(&std::path::Path::new(&*t).join(&*o)))
+                Val::Path(spath::join(&t, &o).into())
             }
             PathFileName => {
                 let t = self.text_of(locals, &args[0]);
-                match std::path::Path::new(&*t).file_name() {
-                    Some(n) => self.some(Val::Str(path_text(n.as_ref()))),
+                match spath::file_name(&t) {
+                    Some(n) => self.some(Val::Str(n.into())),
                     None => self.none(),
                 }
             }
             PathParent => {
                 let t = self.text_of(locals, &args[0]);
-                match std::path::Path::new(&*t).parent() {
-                    Some(n) => self.some(Val::Path(path_text(n))),
+                match spath::parent(&t) {
+                    Some(n) => self.some(Val::Path(n.into())),
                     None => self.none(),
                 }
             }
@@ -1266,22 +1238,8 @@ fn int_of(v: &Val) -> i64 {
     }
 }
 
-fn path_text(x: &std::path::Path) -> Rc<str> {
-    x.to_string_lossy().as_ref().into()
-}
-
 // ---------------------------------------------------------------------------
 // 入口
-
-fn arg_name(a: &Arg) -> &'static str {
-    match a {
-        Arg::Int(_) => "整数",
-        Arg::Float(_) => "小数",
-        Arg::Bool(_) => "真偽値",
-        Arg::Str(_) => "文字列",
-        Arg::List(_) => "一覧",
-    }
-}
 
 fn to_val(a: &Arg) -> Val {
     match a {

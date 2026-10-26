@@ -1,0 +1,17 @@
+[package]
+name = "sigil_rt_os"
+version = "0.0.0"
+edition = "2021"
+description = "Sigil の暫定ランタイムの OS 部（ADR 0015 の決定 6）。console・fs・Path"
+license = "MIT"
+publish = false
+
+# 外部のクレートに依存しない（標準ライブラリだけ）。ルートの Cargo.toml のワークスペースには入れない。
+# core とは独立（受け渡しは ptr/len だけ）。.a を 2 つに分ける理由は ADR 0015 と PR の計測を参照。
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[workspace]
+
+[profile.release]
+panic = "abort"

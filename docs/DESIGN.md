@@ -54,13 +54,14 @@
 | 契約（事前・事後条件）の検査方法（静的 / 実行時） | **決定**: P0 は実行時検査のみ（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)）。静的検査の範囲と時期は未決 | 静的検査は P0 の完了後 |
 | 効果（副作用）の扱い | **決定**: 固定カテゴリの静的宣言と、推論結果との完全一致検査（[ADR 0004](decisions/0004-effects.md)） | — |
 | 異常停止・無限ループを効果に数えるか | **決定**: どちらも数えない。`effects none` は外から観測できる作用がないことを表し、`ensures` は「戻るならば成り立つ」を表す。異常停止（契約違反・桁あふれ・0 での除算）はすべて破棄をしてから停止する（[ADR 0013](decisions/0013-termination-stdlib-and-function-values.md)） | 止まることの証明は契約の静的検査（P0 の完了後）で検討 |
-| モジュールの単位と出力先の指定 | 未決（宣言の表記 `module ... targets ... trust ...` は [ADR 0008](decisions/0008-m0-notation.md) で決定） | M1 の前 |
+| モジュールの単位と出力先の指定 | 未決（宣言の表記 `module ... targets ... trust ...` は [ADR 0008](decisions/0008-m0-notation.md) で決定） | P1 の段階 2 の最初（[ADR 0018](decisions/0018-p1-scope.md)。モジュールの単位の ADR 2-1） |
 | 出力先（ネイティブ・WebAssembly・JavaScript）とコンパイラ構成 | 未決（実装言語とネイティブのバックエンドは ADR 0006 で決定） | M5 の前（ネイティブ）。WebAssembly・JavaScript は P2 の前 |
 | Python 連携の方式（束縛の生成、境界での値の受け渡し） | 未決 | P3 の前 |
 | 資源の解放時期の意味論（出力先によらず同じにする方法） | 未決 | P2 の前 |
 | UI の記述モデル（React の置き換え方） | 未決 | P2 の前 |
 | フロントエンドとバックエンドの間の通信の記述方法 | 未決 | P2 の前 |
 | 並行処理のモデル | **決定**: 中断を効果（`task.*`）として扱う構造化並行処理、`Sendable`・`Shareable` の導出（[ADR 0007](decisions/0007-concurrency-model.md)）。P0 が満たすべき条件は ADR 0006 | 実装は P1（ブラウザ向けは P2） |
+| P1 の範囲と順序 | **決定**: M6 の後に P1 を始め、段階 0〜7（準備 → 言語の前提 → ランタイムの置き換え → 並行処理 P1-a・P1-b → サーバーの部品 → 完了）で進める。完了条件は出力に Rust のコードを含めないこと（[ADR 0018](decisions/0018-p1-scope.md)） | — |
 | 長期目標と段階計画 | **決定**: P0〜P7（[ADR 0005](decisions/0005-long-term-goals.md)） | — |
 | 標準ライブラリの分割（実行環境なしの核 / OS 依存部分） | **決定**（[ADR 0014](decisions/0014-core-and-os-split.md)）。経緯: 未決（M1〜M2 の暫定の表が従う規則（読むだけの操作は `&T` の受け手のメソッド、`console.log` は `Displayable` を `&T` で読む、標準の自由関数の名前は上書きできない）は [ADR 0012](decisions/0012-ownership-check-and-stdlib.md) で決定。効果を持たない部分の正式な一覧（`clone`・`get_mut`・`find`・`min_by` を加え、`unwrap`・`Box`・`position` は置かない。列挙型を通る型の再帰を許す）は [ADR 0013](decisions/0013-termination-stdlib-and-function-values.md) で決定） | 決定済み（M4） |
 | 信頼基盤の宣言方法と、検査を外した箇所の契約の書き方 | 決定（[ADR 0016](decisions/0016-trust-base-declaration.md)。モジュールの宣言の `trust base` は [ADR 0008](decisions/0008-m0-notation.md)） | — |

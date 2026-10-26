@@ -44,6 +44,7 @@ fn cargo_cmd(manifest: &Path, target_dir: &Path) -> Command {
         .arg("--target-dir")
         .arg(target_dir)
         // 親の cargo の指定（clippy のラッパーなど）を、ランタイムのビルドへ持ち込まない。
+        .env("CARGO_TERM_COLOR", "never")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET_DIR");

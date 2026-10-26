@@ -29,13 +29,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc libc6-dev
 
-      - name: 診断(一時)
-        run: |
-          uname -m; cc --version | head -1
-          ls -l /usr/lib/x86_64-linux-gnu/libc.a /usr/lib/x86_64-linux-gnu/libc.so* || true
-          echo 'int main(){return 0;}' > /tmp/t.c && cc -static -no-pie /tmp/t.c -o /tmp/t -lc -lm -lpthread -ldl; echo rc=$?
-          grep -n "fn native_libs" -A8 build.rs src/*.rs | head -20
-
       - uses: actions/cache@v4
         with:
           path: |

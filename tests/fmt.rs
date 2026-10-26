@@ -253,7 +253,7 @@ fn deep_output_is_explicit_error() {
     // 不要な括弧は消えるので、出力は浅くなって成功する。
     let mk = |n: usize| format!("{}x{}", "(".repeat(n), ")".repeat(n));
     let n = ok_depth(&mk);
-    assert!(n >= 50, "{n}");
+    assert!(n >= 60, "{n}");
     assert_eq!(
         format(&body(&format!("  return {};\n", mk(n)))).unwrap(),
         body("  return x;\n")
@@ -280,7 +280,7 @@ fn max_ok(mk: &dyn Fn(usize) -> String) -> usize {
 /// 境界直下の入力で、format が成功して冪等か、TooDeep / FmtVerify のどちらかであること。
 fn check_boundary(mk: &dyn Fn(usize) -> String) {
     let n = max_ok(mk);
-    assert!(n >= 50, "境界が浅すぎる: {n}");
+    assert!(n >= 60, "境界が浅すぎる: {n}");
     assert!(sigil::parse(&mk(n)).is_ok());
     assert!(
         sigil::parse(&mk(n + 1)).is_err(),

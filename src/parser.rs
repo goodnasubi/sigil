@@ -53,6 +53,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "Set",
     "Map",
     "to_float",
+    "raw",
 ];
 
 /// 出力先（ADR 0008 の決定 6。P0 で書けるもの）。
@@ -713,7 +714,7 @@ impl Parser {
             None
         };
 
-        let mut clause_lines = [0u32; 4];
+        let mut clause_lines = [0u32; 5];
         clause_lines[0] = self.span().line;
         self.expect_clause("intent")?;
         let intent_span = self.span();
@@ -766,6 +767,27 @@ impl Parser {
             }
         }
 
+        let mut unchecked = None;
+        if self.at_kw("unchecked") {
+            clause_lines[4] = self.span().line;
+            self.bump();
+            let span = self.span();
+            match self.tok().clone() {
+                Tok::Str(s) => {
+                    self.bump();
+                    if s.is_empty() {
+                        return Err(Error::new(
+                            ErrorKind::EmptyUnchecked,
+                            span,
+                            "`unchecked` の前提の文は空にできない",
+                        ));
+                    }
+                    unchecked = Some(s);
+                }
+                _ => return Err(self.unexpected("`unchecked` の前提（文字列リテラル）")),
+            }
+        }
+
         let body = self.block();
         self.allow_self = saved_self;
         let body = body?;
@@ -778,6 +800,7 @@ impl Parser {
             requires,
             ensures,
             effects,
+            unchecked,
             body,
             span,
             clause_lines,
@@ -788,12 +811,12 @@ impl Parser {
         if self.eat_kw(want) {
             return Ok(());
         }
-        for c in ["intent", "requires", "ensures", "effects"] {
+        for c in ["intent", "requires", "ensures", "effects", "unchecked"] {
             if self.at_kw(c) {
                 return Err(self.err(
                     ErrorKind::ClauseOrder,
                     format!(
-                        "契約節は `intent` → `requires` → `ensures` → `effects` の順に書く（`{want}` のところに `{c}` がある）"
+                        "契約節は `intent` → `requires` → `ensures` → `effects`（→ 省ける `unchecked`）の順に書く（`{want}` のところに `{c}` がある）"
                     ),
                 ));
             }

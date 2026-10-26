@@ -444,3 +444,15 @@ fn impl_blocks() {
         &format!("{HEAD}impl Account {{\n{m}}}\n"),
     );
 }
+
+#[test]
+fn unchecked_clause_round_trips() {
+    let src = format!(
+        "{HEAD}fn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"xs は確保した領域を指す\"\n{{\n  return x;\n}}\n"
+    );
+    assert_eq!(fmt(&src), src);
+    assert!(check(&src).unwrap().is_none());
+    // 字下げの崩れは直る。
+    let messy = src.replace("\n  unchecked", "\n      unchecked");
+    expect(&messy, &src);
+}

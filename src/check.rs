@@ -2005,6 +2005,13 @@ impl Ck {
     }
 
     fn check_fn_in(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
+        if f.unchecked.is_some() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                f.span,
+                "`unchecked` の検査は未実装（ADR 0016 の PR2）",
+            ));
+        }
         self.skip = None;
         self.annots.clear();
         self.cur_fn = f.name.clone();

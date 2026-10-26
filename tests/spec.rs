@@ -100,3 +100,21 @@ fn impl_methods_and_constraints_in_spec() {
     );
     assert_eq!(spec(&with_unit).unwrap(), out);
 }
+
+#[test]
+fn spec_shows_unchecked_premise_and_count() {
+    let src = "module m.a\n  targets server\n  trust base\n\nfn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"領域は確保済み\"\n{\n  return x;\n}\n\nfn g(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return x;\n}\n";
+    let out = spec(src).unwrap();
+    assert!(
+        out.contains("信頼基盤: はい（検査を外す関数 1 個）"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  効果: なし\n  検査を外す: 領域は確保済み\n"),
+        "{out}"
+    );
+    // 節のない関数には出ない。
+    assert_eq!(out.matches("検査を外す:").count(), 1);
+    let none = spec(&src.replace("trust base", "trust none")).unwrap();
+    assert!(none.contains("信頼基盤: いいえ\n"));
+}

@@ -549,3 +549,53 @@ fn let_syntax() {
     assert!(parse(&f("  let () = t;\n  return x;")).is_err());
     assert!(parse(&f("  let (a) = t;\n  return x;")).is_err());
 }
+
+// ---- unchecked の節（ADR 0016 の決定 2） ----
+
+const UNCHECKED_FN: &str = "fn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"前提\"\n{\n  return x;\n}\n";
+
+#[test]
+fn unchecked_clause_parses_after_effects() {
+    ok(&fnsrc(UNCHECKED_FN));
+}
+
+#[test]
+fn unchecked_clause_must_be_last() {
+    let s = fnsrc(&GOOD_FN.replace(
+        "  requires none\n",
+        "  unchecked \"前提\"\n  requires none\n",
+    ));
+    assert_eq!(kind(&s), ErrorKind::ClauseOrder);
+}
+
+#[test]
+fn unchecked_clause_empty_rejected() {
+    let s = fnsrc(&UNCHECKED_FN.replace("\"前提\"", "\"\""));
+    assert_eq!(kind(&s), ErrorKind::EmptyUnchecked);
+}
+
+#[test]
+fn unchecked_clause_needs_a_string() {
+    let s = fnsrc(&UNCHECKED_FN.replace("\"前提\"", "none"));
+    assert_eq!(kind(&s), ErrorKind::Unexpected);
+}
+
+#[test]
+fn raw_is_reserved_name() {
+    assert_eq!(
+        kind(&fnsrc(
+            &GOOD_FN.replace("return x;", "let raw = 1;\n  return x;")
+        )),
+        ErrorKind::ReservedNameDefined
+    );
+    assert_eq!(
+        kind(&fnsrc(&GOOD_FN.replace("fn f(", "fn raw("))),
+        ErrorKind::ReservedNameDefined
+    );
+}
+
+#[test]
+fn unchecked_is_a_keyword() {
+    let s = fnsrc(&GOOD_FN.replace("return x;", "let unchecked = 1;\n  return x;"));
+    assert!(parse(&s).is_err());
+}

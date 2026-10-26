@@ -626,6 +626,10 @@ impl<'a> Printer<'a> {
         } else {
             self.w(&format!("effects {}", effs.join(", ")));
         }
+        if let Some(u) = &d.unchecked {
+            self.plain_start(d.clause_lines[4], ind + 1);
+            self.w(&format!("unchecked {}", escape_str(u)));
+        }
         self.plain_start(d.body.open_line, ind);
         // 戻り値のない関数の末尾の `return;` は書かない（ADR 0008 の決定 2）。
         let drop_ret = d.ret.as_ref().is_none_or(is_unit)

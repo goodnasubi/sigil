@@ -111,10 +111,12 @@ pub struct FnDecl {
     pub ensures: Option<Expr>,
     /// `none` は空。
     pub effects: Vec<Effect>,
+    /// `unchecked "前提"` の節（ADR 0016 の決定 2）。省けて、書かないことは「原始操作を呼ばない」を意味する。
+    pub unchecked: Option<String>,
     pub body: Block,
     pub span: Span,
-    /// `intent`・`requires`・`ensures`・`effects` の各節の行。
-    pub clause_lines: [u32; 4],
+    /// `intent`・`requires`・`ensures`・`effects`・`unchecked` の各節の行（`unchecked` がなければ 0）。
+    pub clause_lines: [u32; 5],
 }
 
 #[derive(Debug, Clone, PartialEq)]

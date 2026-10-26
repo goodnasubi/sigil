@@ -205,3 +205,76 @@ fn type_and_index_errors_are_caught() {
         false
     });
 }
+
+/// 分岐の腕を、何もしない `Return` だけの基本ブロックに付け替える。破棄の落としが「来ない腕」に紛れないことを確かめる。
+#[test]
+fn branch_straight_to_return_is_caught() {
+    caught("f", "分岐の腕を直接の戻りにする", |p| {
+        let f = &mut p.funcs[0];
+        let ret = f.blocks.len();
+        for bi in 0..ret {
+            if let Term::Branch(_, _, e) = &mut f.blocks[bi].term {
+                *e = ret;
+                f.blocks.push(Block {
+                    stmts: vec![],
+                    term: Term::Return,
+                });
+                return true;
+            }
+        }
+        false
+    });
+    caught("g", "Switch の腕を直接の戻りにする", |p| {
+        let f = &mut p.funcs[0];
+        let ret = f.blocks.len();
+        for bi in 0..ret {
+            if let Term::Switch(_, arms, _) = &mut f.blocks[bi].term {
+                arms[0].1 = ret;
+                f.blocks.push(Block {
+                    stmts: vec![],
+                    term: Term::Return,
+                });
+                return true;
+            }
+        }
+        false
+    });
+}
+
+/// 片方の腕だけで破棄し、合流の後でもう一度破棄する（破棄済みかもしれない）。
+#[test]
+fn conditional_double_drop_after_join_is_caught() {
+    caught("f", "片方の腕だけ先に破棄する", |p| {
+        let f = &mut p.funcs[0];
+        let Some(&param) = f.params.iter().find(|&&l| owned_ty(&f.locals[l].ty)) else {
+            return false;
+        };
+        for bi in 0..f.blocks.len() {
+            if let Term::Branch(_, a, _) = f.blocks[bi].term {
+                f.blocks[a].stmts.insert(0, Stmt::Drop(Place::local(param)));
+                return true;
+            }
+        }
+        false
+    });
+}
+
+fn owned_ty(t: &Ty) -> bool {
+    !matches!(
+        t,
+        Ty::Int | Ty::Bool | Ty::Unit | Ty::Float | Ty::Ref(_) | Ty::MutRef(_)
+    )
+}
+
+#[test]
+fn unreachable_arms_are_not_errors() {
+    // 腕がすべて並んだ `match`（g）の既定の腕は `Unreachable` で、誤りにならない。
+    let p = lowered("g");
+    assert!(
+        p.funcs
+            .iter()
+            .any(|f| f.blocks.iter().any(|b| b.term == Term::Unreachable)),
+        "Unreachable の腕がない\n{p}"
+    );
+    assert_eq!(errs(&p), Vec::<String>::new());
+}

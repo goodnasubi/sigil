@@ -829,7 +829,7 @@ impl<'a> L<'a> {
             .into_iter()
             .map(|b| ir::Block {
                 stmts: b.stmts,
-                term: b.term.unwrap_or(Term::Return),
+                term: b.term.unwrap_or(Term::Unreachable),
             })
             .collect();
         ir::Func {
@@ -1175,7 +1175,8 @@ impl<'a> L<'a> {
             self.goto(join);
             self.fb.cur = fail;
         }
-        self.term(Term::Return);
+        // どの腕にも合わなかった場合（腕がすべて並んでいれば来ない）。
+        self.term(Term::Unreachable);
         self.fb.cur = join;
         Ok(())
     }

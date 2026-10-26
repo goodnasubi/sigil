@@ -6,8 +6,8 @@
 //! 2. 移動した値を後で使っていない: 制御流れ図の上で、移動した場所（局所の全体、または欄の経路）を読んでいない。
 //!    合流では「移動したかもしれない」を残す。
 //! 3. 破棄が各経路でちょうど 1 回: 戻り（`Return`）と巻き戻しの終わり（`Resume`）で、破棄の対象の局所
-//!    （戻り値の `_0` を除く）が生きたまま残っていない（破棄の落とし）。また、すでに破棄した局所をもう一度破棄していない
-//!    （移動して空になった場所の `Drop` は、旗の規則で何もしないので数えない）。
+//!    （戻り値の `_0` を除く）が生きたまま残っていない（破棄の落とし）。また、破棄済みかもしれない局所（合流の後を含む）をもう一度破棄していない
+//!    （移動して空になった場所の `Drop` は、旗の規則で何もしないので数えない）。到達しない腕は `Term::Unreachable` で表し、何も検査しない。
 //!
 //! 解析は局所ごとの状態（未初期化・生きている・移動して空・破棄済み）の集合を、基本ブロックの入口で合流させる前向きの
 //! データフローで行う。`cleanup` の辺は、停止しうる操作の引数を移動した後・結果を書く前の状態から出る。
@@ -74,11 +74,11 @@ pub fn verify(prog: &Program) -> Result<(), Vec<String>> {
     }
 }
 
-/// ソースを SIR にして検証する。SIR にできない（未対応の構文など）ときは何も言わない。
+/// ソースを SIR にして検証する。SIR にできないときは誤りとして返す（呼び出し側は、SIR にできるソースだけを渡す）。
 pub fn verify_sources(srcs: &[&str], func: &str) -> Result<(), Vec<String>> {
     match crate::ir_eval::lower_sources(srcs, func) {
         Ok(p) => verify(&p),
-        Err(_) => Ok(()),
+        Err(e) => Err(vec![format!("SIR にできない: {e}")]),
     }
 }
 
@@ -340,7 +340,7 @@ impl<'a> Fn<'a> {
                 }
                 self.expect(bb, "表明の条件", Some(Ty::Bool), self.op_ty(cond));
             }
-            Term::Return | Term::Resume => {}
+            Term::Return | Term::Resume | Term::Unreachable => {}
         }
     }
 
@@ -472,8 +472,12 @@ impl<'a> Fn<'a> {
                     return;
                 }
                 if p.proj.is_empty() {
-                    if st.local[p.base] == DROPPED {
-                        self.err(bb, format!("すでに破棄した {p} をもう一度破棄している"));
+                    // 移動済み（`MOVED` だけ）の破棄は何もしない。破棄済みの可能性がある（`DROPPED` を含む）ものは、合流の後でも誤り。
+                    if st.local[p.base] & DROPPED != 0 {
+                        self.err(
+                            bb,
+                            format!("すでに破棄したかもしれない {p} をもう一度破棄している"),
+                        );
                     }
                     st.local[p.base] = DROPPED;
                     st.paths[p.base].clear();
@@ -482,12 +486,6 @@ impl<'a> Fn<'a> {
                 }
             }
         }
-    }
-
-    /// 分岐の先が、何もしない `Return` だけの基本ブロックなら、到達しない腕である
-    /// （腕がすべて並んだ `match` の既定の腕や、`bool` の `match` の取りこぼしの腕を、lowering はこの形にする）。
-    fn dead(&self, t: BlockId) -> bool {
-        self.f.blocks[t].stmts.is_empty() && self.f.blocks[t].term == Term::Return
     }
 
     fn leaks(&mut self, bb: usize, st: &State, what: &str) {
@@ -569,21 +567,15 @@ impl<'a> Fn<'a> {
             Term::Branch(c, a, e) => {
                 self.mv(bb, st, c);
                 for t in [a, e] {
-                    if !self.dead(*t) {
-                        out.push((*t, st.clone()));
-                    }
+                    out.push((*t, st.clone()));
                 }
             }
             Term::Switch(c, arms, d) => {
                 self.mv(bb, st, c);
                 for (_, t) in arms {
-                    if !self.dead(*t) {
-                        out.push((*t, st.clone()));
-                    }
+                    out.push((*t, st.clone()));
                 }
-                if !self.dead(*d) {
-                    out.push((*d, st.clone()));
-                }
+                out.push((*d, st.clone()));
             }
             Term::Call {
                 func,
@@ -634,6 +626,8 @@ impl<'a> Fn<'a> {
                 }
             }
             Term::Resume => self.leaks(bb, st, "巻き戻しの終わり"),
+            // 来ない基本ブロック。何も検査しない（ここへの辺は、戻りへの辺と違って漏れを隠さない）。
+            Term::Unreachable => {}
         }
         out
     }

@@ -14,7 +14,11 @@ use sigil::ir_eval;
 type Res = Result<Outcome, Failure>;
 
 /// SIR の検証器（ADR 0018 の決定 4）。テストの実行では常に通す。
+/// SIR にできないソース（未対応の構文・入口の誤り）は、検証の対象外として飛ばす。
 fn verify(srcs: &[&str], func: &str) {
+    if sigil::ir_eval::lower_sources(srcs, func).is_err() {
+        return;
+    }
     if let Err(es) = sigil::verify::verify_sources(srcs, func) {
         panic!(
             "SIR の検証に失敗: {func}\n{}\n{}",

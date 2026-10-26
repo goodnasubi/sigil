@@ -344,6 +344,9 @@ pub enum Term {
         cleanup: BlockId,
     },
     Return,
+    /// どこからも来ない基本ブロックの終わり（腕がすべて並んだ `match` の既定の腕など）。
+    /// 実行には来ない。来たら検証器が誤りとする。
+    Unreachable,
     /// 停止の巻き戻しを呼び出し元の `cleanup` へ続ける。
     Resume,
 }

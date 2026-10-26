@@ -20,6 +20,7 @@ pub mod lsp;
 pub mod modpath;
 pub mod native;
 pub mod parser;
+pub mod project;
 pub mod report;
 pub mod runtime_lib;
 #[path = "shared/args.rs"]

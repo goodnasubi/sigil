@@ -201,10 +201,11 @@ fn spec_visibility_of_each_kind() {
 }
 
 #[test]
-fn check_accepts_use_and_pub_in_2a() {
-    // 名前の解決と可視性の検査は 2-2b。2-2a では構文を受け付け、型検査は通す。
-    let src = module("a.b", "\nuse x.y.f;\n", &pub_fn("g"));
-    check::check(&src).unwrap();
+fn check_accepts_pub_and_rejects_use_without_root() {
+    // `pub` は `--root` なしでも通る。`use` の先は根がないと決まらないので、2-2b では明示的に拒否する。
+    check::check(&module("a.b", "", &pub_fn("g"))).unwrap();
+    let e = check::check(&module("a.b", "\nuse x.y.f;\n", &pub_fn("g"))).unwrap_err();
+    assert_eq!((e.kind, e.span.line), (ErrorKind::Unsupported, 5));
 }
 
 // ---- パス→モジュール名（--root） ----

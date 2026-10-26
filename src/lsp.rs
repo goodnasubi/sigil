@@ -379,29 +379,61 @@ impl<W: Write> Server<W> {
         None
     }
 
-    /// 閉じた文書をディスクの中身に戻して検査し直す。ディスクに無ければ、組の診断を消す。
+    /// 文書の中身。開いていなければディスクの中身。
+    fn text_of(&self, uri: &str) -> Option<String> {
+        self.docs
+            .get(uri)
+            .cloned()
+            .or_else(|| uri_to_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))
+    }
+
+    /// 閉じた文書をディスクの中身に戻して検査する。ディスクに無ければ、その診断を消し、残りの組を検査し直す。
     fn close(&mut self, uri: &str) {
         if self.docs.remove(uri).is_none() {
             return;
         }
-        let disk = uri_to_path(uri).and_then(|p| std::fs::read_to_string(p).ok());
-        match disk {
+        match self.text_of(uri) {
             Some(text) => self.recheck(uri, &text),
             None => {
-                let mut all = self.groups.get(uri).cloned().unwrap_or_default();
-                all.push(uri.to_string());
-                all.dedup();
-                for u in all {
-                    self.publish(&u, vec![]);
+                let old = self.groups.remove(uri).unwrap_or_default();
+                self.publish(uri, vec![]);
+                for u in old.into_iter().filter(|u| u != uri) {
+                    if let Some(t) = self.text_of(&u) {
+                        self.recheck(&u, &t);
+                    }
                 }
             }
         }
-        self.groups.remove(uri);
     }
 
+    /// 検査し直して配信する。組を抜けたファイルが残した元の組も、その場で検査し直す（組の変更前と後の和集合）。
     fn recheck(&mut self, uri: &str, text: &str) {
-        let run = std::panic::catch_unwind(AssertUnwindSafe(|| self.compute(uri, text)));
-        let (members, out) = match run {
+        let mut todo = vec![(uri.to_string(), text.to_string())];
+        let mut done: Vec<String> = vec![];
+        while let Some((u, t)) = todo.pop() {
+            if done.contains(&u) {
+                continue;
+            }
+            done.push(u.clone());
+            let old = self.groups.get(&u).cloned().unwrap_or_default();
+            let (members, out) = self.guarded(&u, &t);
+            for m in &members {
+                self.groups.insert(m.clone(), members.clone());
+            }
+            for (x, d) in out {
+                self.publish(&x, d);
+            }
+            for o in old.into_iter().filter(|o| !members.contains(o)) {
+                self.groups.remove(&o);
+                if let Some(ot) = self.text_of(&o) {
+                    todo.push((o, ot));
+                }
+            }
+        }
+    }
+
+    fn guarded(&self, uri: &str, text: &str) -> (Vec<String>, Diags) {
+        match std::panic::catch_unwind(AssertUnwindSafe(|| self.compute(uri, text))) {
             Ok(x) => x,
             Err(p) => {
                 let msg = p
@@ -423,10 +455,6 @@ impl<W: Write> Server<W> {
                 }
                 (m, vec![(uri.to_string(), vec![d])])
             }
-        };
-        self.groups.insert(uri.to_string(), members);
-        for (u, d) in out {
-            self.publish(&u, d);
         }
     }
 

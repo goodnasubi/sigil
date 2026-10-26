@@ -4,13 +4,17 @@ use sigil::json::{obj, parse, Value};
 use sigil::lsp::{path_to_uri, read_frame, Frame, MAX_BODY, MAX_HEADER_LINE};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{channel, Receiver};
+use std::time::{Duration, Instant};
 
 struct Client {
     child: Child,
     stdin: Option<ChildStdin>,
-    out: BufReader<ChildStdout>,
+    out: Receiver<Frame>,
 }
+
+const WAIT: Duration = Duration::from_secs(10);
 
 impl Drop for Client {
     fn drop(&mut self) {
@@ -31,7 +35,16 @@ impl Client {
         }
         let mut child = cmd.spawn().unwrap();
         let stdin = child.stdin.take();
-        let out = BufReader::new(child.stdout.take().unwrap());
+        // 読み取りは別のスレッドで行い、待ちすぎたらテストを失敗させる（hang させない）。
+        let mut rd = BufReader::new(child.stdout.take().unwrap());
+        let (tx, out) = channel();
+        std::thread::spawn(move || loop {
+            let f = read_frame(&mut rd, MAX_BODY);
+            let end = matches!(f, Frame::Eof | Frame::Broken(_));
+            if tx.send(f).is_err() || end {
+                break;
+            }
+        });
         Client { child, stdin, out }
     }
 
@@ -47,9 +60,21 @@ impl Client {
     }
 
     fn recv(&mut self) -> Value {
-        match read_frame(&mut self.out, MAX_BODY) {
-            Frame::Body(b) => parse(std::str::from_utf8(&b).unwrap()).unwrap(),
+        match self.out.recv_timeout(WAIT) {
+            Ok(Frame::Body(b)) => parse(std::str::from_utf8(&b).unwrap()).unwrap(),
             f => panic!("本文が来ない: {f:?}"),
+        }
+    }
+
+    /// 終了を待って終了コードを返す（待ちすぎたら失敗）。
+    fn exit_code(&mut self) -> i32 {
+        let t = Instant::now();
+        loop {
+            if let Some(st) = self.child.try_wait().unwrap() {
+                return st.code().unwrap_or(-1);
+            }
+            assert!(t.elapsed() < WAIT, "終了しない");
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -146,7 +171,7 @@ impl Client {
         }
         self.notify("exit", Value::Null);
         drop(self.stdin.take());
-        (got, self.child.wait().unwrap().code().unwrap())
+        (got, self.exit_code())
     }
 }
 
@@ -288,7 +313,7 @@ fn lsp_shutdown() {
     c.initialize(&[]);
     c.notify("exit", Value::Null);
     drop(c.stdin.take());
-    assert_eq!(c.child.wait().unwrap().code(), Some(1));
+    assert_eq!(c.exit_code(), 1);
     // `initialize` の前の要求と、`shutdown` の後の要求は拒む
     let mut c = Client::start(&[]);
     c.request(5, "shutdown", Value::Null);
@@ -314,7 +339,7 @@ fn lsp_shutdown() {
     );
     c.notify("exit", Value::Null);
     drop(c.stdin.take());
-    assert_eq!(c.child.wait().unwrap().code(), Some(0));
+    assert_eq!(c.exit_code(), 0);
 }
 
 #[test]
@@ -508,5 +533,63 @@ fn lsp_frame_limits_on_the_wire() {
     // 枠が崩れたら終了コード 1 で終わる
     let mut c = Client::start(&[]);
     c.raw(b"Content-Length: abc\r\n\r\n");
-    assert_eq!(c.child.wait().unwrap().code(), Some(1));
+    assert_eq!(c.exit_code(), 1);
+}
+
+#[test]
+fn lsp_group_split_rechecks_remaining() {
+    // a と c は同じ関数 f を持ち（重複）、b は別の関数。3 つとも m.a。
+    let dir = tmpdir("split");
+    let f = |name: &str| {
+        format!(
+            "{HEAD}{}  return n;\n}}\n",
+            FN_HEAD.replace("fn f(", &format!("fn {name}("))
+        )
+    };
+    let (a, b, c) = (
+        write(&dir, "a.sigil", &f("f")),
+        write(&dir, "b.sigil", &f("g")),
+        write(&dir, "c.sigil", &f("f")),
+    );
+    let mut cl = Client::start(&[]);
+    cl.initialize(&[]);
+    cl.open(&b, &f("g"));
+    let first = cl.publishes(3);
+    assert_eq!(
+        first.iter().map(|p| p.1.len()).sum::<usize>(),
+        1,
+        "重複が 1 件"
+    );
+    // b が別のモジュールへ移る。a と c の組は、b を抜けた後も検査し直されて重複が残る。
+    cl.change(&b, &f("g").replace("module m.a", "module m.b"));
+    let (got, code) = cl.finish();
+    assert_eq!(code, 0);
+    let last = |p: &Path| {
+        got.iter()
+            .rev()
+            .find(|g| g.0 == path_to_uri(p))
+            .map(|g| g.1.len())
+    };
+    assert_eq!(last(&b), Some(0));
+    assert_eq!([last(&a), last(&c)].iter().flatten().sum::<usize>(), 1);
+    // 閉じる（ディスクの中身は m.a）と b は元の組へ戻り、3 つのファイルのどれかに重複が 1 件残る。
+    let mut cl = Client::start(&[]);
+    cl.initialize(&[]);
+    cl.open(&b, &f("g"));
+    cl.publishes(3);
+    cl.change(&b, &f("g").replace("module m.a", "module m.b"));
+    cl.close(&b);
+    let (got, _) = cl.finish();
+    let n: usize = [&a, &b, &c]
+        .iter()
+        .map(|p| {
+            got.iter()
+                .rev()
+                .find(|g| g.0 == path_to_uri(p))
+                .unwrap()
+                .1
+                .len()
+        })
+        .sum();
+    assert_eq!(n, 1);
 }

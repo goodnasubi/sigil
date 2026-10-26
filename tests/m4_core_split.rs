@@ -1,7 +1,9 @@
 //! ADR 0014 の PR1: 出力先 `bare` と効果の表の `bare` の列。
 
 use sigil::effects::EffectTable;
-use sigil::interp::{run, Arg};
+mod common;
+use common::run;
+use sigil::interp::Arg;
 use sigil::{check::check, parse, ErrorKind};
 
 const GOOD_FN: &str = "fn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return x;\n}\n";

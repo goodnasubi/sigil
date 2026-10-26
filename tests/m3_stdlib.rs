@@ -1,7 +1,9 @@
 //! ADR 0013 の「M3 の完了条件に加えるもの」のうち、標準ライブラリの各関数の意味（決定 2）と
 //! 関数の値を引数に渡すこと（決定 3）の実行時のテスト。
 
-use sigil::interp::{run, Arg};
+mod common;
+use common::run;
+use sigil::interp::Arg;
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 

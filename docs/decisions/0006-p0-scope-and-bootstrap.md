@@ -285,7 +285,7 @@ M6 の完了をもって P0 の完了とする。契約の静的検査（証明�
 | 9 | M3・M5 | 破棄を記録するテスト用の型で、`?` による早期の戻りと契約違反による停止のときの破棄の順序を M3 で固定し、M5 の実行ファイルでも同じ順序になる |
 | 10 | M4・M5 | M4: 核の部分のモジュールから OS の機能を使う部分を参照するとエラーになる（テスト: `tests/m4_core_split.rs` の `core_rejects_console_log`・`core_rejects_fs_read_and_write`・`core_rejects_path_param`・`core_rejects_ioerror_in_return`・`core_rejects_path_new`・`core_rejects_path_annotation`・`core_rejects_os_type_in_struct_and_enum`・`core_rejects_os_type_in_fn_type`・`core_rejects_os_type_in_closure`・`core_with_server_still_rejects`・`core_trust_base_still_rejects`。ADR 0014）。M5: 核の部分だけを使うプログラムの実行ファイルが、暫定ランタイムの OS の機能（`console`・`fs.read`）に依存しない |
 | 11 | M1 | 条件 4 で足したカテゴリの使える出力先を「サーバー」とすると、ブラウザ向けのモジュールでの使用がエラーになる |
-| 12 | M1 | 通常のモジュールでの大域の可変な値の宣言がエラーになる（信頼基盤の例外は M4 で信頼基盤の宣言方法と合わせて扱う） |
+| 12 | M1 | 通常のモジュールでの大域の可変な値の宣言がエラーになる（信頼基盤の例外は [ADR 0016](0016-trust-base-declaration.md) の決定 5 で扱う） |
 
 ### ADR 0007 に引き継ぐ未決点
 
@@ -331,7 +331,7 @@ ADR 0007 は P1（サーバー）に入る前に決める。サーバーは並�
 | 異常停止・無限ループを効果に数えるか（**解決**: [ADR 0013](0013-termination-stdlib-and-function-values.md)。どちらも数えない） | M3 の前（[ADR 0012](0012-ownership-check-and-stdlib.md) で「M1 の前」から改めた） | 効果の推論の規則が変わる。P0 には契約の静的検査がない（決定 5）ことを前提に決め、静的検査を入れるときに見直す。M2 の所有権の検査は依存せず、停止は M3 で実装されるため、M3 の前に決める |
 | モジュールの単位と出力先の指定（新規） | M1 の前 | ADR 0004 の規則 5 の検査に、モジュールと出力先の宣言が要る（宣言の表記は上の「サンプルの未確定の表記」で M0 の前に決める。ADR 0008 で決定） |
 | 標準ライブラリの分割（実行環境なしの核 / OS 依存部分） | **解決**（[ADR 0014](0014-core-and-os-split.md)。核は `targets` に `bare` を含むモジュール、層は OS に依存するかで分ける）。経緯: M4 の前（正式な最小部分の一覧は M3 の前。M1〜M2 の暫定の表が従う規則は [ADR 0012](0012-ownership-check-and-stdlib.md) の決定 6 で決定。効果を持たない部分の正式な一覧は [ADR 0013](0013-termination-stdlib-and-function-values.md) の決定 2 で決定） | ADR 0005 で P0 から設計に入れると決めている。M3 のインタプリタが本体を持つ範囲（`List`・`Option`・`Result`・`String`）は M3 の完了条件の前に決める |
-| 信頼基盤の宣言方法と、検査を外した箇所の契約の書き方 | M4 の前 | Sigil で書く標準ライブラリが検査を外す箇所を持つ |
+| 信頼基盤の宣言方法と、検査を外した箇所の契約の書き方（解決: [ADR 0016](0016-trust-base-declaration.md)） | M4 の前 | Sigil で書く標準ライブラリが検査を外す箇所を持つ |
 | 出力先とコンパイラ構成 | M5 の前（ネイティブのみ） | 本 ADR で実装言語と最初のバックエンドを決めた。中間表現の形とリンカを M5 の前に決める。WebAssembly・JavaScript は P2 で決める |
 
 番号は着手時に採番する。0007 は並行処理のモデルとする。

@@ -420,7 +420,7 @@ impl<'a> L<'a> {
             "Bool" => ir::Ty::Bool,
             "String" => ir::Ty::Str,
             "Unit" => ir::Ty::Unit,
-            "Map" | "Set" => return bail(format!("{n} は SIR の対象外")),
+            "Map" | "Set" | "Addr" => return bail(format!("{n} は SIR の対象外")),
             _ => {
                 if let Some(&td) = self.refined.get(n) {
                     return self.conv_ast(&td.base, &HashMap::new());

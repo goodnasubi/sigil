@@ -347,6 +347,7 @@ const PRELUDE_TYPES: &[&str] = &[
     "ParseError",
     "Shared",
     "Cell",
+    "Addr",
 ];
 /// 型名を付けずに書く値（`Option`・`Result` の値）。
 const PRELUDE_VALUES: &[(&str, &str)] = &[
@@ -488,6 +489,50 @@ struct Ck {
     ens_used: BTreeSet<String>,
     /// `let mut` で、型が決まっていなかった変数（名前・型・位置）。型が決まってから調べ直す。
     let_pending: Vec<(String, Ty, Span)>,
+    /// 原始操作（ADR 0016）。`raw.名前` -> 前提の文と、効果を宣言に委ねるか。
+    raw_ops: HashMap<String, RawInfo>,
+    /// 登録する原始操作の定義（標準ライブラリの `RAW_OPS` とテスト用の差し込み）。
+    raw_defs: Vec<crate::effects::RawOp>,
+    /// 検査中の関数が `unchecked` の節を持つ（原始操作を直接呼べる）。
+    raw_fn: bool,
+    /// クロージャの本体を検査している入れ子の深さ。
+    closure_depth: u32,
+    /// 検査中の関数が呼んだ原始操作（`raw.名前`）と、宣言に委ねる原始操作を呼んだか。
+    raw_used: BTreeSet<String>,
+    raw_delegated: bool,
+    /// このモジュールが `trust base` を宣言している。
+    base_module: bool,
+    /// `trust base` の宣言を許すモジュール名。
+    allowed_base: Vec<String>,
+    /// 関数ごとの記録（`sigil spec` が使う）。鍵は `FnDecl` の番地。
+    reports: HashMap<usize, FnReport>,
+}
+
+/// 原始操作の登録情報。
+struct RawInfo {
+    premise: String,
+    delegated: bool,
+}
+
+/// 関数ごとの検査の記録（`sigil spec` の `使う原始操作:`・`推論できない効果:`。ADR 0016 の決定 6）。
+#[derive(Debug, Clone, Default)]
+pub struct FnReport {
+    /// 本体から呼ぶ原始操作（`raw.名前`）と表の前提の文。名前の順で重複がない。
+    pub raw_ops: Vec<(String, String)>,
+    /// 宣言に委ねる原始操作を呼ぶか。
+    pub delegated: bool,
+    /// 宣言した効果のうち、本体から推論されなかったもの（葉のカテゴリか `of(x)`）。
+    pub not_inferred: Vec<String>,
+}
+
+/// `FnReport` の表の鍵。
+pub fn fn_key(f: &FnDecl) -> usize {
+    f as *const FnDecl as usize
+}
+
+/// 検査して、関数ごとの記録を返す。`check_file_with` と同じ検査をする。
+pub fn fn_reports(file: &File, opts: &Options) -> R<HashMap<usize, FnReport>> {
+    analyze(file, opts).map(|ck| ck.reports)
 }
 
 /// 移動の状態。移動した場所（`a`・`a.owner`）とその位置、そして経路が早期の戻りで終わったか。
@@ -615,6 +660,25 @@ fn analyze(file: &File, opts: &Options) -> R<Ck> {
         in_old: false,
         ens_used: BTreeSet::new(),
         let_pending: vec![],
+        raw_ops: HashMap::new(),
+        raw_defs: crate::stdlib::RAW_OPS
+            .iter()
+            .map(|r| crate::effects::RawOp {
+                layer: r.layer,
+                signature: r.signature.to_string(),
+                effects: r.effects.to_string(),
+                requires: r.requires.to_string(),
+                premise: r.premise.to_string(),
+            })
+            .chain(opts.raw_ops.iter().cloned())
+            .collect(),
+        raw_fn: false,
+        closure_depth: 0,
+        raw_used: BTreeSet::new(),
+        raw_delegated: false,
+        base_module: file.module.trust == Trust::Base,
+        allowed_base: opts.trust_base.clone(),
+        reports: HashMap::new(),
     };
     ck.prelude();
     ck.run(file)?;
@@ -962,6 +1026,8 @@ impl Ck {
                         self.holds(b, p, d)
                     }
                 }
+                // 番地は値の複製だけができる（演算子は持たない。ADR 0016 の決定 1）
+                Some(TypeDef::Opaque(_)) if n == "Addr" => Some(p == Prop::Copyable),
                 Some(TypeDef::Opaque(_)) => match p {
                     Prop::Equatable | Prop::Sendable | Prop::Shareable => {
                         all(args.iter().map(|t| self.holds(t, p, d)))
@@ -1131,6 +1197,21 @@ impl Ck {
     }
 
     fn run(&mut self, file: &File) -> R<()> {
+        // 0. モジュールの宣言（ADR 0016 の決定 3・6 の補足。名前の予約が許可より先）
+        self.span = file.module.span;
+        let mname = file.module.name.join(".");
+        if file.module.name.first().map(String::as_str) == Some("std") {
+            return self.err(
+                ErrorKind::ReservedModuleName,
+                format!("モジュール名 `{mname}` は標準ライブラリの名前（`std`・`std.` で始まる名前は利用者は使えない）"),
+            );
+        }
+        if self.base_module && !self.allowed_base.contains(&mname) {
+            return self.err(
+                ErrorKind::TrustBaseNotAllowed,
+                format!("モジュール `{mname}` は `trust base` を宣言しているが、許可がない（検査・実行・組み立ての呼び出しに `--trust-base {mname}` を付ける。許可は人間が決める）"),
+            );
+        }
         // 1. 型の名前と型引数
         let mut names: HashSet<String> = HashSet::new();
         let mut shells: Vec<(String, TypeDef)> = vec![];
@@ -1268,6 +1349,7 @@ impl Ck {
         }
         // 4. 関数とメソッドのシグネチャ
         self.register_std()?;
+        self.register_raw()?;
         self.register_primitives()?;
         for item in &file.items {
             match item {
@@ -1549,6 +1631,62 @@ impl Ck {
         self.core = core;
         self.span = saved;
         Ok(())
+    }
+
+    /// 原始操作（`raw.名前`）を関数の表に入れる（ADR 0016 の決定 1）。呼べるかどうかは呼ぶ場所で決める。
+    fn register_raw(&mut self) -> R<()> {
+        let saved = self.span;
+        let core = std::mem::replace(&mut self.core, false);
+        for d in self.raw_defs.clone() {
+            if d.premise.trim().is_empty() {
+                return self.err(
+                    ErrorKind::Unsupported,
+                    format!(
+                        "原始操作 `{}` の前提の文が空（空にできない。ADR 0016 の決定 1）",
+                        d.signature
+                    ),
+                );
+            }
+            let src = crate::stdlib::raw_source(d.layer, &d.signature, &d.effects, &d.requires);
+            let (name, s) = self.std_sig(&src)?;
+            let key = format!("raw.{name}");
+            if self.fns.contains_key(&key) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("原始操作 `{key}` が二重にある"),
+                );
+            }
+            if d.layer == crate::stdlib::Layer::Os {
+                self.os_items.fns.insert(key.clone());
+            }
+            self.raw_ops.insert(
+                key.clone(),
+                RawInfo {
+                    premise: d.premise.clone(),
+                    delegated: d.effects == crate::stdlib::DELEGATED,
+                },
+            );
+            self.fns.insert(key, s);
+        }
+        self.core = core;
+        self.span = saved;
+        Ok(())
+    }
+
+    /// 原始操作 `key` をいまの場所で使えるか（ADR 0016 の決定 2）。使えなければ `RawOutsideUnchecked`。
+    fn raw_allowed(&self, key: &str, as_value: bool) -> R<()> {
+        let why = if as_value {
+            "原始操作は関数の値として使えない（`unchecked` の関数の本体で直接呼ぶ）"
+        } else if self.refine || self.contract {
+            "契約の式（`requires`・`ensures`・篩型の条件）の中では原始操作を呼べない"
+        } else if self.closure_depth > 0 {
+            "クロージャの本体の中では原始操作を呼べない（クロージャは関数の外へ持ち出されうる）"
+        } else if !self.raw_fn {
+            "原始操作は `unchecked` の節を持つ関数の本体でだけ呼べる"
+        } else {
+            return Ok(());
+        };
+        self.err(ErrorKind::RawOutsideUnchecked, format!("`{key}`: {why}"))
     }
 
     fn std_parse(&self, src: &str) -> R<File> {
@@ -2005,13 +2143,25 @@ impl Ck {
     }
 
     fn check_fn_in(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
-        if f.unchecked.is_some() {
+        if f.unchecked.is_some() && !self.base_module {
             return Err(Error::new(
-                ErrorKind::Unsupported,
+                ErrorKind::UncheckedOutsideTrustBase,
                 f.span,
-                "`unchecked` の検査は未実装（ADR 0016 の PR2）",
+                format!(
+                    "関数 `{}` に `unchecked` の節があるが、このモジュールは `trust base` ではない（`unchecked` は `trust base` のモジュールの関数にだけ書ける）",
+                    f.name
+                ),
             ));
         }
+        self.raw_fn = f.unchecked.is_some();
+        self.raw_used.clear();
+        self.raw_delegated = false;
+        let r = self.check_fn_body(f, sig);
+        self.raw_fn = false;
+        r
+    }
+
+    fn check_fn_body(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
         self.skip = None;
         self.annots.clear();
         self.cur_fn = f.name.clone();
@@ -2020,6 +2170,7 @@ impl Ck {
         let mut fin = std::mem::take(&mut self.fin_closures);
         self.closures.append(&mut fin);
         self.span = f.span;
+        self.record_report(f, sig);
         self.match_effects(f, sig)?;
         // 型注釈の要否: 注釈を 1 つ外して検査し直し、同じ型に決まれば冗長
         let annots = self.annots.clone();
@@ -2038,6 +2189,43 @@ impl Ck {
             }
         }
         Ok(())
+    }
+
+    /// 関数の記録（使った原始操作と、宣言だけの効果）を残す。
+    fn record_report(&mut self, f: &FnDecl, sig: &Sig) {
+        let mut declared: Vec<String> = vec![];
+        for t in &sig.effects {
+            match t {
+                EffTerm::Cat(n) => declared.extend(self.table.atoms(n)),
+                EffTerm::Of(i) => declared.push(format!("of({})", sig.params[*i].0)),
+            }
+        }
+        let mut inferred: Vec<String> = vec![];
+        for a in &self.inferred {
+            match a {
+                Atom::Cat(n) => inferred.extend(self.table.atoms(n)),
+                Atom::Of(x) => inferred.push(format!("of({x})")),
+            }
+        }
+        let mut not_inferred: Vec<String> = vec![];
+        for e in declared {
+            if !inferred.contains(&e) && !not_inferred.contains(&e) {
+                not_inferred.push(e);
+            }
+        }
+        let raw_ops = self
+            .raw_used
+            .iter()
+            .map(|k| (k.clone(), self.raw_ops[k].premise.clone()))
+            .collect();
+        self.reports.insert(
+            fn_key(f),
+            FnReport {
+                raw_ops,
+                delegated: self.raw_delegated,
+                not_inferred,
+            },
+        );
     }
 
     /// 宣言した効果と、本体から推論した効果の照合（ADR 0004 の規則 3・ADR 0006 の条件 11）。
@@ -2076,6 +2264,10 @@ impl Ck {
                     f.name
                 ),
             );
+        }
+        // 宣言に委ねる原始操作を呼ぶ関数は、宣言が推論より多くてよい（ADR 0016 の決定 4）
+        if self.raw_delegated {
+            return Ok(());
         }
         if let Some(e) = declared.iter().find(|e| !inferred.contains(e)) {
             return self.err(
@@ -3760,6 +3952,7 @@ impl Ck {
         };
         self.ret = r.clone();
         let sp = self.span;
+        self.closure_depth += 1;
         let res: R<()> = match body {
             ClosureBody::Expr(e) => match self.expr(e) {
                 Ok(t) => {
@@ -3797,6 +3990,7 @@ impl Ck {
                 Ok(())
             }),
         };
+        self.closure_depth -= 1;
         self.ret = saved;
         self.scopes.pop();
         self.sync_borrowed();
@@ -4215,6 +4409,13 @@ impl Ck {
 
     fn field(&mut self, recv: &Expr, name: &str) -> R<Ty> {
         let skip = std::mem::take(&mut self.skip_use);
+        if matches!(recv, Expr::Name(ns) if ns == "raw")
+            && self.raw_ops.contains_key(&format!("raw.{name}"))
+        {
+            return self
+                .raw_allowed(&format!("raw.{name}"), true)
+                .map(|()| Ty::Unit);
+        }
         if let Some(tn) = self.type_path(recv) {
             return match self.types.get(&tn).cloned() {
                 Some(TypeDef::Enum { variants, .. }) => {
@@ -4387,6 +4588,12 @@ impl Ck {
                 if let Expr::Name(ns) = &**expr {
                     let key = format!("{ns}.{name}");
                     if self.lookup(ns).is_none() && self.fns.contains_key(&key) {
+                        if let Some(info) = self.raw_ops.get(&key) {
+                            let delegated = info.delegated;
+                            self.raw_allowed(&key, false)?;
+                            self.raw_used.insert(key.clone());
+                            self.raw_delegated |= delegated;
+                        }
                         if self.core && self.os_items.fns.contains(&key) {
                             return self.os_in_core(&key);
                         }

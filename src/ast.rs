@@ -99,6 +99,16 @@ pub struct Variant {
     pub line: u32,
 }
 
+/// `FnDecl::clause_lines` の添字（各節の行）。
+pub mod clause {
+    pub const INTENT: usize = 0;
+    pub const REQUIRES: usize = 1;
+    pub const ENSURES: usize = 2;
+    pub const EFFECTS: usize = 3;
+    pub const UNCHECKED: usize = 4;
+    pub const COUNT: usize = 5;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: String,
@@ -116,7 +126,7 @@ pub struct FnDecl {
     pub body: Block,
     pub span: Span,
     /// `intent`・`requires`・`ensures`・`effects`・`unchecked` の各節の行（`unchecked` がなければ 0）。
-    pub clause_lines: [u32; 5],
+    pub clause_lines: [u32; clause::COUNT],
 }
 
 #[derive(Debug, Clone, PartialEq)]

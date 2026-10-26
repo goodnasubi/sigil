@@ -50,6 +50,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "ParseError",
     "Shared",
     "Cell",
+    "Addr",
     "Set",
     "Map",
     "to_float",
@@ -714,8 +715,8 @@ impl Parser {
             None
         };
 
-        let mut clause_lines = [0u32; 5];
-        clause_lines[0] = self.span().line;
+        let mut clause_lines = [0u32; clause::COUNT];
+        clause_lines[clause::INTENT] = self.span().line;
         self.expect_clause("intent")?;
         let intent_span = self.span();
         let intent = match self.tok().clone() {
@@ -733,7 +734,7 @@ impl Parser {
             ));
         }
 
-        clause_lines[1] = self.span().line;
+        clause_lines[clause::REQUIRES] = self.span().line;
         self.expect_clause("requires")?;
         let requires = if self.eat_kw("none") {
             None
@@ -741,7 +742,7 @@ impl Parser {
             Some(self.expr()?)
         };
 
-        clause_lines[2] = self.span().line;
+        clause_lines[clause::ENSURES] = self.span().line;
         self.expect_clause("ensures")?;
         let ensures = if self.eat_kw("none") {
             None
@@ -755,7 +756,7 @@ impl Parser {
             Some(e?)
         };
 
-        clause_lines[3] = self.span().line;
+        clause_lines[clause::EFFECTS] = self.span().line;
         self.expect_clause("effects")?;
         let mut effects = Vec::new();
         if !self.eat_kw("none") {
@@ -769,7 +770,7 @@ impl Parser {
 
         let mut unchecked = None;
         if self.at_kw("unchecked") {
-            clause_lines[4] = self.span().line;
+            clause_lines[clause::UNCHECKED] = self.span().line;
             self.bump();
             let span = self.span();
             match self.tok().clone() {

@@ -605,21 +605,21 @@ impl<'a> Printer<'a> {
             self.w(" -> ");
             self.ty(r);
         }
-        self.plain_start(d.clause_lines[0], ind + 1);
+        self.plain_start(d.clause_lines[clause::INTENT], ind + 1);
         self.w(&format!("intent {}", escape_str(&d.intent)));
-        self.plain_start(d.clause_lines[1], ind + 1);
+        self.plain_start(d.clause_lines[clause::REQUIRES], ind + 1);
         self.w("requires ");
         match &d.requires {
             Some(e) => self.expr(e, 0, false, ind + 1),
             None => self.w("none"),
         }
-        self.plain_start(d.clause_lines[2], ind + 1);
+        self.plain_start(d.clause_lines[clause::ENSURES], ind + 1);
         self.w("ensures ");
         match &d.ensures {
             Some(e) => self.expr(e, 0, false, ind + 1),
             None => self.w("none"),
         }
-        self.plain_start(d.clause_lines[3], ind + 1);
+        self.plain_start(d.clause_lines[clause::EFFECTS], ind + 1);
         let effs = normalize_effects(&d.effects, &d.params);
         if effs.is_empty() {
             self.w("effects none");
@@ -627,7 +627,7 @@ impl<'a> Printer<'a> {
             self.w(&format!("effects {}", effs.join(", ")));
         }
         if let Some(u) = &d.unchecked {
-            self.plain_start(d.clause_lines[4], ind + 1);
+            self.plain_start(d.clause_lines[clause::UNCHECKED], ind + 1);
             self.w(&format!("unchecked {}", escape_str(u)));
         }
         self.plain_start(d.body.open_line, ind);

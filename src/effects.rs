@@ -131,6 +131,20 @@ pub struct Primitive {
     pub effects: Vec<String>,
 }
 
+/// テスト用の原始操作（ADR 0016 の決定 3。`stdlib::RAW_OPS` と同じ形の行）。
+#[derive(Debug, Clone)]
+pub struct RawOp {
+    pub layer: crate::stdlib::Layer,
+    /// `raw.` を除いたシグネチャ。例: `"alloc(size: Int, align: Int) -> Addr"`。
+    pub signature: String,
+    /// `effects` 節の中身（例: `"state"`）か、`stdlib::DELEGATED`。
+    pub effects: String,
+    /// 実行時に検査する `requires`（式。ないときは `"none"`）。
+    pub requires: String,
+    /// 式で書けない前提の文（空にできない）。
+    pub premise: String,
+}
+
 /// 検査の設定。
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -138,6 +152,10 @@ pub struct Options {
     pub primitives: Vec<Primitive>,
     /// 型名ごとの Copyable の上書き（ADR0006 の判定表を差し替える差し込み口。名前つきの struct/enum のみ）。
     pub copy_override: Vec<(String, bool)>,
+    /// `trust base` の宣言を許すモジュール名（`--trust-base`。`std`・`std.*` は予約で、挙げても許されない。ADR 0016 の決定 3）。
+    pub trust_base: Vec<String>,
+    /// テスト用の原始操作（標準ライブラリの `RAW_OPS` に足して登録する）。
+    pub raw_ops: Vec<RawOp>,
 }
 
 impl Default for Options {
@@ -146,6 +164,8 @@ impl Default for Options {
             table: EffectTable::standard(),
             primitives: vec![],
             copy_override: vec![],
+            trust_base: vec![],
+            raw_ops: vec![],
         }
     }
 }

@@ -79,6 +79,14 @@ pub enum ErrorKind {
     UnknownName,
     UnknownType,
     OsItemInCore,
+    /// 信頼基盤でないモジュールの関数に `unchecked` の節がある（ADR 0016 の決定 2）。
+    UncheckedOutsideTrustBase,
+    /// `trust base` を宣言したが、許可（`--trust-base`）がない（ADR 0016 の決定 3）。
+    TrustBaseNotAllowed,
+    /// 利用者のモジュールの名前が `std`・`std.` で始まる（ADR 0016 の決定 3）。
+    ReservedModuleName,
+    /// `unchecked` の関数の本体の外（クロージャ・契約・関数の値・節のない関数）で原始操作を使った（ADR 0016 の決定 2）。
+    RawOutsideUnchecked,
     ModuleMismatch,
     DuplicateDefinition,
     TypeMismatch,
@@ -173,6 +181,10 @@ impl ErrorKind {
             | UnknownName
             | UnknownType
             | OsItemInCore
+            | UncheckedOutsideTrustBase
+            | TrustBaseNotAllowed
+            | ReservedModuleName
+            | RawOutsideUnchecked
             | ModuleMismatch
             | DuplicateDefinition
             | TypeMismatch

@@ -268,10 +268,16 @@ fn core_with_server_still_rejects() {
 #[test]
 fn core_trust_base_still_rejects() {
     let items = func("f() -> Int", "console", "  console.log(&1);\n  return 0;");
-    assert_eq!(
-        kind_of(&with("bare", "base", &items)),
-        ErrorKind::OsItemInCore
-    );
+    // 利用者のソースの `trust base` は、`--trust-base` に名前を挙げたときだけ許される（ADR 0016 の決定 3）。
+    // 挙げれば、核では OS の項目を免除しない（ADR 0014）ので、従来と同じ `OsItemInCore` になる。
+    let src = with("bare", "base", &items);
+    assert_eq!(kind_of(&src), ErrorKind::TrustBaseNotAllowed);
+    let opts = sigil::effects::Options {
+        trust_base: vec!["m.a".into()],
+        ..Default::default()
+    };
+    let e = sigil::check::check_with(&src, &opts).unwrap_err();
+    assert_eq!(e.kind, ErrorKind::OsItemInCore);
 }
 
 // ---- 通る例 ----

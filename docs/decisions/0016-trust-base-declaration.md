@@ -1,6 +1,7 @@
 # 0016: 信頼基盤（`trust base`）の宣言方法と、検査を外した箇所の契約の書き方
 
 - **状態**: 承認（2026-10-26。所有者が決定。）
+- **実装**: PR1（構文と表示。#55）と PR2（検査・`--trust-base`・`sigil spec` の 2 行・既存テストの移し替え）で実装済み。`stdlib::RAW_OPS` は空で、テストは `effects::Options.raw_ops` にテスト用の原始操作を足して検査する。`tests/trust_base.rs` に完了条件の表のテストと、`--trust-base` のコマンドラインの事例（`*_cli`）、原始操作の登録の誤り（`raw_op_without_premise_rejected`・`duplicate_raw_op_rejected`）を置いた。
 
 ## 背景
 

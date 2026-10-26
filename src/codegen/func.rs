@@ -861,6 +861,13 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let z = self.ic(0);
                 self.b.ins().return_(&[v, z]);
             }
+            // 来ない基本ブロック。形を保つために戻りと同じ命令にする。
+            Term::Unreachable => {
+                let a = self.saddr(self.slots[0]);
+                let v = self.ld(a, 0);
+                let z = self.ic(0);
+                self.b.ins().return_(&[v, z]);
+            }
             Term::Resume => {
                 let ps = self.pending.expect("pending");
                 let a = self.saddr(ps);

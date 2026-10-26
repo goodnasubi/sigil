@@ -46,7 +46,7 @@ fn peel(t: &ir::Ty) -> &ir::Ty {
 }
 
 /// 破棄の記録を残す値の型。
-fn needs_drop(t: &ir::Ty) -> bool {
+pub(crate) fn needs_drop(t: &ir::Ty) -> bool {
     !matches!(
         t,
         ir::Ty::Int
@@ -824,12 +824,28 @@ impl<'a> L<'a> {
     }
 
     fn finish(&mut self, fb: Fb) -> ir::Func {
+        // 終わりのないブロックは、入口から辿れなければ `Unreachable`、辿れるなら（lowering の誤りだが）従来どおり `Return`。
+        let mut reach = vec![false; fb.blocks.len()];
+        let mut work = vec![0usize];
+        while let Some(b) = work.pop() {
+            if b < reach.len() && !reach[b] {
+                reach[b] = true;
+                if let Some(t) = &fb.blocks[b].term {
+                    work.extend(t.succs());
+                }
+            }
+        }
         let blocks = fb
             .blocks
             .into_iter()
-            .map(|b| ir::Block {
+            .enumerate()
+            .map(|(i, b)| ir::Block {
                 stmts: b.stmts,
-                term: b.term.unwrap_or(Term::Return),
+                term: b.term.unwrap_or(if reach[i] {
+                    Term::Return
+                } else {
+                    Term::Unreachable
+                }),
             })
             .collect();
         ir::Func {
@@ -1175,7 +1191,8 @@ impl<'a> L<'a> {
             self.goto(join);
             self.fb.cur = fail;
         }
-        self.term(Term::Return);
+        // どの腕にも合わなかった場合（腕がすべて並んでいれば来ない）。
+        self.term(Term::Unreachable);
         self.fb.cur = join;
         Ok(())
     }

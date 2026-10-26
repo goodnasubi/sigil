@@ -13,6 +13,40 @@ use sigil::ir_eval;
 
 type Res = Result<Outcome, Failure>;
 
+/// SIR にできなかった（`Unsupported`）ソースの数の、既知の上限（テストの実行ファイルごと）。超えたら落とす。
+/// 増えるのは、検証されないソースが増えるということなので、増やすときは理由を PR に書く。
+const KNOWN_UNSUPPORTED_MAX: usize = 0;
+
+static UNSUPPORTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// SIR の検証器（ADR 0018 の決定 4）。テストの実行では常に通す。
+/// 構文・型検査の誤りと入口の誤り（`Check`・`Entry`）は検証の対象がないので飛ばす。
+/// 未対応（`Unsupported`）は検証されないので、数えて既知の上限と比べる。
+#[allow(clippy::absurd_extreme_comparisons)] // 上限が 0 の間は、1 件でも落ちる
+fn verify(srcs: &[&str], func: &str) {
+    match sigil::ir_eval::lower_sources(srcs, func) {
+        Ok(_) => {}
+        Err(RunError::Check(_) | RunError::Entry(_)) => return,
+        Err(RunError::Stop(s)) => panic!("lowering が停止を返した: {func}: {s}"),
+        Err(RunError::Unsupported(m)) => {
+            let n = UNSUPPORTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            eprintln!("SIR の検証を飛ばす（未対応 {n} 件目）: {func}: {m}");
+            assert!(
+                n <= KNOWN_UNSUPPORTED_MAX,
+                "SIR にできないソースが既知の上限 {KNOWN_UNSUPPORTED_MAX} を超えた: {func}: {m}"
+            );
+            return;
+        }
+    }
+    if let Err(es) = sigil::verify::verify_sources(srcs, func) {
+        panic!(
+            "SIR の検証に失敗: {func}\n{}\n{}",
+            es.join("\n"),
+            srcs.join("\n---\n")
+        );
+    }
+}
+
 fn compare(label: &str, a: &Res, b: &Res) {
     match (a, b) {
         (Ok(x), Ok(y)) => {
@@ -46,6 +80,7 @@ fn show(r: &Res) -> String {
 }
 
 pub fn run(src: &str, func: &str, args: &[Arg]) -> Res {
+    verify(&[src], func);
     let a = interp::run(src, func, args);
     let b = ir_eval::run(src, func, args);
     compare(func, &a, &b);
@@ -54,6 +89,7 @@ pub fn run(src: &str, func: &str, args: &[Arg]) -> Res {
 }
 
 pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(&[src], func);
     let a = interp::run_with(src, func, args, opts);
     let b = ir_eval::run_with(src, func, args, opts);
     compare(func, &a, &b);
@@ -62,6 +98,7 @@ pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
 }
 
 pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
+    verify(srcs, func);
     let a = interp::run_sources(srcs, func, args);
     let b = ir_eval::run_sources(srcs, func, args);
     compare(func, &a, &b);
@@ -70,6 +107,7 @@ pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
 }
 
 pub fn run_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(srcs, func);
     let a = interp::run_sources_with(srcs, func, args, opts);
     let b = ir_eval::run_sources_with(srcs, func, args, opts);
     compare(func, &a, &b);
@@ -79,24 +117,28 @@ pub fn run_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options)
 
 /// インタプリタと食い違う既知の事例（破棄の順序など）を、SIR の評価器とネイティブだけで突き合わせたいときに使う。
 pub fn sir_native(src: &str, func: &str, args: &[Arg]) -> Res {
+    verify(&[src], func);
     let b = ir_eval::run(src, func, args);
     native::check(&[src], func, args, &Options::captured(), &b);
     b
 }
 
 pub fn sir_native_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(&[src], func);
     let b = ir_eval::run_with(src, func, args, opts);
     native::check(&[src], func, args, opts, &b);
     b
 }
 
 pub fn sir_native_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
+    verify(srcs, func);
     let b = ir_eval::run_sources(srcs, func, args);
     native::check(srcs, func, args, &Options::captured(), &b);
     b
 }
 
 pub fn sir_native_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(srcs, func);
     let b = ir_eval::run_sources_with(srcs, func, args, opts);
     native::check(srcs, func, args, opts, &b);
     b

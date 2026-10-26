@@ -344,8 +344,26 @@ pub enum Term {
         cleanup: BlockId,
     },
     Return,
+    /// 実行に来ない基本ブロックの終わり（腕がすべて並んだ `match` の取りこぼしの腕と、どこからも来ないブロック）。
+    /// 検証器は、`Branch`・`Switch` の腕としてだけ指されることを求める（`Goto`・`Call` の `next`・`cleanup` などから指すのは誤り）。
+    Unreachable,
     /// 停止の巻き戻しを呼び出し元の `cleanup` へ続ける。
     Resume,
+}
+
+impl Term {
+    /// 次に進みうる基本ブロック。
+    pub fn succs(&self) -> Vec<BlockId> {
+        match self {
+            Term::Goto(t) => vec![*t],
+            Term::Branch(_, a, b) => vec![*a, *b],
+            Term::Switch(_, arms, d) => arms.iter().map(|(_, t)| *t).chain([*d]).collect(),
+            Term::Call { next, cleanup, .. }
+            | Term::CheckedOp { next, cleanup, .. }
+            | Term::Assert { next, cleanup, .. } => vec![*next, *cleanup],
+            Term::Return | Term::Resume | Term::Unreachable => vec![],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

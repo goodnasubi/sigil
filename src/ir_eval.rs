@@ -796,6 +796,7 @@ impl<'p> M<'p> {
                     let v = std::mem::replace(&mut *locals[0].borrow_mut(), Val::Empty);
                     return Ok(v);
                 }
+                Term::Unreachable => unreachable!("到達しない基本ブロックに来た"),
                 Term::Resume => {
                     return Err(pending
                         .take()

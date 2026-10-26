@@ -54,7 +54,7 @@
 | 契約（事前・事後条件）の検査方法（静的 / 実行時） | **決定**: P0 は実行時検査のみ（[ADR 0006](decisions/0006-p0-scope-and-bootstrap.md)）。静的検査の範囲と時期は未決 | 静的検査は P0 の完了後 |
 | 効果（副作用）の扱い | **決定**: 固定カテゴリの静的宣言と、推論結果との完全一致検査（[ADR 0004](decisions/0004-effects.md)） | — |
 | 異常停止・無限ループを効果に数えるか | **決定**: どちらも数えない。`effects none` は外から観測できる作用がないことを表し、`ensures` は「戻るならば成り立つ」を表す。異常停止（契約違反・桁あふれ・0 での除算）はすべて破棄をしてから停止する（[ADR 0013](decisions/0013-termination-stdlib-and-function-values.md)） | 止まることの証明は契約の静的検査（P0 の完了後）で検討 |
-| モジュールの単位と出力先の指定 | 未決（宣言の表記 `module ... targets ... trust ...` は [ADR 0008](decisions/0008-m0-notation.md) で決定） | P1 の段階 2 の最初（[ADR 0018](decisions/0018-p1-scope.md)。モジュールの単位の ADR 2-1） |
+| モジュールの単位と出力先の指定 | 提案（[ADR 0021](decisions/0021-module-unit-and-visibility.md)。承認待ち。宣言の表記 `module ... targets ... trust ...` は [ADR 0008](decisions/0008-m0-notation.md) で決定） | 承認後に PR 2-2 |
 | 出力先（ネイティブ・WebAssembly・JavaScript）とコンパイラ構成 | 未決（実装言語とネイティブのバックエンドは ADR 0006 で決定） | M5 の前（ネイティブ）。WebAssembly・JavaScript は P2 の前 |
 | Python 連携の方式（束縛の生成、境界での値の受け渡し） | 未決 | P3 の前 |
 | 資源の解放時期の意味論（出力先によらず同じにする方法） | 未決 | P2 の前 |

@@ -333,17 +333,69 @@ fn case_only_difference_is_an_error() {
 }
 
 #[test]
-fn reserved_std_names_win_over_path_match() {
+fn reserved_std_names_rejected_by_verify_too() {
     let t = Tmp::new("std");
-    // 宣言とパスが一致していても std.x は ReservedModuleName（検査器が拒否する）
+    // 宣言とパスが一致していても std.x は ReservedModuleName（verify 側で拒否。spec --root もここを通る）
     let f = t.write("std/x.sigil", &module("std.x", "", &pub_fn("f")));
-    assert_eq!(verify(&t.0, &f), Ok(()), "パス検査は予約名に触れない");
+    assert_eq!(verify(&t.0, &f), Err((ErrorKind::ReservedModuleName, 1)));
     let src = std::fs::read_to_string(&f).unwrap();
     let e = check::check(&src).unwrap_err();
     assert_eq!((e.kind, e.span.line), (ErrorKind::ReservedModuleName, 1));
     // パスと食い違う std.x も ModulePathMismatch ではなく ReservedModuleName
     let g = t.write("app/x.sigil", &module("std.x", "", &pub_fn("f")));
-    assert_eq!(verify(&t.0, &g), Ok(()));
+    assert_eq!(verify(&t.0, &g), Err((ErrorKind::ReservedModuleName, 1)));
+}
+
+#[cfg(unix)]
+#[test]
+fn intermediate_directory_symlink_escaping_root_is_rejected() {
+    // root/app -> 根の外のディレクトリ。見かけの名前は app.x で宣言と一致するが、実体は根の外。
+    let t = Tmp::new("dirsym");
+    let outside = Tmp::new("dirsym-out");
+    outside.write("x.sigil", &module("app.x", "", &pub_fn("f")));
+    std::os::unix::fs::symlink(&outside.0, t.0.join("app")).unwrap();
+    assert_eq!(
+        verify(&t.0, &t.0.join("app/x.sigil")),
+        Err((ErrorKind::ModulePathMismatch, 1))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dotdot_through_symlink_is_rejected() {
+    // d/link -> 根の外の other/sub。`d/link/../top.sigil` は字面では d/top.sigil だが、
+    // OS は link の実体の親（other/top.sigil）を開く。
+    let t = Tmp::new("dotdot");
+    t.write("d/top.sigil", &module("d.top", "", &pub_fn("f")));
+    let outside = Tmp::new("dotdot-out");
+    std::fs::create_dir_all(outside.0.join("sub")).unwrap();
+    outside.write("top.sigil", &module("d.top", "", &pub_fn("f")));
+    std::os::unix::fs::symlink(outside.0.join("sub"), t.0.join("d/link")).unwrap();
+    let via = t.0.join("d/link/../top.sigil");
+    assert_eq!(verify(&t.0, &via), Err((ErrorKind::ModulePathMismatch, 1)));
+    // 正規の d/top.sigil は通る
+    assert_eq!(verify(&t.0, &t.0.join("d/top.sigil")), Ok(()));
+    // 実体が根の中でも、見かけ（d/top.sigil）と実体（x/top.sigil）が違えば拒否
+    std::fs::create_dir_all(t.0.join("x/sub")).unwrap();
+    t.write("x/top.sigil", &module("d.top", "", &pub_fn("f")));
+    std::os::unix::fs::symlink(t.0.join("x/sub"), t.0.join("d/in")).unwrap();
+    let via_in = t.0.join("d/in/../top.sigil");
+    assert_eq!(
+        verify(&t.0, &via_in),
+        Err((ErrorKind::ModulePathMismatch, 1))
+    );
+}
+
+#[test]
+fn run_rejects_use_explicitly() {
+    let src = module("a.b", "\nuse x.y.f;\n", &pub_fn("g"));
+    let e = sigil::ir_eval::run(&src, "g", &[]).unwrap_err();
+    match e.error {
+        sigil::exec::RunError::Check(e) => {
+            assert_eq!((e.kind, e.span.line), (ErrorKind::Unsupported, 5));
+        }
+        other => panic!("Check(Unsupported) のはず: {other:?}"),
+    }
 }
 
 // ---- CLI ----
@@ -402,4 +454,23 @@ fn cli_check_and_spec_with_root() {
     assert!(out.contains("\"visibility\":\"pub\""), "{out}");
     let (c, _, _) = bin(&["spec", "--root"]);
     assert_eq!(c, 2);
+    // spec --root でも std.* は拒否
+    let (c, _, err) = bin(&["spec", "--root", root, sx]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("標準ライブラリの名前"), "{err}");
+}
+
+#[test]
+fn cli_run_and_build_reject_use() {
+    let t = Tmp::new("cli-use");
+    let f = t.write("a.sigil", &module("a", "\nuse x.y.f;\n", &pub_fn("g")));
+    let p = f.to_str().unwrap();
+    let (c, _, err) = bin(&["run", p, "g", "1"]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("`use` を含むプログラムの実行"), "{err}");
+    let out = t.0.join("out.bin");
+    let (c, _, err) = bin(&["build", p, "g", "-o", out.to_str().unwrap()]);
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("`use` を含むプログラムの実行"), "{err}");
+    assert!(!out.exists());
 }

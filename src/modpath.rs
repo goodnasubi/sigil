@@ -90,27 +90,30 @@ pub fn module_name_for(root: &Path, file: &Path) -> Result<Vec<String>, String> 
     Ok(segs)
 }
 
-/// symlink は見かけの位置で名前を決め、指す先が根の外ならエラーにする。
-fn symlink_inside_root(root: &Path, file: &Path) -> Result<(), String> {
-    let is_link = std::fs::symlink_metadata(file).is_ok_and(|m| m.file_type().is_symlink());
-    if !is_link {
-        return Ok(());
-    }
-    let (Ok(target), Ok(root_real)) = (std::fs::canonicalize(file), std::fs::canonicalize(root))
+/// 実体の確認。名前は見かけの位置（字面で畳んだパス）で決めるが、実体は根の外であってはならない。
+/// - 与えられたパスをそのまま OS に解決させた実体（途中のディレクトリの symlink を辿る）が、
+///   根の実体の下にあること。
+/// - 字面で畳んだパス（`d/link/../top.sigil` は `d/top.sigil`）が同じ実体を指すこと。
+///   食い違うなら、`..` が symlink の先で解決されており、見かけの位置と実体が別になっている。
+fn real_inside_root(root: &Path, file: &Path) -> Result<(), String> {
+    let (Ok(root_real), Ok(raw_real)) = (std::fs::canonicalize(root), std::fs::canonicalize(file))
     else {
-        return Err(format!(
-            "symlink `{}` の指す先を解決できない",
-            file.display()
-        ));
+        return Err(format!("`{}` の実体を解決できない", file.display()));
     };
-    if target.starts_with(&root_real) {
-        Ok(())
-    } else {
-        Err(format!(
-            "symlink `{}` の指す先 `{}` が根の外にある",
+    if !raw_real.starts_with(&root_real) {
+        return Err(format!(
+            "`{}` の実体 `{}` が根 `{}` の外にある（symlink）",
             file.display(),
-            target.display()
-        ))
+            raw_real.display(),
+            root_real.display()
+        ));
+    }
+    match std::fs::canonicalize(absolute(file)) {
+        Ok(norm_real) if norm_real == raw_real => Ok(()),
+        _ => Err(format!(
+            "`{}` は symlink の先で `..` を辿っており、見かけの位置と実体が違う",
+            file.display()
+        )),
     }
 }
 
@@ -141,16 +144,22 @@ fn case_collision(root: &Path, file: &Path) -> Option<String> {
 }
 
 /// `file`（内容 `src`）が、根 `root` の下で宣言どおりのモジュールか確かめる。
-/// 構文エラーならそのエラー。`std`・`std.` で始まる宣言は検査器の `ReservedModuleName` に任せる
-/// （宣言とパスが一致していても拒否するため、ここでは触れない）。
+/// 構文エラーならそのエラー。`std`・`std.` で始まる宣言は、パスと一致していても `ReservedModuleName`。
 pub fn verify(src: &str, root: &Path, file: &Path) -> Result<(), Error> {
     let f = crate::parse(src)?;
     let span: Span = f.module.span;
-    if f.module.name.first().map(String::as_str) == Some("std") {
-        return Ok(());
-    }
     let fail = |kind: ErrorKind, msg: String| Err(Error::new(kind, span, msg));
-    if let Err(m) = symlink_inside_root(root, file) {
+    // `std`・`std.…` は、宣言とパスが一致していても拒否する（検査器と同じ `ReservedModuleName`）。
+    if f.module.name.first().map(String::as_str) == Some("std") {
+        return fail(
+            ErrorKind::ReservedModuleName,
+            format!(
+                "モジュール名 `{}` は標準ライブラリの名前（`std`・`std.` で始まる名前は利用者は使えない）",
+                f.module.name.join(".")
+            ),
+        );
+    }
+    if let Err(m) = real_inside_root(root, file) {
         return fail(ErrorKind::ModulePathMismatch, m);
     }
     if let Some(m) = case_collision(root, file) {

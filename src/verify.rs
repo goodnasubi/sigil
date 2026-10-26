@@ -510,6 +510,22 @@ impl<'a> Fn<'a> {
         }
         for (bb, b) in self.f.blocks.iter().enumerate() {
             self.check_types(bb, b);
+            // `Unreachable` は `Branch`・`Switch` の腕としてだけ指される。
+            if !matches!(b.term, Term::Branch(..) | Term::Switch(..)) {
+                for t in b.term.succs() {
+                    if self
+                        .f
+                        .blocks
+                        .get(t)
+                        .is_some_and(|x| x.term == Term::Unreachable)
+                    {
+                        self.err(
+                            bb,
+                            format!("到達しない基本ブロック bb{t} へ分岐以外の辺で続いている"),
+                        );
+                    }
+                }
+            }
         }
         if !self.errs.is_empty() {
             return;

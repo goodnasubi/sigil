@@ -253,6 +253,9 @@ ADR 0017 は、削除の前に「lowering の誤りを見つける別の手段�
     - `Ref`/`MutRef` の層の数の違い（読むときに指す先として扱うので、層は区別しない）。
     - 型が決まらない形は、型の比較を飛ばす: `Const::Fn`、`MakeClosure`、`Deref` を `Ref`/`MutRef`/`Shared`/`Cell` 以外に付けた場所、組・リスト・構造体以外への `Field`、列挙型の `Downcast` だけで欄を選ばない場所、範囲外の欄・変種・型の番号を通った場所、それらを含む組の値・`Ref`・二項演算。
   - 到達しない腕（腕がすべて並んだ `match` の取りこぼし）は、lowering が `Term::Unreachable` で出し、検証器は何も検査しない。これを *dead* と呼び、`Return` への辺とは区別する（`Return` へ続く腕の漏れは検出する）。
+    - 前提: `Unreachable` を指してよい辺は `Branch`・`Switch` の腕だけで、`Goto`・`Call` の `next`・`cleanup` などから指すのは誤りとして検出する。lowering は、入口から辿れない終わりのないブロックだけを `Unreachable` にする（辿れるのに終わりのないブロックは `Return` のままにし、漏れとして検出される）。
+    - 前提: `Branch`・`Switch` の腕としての `Unreachable` は、その腕が実行に来ないことを lowering が保証するものとして信用する（検証器は腕の条件が本当に偽かを確かめない）。
+  - `tests/common` の検証は、SIR にできないソースのうち `Check`・`Entry` は飛ばし、`Unsupported` は数えて既知の上限（今は 0）を超えたら落とす。
   - テストの実行（`tests/common` の `run*`）では常に検証器を通す。
 - 検証器を入れた後、インタプリタを削除する（PR 1-5）。
   - `src/interp.rs` と、`tests/common` のインタプリタとの比較を外す。`run*` は SIR の評価器と実行ファイルを比べる。

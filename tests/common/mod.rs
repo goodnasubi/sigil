@@ -13,11 +13,30 @@ use sigil::ir_eval;
 
 type Res = Result<Outcome, Failure>;
 
+/// SIR にできなかった（`Unsupported`）ソースの数の、既知の上限（テストの実行ファイルごと）。超えたら落とす。
+/// 増えるのは、検証されないソースが増えるということなので、増やすときは理由を PR に書く。
+const KNOWN_UNSUPPORTED_MAX: usize = 0;
+
+static UNSUPPORTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// SIR の検証器（ADR 0018 の決定 4）。テストの実行では常に通す。
-/// SIR にできないソース（未対応の構文・入口の誤り）は、検証の対象外として飛ばす。
+/// 構文・型検査の誤りと入口の誤り（`Check`・`Entry`）は検証の対象がないので飛ばす。
+/// 未対応（`Unsupported`）は検証されないので、数えて既知の上限と比べる。
+#[allow(clippy::absurd_extreme_comparisons)] // 上限が 0 の間は、1 件でも落ちる
 fn verify(srcs: &[&str], func: &str) {
-    if sigil::ir_eval::lower_sources(srcs, func).is_err() {
-        return;
+    match sigil::ir_eval::lower_sources(srcs, func) {
+        Ok(_) => {}
+        Err(RunError::Check(_) | RunError::Entry(_)) => return,
+        Err(RunError::Stop(s)) => panic!("lowering が停止を返した: {func}: {s}"),
+        Err(RunError::Unsupported(m)) => {
+            let n = UNSUPPORTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            eprintln!("SIR の検証を飛ばす（未対応 {n} 件目）: {func}: {m}");
+            assert!(
+                n <= KNOWN_UNSUPPORTED_MAX,
+                "SIR にできないソースが既知の上限 {KNOWN_UNSUPPORTED_MAX} を超えた: {func}: {m}"
+            );
+            return;
+        }
     }
     if let Err(es) = sigil::verify::verify_sources(srcs, func) {
         panic!(

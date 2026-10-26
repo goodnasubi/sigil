@@ -278,3 +278,41 @@ fn unreachable_arms_are_not_errors() {
     );
     assert_eq!(errs(&p), Vec::<String>::new());
 }
+
+/// `Goto`・`Call` の `next`・`cleanup` などから `Unreachable` に落ちる形は、分岐の腕ではないので誤り。
+#[test]
+fn edge_into_unreachable_other_than_a_branch_arm_is_caught() {
+    caught("f", "Goto の先を Unreachable にする", |p| {
+        let f = &mut p.funcs[0];
+        let u = f.blocks.len();
+        for bi in 0..u {
+            if let Term::Goto(t) = &mut f.blocks[bi].term {
+                *t = u;
+                f.blocks.push(Block {
+                    stmts: vec![],
+                    term: Term::Unreachable,
+                });
+                return true;
+            }
+        }
+        false
+    });
+    caught("f", "Call の cleanup を Unreachable にする", |p| {
+        let f = &mut p.funcs[0];
+        let u = f.blocks.len();
+        for bi in 0..u {
+            if let Term::Call { cleanup, .. }
+            | Term::CheckedOp { cleanup, .. }
+            | Term::Assert { cleanup, .. } = &mut f.blocks[bi].term
+            {
+                *cleanup = u;
+                f.blocks.push(Block {
+                    stmts: vec![],
+                    term: Term::Unreachable,
+                });
+                return true;
+            }
+        }
+        false
+    });
+}

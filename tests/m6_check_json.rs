@@ -130,11 +130,7 @@ fn check_json_kinds() {
         assert_eq!(code, 0, "{args:?}");
         assert_eq!(out, "{\"format\":1,\"ok\":true,\"diagnostics\":[]}\n");
     }
-    // 読めないファイルは標準エラーに出し、終了コードは 1、`ok` は偽。
-    let (code, out, err) = sigil_bin(&["check", "--json", "/no/such/file.sigil"]);
-    assert_eq!(code, 1);
-    assert!(err.contains("読めない"));
-    assert_eq!(out, "{\"format\":1,\"ok\":false,\"diagnostics\":[]}\n");
+    // 読めないファイルは ReadError の診断（`check_json_read_error` が確かめる）。
 }
 
 #[test]
@@ -147,4 +143,35 @@ fn check_json_message_with_escapes() {
     let d = &v.get("diagnostics").unwrap().as_array().unwrap()[0];
     assert_eq!(d.get("kind").unwrap().as_str(), Some("BadEscape"));
     assert_eq!(d.get("phase").unwrap().as_str(), Some("lex"));
+}
+
+#[test]
+fn check_json_read_error() {
+    let ok = temp_file("read_ok.sigil", &func("  return n;"));
+    let bad = temp_file("read_bad.sigil", "");
+    std::fs::write(&bad, [0xff, 0xfe, 0x00]).unwrap(); // UTF-8 でない
+    let missing = format!("{ok}.missing");
+    let (code, out, err) = sigil_bin(&["check", "--json", &missing, &ok, &bad]);
+    assert_eq!(code, 1);
+    assert_eq!(err, "", "--json では標準エラーに出さない");
+    let v = parse(out.trim()).unwrap();
+    assert_eq!(v.get("ok"), Some(&Value::Bool(false)));
+    let d = v.get("diagnostics").and_then(Value::as_array).unwrap();
+    assert_eq!(d.len(), 2);
+    for (x, file) in d.iter().zip([&missing, &bad]) {
+        assert_eq!(x.get("file").and_then(Value::as_str), Some(file.as_str()));
+        assert_eq!(x.get("kind").and_then(Value::as_str), Some("ReadError"));
+        assert_eq!(x.get("phase").and_then(Value::as_str), Some("read"));
+        assert_eq!(x.get("line"), Some(&Value::Null));
+        assert_eq!(x.get("col"), Some(&Value::Null));
+        assert!(x
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap()
+            .starts_with("読めない: "));
+    }
+    // 人間向けの出力は従来どおり標準エラー
+    let (code, out, err) = sigil_bin(&["check", &missing]);
+    assert_eq!((code, out.as_str()), (1, ""));
+    assert!(err.contains("読めない"));
 }

@@ -77,6 +77,7 @@ pub fn run_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options)
     b
 }
 
+/// インタプリタと食い違う既知の事例（破棄の順序など）を、SIR の評価器とネイティブだけで突き合わせたいときに使う。
 pub fn sir_native(src: &str, func: &str, args: &[Arg]) -> Res {
     let b = ir_eval::run(src, func, args);
     native::check(&[src], func, args, &Options::captured(), &b);

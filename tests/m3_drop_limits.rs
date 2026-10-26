@@ -50,11 +50,26 @@ fn spec_ids_of(body: &str) -> Vec<i64> {
 }
 
 fn probe_ids(d: &[String]) -> Vec<i64> {
-    d.iter()
-        .filter_map(|s| s.strip_prefix("Probe { id: "))
-        // SIR の評価器は、枯渇の直前の最も深い枠の値を表示できない（本文が空になる）ので、数として読めないものは除く。
-        .filter_map(|s| s.trim_end_matches(" }").trim().parse().ok())
-        .collect()
+    let (ids, blanks) = probe_ids_with_blanks(d);
+    assert_eq!(blanks, 0, "表示が空の破棄がある: {d:?}");
+    ids
+}
+
+/// 数として読めない Probe（本文が空）を除いた id と、その件数を返す。空のものは先頭に連続していなければならない。
+/// SIR の評価器は、枯渇の直前の最も深い枠の値を表示できない（`show_val` が `deep()` で空を返す。ADR 0006 の既知の制限）。
+fn probe_ids_with_blanks(d: &[String]) -> (Vec<i64>, usize) {
+    let mut ids = Vec::new();
+    let mut blanks = 0;
+    for s in d.iter().filter_map(|s| s.strip_prefix("Probe { id: ")) {
+        match s.trim_end_matches(" }").trim().parse() {
+            Ok(n) => ids.push(n),
+            Err(_) => {
+                assert!(ids.is_empty(), "空の表示は先頭にだけ許す: {d:?}");
+                blanks += 1;
+            }
+        }
+    }
+    (ids, blanks)
 }
 
 #[test]
@@ -124,15 +139,19 @@ fn stack_exhaustion_drops_from_the_innermost_frame_outward() {
         panic!("{}", e.error)
     };
     assert_eq!(s.kind, StopKind::StackExhausted);
-    assert_frames_unwind(&probe_ids(&e.drops));
+    // 表示が空になるのは最も深い 1 枠（p と q の 2 件）まで。
+    let (ids, blanks) = probe_ids_with_blanks(&e.drops);
+    assert!(blanks == 0 || blanks == 2, "空の表示の件数: {blanks}");
+    assert_frames_unwind(&ids, blanks);
     // 実行ファイルも、同じ形で破棄する（枠の数は違ってよい）。
     let (got, native) = common::native::native_drops(&[&src], "t", &[] as &[Arg]);
     assert_eq!(got.code, Some(70), "{}", got.stderr);
-    assert_frames_unwind(&probe_ids(&native));
+    assert_frames_unwind(&probe_ids(&native), 0);
 }
 
 /// 各枠では q (-n) が p (n) より先、枠は深い方 (n が大きい) から浅い方へ、最後に呼び出し元の a。
-fn assert_frames_unwind(ids: &[i64]) {
+/// `blanks` は先頭で表示が空になって除かれた件数（最も深い枠の分）。
+fn assert_frames_unwind(ids: &[i64], blanks: usize) {
     let (last, frames) = ids.split_last().unwrap();
     assert_eq!(*last, 100_000_000);
     assert!(
@@ -140,9 +159,13 @@ fn assert_frames_unwind(ids: &[i64]) {
         "{}",
         frames.len()
     );
-    // 最も深い枠は表示できないことがあるので、深さは先頭の q (-n) から読む。
-    let depth = -frames[0];
-    assert_eq!(frames.len() as i64, depth * 2);
-    let want: Vec<i64> = (1..=depth).rev().flat_map(|n| [-n, n]).collect();
+    // 深さは、除かれた分も数えて、先頭の q (-n) から読む。
+    let depth = -frames[0] + (blanks / 2) as i64;
+    assert_eq!((frames.len() + blanks) as i64, depth * 2);
+    let want: Vec<i64> = (1..=depth)
+        .rev()
+        .flat_map(|n| [-n, n])
+        .skip(blanks)
+        .collect();
     assert_eq!(frames, want.as_slice());
 }

@@ -2,6 +2,8 @@
 //!
 //! 依存は足さず、枠（`Content-Length`）・JSON-RPC・診断を自前で持つ。送る通知は `publishDiagnostics` だけ。
 
+mod hover;
+
 use crate::json::{obj, parse, Value};
 use crate::lexer::{lex, Tok};
 use crate::{Error, Phase};
@@ -329,6 +331,7 @@ impl<W: Write> Server<W> {
                 let caps = obj(vec![
                     ("positionEncoding", enc.into()),
                     ("textDocumentSync", sync),
+                    ("hoverProvider", true.into()),
                 ]);
                 let info = obj(vec![
                     ("name", "sigil".into()),
@@ -373,10 +376,41 @@ impl<W: Write> Server<W> {
                     self.close(uri);
                 }
             }
+            ("textDocument/hover", Some(id)) => {
+                let r = self.hover(params).unwrap_or(Value::Null);
+                self.respond(id, r);
+            }
             (_, Some(id)) => self.respond_err(id, -32601, "未対応の要求"),
             _ => {}
         }
         None
+    }
+
+    /// hover の結果（`MarkupContent` の `plaintext`）。返さないときは `None`（応答は `null`）。
+    fn hover(&self, params: &Value) -> Option<Value> {
+        let uri = params.get("textDocument")?.get("uri")?.as_str()?;
+        let pos = params.get("position")?;
+        let line = pos.get("line")?.as_i64()? as usize;
+        let ch = pos.get("character")?.as_i64()? as usize;
+        let text = self.text_of(uri)?;
+        let cs: Vec<char> = text.split('\n').nth(line)?.chars().collect();
+        // 位置の単位（UTF-16 の符号単位か文字数）から、文字の添字へ。
+        let (mut col, mut units) = (0, 0);
+        while col < cs.len() && units < ch {
+            units += if self.utf32 { 1 } else { cs[col].len_utf16() };
+            col += 1;
+        }
+        let specs: Vec<_> = self
+            .group(uri, &text)
+            .ok()?
+            .into_iter()
+            .map(|(u, t)| (u, crate::spec::extract_with(&t, &self.opts).ok()))
+            .collect();
+        let own = specs.iter().find(|s| s.0 == uri)?.1.clone()?;
+        let all: Vec<_> = specs.into_iter().filter_map(|s| s.1).collect();
+        let value = hover::hover(&text, line as u32 + 1, col as u32 + 1, &own, &all)?;
+        let md = obj(vec![("kind", "plaintext".into()), ("value", value.into())]);
+        Some(obj(vec![("contents", md)]))
     }
 
     /// 文書の中身。開いていなければディスクの中身。

@@ -1,6 +1,6 @@
 # 0019: M6 の仕様の機械向けの形式と、言語サーバー
 
-- **状態**: 承認（2026-10-26。所有者の委任を受けて Claude が決定。）判断 1・2 は推奨どおり J1・L1（依存を加えない）とした（「人間の判断が要る点」）。
+- **状態**: 承認・実装済み（PR1〜PR3、2026-10-26。所有者の委任を受けて Claude が決定。）判断 1・2 は推奨どおり J1・L1（依存を加えない）とした（「人間の判断が要る点」）。
 
 ## 背景
 
@@ -277,6 +277,13 @@
 1. **PR1: JSON と機械向けの形式**。`src/json.rs`（判断 1 の結論による）、`sigil spec --json`、`sigil check --json`。`spec_json_*`・`check_json_kinds`。
 2. **PR2: 言語サーバーの枠と診断**。`sigil lsp`、`Content-Length` の枠の読み書き、`initialize`〜`exit`、全文の同期、決定 4 の診断、決定 6 の位置の変換。`lsp_samples_no_diagnostics`・`lsp_error_diagnostic`・`lsp_utf16_positions`・`lsp_shutdown`・`lsp_internal_error_contained`・`lsp_lex_error_ranges`・`lsp_multi_file_publish`。
 3. **PR3: hover と M6 の完了**。決定 5、`lsp_hover_matches_spec`。ADR 0006 に M6 の完了（P0 の完了）を記録する。
+
+### 実装の記録（PR3）
+
+- hover は `src/lsp/hover.rs` の純粋な関数で、字句の列と、文・腕・ブロックの行番号だけを使う（式に位置の情報がないため）。宣言は `SpecItem` の位置（`FnDecl` の位置と同じ）で引く。
+- ローカルの名前の隠れ方は行単位の近似である。引数は関数全体、`let` はその文からブロックの終わりまで、`match` の腕の束縛はその腕の行から次の腕または match の終わりまで。クロージャの引数は関数全体で隠す側に倒す（誤って別の仕様を返すより `null` を返す）。
+- 呼び出し先は同じ組（`group`）の全ファイルの仕様から引く。
+- LSP の行数（テストと空行・コメント行を除く）は `src/lsp.rs` が 583、`src/lsp/hover.rs` が 179 で、合わせて 762（閾値 800 以下）。
 
 ## 影響
 

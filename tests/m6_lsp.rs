@@ -593,3 +593,106 @@ fn lsp_group_split_rechecks_remaining() {
         .sum();
     assert_eq!(n, 1);
 }
+
+impl Client {
+    /// `hover` の結果。`null` は `None`。
+    fn hover(&mut self, path: &Path, line: i64, ch: i64) -> Option<String> {
+        let pos = obj(vec![("line", line.into()), ("character", ch.into())]);
+        let doc = obj(vec![("uri", path_to_uri(path).into())]);
+        self.request(
+            7,
+            "textDocument/hover",
+            obj(vec![("textDocument", doc), ("position", pos)]),
+        );
+        let r = self.recv();
+        assert_eq!(r.get("id").and_then(Value::as_i64), Some(7), "{r}");
+        let v = r.get("result").unwrap();
+        if *v == Value::Null {
+            return None;
+        }
+        let c = v.get("contents").unwrap();
+        assert_eq!(c.get("kind").and_then(Value::as_str), Some("plaintext"));
+        Some(c.get("value").and_then(Value::as_str).unwrap().to_string())
+    }
+}
+
+#[test]
+fn lsp_hover_matches_spec() {
+    let p = example("03-ownership/ownership.sigil");
+    let src = std::fs::read_to_string(&p).unwrap();
+    let spec = std::fs::read_to_string(example("03-ownership/ownership.spec")).unwrap();
+    // `sigil spec` の出力から `deposit` の塊（空行で区切られる）を取り出す。
+    let chunk = spec
+        .split("\n\n")
+        .find(|c| c.starts_with("関数 deposit\n"))
+        .map(|c| format!("{}\n", c.trim_end()))
+        .unwrap();
+    let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).unwrap() as i64;
+    let mut c = Client::start(&[]);
+    let caps = c.initialize(&[]);
+    let caps = caps.get("result").unwrap().get("capabilities").unwrap();
+    assert_eq!(caps.get("hoverProvider"), Some(&Value::Bool(true)));
+    c.open(&p, &src);
+    c.publish();
+    let decl = line_of("fn deposit(");
+    // 宣言: 名前の上、引数の行、4 節の行。
+    for (l, ch) in [(decl, 4), (decl, 0), (decl + 1, 4), (decl + 3, 10)] {
+        assert_eq!(
+            c.hover(&p, l, ch).as_deref(),
+            Some(chunk.as_str()),
+            "{l}:{ch}"
+        );
+    }
+    // 本体の `{` の行より後ろは返さない。
+    assert_eq!(c.hover(&p, decl + 7, 4), None);
+    // 呼び出しの箇所。
+    let call = line_of("deposit(&mut a");
+    assert_eq!(c.hover(&p, call, 3).as_deref(), Some(chunk.as_str()));
+    // 型の宣言の名前。
+    let st = line_of("struct Account");
+    let got = c.hover(&p, st, 8).unwrap();
+    assert!(
+        spec.contains(&got) && got.starts_with("構造体 Account"),
+        "{got}"
+    );
+    // 標準ライブラリの関数・呼び出しでない名前・空白は返さない。
+    assert_eq!(c.hover(&p, line_of("console.log(&b)"), 11), None);
+    assert_eq!(c.hover(&p, call, 12), None);
+    assert_eq!(c.hover(&p, call, 0), None);
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_hover_scope_and_methods() {
+    let dir = tmpdir("hover");
+    let head = format!("{HEAD}struct S {{\n  v: Int,\n}}\n\n");
+    let g = "fn g(n: Int) -> Int\n  intent \"g\"\n  requires none\n  ensures none\n  effects none\n{\n  return n;\n}\n\n";
+    let imp = "impl S {\n  fn m(self: &S) -> Int\n    intent \"m\"\n    requires none\n    ensures none\n    effects none\n  {\n    return self.v;\n  }\n}\n\n";
+    let user = "fn u(g: Int, s: S) -> Int\n  intent \"u\"\n  requires none\n  ensures none\n  effects none\n{\n  let a = g(1);\n  return a;\n}\n\n\
+fn w(s: S) -> Int\n  intent \"w\"\n  requires none\n  ensures none\n  effects none\n{\n  let a = g(1);\n  let b = S.m(&s);\n  let c = s.m();\n  return a;\n}\n";
+    let src = format!("{head}{g}{imp}{user}");
+    let p = write(&dir, "m.sigil", &src);
+    let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).unwrap() as i64;
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    c.open(&p, &src);
+    c.publish();
+    let gl = line_of("fn g(");
+    let gtext = c.hover(&p, gl, 3).unwrap();
+    assert!(gtext.starts_with("関数 g\n"), "{gtext}");
+    // 引数 g が関数 g を隠している
+    assert_eq!(c.hover(&p, line_of("let a = g(1)"), 10), None);
+    // 隠していない呼び出しは返す。メソッドは `型.名前(...)` の形だけ
+    let w = src.lines().position(|l| l.contains("fn w(")).unwrap() as i64;
+    let ws: Vec<i64> = (w..w + 12).collect();
+    let find = |s: &str| {
+        *ws.iter()
+            .find(|l| src.lines().nth(**l as usize).unwrap().contains(s))
+            .unwrap()
+    };
+    assert_eq!(c.hover(&p, find("let a = g(1)"), 10), Some(gtext));
+    let m = c.hover(&p, find("S.m(&s)"), 12).unwrap();
+    assert!(m.starts_with("メソッド S.m"), "{m}");
+    assert_eq!(c.hover(&p, find("s.m()"), 12), None);
+    assert_eq!(c.finish().1, 0);
+}

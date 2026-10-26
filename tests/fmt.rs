@@ -253,7 +253,7 @@ fn deep_output_is_explicit_error() {
     // 不要な括弧は消えるので、出力は浅くなって成功する。
     let mk = |n: usize| format!("{}x{}", "(".repeat(n), ")".repeat(n));
     let n = ok_depth(&mk);
-    assert!(n >= 100, "{n}");
+    assert!(n >= 50, "{n}");
     assert_eq!(
         format(&body(&format!("  return {};\n", mk(n)))).unwrap(),
         body("  return x;\n")

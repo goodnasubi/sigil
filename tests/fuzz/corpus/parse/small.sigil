@@ -1,0 +1,20 @@
+module m.s
+  targets server
+  trust none
+
+// 小さな関数
+fn f(x: Int) -> Int
+  intent "x を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut y = x; // 行末
+  while y < 10 {
+    y = y + 1;
+  }
+  match y {
+    10 => { return y; }
+    _ => { return 0; }
+  }
+}

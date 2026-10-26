@@ -1,0 +1,62 @@
+// 例 05: 制御の書き方（ADR 0008 の決定 2）
+// if と while は文であり、値を持たない。値を選ぶ分岐は match で書く。
+// 脱出するクロージャ（変数に保存するものなど）には move を付ける。
+
+module examples.control
+  targets browser, server
+  trust none
+
+// while と if は文。値は return で返す。
+fn sum_range(from: Int, to: Int) -> Int
+  intent "from 以上 to 以下の整数の合計を返す"
+  requires from <= to
+  ensures none
+  effects none
+{
+  let mut total = 0;
+  let mut i = from;
+  while i <= to {
+    total = total + i;
+    i = i + 1;
+  }
+  return total;
+}
+
+// if の分岐の中で値を返すときは return を書く。else は省略できる。
+fn clamp(x: Int, low: Int, high: Int) -> Int
+  intent "x を low 以上 high 以下に収める"
+  requires low <= high
+  ensures low <= result && result <= high
+  effects none
+{
+  if x < low {
+    return low;
+  } else if x > high {
+    return high;
+  }
+  return x;
+}
+
+// 条件の真偽で値を選ぶときは match で書く（let y = if ... は書けない）。
+fn sign(x: Int) -> Int
+  intent "x が負なら -1、それ以外なら 1 を返す"
+  requires none
+  ensures result == -1 || result == 1
+  effects none
+{
+  return match x < 0 {
+    true => -1,
+    false => 1,
+  };
+}
+
+// 変数に保存するクロージャは脱出するので、とらえる値を move で移す。
+fn add_to(n: Int, x: Int) -> Int
+  intent "x に n を加えた値を返す"
+  requires none
+  ensures result == x + n
+  effects none
+{
+  let add_n = move |y| y + n;
+  return add_n(x);
+}

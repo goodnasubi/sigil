@@ -146,7 +146,7 @@ struct Parser {
 /// 式・型・パターン・ブロックの入れ子の深さの上限。
 /// `.`・`(...)`・`?` の連鎖、二項演算の連鎖、`else if` の連鎖も 1 つにつき 1 段と数える
 /// （構文木の深さを抑え、木をたどる再帰と `Drop` のスタックあふれを防ぐ）。
-const MAX_DEPTH: usize = 256;
+const MAX_DEPTH: usize = 128;
 
 fn describe(t: &Tok) -> String {
     match t {

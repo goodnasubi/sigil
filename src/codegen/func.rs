@@ -24,11 +24,18 @@ enum Cur {
     V(usize, usize),
 }
 
-/// 値の複写（影）と破棄が必要な型。`Str`・`Path`・スカラー・参照は含まない。
+/// 値の複写（影）と破棄が必要な型。文字列・パス（`RtStr`）も含む。スカラー・参照は含まない。
 fn aggregate(t: &Ty) -> bool {
     matches!(
         t,
-        Ty::Tuple(_) | Ty::Adt(_) | Ty::List(_) | Ty::Cell(_) | Ty::Shared(_) | Ty::FnRef(..)
+        Ty::Tuple(_)
+            | Ty::Adt(_)
+            | Ty::List(_)
+            | Ty::Cell(_)
+            | Ty::Shared(_)
+            | Ty::FnRef(..)
+            | Ty::Str
+            | Ty::Path
     )
 }
 
@@ -694,13 +701,8 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (v, _) = self.val(op);
                 let t = strip(&norm(ty));
                 match t {
-                    Ty::Int
-                    | Ty::Float
-                    | Ty::Bool
-                    | Ty::Unit
-                    | Ty::Str
-                    | Ty::Path
-                    | Ty::ParseError => v,
+                    Ty::Int | Ty::Float | Ty::Bool | Ty::Unit | Ty::ParseError => v,
+                    Ty::Str | Ty::Path => self.rt("str_clone", &[v]),
                     _ => {
                         let d = self.desc_addr(&t);
                         self.rt("val_clone", &[d, v])
@@ -1359,7 +1361,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             PathNew => {
                 let (s, _) = self.val(&args[0]);
-                (s, u)
+                (self.rt("str_clone", &[s]), u)
             }
             PathJoin => {
                 let (a, _) = self.val(&args[0]);
@@ -1535,7 +1537,9 @@ impl<'a, 'p> Fx<'a, 'p> {
             .ins()
             .load(types::I32, MemFlagsData::new(), kind_slot, 0);
         let kw = self.b.ins().uextend(types::I64, k);
-        self.mk_enum(kw, &[path])
+        // 借りた経路は呼び出し側が解放するので、エラーの値は自分の複製を持つ。
+        let own = self.rt("str_clone", &[path]);
+        self.mk_enum(kw, &[own])
     }
 
     // --- 入口 ---

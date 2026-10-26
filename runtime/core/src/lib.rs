@@ -9,7 +9,7 @@
 
 use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 #[path = "../../../src/shared/args.rs"]
 mod args;
@@ -58,7 +58,40 @@ pub unsafe extern "C" fn sigil_rt_free(p: *mut u8, size: usize, align: usize) {
 
 pub struct RtStr(String);
 
+// ---------------------------------------------------------------------------
+// 生きている塊の数（ADR 0018 の決定 5。テストが解放の漏れと二重解放を見つけるための数え）
+
+static LIVE_STRS: AtomicIsize = AtomicIsize::new(0);
+static LIVE_BLOCKS: AtomicIsize = AtomicIsize::new(0);
+
+/// 文字列・パスの数を `d` だけ増やす。0 を下回ったら（作っていない物を解放した）二重解放として止める。
+pub(crate) fn live_strs(d: isize) {
+    if LIVE_STRS.fetch_add(d, Ordering::Relaxed) + d < 0 {
+        std::process::abort();
+    }
+}
+
+/// 見出しつきの塊の数を `d` だけ増やす。0 を下回ったら二重解放として止める。
+pub(crate) fn live_blocks(d: isize) {
+    if LIVE_BLOCKS.fetch_add(d, Ordering::Relaxed) + d < 0 {
+        std::process::abort();
+    }
+}
+
+/// 生きている文字列・パスの数。
+#[no_mangle]
+pub extern "C" fn sigil_rt_live_strs() -> isize {
+    LIVE_STRS.load(Ordering::Relaxed)
+}
+
+/// 生きている見出しつきの塊の数。
+#[no_mangle]
+pub extern "C" fn sigil_rt_live_blocks() -> isize {
+    LIVE_BLOCKS.load(Ordering::Relaxed)
+}
+
 fn new_str(s: String) -> *mut RtStr {
+    live_strs(1);
     Box::into_raw(Box::new(RtStr(s)))
 }
 
@@ -85,6 +118,7 @@ pub unsafe extern "C" fn sigil_rt_str_new(ptr: *const u8, len: usize) -> *mut Rt
 #[no_mangle]
 pub unsafe extern "C" fn sigil_rt_str_free(p: *mut RtStr) {
     if !p.is_null() {
+        live_strs(-1);
         drop(Box::from_raw(p));
     }
 }
@@ -489,10 +523,20 @@ pub unsafe extern "C" fn sigil_rt_enter_with(
             sigil_rt_stack_init(stack_bytes / 4 * 3);
             entry(a.0)
         });
-    match h {
+    let code = match h {
         Ok(h) => h.join().unwrap_or(1),
         Err(_) => 1,
+    };
+    // テスト用: 環境変数 `SIGIL_RT_LIVE` があれば、終わった時点で生きている塊の数を標準エラーに出す。
+    if std::env::var_os("SIGIL_RT_LIVE").is_some() {
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "live: strs={} blocks={}",
+            sigil_rt_live_strs(),
+            sigil_rt_live_blocks()
+        );
     }
+    code
 }
 
 /// 256 MiB のスタックで入口を呼ぶ（下限は上端から 192 MiB 下）。

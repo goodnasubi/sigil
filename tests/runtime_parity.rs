@@ -114,17 +114,29 @@ fn lit(s: &str) -> String {
     o
 }
 
+/// `cc` があるか。なければ理由を標準エラーに出す（どのテストでも、飛ばしたことが分かるように）。
 fn have_cc() -> bool {
-    Command::new("cc")
+    let ok = Command::new("cc")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("cc がないので、このテストは飛ばす（ランタイムのリンクの試験は実行されない）");
+    }
+    ok
+}
+
+/// 作業ディレクトリ（`CARGO_TARGET_TMPDIR` の下。`/tmp` には残さない）。同じ名前のものがあれば作り直す。
+fn work_dir(tag: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sigil-rt-parity-{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// 埋め込んだ `.a` で C のドライバをリンクして、実行ファイルの場所を返す。`order_os_first` で `.a` の順序を替える。
 fn build_driver(tag: &str, order_os_first: bool) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("sigil-rt-parity-{}-{tag}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = work_dir(tag);
     std::fs::write(dir.join("core.a"), runtime_lib::core_a()).unwrap();
     std::fs::write(dir.join("os.a"), runtime_lib::os_a()).unwrap();
     std::fs::write(dir.join("d.c"), DRIVER).unwrap();
@@ -143,6 +155,13 @@ fn build_driver(tag: &str, order_os_first: bool) -> PathBuf {
         String::from_utf8_lossy(&o.stderr)
     );
     dir.join("d")
+}
+
+/// 作業ディレクトリを消す。
+fn cleanup(exe: &std::path::Path) {
+    if let Some(d) = exe.parent() {
+        let _ = std::fs::remove_dir_all(d);
+    }
 }
 
 fn rt(exe: &PathBuf, args: &[&str]) -> String {
@@ -287,10 +306,11 @@ fn check_all(exe: &PathBuf) {
 #[test]
 fn runtime_matches_interpreter_core_then_os() {
     if !have_cc() {
-        eprintln!("cc がないので飛ばす");
         return;
     }
-    check_all(&build_driver("a", false));
+    let exe = build_driver("a", false);
+    check_all(&exe);
+    cleanup(&exe);
 }
 
 #[test]
@@ -298,7 +318,9 @@ fn runtime_matches_interpreter_os_then_core() {
     if !have_cc() {
         return;
     }
-    check_all(&build_driver("b", true));
+    let exe = build_driver("b", true);
+    check_all(&exe);
+    cleanup(&exe);
 }
 
 #[test]
@@ -306,8 +328,7 @@ fn core_alone_links_without_os() {
     if !have_cc() {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("sigil-rt-parity-{}-core", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = work_dir("core");
     std::fs::write(dir.join("core.a"), runtime_lib::core_a()).unwrap();
     let src = "#include <stdint.h>\n#include <stddef.h>\ntypedef struct RtStr RtStr;\nRtStr* sigil_rt_show_int(int64_t);\nvoid sigil_rt_print_result(const RtStr*);\nint main(void){ sigil_rt_print_result(sigil_rt_show_int(42)); return 0; }\n";
     std::fs::write(dir.join("d.c"), src).unwrap();
@@ -321,6 +342,7 @@ fn core_alone_links_without_os() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     let r = Command::new(dir.join("d")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&r.stdout), "42\n");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -336,6 +358,7 @@ fn console_log_and_stop_exit_code() {
     assert_eq!(o.status.code(), Some(70));
     assert_eq!(String::from_utf8_lossy(&o.stdout), "before");
     assert_eq!(String::from_utf8_lossy(&o.stderr), "停止: x\n");
+    cleanup(&exe);
     console_log_only();
 }
 
@@ -345,6 +368,7 @@ fn console_log_only() {
     }
     let exe = build_driver("c", false);
     assert_eq!(rt(&exe, &["log", "こんにちは"]), "こんにちは");
+    cleanup(&exe);
 }
 
 #[test]

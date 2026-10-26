@@ -14,5 +14,9 @@ path = "src/lib.rs"
 name = "sigil"
 path = "src/main.rs"
 
-# 外部依存なし（ADR 0006: 依存クレートの追加は人間の承認が要る）
+# 依存クレートの追加は人間の承認が要る（ADR 0006）。Cranelift の 4 クレートだけ、所有者が 2026-10-26 に承認した（ADR 0015）。
 [dependencies]
+cranelift-codegen = "=0.137.0"
+cranelift-frontend = "=0.137.0"
+cranelift-module = "=0.137.0"
+cranelift-object = "=0.137.0"

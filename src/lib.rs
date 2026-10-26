@@ -5,6 +5,7 @@
 pub mod ast;
 pub mod borrow;
 pub mod check;
+pub mod codegen;
 pub mod effects;
 pub mod error;
 pub mod exhaustive;
@@ -14,6 +15,7 @@ pub mod ir;
 pub mod ir_eval;
 pub mod lexer;
 pub mod lower;
+pub mod native;
 pub mod parser;
 pub mod report;
 pub mod runtime_lib;

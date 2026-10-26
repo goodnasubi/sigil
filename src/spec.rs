@@ -11,14 +11,29 @@ use crate::parser::parse;
 
 /// ソースから仕様のテキストを作る。構文エラーならそのエラー。
 pub fn spec(src: &str) -> Result<String, Error> {
+    spec_with(src, &crate::effects::Options::default())
+}
+
+/// 検査器の設定（テスト用の原始操作）を指定して仕様を作る。
+pub fn spec_with(src: &str, opts: &crate::effects::Options) -> Result<String, Error> {
     let file = parse(src)?;
+    // `使う原始操作:`・`推論できない効果:` は検査器の解決結果から作る。`unchecked` の関数があるときだけ検査器を呼ぶ。
+    // `sigil spec` は許可を検査しないので、このモジュール自身を `trust_base` に挙げて呼ぶ（ADR 0016 の決定 6）。
+    let reports = if unchecked_count(&file.items) > 0 {
+        let mut o = opts.clone();
+        o.trust_base.push(file.module.name.join("."));
+        Some(crate::check::fn_reports(&file, &o).ok())
+    } else {
+        None
+    };
+    let reports = &reports;
     let mut blocks: Vec<String> = vec![module_spec(&file.module, unchecked_count(&file.items))];
     for item in &file.items {
         blocks.push(match item {
             Item::Type(t) => type_spec(t),
             Item::Struct(s) => struct_spec(s),
             Item::Enum(e) => enum_spec(e),
-            Item::Fn(f) => fn_spec(f, "関数", &f.name, &f.generics),
+            Item::Fn(f) => fn_spec(f, "関数", &f.name, &f.generics, reports),
             Item::Impl(i) => i
                 .fns
                 .iter()
@@ -31,7 +46,7 @@ pub fn spec(src: &str) -> Result<String, Error> {
                         .chain(f.generics.iter())
                         .cloned()
                         .collect();
-                    fn_spec(f, "メソッド", &name, &gs)
+                    fn_spec(f, "メソッド", &name, &gs, reports)
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -218,7 +233,45 @@ fn intent_text(s: &str) -> String {
     }
 }
 
-fn fn_spec(f: &FnDecl, label: &str, name: &str, gs: &[Generic]) -> String {
+/// 検査器の記録。`None` は `unchecked` の関数がなく検査器を呼ばなかった場合、`Some(None)` は検査が失敗した場合。
+type Reports = Option<Option<std::collections::HashMap<usize, crate::check::FnReport>>>;
+
+const CHECK_FAILED: &str = "（検査のエラーのため表示できない）";
+
+/// `unchecked` の関数の、検査を外す前提・使う原始操作・推論できない効果の行。
+fn unchecked_lines(f: &FnDecl, u: &str, reports: &Reports) -> String {
+    let mut out = format!("  検査を外す: {}\n", intent_text(u));
+    let rep = match reports {
+        Some(Some(m)) => m.get(&crate::check::fn_key(f)),
+        _ => None,
+    };
+    let Some(rep) = rep else {
+        out.push_str(&format!("  使う原始操作: {CHECK_FAILED}\n"));
+        out.push_str(&format!("  推論できない効果: {CHECK_FAILED}\n"));
+        return out;
+    };
+    let ops = if rep.raw_ops.is_empty() {
+        "なし".to_string()
+    } else {
+        rep.raw_ops
+            .iter()
+            .map(|(n, p)| format!("{n}（前提: {}）", intent_text(p)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    out.push_str(&format!("  使う原始操作: {ops}\n"));
+    if rep.delegated {
+        let ne = if rep.not_inferred.is_empty() {
+            "なし".to_string()
+        } else {
+            rep.not_inferred.join(", ")
+        };
+        out.push_str(&format!("  推論できない効果: {ne}\n"));
+    }
+    out
+}
+
+fn fn_spec(f: &FnDecl, label: &str, name: &str, gs: &[Generic], reports: &Reports) -> String {
     let params = if f.params.is_empty() {
         "なし".to_string()
     } else {
@@ -234,9 +287,10 @@ fn fn_spec(f: &FnDecl, label: &str, name: &str, gs: &[Generic]) -> String {
         .as_ref()
         .filter(|r| !is_unit(r))
         .map_or("なし".to_string(), type_text);
-    let unchecked = f.unchecked.as_ref().map_or(String::new(), |u| {
-        format!("  検査を外す: {}\n", intent_text(u))
-    });
+    let unchecked = f
+        .unchecked
+        .as_ref()
+        .map_or(String::new(), |u| unchecked_lines(f, u, reports));
     format!(
         "{} {}{}\n  意図: {}\n  引数: {}\n  戻り値: {}\n  事前条件: {}\n  事後条件: {}\n  効果: {}\n{}",
         label,

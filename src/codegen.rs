@@ -30,6 +30,8 @@ use std::fmt;
 pub struct Opts {
     /// `--trace-drops`（破棄の記録を標準エラーに出す）。
     pub trace_drops: bool,
+    /// `--trust-base`（`trust base` を許すモジュール名。ADR 0016）。
+    pub trust_base: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

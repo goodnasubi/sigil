@@ -118,3 +118,138 @@ fn spec_shows_unchecked_premise_and_count() {
     let none = spec(&src.replace("trust base", "trust none")).unwrap();
     assert!(none.contains("信頼基盤: いいえ\n"));
 }
+
+// ---- ADR 0016 の決定 6（PR2: 使う原始操作・推論できない効果） ----
+
+fn raw_opts() -> sigil::effects::Options {
+    use sigil::effects::RawOp;
+    use sigil::stdlib::{Layer, DELEGATED};
+    let op = |layer, sig: &str, effects: &str, premise: &str| RawOp {
+        layer,
+        signature: sig.to_string(),
+        effects: effects.to_string(),
+        requires: "none".to_string(),
+        premise: premise.to_string(),
+    };
+    sigil::effects::Options {
+        raw_ops: vec![
+            op(
+                Layer::Core,
+                "alloc(size: Int) -> Addr",
+                "state",
+                "確保器が有効",
+            ),
+            op(
+                Layer::Core,
+                "read_int(a: &Addr) -> Int",
+                "none",
+                "領域が生きている",
+            ),
+            op(Layer::Os, "syscall(n: Int) -> Int", DELEGATED, "番号が有効"),
+        ],
+        ..Default::default()
+    }
+}
+
+fn ufn(name: &str, effects: &str, body: &str) -> String {
+    format!(
+        "fn {name}(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects {effects}\n  unchecked \"領域は確保済み\"\n{{\n{body}\n}}\n\n"
+    )
+}
+
+#[test]
+fn spec_shows_unchecked_premise_and_raw_ops() {
+    let body = "  let a = raw.alloc(n);\n  let b = raw.alloc(n);\n  return raw.read_int(&a) + raw.read_int(&b);";
+    let src = format!(
+        "module m.a\n  targets server\n  trust base\n\n{}",
+        ufn("f", "state", body)
+    );
+    let out = sigil::spec::spec_with(&src, &raw_opts()).unwrap();
+    // 名前の順で、重複なく、前提つき。
+    assert!(
+        out.contains("  検査を外す: 領域は確保済み\n  使う原始操作: raw.alloc（前提: 確保器が有効）, raw.read_int（前提: 領域が生きている）\n"),
+        "{out}"
+    );
+    // 宣言に委ねる操作を呼ばないので、推論できない効果の行は出ない。
+    assert!(!out.contains("推論できない効果"), "{out}");
+    assert!(
+        out.contains("信頼基盤: はい（検査を外す関数 1 個）"),
+        "{out}"
+    );
+}
+
+#[test]
+fn spec_shows_effects_not_inferred() {
+    let o = raw_opts();
+    let mk = |effects: &str| {
+        format!(
+            "module m.a\n  targets server\n  trust base\n\n{}",
+            ufn("f", effects, "  return raw.syscall(n);")
+        )
+    };
+    let out = sigil::spec::spec_with(&mk("fs.read, fs.write"), &o).unwrap();
+    assert!(
+        out.contains("  使う原始操作: raw.syscall（前提: 番号が有効）\n  推論できない効果: fs.read, fs.write\n"),
+        "{out}"
+    );
+    let out = sigil::spec::spec_with(&mk("none"), &o).unwrap();
+    assert!(out.contains("  推論できない効果: なし\n"), "{out}");
+    // 検査が失敗したファイル。
+    let bad = mk("none").replace("raw.syscall(n)", "nope");
+    let out = sigil::spec::spec_with(&bad, &o).unwrap();
+    assert!(
+        out.contains("  使う原始操作: （検査のエラーのため表示できない）\n  推論できない効果: （検査のエラーのため表示できない）\n"),
+        "{out}"
+    );
+    // `unchecked` の関数がなければ検査器は呼ばず、行も出ない。
+    let plain = "module m.a\n  targets server\n  trust none\n\nfn g(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return n;\n}\n";
+    let out = sigil::spec::spec_with(plain, &o).unwrap();
+    assert!(
+        !out.contains("原始操作") && !out.contains("推論できない"),
+        "{out}"
+    );
+}
+
+#[test]
+fn spec_without_raw_ops_says_none() {
+    let src = format!(
+        "module m.a\n  targets server\n  trust base\n\n{}",
+        ufn("f", "none", "  return n;")
+    );
+    let out = spec(&src).unwrap();
+    assert!(
+        out.contains("  検査を外す: 領域は確保済み\n  使う原始操作: なし\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn spec_counts_unchecked_in_impl_methods() {
+    // `impl` のメソッドに節を書いたものも、モジュールの行の数に入る。
+    let m = |unchecked: bool| {
+        format!(
+            "fn {}(self: &S) -> Int\n    intent \"x\"\n    requires none\n    ensures none\n    effects none\n{}  {{\n    return 1;\n  }}\n",
+            "get",
+            if unchecked { "    unchecked \"前提\"\n" } else { "" }
+        )
+    };
+    let src = format!(
+        "module m.a\n  targets server\n  trust base\n\nstruct S {{\n  n: Int\n}}\n\nimpl S {{\n  {}  {}}}\n\n{}",
+        m(true),
+        m(true).replace("get", "get2"),
+        ufn("f", "none", "  return n;")
+    );
+    let out = spec(&src).unwrap();
+    assert!(
+        out.contains("信頼基盤: はい（検査を外す関数 3 個）"),
+        "{out}"
+    );
+    assert_eq!(out.matches("  検査を外す:").count(), 3, "{out}");
+    // 節のないメソッドは数えない。
+    let src2 = src.replace("    unchecked \"前提\"\n", "");
+    let out = spec(&src2).unwrap();
+    assert!(
+        out.contains("信頼基盤: はい（検査を外す関数 1 個）"),
+        "{out}"
+    );
+}

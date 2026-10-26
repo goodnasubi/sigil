@@ -31,7 +31,8 @@ impl fmt::Display for BuildError {
 
 /// ソース（複数ファイルは `run_sources` と同じく結合する）から実行ファイルを作る。
 pub fn build(srcs: &[&str], func: &str, opts: &Opts, out: &Path) -> Result<(), BuildError> {
-    let p = crate::ir_eval::lower_sources(srcs, func).map_err(BuildError::Run)?;
+    let p = crate::ir_eval::lower_sources_with(srcs, func, &opts.trust_base)
+        .map_err(BuildError::Run)?;
     build_program(&p, opts, out)
 }
 

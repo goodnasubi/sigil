@@ -60,7 +60,16 @@ pub fn try_build(
     out: &std::path::Path,
     trace_drops: bool,
 ) -> Result<(), String> {
-    native::build(srcs, func, &Opts { trace_drops }, out).map_err(|e| e.to_string())
+    native::build(
+        srcs,
+        func,
+        &Opts {
+            trace_drops,
+            ..Opts::default()
+        },
+        out,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// 実行ファイルを `--trace-drops` つきで作って走らせ、標準エラーの破棄の記録（`drop: ` の後ろ）を返す。
@@ -237,6 +246,7 @@ pub fn check(
         func,
         &Opts {
             trace_drops: opts.trace_drops,
+            trust_base: opts.trust_base.clone(),
         },
         &exe,
     ) {

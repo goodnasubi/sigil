@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--trace-drops] [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec <ファイル>             仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--trust-base <モジュール>]... <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil run [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] [--trust-base <モジュール>]... <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
 
 fn read(path: &str) -> Option<String> {
     match std::fs::read(path)
@@ -134,13 +134,31 @@ fn main() -> ExitCode {
             done(failed)
         }
         Some("check") if args.len() > 1 => {
+            let mut trust_base: Vec<String> = vec![];
+            let mut i = 1;
+            while args.get(i).map(String::as_str) == Some("--trust-base") {
+                let Some(m) = args.get(i + 1) else {
+                    eprintln!("--trust-base にはモジュール名が要る");
+                    return ExitCode::from(2);
+                };
+                trust_base.push(m.clone());
+                i += 2;
+            }
+            if args.len() <= i {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+            let copts = sigil::effects::Options {
+                trust_base,
+                ..Default::default()
+            };
             let mut failed = false;
-            for path in &args[1..] {
+            for path in &args[i..] {
                 let Some(src) = read(path) else {
                     failed = true;
                     continue;
                 };
-                match sigil::check::check(&src) {
+                match sigil::check::check_with(&src, &copts) {
                     Ok(()) => println!("{path}: ok"),
                     Err(e) => {
                         eprintln!("{path}:{e}");
@@ -171,14 +189,24 @@ fn main() -> ExitCode {
             // `fs.read(&仮のパス)` が実ファイルの内容を返す。指定がなければ実ファイルを読み書きする。同じ仮のパスの重複指定は使い方の誤り（終了コード 2）。
             let mut doubles: Vec<(String, String)> = vec![];
             let mut trace = false;
+            let mut trust_base: Vec<String> = vec![];
             let mut i = 1;
             while matches!(
                 args.get(i).map(String::as_str),
-                Some("--fs-double" | "--trace-drops")
+                Some("--fs-double" | "--trace-drops" | "--trust-base")
             ) {
                 if args[i] == "--trace-drops" {
                     trace = true;
                     i += 1;
+                    continue;
+                }
+                if args[i] == "--trust-base" {
+                    let Some(m) = args.get(i + 1) else {
+                        eprintln!("--trust-base にはモジュール名が要る");
+                        return ExitCode::from(2);
+                    };
+                    trust_base.push(m.clone());
+                    i += 2;
                     continue;
                 }
                 let Some((k, v)) = args.get(i + 1).and_then(|a| a.split_once('=')) else {
@@ -201,6 +229,7 @@ fn main() -> ExitCode {
                 .collect();
             let mut opts = sigil::interp::Options {
                 trace_drops: trace,
+                trust_base,
                 ..Default::default()
             };
             if !doubles.is_empty() {
@@ -256,10 +285,20 @@ fn main() -> ExitCode {
         }
         Some("build") if args.len() >= 4 => {
             let mut trace = false;
+            let mut trust_base: Vec<String> = vec![];
             let mut rest: Vec<&String> = args[1..].iter().collect();
-            if rest.first().map(|s| s.as_str()) == Some("--trace-drops") {
-                trace = true;
-                rest.remove(0);
+            loop {
+                match rest.first().map(|s| s.as_str()) {
+                    Some("--trace-drops") => {
+                        trace = true;
+                        rest.remove(0);
+                    }
+                    Some("--trust-base") if rest.len() >= 2 => {
+                        trust_base.push(rest[1].clone());
+                        rest.drain(..2);
+                    }
+                    _ => break,
+                }
             }
             let n = rest.len();
             if n < 4 || rest[n - 2].as_str() != "-o" {
@@ -277,7 +316,10 @@ fn main() -> ExitCode {
                 srcs.push(s);
             }
             let refs: Vec<&str> = srcs.iter().map(String::as_str).collect();
-            let opts = sigil::codegen::Opts { trace_drops: trace };
+            let opts = sigil::codegen::Opts {
+                trace_drops: trace,
+                trust_base,
+            };
             match sigil::native::build(&refs, &func, &opts, std::path::Path::new(&out)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {

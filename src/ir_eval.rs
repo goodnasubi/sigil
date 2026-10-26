@@ -1287,8 +1287,21 @@ fn coerce(a: &Arg, ty: &Type) -> Result<Val, String> {
 
 /// ソースを検査して、入口の関数から SIR にする（ネイティブ出力の入口。`sigil build`）。
 pub fn lower_sources(srcs: &[&str], func: &str) -> Result<Program, RunError> {
+    lower_sources_with(srcs, func, &[])
+}
+
+/// `lower_sources` に `--trust-base` のモジュール名を渡す版。
+pub fn lower_sources_with(
+    srcs: &[&str],
+    func: &str,
+    trust_base: &[String],
+) -> Result<Program, RunError> {
     let file = crate::interp::merge_sources(srcs).map_err(|f| f.error)?;
-    let typed = crate::check::typed(&file).map_err(RunError::Check)?;
+    let opts = crate::effects::Options {
+        trust_base: trust_base.to_vec(),
+        ..Default::default()
+    };
+    let typed = crate::check::typed_with(&file, &opts).map_err(RunError::Check)?;
     let found = file
         .items
         .iter()
@@ -1337,7 +1350,8 @@ pub fn run_sources_with(
 fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
     use crate::interp::fail;
     let file: File = crate::interp::merge_sources(srcs)?;
-    let typed = crate::check::typed(&file).map_err(|e| fail(RunError::Check(e)))?;
+    let typed = crate::check::typed_with(&file, &crate::interp::check_options(opts))
+        .map_err(|e| fail(RunError::Check(e)))?;
     let decl = file.items.iter().find_map(|i| match i {
         Item::Fn(d) if d.name == func => Some(d),
         _ => None,

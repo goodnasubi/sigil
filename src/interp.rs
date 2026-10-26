@@ -148,6 +148,8 @@ pub struct Options {
     pub fs_files: Option<std::collections::BTreeMap<String, String>>,
     /// `console.log` の出力を `Outcome::output` に溜める（テスト用）。偽（既定）なら本物の標準出力へ書き、`output` は空。
     pub capture_console: bool,
+    /// `trust base` の宣言を許すモジュール名（`--trust-base`。ADR 0016）。
+    pub trust_base: Vec<String>,
 }
 
 impl Options {
@@ -167,6 +169,7 @@ impl Default for Options {
             trace_drops: false,
             fs_files: None,
             capture_console: false,
+            trust_base: Vec::new(),
         }
     }
 }
@@ -241,9 +244,18 @@ pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
     Ok(File { module, items })
 }
 
+/// 検査器に渡す設定（`--trust-base` を載せる）。
+pub(crate) fn check_options(opts: &Options) -> crate::effects::Options {
+    crate::effects::Options {
+        trust_base: opts.trust_base.clone(),
+        ..Default::default()
+    }
+}
+
 fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
     let file = merge_sources(srcs)?;
-    crate::check::check_file(&file).map_err(|e| fail(RunError::Check(e)))?;
+    crate::check::check_file_with(&file, &check_options(opts))
+        .map_err(|e| fail(RunError::Check(e)))?;
     let mut it = Interp::new(&file, opts);
     DROP_LOG.with(|l| *l.borrow_mut() = opts.trace_drops.then(Vec::new));
     let Some(decl) = it.prog.fns.get(func).copied() else {
@@ -1169,7 +1181,7 @@ impl<'a> Interp<'a> {
 
     fn run_decl(&mut self, d: &'a FnDecl) -> R<Value> {
         if let Some(req) = &d.requires {
-            self.line = d.clause_lines[1];
+            self.line = d.clause_lines[clause::REQUIRES];
             if !self.contract(req, &d.name, Clause::Requires)? {
                 return Err(self.stop(StopKind::RequiresViolated, ""));
             }
@@ -1178,7 +1190,7 @@ impl<'a> Interp<'a> {
             let mut olds = vec![];
             collect_olds(ens, &mut olds);
             for o in olds {
-                self.line = d.clause_lines[2];
+                self.line = d.clause_lines[clause::ENSURES];
                 let v = self.in_contract(&d.name, Clause::Ensures, |s| s.val(o))?;
                 if let Some(f) = self.frames.last_mut() {
                     f.olds.insert(old_key(o), v);
@@ -1198,7 +1210,7 @@ impl<'a> Interp<'a> {
             if let Some(f) = self.frames.last_mut() {
                 f.result = Some(r.clone());
             }
-            self.line = d.clause_lines[2];
+            self.line = d.clause_lines[clause::ENSURES];
             if !self.contract(ens, &d.name, Clause::Ensures)? {
                 return Err(self.stop(StopKind::EnsuresViolated, ""));
             }

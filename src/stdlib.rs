@@ -42,7 +42,32 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("ParseError", 0, Layer::Core),
     ("Shared", 1, Layer::Core),
     ("Cell", 1, Layer::Core),
+    // 番地（ADR 0016 の決定 1）。`Copyable` で演算子を持たない。番地の計算は原始操作で行う。
+    ("Addr", 0, Layer::Core),
 ];
+
+/// 原始操作の表の効果の列で、起こす作用が引数で決まること（システムコール）を表す語（ADR 0016 の決定 4）。
+/// この語の操作を呼ぶ関数に限り、効果の検査は「宣言が推論を含む」になる。
+pub const DELEGATED: &str = "宣言に委ねる";
+
+/// 原始操作の表の 1 行（ADR 0016 の決定 1）。名前空間 `raw` に置く。
+#[derive(Debug, Clone, Copy)]
+pub struct RawRow {
+    pub layer: Layer,
+    /// `raw.` を除いたシグネチャ（例: `alloc(size: Int, align: Int) -> Addr`）。
+    pub signature: &'static str,
+    /// `effects` 節の中身か、`DELEGATED`。
+    pub effects: &'static str,
+    /// 実行時に検査する `requires`（式。ない行は `none`）。
+    pub requires: &'static str,
+    /// 式で書けない前提の文（日本語。空にできない）。
+    pub premise: &'static str,
+}
+
+/// 原始操作の表。行を足す・変える・消すときは、先に ADR に記録する（ADR 0016 の決定 1）。
+/// 実際の一覧は、P1 の範囲を決める ADR が決める。それまでは空で、テストの中だけで
+/// `effects::Options::raw_ops` から差し込む（ADR 0006 の「テスト用の性質・カテゴリ・型はテストの中だけで定義する」）。
+pub const RAW_OPS: &[RawRow] = &[];
 
 /// 名前空間のない関数。読むだけの操作はメソッドに移したので、`Copyable` な値の関数だけが残る。
 pub const FREE_FNS: &[(Layer, &str, &str)] = &[
@@ -209,6 +234,10 @@ fn clauses(sig: &str, effects: &str) -> String {
         .iter()
         .find(|(s, _)| *s == sig)
         .map_or("none", |(_, r)| r);
+    clauses_with(requires, effects)
+}
+
+fn clauses_with(requires: &str, effects: &str) -> String {
     format!(
         "\n  intent \"s\"\n  requires {requires}\n  ensures none\n  effects {effects}\n{{\n}}\n"
     )
@@ -219,6 +248,20 @@ fn module_head(layer: Layer) -> &'static str {
         Layer::Core => "module std.core\n  targets bare, browser, server\n  trust base\n\n",
         Layer::Os => "module std.os\n  targets browser, server\n  trust base\n\n",
     }
+}
+
+/// 原始操作の 1 行を、型検査器が読む `fn` のソースにする（効果の `DELEGATED` は `none` として読む）。
+pub fn raw_source(layer: Layer, sig: &str, effects: &str, requires: &str) -> String {
+    let effects = if effects == DELEGATED {
+        "none"
+    } else {
+        effects
+    };
+    format!(
+        "{}fn {sig}{}",
+        module_head(layer),
+        clauses_with(requires, effects)
+    )
 }
 
 /// 型検査器が読む `Sigil` のソース。自由関数と名前空間の関数は `fn` の並び、メソッドは `impl` の並び。
@@ -280,6 +323,29 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn every_raw_op_has_premise() {
+        // 本 ADR（0016）の時点では `RAW_OPS` は空。テスト用の差し込み（`Options::raw_ops`）の行は、
+        // 検査器が登録するときに同じ規則で調べる（tests/trust_base.rs の `raw_op_without_premise_rejected`）。
+        for r in RAW_OPS {
+            assert!(!r.premise.trim().is_empty(), "{}", r.signature);
+        }
+    }
+
+    #[test]
+    fn std_modules_always_allowed() {
+        // 標準ライブラリの仮のモジュール（`std.core`・`std.os`。どちらも `trust base`）は処理系が内部で読むので、
+        // 許可（`trust_base`）が空でも、利用者のファイルの検査の前にそれを登録して通る。
+        let opts = crate::effects::Options::default();
+        assert!(opts.trust_base.is_empty());
+        let src = "module m.a\n  targets server\n  trust none\n\nfn f() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 1;\n}\n";
+        crate::check::check_with(src, &opts).unwrap();
+        for layer in [Layer::Core, Layer::Os] {
+            let f = crate::parser::parse_std(&free_source(layer, "f() -> Int", "none")).unwrap();
+            assert_eq!(f.module.trust, crate::ast::Trust::Base);
+        }
     }
 
     #[test]

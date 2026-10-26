@@ -121,7 +121,6 @@ struct RawClosure {
 }
 
 /// 呼び出しの解決の種類（ADR 0015 の決定 3）。
-#[allow(dead_code)] // 読むのは lowering（ADR 0015 の PR3 以降）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResKind {
     /// 名前で呼ぶ関数（利用者の関数・標準の自由関数・`Some`/`Ok`/`Err` などの値の構築子）。
@@ -141,7 +140,6 @@ pub(crate) enum ResKind {
 }
 
 /// 呼び出しの解決（どの関数・メソッドか、型引数の具体化）。
-#[allow(dead_code)] // 読むのは lowering（ADR 0015 の PR3 以降）
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Resolved {
     pub(crate) kind: ResKind,
@@ -153,7 +151,6 @@ pub(crate) struct Resolved {
 
 /// 検査器が記録した型の情報（ADR 0015 の決定 3）。表の鍵は式・文の番地（`*const Expr as usize`）。
 /// 番地は `file` を借りている間だけ有効で、検査器は式を複製せずに検査する。
-#[allow(dead_code)] // 読むのは lowering（ADR 0015 の PR3 以降）と単体テスト
 pub struct Typed<'a> {
     pub file: &'a File,
     /// 式の番地 -> 具体化前の型（型引数を含みうる）。

@@ -6,7 +6,9 @@
 //! - 値の中は、値そのもの、次にフィールド・要素を宣言の順に破棄する。
 //! - `?` による早期の戻りと、すべての異常停止は、ふつうの戻りと同じ順序で破棄してから戻る・停止する。
 
-use sigil::interp::{run_with, Arg, Options, RunError, StopKind};
+mod common;
+use common::run_with;
+use sigil::interp::{Arg, Options, RunError, StopKind};
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 

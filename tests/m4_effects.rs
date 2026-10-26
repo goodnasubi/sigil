@@ -1,7 +1,9 @@
 //! M4 の効果操作: 実ファイルの `fs.read`・`fs.write`、`Path` の操作、`Cell` の複製、`--fs-double` の重複。
 //! 実ファイルは一時ディレクトリ（プロセスごとに別）で試す。
 
-use sigil::interp::{run_with, Arg, Options};
+mod common;
+use common::run_with;
+use sigil::interp::{Arg, Options};
 use std::path::PathBuf;
 use std::process::Command;
 

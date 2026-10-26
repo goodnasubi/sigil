@@ -1,7 +1,9 @@
 //! M3 の最初の PR のテスト: インタープリタの土台と、4 種類の異常停止（契約違反・Int オーバーフロー・
 //! 0 除算・スタック枯渇。ADR 0013 の決定 1）。
 
-use sigil::interp::{run, run_with, Arg, Clause, Options, RunError, Stop, StopKind};
+mod common;
+use common::{run, run_with};
+use sigil::interp::{Arg, Clause, Options, RunError, Stop, StopKind};
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 

@@ -1,7 +1,9 @@
 //! `fs.read` のテスト用の差し替え（ADR 0004 の規則 7）と、`Cell`・`Shared` の実行、
 //! サンプル `02-read-port`・`04-effects` の実行。
 
-use sigil::interp::{run_sources_with, Arg, Failure, Options, Outcome, RunError};
+mod common;
+use common::run_sources_with;
+use sigil::interp::{Arg, Failure, Options, Outcome, RunError};
 use std::collections::BTreeMap;
 
 const PORT: &str = include_str!("../examples/02-read-port/c-brace.sigil");

@@ -29,7 +29,7 @@ use std::rc::Rc;
 /// 異常停止のときのプロセスの終了コード（種類によらず 1 つ。`EX_SOFTWARE`）。ADR 0006 の M3 の記録を参照。
 pub const STOP_EXIT_CODE: u8 = 70;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Clause {
     Requires,
     Ensures,
@@ -44,7 +44,7 @@ impl fmt::Display for Clause {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StopKind {
     /// 呼び出し側が `requires` を破った。
     RequiresViolated,
@@ -210,7 +210,7 @@ pub fn run_sources_with(
     })
 }
 
-fn fail(error: RunError) -> Failure {
+pub(crate) fn fail(error: RunError) -> Failure {
     Failure {
         error,
         output: String::new(),
@@ -218,7 +218,8 @@ fn fail(error: RunError) -> Failure {
     }
 }
 
-fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+/// 複数のソースを 1 つのファイルに合わせる（モジュールの宣言がすべて同じことを求める）。
+pub(crate) fn merge_sources(srcs: &[&str]) -> Result<File, Failure> {
     let mut module = None;
     let mut items = vec![];
     for s in srcs {
@@ -243,7 +244,11 @@ fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Ou
     let Some(module) = module else {
         return Err(fail(RunError::Entry("ソースがない".into())));
     };
-    let file = File { module, items };
+    Ok(File { module, items })
+}
+
+fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+    let file = merge_sources(srcs)?;
     crate::check::check_file(&file).map_err(|e| fail(RunError::Check(e)))?;
     let mut it = Interp::new(&file, opts);
     DROP_LOG.with(|l| *l.borrow_mut() = opts.trace_drops.then(Vec::new));
@@ -991,7 +996,7 @@ fn is_place(e: &Expr) -> bool {
 }
 
 /// `ensures` の中の `old(e)` の `e`（捕捉する式）を集める。
-fn collect_olds<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+pub(crate) fn collect_olds<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
     match e {
         Expr::Old(i) => out.push(i),
         Expr::Paren(i) | Expr::Try(i) => collect_olds(i, out),

@@ -278,6 +278,68 @@ fn every_kind_of_abnormal_stop_exits_with_the_same_code() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// 破棄の順序の試験に使うプログラム（`t` は Int を返す）。
+const DROP_HEAD: &str = "module m.a\n  targets server\n  trust none\n\nstruct Probe {\n  id: Int,\n}\n\nfn mk(n: Int) -> Probe\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Probe { id: n };\n}\n\n";
+
+/// ADR 0017: `sigil run` は SIR の評価器で走るので、`--trace-drops` の破棄は仕様の順序（7、1、5）になる。
+/// （インタープリタでは 7、5、1 になる。）
+#[test]
+fn cli_run_uses_sir_evaluator() {
+    let bin = env!("CARGO_BIN_EXE_sigil");
+    let dir = std::env::temp_dir().join(format!("sigil-run-sir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = "let o = Some(mk(1));\nlet z = mk(5);\nmatch o {\n    Some(p) => {\n        let q = mk(7);\n    }\n    None => {}\n}\nreturn 0;";
+    let src = format!("{DROP_HEAD}{}", func("t() -> Int", "none", "none", body));
+    let file = dir.join("p.sigil");
+    std::fs::write(&file, src).unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["run", "--trace-drops", file.to_str().unwrap(), "t"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let drops: Vec<&str> = err.lines().collect();
+    assert_eq!(
+        drops,
+        [
+            "drop: Probe { id: 7 }",
+            "drop: Probe { id: 1 }",
+            "drop: Probe { id: 5 }"
+        ]
+    );
+    // `--trace-drops` がなければ stderr に破棄は出ない。
+    let out = std::process::Command::new(bin)
+        .args(["run", file.to_str().unwrap(), "t"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0017: スタックの枯渇は `sigil run` でも 70 で止まり、報告の先頭は決まった形になる。
+#[test]
+fn cli_run_stack_exhausted() {
+    let bin = env!("CARGO_BIN_EXE_sigil");
+    let dir = std::env::temp_dir().join(format!("sigil-run-stack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("p.sigil");
+    std::fs::write(&file, program(RECURSE)).unwrap();
+    let path = file.to_str().unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["run", path, "down", "0"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(70));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with(&format!("{path}: 異常停止: スタックの枯渇（関数 ")),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- 例 ----
 
 #[test]

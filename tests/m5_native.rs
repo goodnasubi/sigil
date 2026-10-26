@@ -211,6 +211,55 @@ fn cli_build_and_trace_drops() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR 0017: `sigil run --trace-drops` の破棄の記録は、`sigil build --trace-drops` の実行ファイルと同じ。
+#[test]
+fn cli_run_and_build_trace_match() {
+    const HEAD: &str = "module m.a\n  targets server\n  trust none\n\nstruct Probe {\n  id: Int,\n}\n\nstruct Two {\n  a: Probe,\n  b: Probe,\n}\n\nfn mk(n: Int) -> Probe\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Probe { id: n };\n}\n\n";
+    let bodies = [
+        "let t = Two { a: mk(1), b: mk(2) };\nlet y = mk(9);\nlet x = t.a;\nreturn 0;",
+        "let o = Some(mk(1));\nlet z = mk(5);\nmatch o {\n    Some(p) => {\n        let q = mk(7);\n    }\n    None => {}\n}\nreturn 0;",
+        "let o = Some(mk(1));\nlet z = mk(5);\nlet m = o.map(|p| p.id);\nreturn 0;",
+        "let p = mk(1);\nlet z = mk(5);\nlet c = move || p.id;\nlet w = mk(6);\nreturn c();",
+        "let p = mk(1);\nlet c = move || p.id;\nlet w = mk(6);\nlet d = c;\nlet k = mk(7);\nreturn d();",
+    ];
+    let bin = env!("CARGO_BIN_EXE_sigil");
+    let dir = scratch("run-trace");
+    for (i, body) in bodies.iter().enumerate() {
+        let src = format!(
+            "{HEAD}fn t() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{body}\n}}\n"
+        );
+        let file = dir.join(format!("c{i}.sigil"));
+        std::fs::write(&file, src).unwrap();
+        let exe = dir.join(format!("c{i}"));
+        let o = Command::new(bin)
+            .args(["build", "--trace-drops"])
+            .arg(&file)
+            .args(["t", "-o"])
+            .arg(&exe)
+            .output()
+            .unwrap();
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let built = exec(&exe, &[]);
+        assert_eq!(built.code, Some(0), "{}", built.stderr);
+        let ran = Command::new(bin)
+            .args(["run", "--trace-drops"])
+            .arg(&file)
+            .arg("t")
+            .output()
+            .unwrap();
+        assert_eq!(ran.status.code(), Some(0));
+        let ran_err = String::from_utf8_lossy(&ran.stderr);
+        assert!(ran_err.contains("drop: "), "case {i}: {ran_err}");
+        assert_eq!(ran_err, built.stderr, "case {i}: 破棄の記録");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// 処理系のソースに `BuildUnsupported`（未実装の構文を build で止める印）を作る箇所が残っていない（M5 の完了の確かめ）。
 #[test]
 fn no_build_unsupported_left() {

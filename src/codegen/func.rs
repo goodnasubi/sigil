@@ -1473,6 +1473,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let s = self.rt("val_show", &[d, v, q]);
                 let (p, n) = (self.rt("str_data", &[s]), self.rt("str_bytes", &[s]));
                 self.rt("console_log", &[p, n]);
+                self.rt("str_free", &[s]);
                 (self.ic(0), u)
             }
             FsRead => {
@@ -1655,6 +1656,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let q = self.ic(1);
         let s = self.rt("val_show", &[d, r[0], q]);
         self.rt("print_result", &[s]);
+        self.rt("str_free", &[s]);
         self.drop_val(&rt, r[0]);
         let z = self.b.ins().iconst(types::I32, 0);
         self.b.ins().return_(&[z]);

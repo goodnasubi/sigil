@@ -678,6 +678,37 @@ pub unsafe extern "C" fn sigil_rt_arg_name(a: *const RtArg) -> *mut RtStr {
 mod tests {
     use super::*;
 
+    /// 同じ文字列を 2 回解放すると、数が負になってランタイムが異常終了する（直接の検査）。
+    /// 子プロセスで同じテストを走らせ、環境変数が付いているときだけ二重解放をする。
+    #[test]
+    fn double_free_of_a_string_aborts() {
+        unsafe {
+            if std::env::var_os("SIGIL_TEST_DOUBLE_FREE").is_some() {
+                let p = st("a");
+                sigil_rt_str_free(p);
+                sigil_rt_str_free(p);
+                return;
+            }
+            let exe = std::env::current_exe().unwrap();
+            let out = std::process::Command::new(exe)
+                .args([
+                    "--exact",
+                    "tests::double_free_of_a_string_aborts",
+                    "--test-threads=1",
+                ])
+                .env("SIGIL_TEST_DOUBLE_FREE", "1")
+                .output()
+                .unwrap();
+            assert!(!out.status.success(), "二重解放で止まらなかった");
+            assert_eq!(
+                out.status.code(),
+                None,
+                "異常終了（シグナル）ではない: {:?}",
+                out.status
+            );
+        }
+    }
+
     unsafe fn st(s: &str) -> *mut RtStr {
         sigil_rt_str_new(s.as_ptr(), s.len())
     }

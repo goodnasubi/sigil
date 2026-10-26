@@ -303,7 +303,7 @@ unsafe fn blk_alloc(bytes: usize) -> *mut i64 {
 
 unsafe fn blk_free(p: *mut i64) {
     let h = p.sub(2);
-    // 二重解放は、解放済みの印が残っているうちなら見つけて止める。
+    // 二重解放は、解放済みの印が残っているうちなら見つけて止める（最善の努力。解放後にアロケータが印を上書きすれば見逃す）。
     if *h.add(1) == FREED {
         std::process::abort();
     }

@@ -103,7 +103,7 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
         "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
         "trace_on" => ("", 'v'),
-        "print_result" => ("p", 'v'),
+        "print_result" | "str_free" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" | "list_best" => ("ppi", 'p'),
         "val_eq" | "val_cmp" => ("ppp", 'i'),

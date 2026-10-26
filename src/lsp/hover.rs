@@ -140,7 +140,7 @@ fn is_punct(t: Option<&Token>, p: &str) -> bool {
 }
 
 /// `(line, col)`（1 始まり、列は文字数）の位置の hover の文字列。返さないときは `None`。
-/// `own` はこの文書の仕様、`all` は同じ組のすべてのファイルの仕様。
+/// `own` はこの文書の仕様、`all` はこの文書から `use` で辿れるモジュールすべての仕様。
 pub fn hover(text: &str, line: u32, col: u32, own: &Spec, all: &[Spec]) -> Option<String> {
     let file = crate::parse(text).ok()?;
     let toks = lex(text).ok()?.tokens;

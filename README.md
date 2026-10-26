@@ -118,6 +118,7 @@ Sigil（シジル）は、Java・React・Node.js に代わる言語を目指し�
 > `sigil run` を SIR の評価器に載せ替える決定（`--trace-drops` の追加を含む）を [ADR 0017](docs/decisions/0017-run-on-sir-evaluator.md) で決めました。
 > 信頼基盤の宣言方法と検査を外した箇所の契約の書き方を [ADR 0016](docs/decisions/0016-trust-base-declaration.md) で決めました（実装済み。`sigil check`・`run`・`build` の `--trust-base <モジュール>` が許可）。
 > 標準ライブラリの核と OS 依存部分の分割（出力先 `bare`、層ごとの標準ライブラリの表、核のモジュールからの OS 層の参照の検査）を [ADR 0014](docs/decisions/0014-core-and-os-split.md) で決めました。
+> P1（サーバー）の範囲・段階・順序（暫定ランタイムの Sigil への置き換え、インタプリタの削除、1 件の要求の失敗の隔離など）を [ADR 0018](docs/decisions/0018-p1-scope.md) で決めました。
 
 ## 目標
 

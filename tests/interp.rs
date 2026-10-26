@@ -249,7 +249,8 @@ fn every_kind_of_abnormal_stop_exits_with_the_same_code() {
         + &func("ovf(x: Int) -> Int", "none", "none", "return x + 1;")
         + &func("dz(x: Int) -> Int", "none", "none", "return 1 / x;")
         + RECURSE;
-    let file = dir.join("p.sigil");
+    std::fs::create_dir_all(dir.join("m")).unwrap();
+    let file = dir.join("m").join("a.sigil");
     std::fs::write(&file, program(&items)).unwrap();
     let cases: [(&str, &str); 5] = [
         ("req", "0"),
@@ -260,7 +261,14 @@ fn every_kind_of_abnormal_stop_exits_with_the_same_code() {
     ];
     for (f, a) in cases {
         let out = std::process::Command::new(bin)
-            .args(["run", file.to_str().unwrap(), f, a])
+            .args([
+                "run",
+                "--root",
+                dir.to_str().unwrap(),
+                file.to_str().unwrap(),
+                f,
+                a,
+            ])
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(70), "{f}");
@@ -270,7 +278,14 @@ fn every_kind_of_abnormal_stop_exits_with_the_same_code() {
         );
     }
     let ok = std::process::Command::new(bin)
-        .args(["run", file.to_str().unwrap(), "req", "3"])
+        .args([
+            "run",
+            "--root",
+            dir.to_str().unwrap(),
+            file.to_str().unwrap(),
+            "req",
+            "3",
+        ])
         .output()
         .unwrap();
     assert_eq!(ok.status.code(), Some(0));
@@ -289,10 +304,18 @@ fn cli_run_uses_sir_evaluator() {
     std::fs::create_dir_all(&dir).unwrap();
     let body = "let o = Some(mk(1));\nlet z = mk(5);\nmatch o {\n    Some(p) => {\n        let q = mk(7);\n    }\n    None => {}\n}\nreturn 0;";
     let src = format!("{DROP_HEAD}{}", func("t() -> Int", "none", "none", body));
-    let file = dir.join("p.sigil");
+    std::fs::create_dir_all(dir.join("m")).unwrap();
+    let file = dir.join("m").join("a.sigil");
     std::fs::write(&file, src).unwrap();
     let out = std::process::Command::new(bin)
-        .args(["run", "--trace-drops", file.to_str().unwrap(), "t"])
+        .args([
+            "run",
+            "--root",
+            dir.to_str().unwrap(),
+            "--trace-drops",
+            file.to_str().unwrap(),
+            "t",
+        ])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -309,7 +332,13 @@ fn cli_run_uses_sir_evaluator() {
     );
     // `--trace-drops` がなければ stderr に破棄は出ない。
     let out = std::process::Command::new(bin)
-        .args(["run", file.to_str().unwrap(), "t"])
+        .args([
+            "run",
+            "--root",
+            dir.to_str().unwrap(),
+            file.to_str().unwrap(),
+            "t",
+        ])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
@@ -323,11 +352,12 @@ fn cli_run_stack_exhausted() {
     let bin = env!("CARGO_BIN_EXE_sigil");
     let dir = std::env::temp_dir().join(format!("sigil-run-stack-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("p.sigil");
+    std::fs::create_dir_all(dir.join("m")).unwrap();
+    let file = dir.join("m").join("a.sigil");
     std::fs::write(&file, program(RECURSE)).unwrap();
     let path = file.to_str().unwrap();
     let out = std::process::Command::new(bin)
-        .args(["run", path, "down", "0"])
+        .args(["run", "--root", dir.to_str().unwrap(), path, "down", "0"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(70));
@@ -537,12 +567,20 @@ fn out_of_range_integer_literal_is_an_entry_error_on_the_command_line() {
     let bin = env!("CARGO_BIN_EXE_sigil");
     let dir = std::env::temp_dir().join(format!("sigil-interp-lit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("p.sigil");
+    std::fs::create_dir_all(dir.join("m")).unwrap();
+    let file = dir.join("m").join("a.sigil");
     let f = func("k(a: Float) -> Float", "none", "none", "return a;");
     std::fs::write(&file, program(&f)).unwrap();
     let run_cli = |a: &str| {
         std::process::Command::new(bin)
-            .args(["run", file.to_str().unwrap(), "k", a])
+            .args([
+                "run",
+                "--root",
+                dir.to_str().unwrap(),
+                file.to_str().unwrap(),
+                "k",
+                a,
+            ])
             .output()
             .unwrap()
     };

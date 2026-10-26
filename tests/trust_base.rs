@@ -363,6 +363,13 @@ fn duplicate_raw_op_rejected() {
 
 // ---- コマンドライン（`--trust-base`） ----
 
+/// `args[0]` の直後に `--root <root>` を足して走らせる（根の既定は cwd。ADR 0021 2-2c）。
+fn sigil_bin_in(root: &str, args: &[&str]) -> (i32, String, String) {
+    let mut full = vec![args[0], "--root", root];
+    full.extend_from_slice(&args[1..]);
+    sigil_bin(&full)
+}
+
 fn sigil_bin(args: &[&str]) -> (i32, String, String) {
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
         .args(args)
@@ -372,6 +379,24 @@ fn sigil_bin(args: &[&str]) -> (i32, String, String) {
         o.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&o.stdout).into_owned(),
         String::from_utf8_lossy(&o.stderr).into_owned(),
+    )
+}
+
+/// モジュール名どおりのパス（`<根>/m/a.sigil` など）に書く。`(根, ファイル)` を返す。
+fn staged(tag: &str, src: &str) -> (String, String) {
+    let name = src
+        .lines()
+        .find_map(|l| l.strip_prefix("module "))
+        .unwrap()
+        .trim()
+        .to_string();
+    let root = std::env::temp_dir().join(format!("sigil-trust-base-{}-{tag}", std::process::id()));
+    let file = root.join(format!("{}.sigil", name.replace('.', "/")));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, src).unwrap();
+    (
+        root.to_string_lossy().into_owned(),
+        file.to_string_lossy().into_owned(),
     )
 }
 
@@ -386,17 +411,17 @@ fn temp_file(name: &str, src: &str) -> String {
 #[test]
 fn trust_base_allowed_with_option_cli() {
     let src = base(&ufn("f(n: Int) -> Int", "none", "  return n + 1;"));
-    let p = temp_file("a.sigil", &src);
-    let (code, _, err) = sigil_bin(&["check", &p]);
+    let (root, p) = staged("a", &src);
+    let (code, _, err) = sigil_bin_in(&root, &["check", &p]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("trust base"), "{err}");
-    let (code, out, err) = sigil_bin(&["check", "--trust-base", "m.a", &p]);
+    let (code, out, err) = sigil_bin_in(&root, &["check", "--trust-base", "m.a", &p]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("ok"), "{out}");
-    let (code, out, err) = sigil_bin(&["run", "--trust-base", "m.a", &p, "f", "41"]);
+    let (code, out, err) = sigil_bin_in(&root, &["run", "--trust-base", "m.a", &p, "f", "41"]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(out.trim(), "42");
-    let (code, _, _) = sigil_bin(&["run", &p, "f", "41"]);
+    let (code, _, _) = sigil_bin_in(&root, &["run", &p, "f", "41"]);
     assert_eq!(code, 1);
     // 値のない `--trust-base` は使い方の誤り。
     let (code, _, _) = sigil_bin(&["check", "--trust-base"]);
@@ -411,8 +436,8 @@ fn user_std_module_name_rejected_cli() {
         "base",
         &ufn("f(n: Int) -> Int", "none", "  return n;"),
     );
-    let p = temp_file("b.sigil", &src);
-    let (code, _, err) = sigil_bin(&["check", "--trust-base", "std.x", &p]);
+    let (root, p) = staged("b", &src);
+    let (code, _, err) = sigil_bin_in(&root, &["check", "--trust-base", "std.x", &p]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("std"), "{err}");
 }
@@ -420,12 +445,15 @@ fn user_std_module_name_rejected_cli() {
 #[test]
 fn trust_base_allowed_with_option_build_cli() {
     let src = base(&ufn("f(n: Int) -> Int", "none", "  return n + 1;"));
-    let p = temp_file("c.sigil", &src);
+    let (root, p) = staged("c", &src);
     let out = temp_file("c.out", "");
-    let (code, _, err) = sigil_bin(&["build", &p, "f", "-o", &out]);
+    let (code, _, err) = sigil_bin_in(&root, &["build", &p, "f", "-o", &out]);
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("trust base"), "{err}");
-    let (code, _, err) = sigil_bin(&["build", "--trust-base", "m.a", &p, "f", "-o", &out]);
+    let (code, _, err) = sigil_bin_in(
+        &root,
+        &["build", "--trust-base", "m.a", &p, "f", "-o", &out],
+    );
     assert_eq!(code, 0, "{err}");
     let o = std::process::Command::new(&out).arg("41").output().unwrap();
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "42");

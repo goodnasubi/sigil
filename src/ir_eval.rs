@@ -1286,7 +1286,8 @@ fn coerce(a: &Arg, ty: &Type) -> Result<Val, String> {
     }
 }
 
-/// ソースを検査して、入口の関数から SIR にする（ネイティブ出力の入口。`sigil build`）。
+/// ソースの並び（先頭が入口のモジュール。残りは `use` で辿られるモジュール）を結んで、
+/// 入口の関数から SIR にする（ネイティブ出力の入口）。
 pub fn lower_sources(srcs: &[&str], func: &str) -> Result<Program, RunError> {
     lower_sources_with(srcs, func, &[])
 }
@@ -1297,12 +1298,37 @@ pub fn lower_sources_with(
     func: &str,
     trust_base: &[String],
 ) -> Result<Program, RunError> {
-    let file = crate::exec::merge_sources_for_run(srcs).map_err(|f| f.error)?;
     let opts = crate::effects::Options {
         trust_base: trust_base.to_vec(),
         ..Default::default()
     };
-    let typed = crate::check::typed_with(&file, &opts).map_err(RunError::Check)?;
+    let file =
+        crate::project::link_sources(srcs, &opts).map_err(|e| crate::exec::link_error(e, true))?;
+    lower_file(&file, func, &opts)
+}
+
+/// ファイルの `use` を `root` から辿って結び、入口の関数から SIR にする（`sigil build`）。
+pub fn lower_project(
+    root: &std::path::Path,
+    entry: &std::path::Path,
+    func: &str,
+    trust_base: &[String],
+) -> Result<Program, RunError> {
+    let opts = crate::effects::Options {
+        trust_base: trust_base.to_vec(),
+        ..Default::default()
+    };
+    let file = crate::project::link_project(root, entry, &opts)
+        .map_err(|e| crate::exec::link_error(e, false))?;
+    lower_file(&file, func, &opts)
+}
+
+fn lower_file(
+    file: &File,
+    func: &str,
+    opts: &crate::effects::Options,
+) -> Result<Program, RunError> {
+    let typed = crate::check::typed_with(file, opts).map_err(RunError::Check)?;
     let found = file
         .items
         .iter()
@@ -1311,6 +1337,12 @@ pub fn lower_sources_with(
         return Err(RunError::Entry(format!("関数 {func} がない")));
     }
     crate::lower::lower(&typed, func).map_err(|e| RunError::Unsupported(e.0))
+}
+
+/// 実行の入力。ソースの並び、またはファイル（`root` と入口）。
+enum Input<'a> {
+    Sources(&'a [&'a str]),
+    Project(&'a std::path::Path, &'a std::path::Path),
 }
 
 pub fn run(src: &str, func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
@@ -1331,10 +1363,25 @@ pub fn run_sources_with(
     args: &[Arg],
     opts: &Options,
 ) -> Result<Outcome, Failure> {
+    run_input(Input::Sources(srcs), func, args, opts)
+}
+
+/// 入口のファイルから `use` を `root` で辿って結び、関数を実行する（`sigil run`）。
+pub fn run_project_with(
+    root: &std::path::Path,
+    entry: &std::path::Path,
+    func: &str,
+    args: &[Arg],
+    opts: &Options,
+) -> Result<Outcome, Failure> {
+    run_input(Input::Project(root, entry), func, args, opts)
+}
+
+fn run_input(input: Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
     std::thread::scope(|s| {
         let spawned = std::thread::Builder::new()
             .stack_size(opts.stack_bytes)
-            .spawn_scoped(s, || execute(srcs, func, args, opts));
+            .spawn_scoped(s, || execute(&input, func, args, opts));
         match spawned {
             Ok(h) => h.join().unwrap_or_else(|_| {
                 Err(crate::exec::fail(RunError::Entry(
@@ -1348,11 +1395,16 @@ pub fn run_sources_with(
     })
 }
 
-fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
     use crate::exec::fail;
-    let file: File = crate::exec::merge_sources_for_run(srcs)?;
-    let typed = crate::check::typed_with(&file, &crate::exec::check_options(opts))
-        .map_err(|e| fail(RunError::Check(e)))?;
+    let copts = crate::exec::check_options(opts);
+    let file: File = match input {
+        Input::Sources(srcs) => crate::project::link_sources(srcs, &copts)
+            .map_err(|e| fail(crate::exec::link_error(e, true)))?,
+        Input::Project(root, entry) => crate::project::link_project(root, entry, &copts)
+            .map_err(|e| fail(crate::exec::link_error(e, false)))?,
+    };
+    let typed = crate::check::typed_with(&file, &copts).map_err(|e| fail(RunError::Check(e)))?;
     let decl = file.items.iter().find_map(|i| match i {
         Item::Fn(d) if d.name == func => Some(d),
         _ => None,

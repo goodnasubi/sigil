@@ -41,32 +41,122 @@ pub fn check_project_with(
     opts: &Options,
     on_read: &mut dyn FnMut(&Path),
 ) -> R<()> {
+    run_fs(root, entry, opts, on_read).map(|_| ())
+}
+
+fn run_fs<'a>(
+    root: &'a Path,
+    entry: &Path,
+    opts: &'a Options,
+    on_read: &'a mut dyn FnMut(&Path),
+) -> R<(Proj<'a>, String)> {
     let mut p = Proj {
-        root,
+        src: Src::Fs { root, on_read },
         opts,
         mods: HashMap::new(),
+        order: vec![],
         stack: vec![],
-        on_read,
     };
     let (path, file) = p.load(entry, None)?;
-    p.visit(path, file)
+    let name = file.module.name.join(".");
+    p.visit(path, file)?;
+    Ok((p, name))
+}
+
+/// `entry` を入口にして `use` で辿れるモジュールを検査し、1 つのプログラム（`File`）に結ぶ
+/// （ADR 0021 の 2-2c。lowering・評価器・ネイティブ出力が受け取る形）。
+pub fn link_project(root: &Path, entry: &Path, opts: &Options) -> R<File> {
+    let mut nop = |_: &Path| {};
+    let (p, name) = run_fs(root, entry, opts, &mut nop)?;
+    p.link(&name)
+}
+
+/// ソースの並び（先頭が入口のモジュール、残りは入口から `use` で辿られるモジュール。
+/// ファイルの位置は見ず、`module` の宣言の名前で引く）を検査して、1 つのプログラムに結ぶ。
+/// 辿られないソース、同じモジュール名の宣言が 2 つ以上あるのはエラー。
+pub fn link_sources(srcs: &[&str], opts: &Options) -> R<File> {
+    let mut files: HashMap<String, (PathBuf, File)> = HashMap::new();
+    let mut entry: Option<String> = None;
+    for (i, s) in srcs.iter().enumerate() {
+        let pseudo = PathBuf::from(format!("<ソース {}>", i + 1));
+        let f = crate::parse(s).map_err(|error| ProjectError::Diag {
+            file: pseudo.clone(),
+            error,
+        })?;
+        let name = f.module.name.join(".");
+        if files.contains_key(&name) {
+            return Err(ProjectError::Diag {
+                file: pseudo,
+                error: Error::new(
+                    ErrorKind::ModulePathMismatch,
+                    f.module.span,
+                    format!("モジュール `{name}` の宣言が 2 つ以上のソースにある（1 つのモジュールは 1 つのソース）"),
+                ),
+            });
+        }
+        if i == 0 {
+            entry = Some(name.clone());
+        }
+        files.insert(name, (pseudo, f));
+    }
+    let Some(entry) = entry else {
+        return Err(ProjectError::Read {
+            file: PathBuf::new(),
+            msg: "ソースがない".into(),
+        });
+    };
+    let (path, file) = files.remove(&entry).expect("入口を入れた");
+    let mut p = Proj {
+        src: Src::Mem(files),
+        opts,
+        mods: HashMap::new(),
+        order: vec![],
+        stack: vec![],
+    };
+    p.visit(path, file)?;
+    if let Src::Mem(rest) = &p.src {
+        if let Some((name, (path, f))) = rest.iter().min_by_key(|(n, _)| n.to_string()) {
+            return Err(ProjectError::Diag {
+                file: path.clone(),
+                error: Error::new(
+                    ErrorKind::UnresolvedUse,
+                    f.module.span,
+                    format!("モジュール `{name}` は入口のモジュールから `use` で辿られない（辿られないソースは渡せない）"),
+                ),
+            });
+        }
+    }
+    p.link(&entry)
+}
+
+enum Src<'a> {
+    Fs {
+        root: &'a Path,
+        on_read: &'a mut dyn FnMut(&Path),
+    },
+    /// 渡されたソース（モジュール名 -> 仮の位置と構文木）。辿ったものは取り除く。
+    Mem(HashMap<String, (PathBuf, File)>),
 }
 
 struct Proj<'a> {
-    root: &'a Path,
+    src: Src<'a>,
     opts: &'a Options,
     /// 検査し終えたモジュール（名前 -> 位置と構文木）。
     mods: HashMap<String, (PathBuf, File)>,
+    /// 検査し終えた順（依存が先。入口が最後）。
+    order: Vec<String>,
     /// 検査中のモジュール（輪の検出）。
     stack: Vec<String>,
-    on_read: &'a mut dyn FnMut(&Path),
 }
 
 impl Proj<'_> {
     /// ファイルを読む。`from` は取り込んだ側の `use`（ファイルがないとき、その行の `UnresolvedUse` にする）。
     fn load(&mut self, path: &Path, from: Option<(&Path, &UseDecl)>) -> R<(PathBuf, File)> {
-        let mut hook = || (self.on_read)(path);
-        match modpath::load_with_hook(self.root, path, &mut hook) {
+        let Src::Fs { root, on_read } = &mut self.src else {
+            unreachable!("ファイルから読むのは Fs だけ");
+        };
+        let mut hook = || (on_read)(path);
+        match modpath::load_with_hook(root, path, &mut hook) {
             Ok((_, f)) => Ok((path.to_path_buf(), f)),
             Err(LoadError::Lang(error)) => Err(ProjectError::Diag {
                 file: path.to_path_buf(),
@@ -99,8 +189,34 @@ impl Proj<'_> {
         let r = self.visit_in(&path, &file, &name);
         self.stack.pop();
         r?;
+        self.order.push(name.clone());
         self.mods.insert(name, (path, file));
         Ok(())
+    }
+
+    /// `use` の先のモジュール `mpath` を読む（ファイル、または渡されたソース）。
+    fn load_dep(&mut self, mpath: &[String], from: (&Path, &UseDecl)) -> R<(PathBuf, File)> {
+        let mname = mpath.join(".");
+        match &mut self.src {
+            Src::Fs { root, .. } => {
+                let tpath = root.join(format!("{}.sigil", mpath.join("/")));
+                self.load(&tpath, Some(from))
+            }
+            Src::Mem(files) => match files.remove(&mname) {
+                Some(x) => Ok(x),
+                None => Err(ProjectError::Diag {
+                    file: from.0.to_path_buf(),
+                    error: Error::new(
+                        ErrorKind::UnresolvedUse,
+                        from.1.span,
+                        format!(
+                            "`use {}` の先のモジュール `{mname}` のソースが渡されていない",
+                            from.1.path.join(".")
+                        ),
+                    ),
+                }),
+            },
+        }
     }
 
     fn visit_in(&mut self, path: &Path, file: &File, name: &str) -> R<()> {
@@ -143,8 +259,7 @@ impl Proj<'_> {
                 ));
             }
             if !self.mods.contains_key(&mname) {
-                let tpath = self.root.join(format!("{}.sigil", mpath.join("/")));
-                let (tp, tf) = self.load(&tpath, Some((path, u)))?;
+                let (tp, tf) = self.load_dep(mpath, (path, u))?;
                 self.visit(tp, tf)?;
             }
             let (_, target) = &self.mods[&mname];
@@ -433,6 +548,242 @@ pub fn private_in_public(file: &File) -> Option<(Span, String)> {
         }
     }
     None
+}
+
+impl Proj<'_> {
+    /// 検査し終えたモジュールを 1 つのプログラムに結ぶ（ADR 0021 の 2-2c）。
+    /// 入口でないモジュールの関数は `<モジュール名>.<関数名>` に改め（`.` は利用者の名前に現れないので衝突しない）、
+    /// 各モジュールの関数の参照（自分の宣言・取り込んだ名前）を改めた名前に向ける。型の名前は改めない
+    /// （検査器の型は平らな名前なので、別のモジュールの同名の型は結べない）。
+    fn link(&self, entry: &str) -> R<File> {
+        let diag = |m: &str, span: Span, kind: ErrorKind, msg: String| ProjectError::Diag {
+            file: self.mods[m].0.clone(),
+            error: Error::new(kind, span, msg),
+        };
+        let mut seen_types: HashMap<&str, &str> = HashMap::new();
+        for m in &self.order {
+            let (_, f) = &self.mods[m];
+            if m != entry && f.module.trust == Trust::Base {
+                return Err(diag(
+                    m,
+                    f.module.span,
+                    ErrorKind::Unsupported,
+                    format!("入口でないモジュール `{m}` は `trust base` にできない（信頼基盤は入口のモジュールだけ。結合の対象外）"),
+                ));
+            }
+            for it in &f.items {
+                if let Item::Fn(_) | Item::Impl(_) = it {
+                    continue;
+                }
+                let n = item_name(it).expect("型の宣言は名前を持つ");
+                if let Some(o) = seen_types.insert(n, m) {
+                    let span = match it {
+                        Item::Type(t) => t.span,
+                        Item::Struct(s) => s.span,
+                        Item::Enum(e) => e.span,
+                        _ => f.module.span,
+                    };
+                    return Err(diag(
+                        m,
+                        span,
+                        ErrorKind::Unsupported,
+                        format!("型 `{n}` がモジュール `{o}` と `{m}` の両方にある（型の名前は平らで、別のモジュールの同名の型は結べない）"),
+                    ));
+                }
+            }
+        }
+        let mut items: Vec<Item> = vec![];
+        for m in &self.order {
+            let (_, f) = &self.mods[m];
+            let mut map: HashMap<String, String> = HashMap::new();
+            if m != entry {
+                for it in &f.items {
+                    if let Item::Fn(d) = it {
+                        map.insert(d.name.clone(), format!("{m}.{}", d.name));
+                    }
+                }
+            }
+            for u in &f.uses {
+                let (item, mpath) = u.path.split_last().expect("use の path は 2 つ以上");
+                let mname = mpath.join(".");
+                if mname != entry
+                    && matches!(find_decl(&self.mods[&mname].1, item), Some(Item::Fn(_)))
+                {
+                    map.insert(item.clone(), format!("{mname}.{item}"));
+                }
+            }
+            let mut rn = Rn {
+                map,
+                scopes: vec![],
+            };
+            for it in &f.items {
+                let mut it = it.clone();
+                rn.item(&mut it);
+                items.push(it);
+            }
+        }
+        let (_, ef) = &self.mods[entry];
+        Ok(File {
+            module: ef.module.clone(),
+            uses: vec![],
+            items,
+        })
+    }
+}
+
+/// 関数の参照の付け替え（局所の束縛が同じ名前を隠すところは触らない）。
+struct Rn {
+    map: HashMap<String, String>,
+    scopes: Vec<Vec<String>>,
+}
+
+impl Rn {
+    fn item(&mut self, it: &mut Item) {
+        match it {
+            Item::Type(t) => {
+                self.scopes.push(vec![]);
+                self.expr(&mut t.cond);
+                self.scopes.pop();
+            }
+            Item::Struct(_) | Item::Enum(_) => {}
+            Item::Fn(f) => {
+                self.func(f, true);
+            }
+            Item::Impl(im) => im.fns.iter_mut().for_each(|f| self.func(f, false)),
+        }
+    }
+
+    fn func(&mut self, f: &mut FnDecl, is_free: bool) {
+        if is_free {
+            if let Some(n) = self.map.get(&f.name) {
+                f.name = n.clone();
+            }
+        }
+        self.scopes
+            .push(f.params.iter().map(|p| p.name.clone()).collect());
+        if let Some(e) = &mut f.requires {
+            self.expr(e);
+        }
+        if let Some(e) = &mut f.ensures {
+            self.expr(e);
+        }
+        self.block(&mut f.body);
+        self.scopes.pop();
+    }
+
+    fn bound(&self, n: &str) -> bool {
+        self.scopes.iter().any(|s| s.iter().any(|x| x == n))
+    }
+
+    fn bind(&mut self, p: &Pattern) {
+        match p {
+            Pattern::Bind(n) => self.scopes.last_mut().expect("スコープ").push(n.clone()),
+            Pattern::Variant { args, .. } => args.iter().for_each(|a| self.bind(a)),
+            Pattern::Tuple(ps) => ps.iter().for_each(|a| self.bind(a)),
+            _ => {}
+        }
+    }
+
+    fn block(&mut self, b: &mut Block) {
+        self.scopes.push(vec![]);
+        b.stmts.iter_mut().for_each(|s| self.stmt(s));
+        self.scopes.pop();
+    }
+
+    fn stmt(&mut self, s: &mut Stmt) {
+        match &mut s.kind {
+            StmtKind::Let { pattern, value, .. } => {
+                self.expr(value);
+                self.bind(pattern);
+            }
+            StmtKind::Assign { target, value } => {
+                self.expr(target);
+                self.expr(value);
+            }
+            StmtKind::Expr(e) => self.expr(e),
+            StmtKind::Return(e) => {
+                if let Some(e) = e {
+                    self.expr(e);
+                }
+            }
+            StmtKind::If(i) => self.if_stmt(i),
+            StmtKind::While { cond, body } => {
+                self.expr(cond);
+                self.block(body);
+            }
+            StmtKind::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                for a in arms {
+                    self.scopes.push(vec![]);
+                    self.bind(&a.pattern);
+                    self.block(&mut a.body);
+                    self.scopes.pop();
+                }
+            }
+        }
+    }
+
+    fn if_stmt(&mut self, i: &mut IfStmt) {
+        self.expr(&mut i.cond);
+        self.block(&mut i.then);
+        match i.otherwise.as_deref_mut() {
+            Some(Else::If(n)) => self.if_stmt(n),
+            Some(Else::Block(b)) => self.block(b),
+            None => {}
+        }
+    }
+
+    fn expr(&mut self, e: &mut Expr) {
+        match e {
+            Expr::Name(n) => {
+                if !self.bound(n) {
+                    if let Some(m) = self.map.get(n.as_str()) {
+                        *n = m.clone();
+                    }
+                }
+            }
+            Expr::Old(x) | Expr::Paren(x) | Expr::Try(x) => self.expr(x),
+            Expr::Tuple(xs) => xs.iter_mut().for_each(|x| self.expr(x)),
+            Expr::Unary { expr: x, .. } => self.expr(x),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            Expr::Field { expr: x, .. } => self.expr(x),
+            Expr::Call { callee, args } => {
+                self.expr(callee);
+                args.iter_mut().for_each(|a| self.expr(a));
+            }
+            Expr::StructLit { fields, .. } => fields.iter_mut().for_each(|(_, x)| self.expr(x)),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee);
+                for a in arms {
+                    self.scopes.push(vec![]);
+                    self.bind(&a.pattern);
+                    self.expr(&mut a.body);
+                    self.scopes.pop();
+                }
+            }
+            Expr::Closure { params, body, .. } => {
+                self.scopes.push(params.clone());
+                match body {
+                    ClosureBody::Expr(x) => self.expr(x),
+                    ClosureBody::Block(b) => self.block(b),
+                }
+                self.scopes.pop();
+            }
+            Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Result
+            | Expr::SelfValue => {}
+        }
+    }
 }
 
 // ---- 名前の使用の収集（未使用の `use` の検出。字面で見る。同じ名前の局所変数があれば使用に数える）----

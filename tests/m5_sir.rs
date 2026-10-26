@@ -48,9 +48,9 @@ fn sir_examples_run() {
 
     // 例 04
     let eff = example("04-effects/effects.sigil");
-    let entry = example("04-effects/entry.sigil");
-    run_sources(&[&eff, &entry], "bump_twice", &[]).unwrap();
-    run_sources(&[&eff, &entry], "tax", &[]).unwrap();
+    let [entry, eff_pub] = common::effects_pair();
+    run_sources(&[&entry, &eff_pub], "bump_twice", &[]).unwrap();
+    run_sources(&[&entry, &eff_pub], "tax", &[]).unwrap();
     run(&eff, "add_tax", &[Arg::Int(100), Arg::Int(10)]).unwrap();
     let o = files(&[("prices.txt", "100\n250\n")]);
     run_sources_with(&[&eff], "load_prices", &[Arg::Str("prices.txt".into())], &o).unwrap();

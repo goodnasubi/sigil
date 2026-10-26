@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] 検査のあと関数を実行する（引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--trace-drops] [--trust-base <モジュール>]... <ファイル>... <関数> -o <出力> 検査のあとネイティブの実行ファイルを作る（cc と glibc の静的ライブラリが要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （--root の既定は現在のディレクトリ。trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        （--root の既定は現在のディレクトリ。`use` を辿る）構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--root <根>] [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] `use` で辿れるモジュールを結んで検査のあと関数を実行する（--root の既定は現在のディレクトリ。引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--root <根>] [--trace-drops] [--trust-base <モジュール>]... <ファイル> <関数> -o <出力> `use` で辿れるモジュールを結んでネイティブの実行ファイルを作る（--root の既定は現在のディレクトリ。cc と glibc の静的ライブラリが要る）";
 
 fn read_text(path: &str) -> Result<String, String> {
     std::fs::read(path)
@@ -174,6 +174,7 @@ fn main() -> ExitCode {
                 trust_base,
                 ..Default::default()
             };
+            let root_dir = root_dir(root.as_deref());
             let mut failed = false;
             let mut diagnostics = vec![];
             for path in &args[i..] {
@@ -198,37 +199,33 @@ fn main() -> ExitCode {
                         continue;
                     }
                 };
-                let (file_path, checked) = match &root {
-                    Some(r) => {
-                        match sigil::project::check_project(
-                            std::path::Path::new(r),
-                            std::path::Path::new(path),
-                            &copts,
-                        ) {
-                            Ok(()) => (path.clone(), Ok(())),
-                            Err(sigil::project::ProjectError::Diag { file, error }) => {
-                                (file.display().to_string(), Err(error))
-                            }
-                            Err(sigil::project::ProjectError::Read { file, msg }) => {
-                                let f = file.display().to_string();
-                                if json {
-                                    diagnostics.push(sigil::json::obj(vec![
-                                        ("file", f.as_str().into()),
-                                        ("kind", "ReadError".into()),
-                                        ("phase", "read".into()),
-                                        ("line", sigil::json::Value::Null),
-                                        ("col", sigil::json::Value::Null),
-                                        ("message", format!("読めない: {msg}").into()),
-                                    ]));
-                                } else {
-                                    eprintln!("{f}: 読めない: {msg}");
-                                }
-                                failed = true;
-                                continue;
-                            }
-                        }
+                let _ = src;
+                let (file_path, checked) = match sigil::project::check_project(
+                    &root_dir,
+                    std::path::Path::new(path),
+                    &copts,
+                ) {
+                    Ok(()) => (path.clone(), Ok(())),
+                    Err(sigil::project::ProjectError::Diag { file, error }) => {
+                        (file.display().to_string(), Err(error))
                     }
-                    None => (path.clone(), sigil::check::check_with(&src, &copts)),
+                    Err(sigil::project::ProjectError::Read { file, msg }) => {
+                        let f = file.display().to_string();
+                        if json {
+                            diagnostics.push(sigil::json::obj(vec![
+                                ("file", f.as_str().into()),
+                                ("kind", "ReadError".into()),
+                                ("phase", "read".into()),
+                                ("line", sigil::json::Value::Null),
+                                ("col", sigil::json::Value::Null),
+                                ("message", format!("読めない: {msg}").into()),
+                            ]));
+                        } else {
+                            eprintln!("{f}: 読めない: {msg}");
+                        }
+                        failed = true;
+                        continue;
+                    }
                 };
                 match checked {
                     Ok(()) if !json => println!("{path}: ok"),
@@ -301,20 +298,14 @@ fn main() -> ExitCode {
             let Some(src) = read(path) else {
                 return ExitCode::FAILURE;
             };
-            let result = if let Some(r) = root {
-                sigil::modpath::verify(&src, std::path::Path::new(r), std::path::Path::new(path))
-                    .and_then(|()| {
-                        if json {
-                            sigil::spec::extract(&src).map(|s| format!("{}\n", s.to_json()))
-                        } else {
-                            sigil::spec::spec(&src)
-                        }
-                    })
-            } else if json {
-                sigil::spec::extract(&src).map(|s| format!("{}\n", s.to_json()))
-            } else {
-                sigil::spec::spec(&src)
-            };
+            let result = sigil::modpath::verify(&src, &root_dir(root), std::path::Path::new(path))
+                .and_then(|()| {
+                    if json {
+                        sigil::spec::extract(&src).map(|s| format!("{}\n", s.to_json()))
+                    } else {
+                        sigil::spec::spec(&src)
+                    }
+                });
             match result {
                 Ok(out) => {
                     print!("{out}");
@@ -332,11 +323,21 @@ fn main() -> ExitCode {
             let mut doubles: Vec<(String, String)> = vec![];
             let mut trace = false;
             let mut trust_base: Vec<String> = vec![];
+            let mut root: Option<String> = None;
             let mut i = 1;
             while matches!(
                 args.get(i).map(String::as_str),
-                Some("--fs-double" | "--trace-drops" | "--trust-base")
+                Some("--fs-double" | "--trace-drops" | "--trust-base" | "--root")
             ) {
+                if args[i] == "--root" {
+                    let Some(r) = args.get(i + 1) else {
+                        eprintln!("--root にはディレクトリが要る");
+                        return ExitCode::from(2);
+                    };
+                    root = Some(r.clone());
+                    i += 2;
+                    continue;
+                }
                 if args[i] == "--trace-drops" {
                     trace = true;
                     i += 1;
@@ -385,9 +386,7 @@ fn main() -> ExitCode {
                 opts.fs_files = Some(m);
             }
             let path = &args[1];
-            let Some(src) = read(path) else {
-                return ExitCode::FAILURE;
-            };
+            let root_dir = root_dir(root.as_deref());
             let call = match args[3..]
                 .iter()
                 .map(|a| parse_arg(a))
@@ -405,7 +404,13 @@ fn main() -> ExitCode {
                     eprintln!("drop: {d}");
                 }
             };
-            match sigil::ir_eval::run_with(&src, &args[2], &call, &opts) {
+            match sigil::ir_eval::run_project_with(
+                &root_dir,
+                std::path::Path::new(path),
+                &args[2],
+                &call,
+                &opts,
+            ) {
                 Ok(out) => {
                     show_drops(&out.drops);
                     // 標準出力が閉じていても（Broken pipe など）パニックせず、黙って終える。
@@ -418,6 +423,10 @@ fn main() -> ExitCode {
                         eprintln!("{path}: {s}");
                         ExitCode::from(EXIT_ABNORMAL_STOP)
                     }
+                    e @ sigil::exec::RunError::Module { .. } => {
+                        eprintln!("{e}");
+                        ExitCode::FAILURE
+                    }
                     e => {
                         eprintln!("{path}:{e}");
                         ExitCode::FAILURE
@@ -428,6 +437,7 @@ fn main() -> ExitCode {
         Some("build") if args.len() >= 4 => {
             let mut trace = false;
             let mut trust_base: Vec<String> = vec![];
+            let mut root: Option<String> = None;
             let mut rest: Vec<&String> = args[1..].iter().collect();
             loop {
                 match rest.first().map(|s| s.as_str()) {
@@ -439,33 +449,39 @@ fn main() -> ExitCode {
                         trust_base.push(rest[1].clone());
                         rest.drain(..2);
                     }
+                    Some("--root") if rest.len() >= 2 => {
+                        root = Some(rest[1].clone());
+                        rest.drain(..2);
+                    }
                     _ => break,
                 }
             }
             let n = rest.len();
-            if n < 4 || rest[n - 2].as_str() != "-o" {
+            if n != 4 || rest[n - 2].as_str() != "-o" {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
             let out = rest[n - 1].clone();
             let func = rest[n - 3].clone();
-            let files = &rest[..n - 3];
-            let mut srcs = vec![];
-            for path in files {
-                let Some(s) = read(path) else {
-                    return ExitCode::FAILURE;
-                };
-                srcs.push(s);
-            }
-            let refs: Vec<&str> = srcs.iter().map(String::as_str).collect();
+            let file = rest[0];
             let opts = sigil::codegen::Opts {
                 trace_drops: trace,
                 trust_base,
             };
-            match sigil::native::build(&refs, &func, &opts, std::path::Path::new(&out)) {
+            match sigil::native::build_project(
+                &root_dir(root.as_deref()),
+                std::path::Path::new(file),
+                &func,
+                &opts,
+                std::path::Path::new(&out),
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
+                Err(sigil::native::BuildError::Run(e @ sigil::exec::RunError::Module { .. })) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
                 Err(e) => {
-                    eprintln!("{}:{e}", files[0]);
+                    eprintln!("{file}:{e}");
                     ExitCode::FAILURE
                 }
             }
@@ -474,5 +490,13 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// `--root`（指定がなければ現在のディレクトリ。ADR 0021 の 2-2c）。
+fn root_dir(root: Option<&str>) -> std::path::PathBuf {
+    match root {
+        Some(r) => std::path::PathBuf::from(r),
+        None => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
     }
 }

@@ -550,17 +550,33 @@ fn cli_reports_dependency_file_and_json() {
     assert!(out.contains("main.sigil"), "{out}");
 }
 
+/// ADR 0021 2-2c: `--root` を省くと根は cwd。cwd が根でなければ `use` の先は見つからない。
 #[test]
-fn cli_use_without_root_is_an_explicit_error() {
+fn cli_use_without_root_defaults_to_cwd() {
     let t = Tmp::new("noroot");
     util(&t);
     let p = t.write(
         "app/main.sigil",
         &module("app.main", "\nuse lib.util.f;\n", &caller("h", "f")),
     );
-    let (code, _, err) = bin(&["check", p.to_str().unwrap()]);
-    assert_eq!(code, 1, "{err}");
-    assert!(err.contains("--root"), "{err}");
+    let run = |cwd: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
+            .current_dir(cwd)
+            .args(["check", p.to_str().unwrap()])
+            .output()
+            .unwrap()
+    };
+    // 根が cwd（リポジトリ）なら、ファイルは根の外。
+    let o = run(Path::new(env!("CARGO_MANIFEST_DIR")));
+    assert_eq!(o.status.code(), Some(1));
+    // cwd を根の位置にすれば `use` を辿れる。
+    let o = run(&t.0);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 #[allow(dead_code)]

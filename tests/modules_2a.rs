@@ -387,15 +387,16 @@ fn dotdot_through_symlink_is_rejected() {
     );
 }
 
+/// ADR 0021 2-2c: `run` は `use` を扱う。先のモジュールがなければ、その `use` の行で止まる。
 #[test]
-fn run_rejects_use_explicitly() {
+fn run_reports_unresolved_use_at_the_use_line() {
     let src = module("a.b", "\nuse x.y.f;\n", &pub_fn("g"));
     let e = sigil::ir_eval::run(&src, "g", &[]).unwrap_err();
     match e.error {
         sigil::exec::RunError::Check(e) => {
-            assert_eq!((e.kind, e.span.line), (ErrorKind::Unsupported, 5));
+            assert_eq!((e.kind, e.span.line), (ErrorKind::UnresolvedUse, 5));
         }
-        other => panic!("Check(Unsupported) のはず: {other:?}"),
+        other => panic!("Check(UnresolvedUse) のはず: {other:?}"),
     }
 }
 
@@ -443,9 +444,16 @@ fn cli_check_and_spec_with_root() {
     let d = &v.get("diagnostics").unwrap().as_array().unwrap()[0];
     assert_eq!(d.get("kind").unwrap().as_str(), Some("ReservedModuleName"));
 
-    // --root がなければ従来どおり（パスは見ない）
+    // --root がなければ根は cwd（ADR 0021 2-2c）。cwd の外のファイルはパス検査で落ち、
+    // cwd を根の位置にすれば通る。
     let (c, _, _) = bin(&["check", bd]);
-    assert_eq!(c, 0);
+    assert_eq!(c, 1);
+    let o = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
+        .current_dir(&t.0)
+        .args(["check", "app/ok.sigil"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0));
 
     // spec も同じ検査をする
     let (c, _, err) = bin(&["spec", "--root", root, bd]);
@@ -461,17 +469,38 @@ fn cli_check_and_spec_with_root() {
     assert!(err.contains("標準ライブラリの名前"), "{err}");
 }
 
+/// ADR 0021 2-2c: `run` と `build` も根（既定は cwd）から `use` を辿る。
 #[test]
-fn cli_run_and_build_reject_use() {
+fn cli_run_and_build_follow_use() {
     let t = Tmp::new("cli-use");
-    let f = t.write("a.sigil", &module("a", "\nuse x.y.f;\n", &pub_fn("g")));
+    t.write("lib/k.sigil", &module("lib.k", "", &pub_fn("g")));
+    let f = t.write(
+        "a.sigil",
+        &module(
+            "a",
+            "\nuse lib.k.g;\n",
+            "pub fn h(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return g(n);\n}\n",
+        ),
+    );
     let p = f.to_str().unwrap();
-    let (c, _, err) = bin(&["run", p, "g", "1"]);
+    let root = t.0.to_str().unwrap();
+    let (c, out, err) = bin(&["run", "--root", root, p, "h", "1"]);
+    assert_eq!((c, out.trim()), (0, "1"), "{err}");
+    let out_bin = t.0.join("out.bin");
+    let (c, _, err) = bin(&[
+        "build",
+        "--root",
+        root,
+        p,
+        "h",
+        "-o",
+        out_bin.to_str().unwrap(),
+    ]);
+    assert_eq!(c, 0, "{err}");
+    assert!(out_bin.exists());
+    // 先のファイルがなければ、どちらも `use` の行で止まる。
+    let g = t.write("b.sigil", &module("b", "\nuse x.y.f;\n", &pub_fn("g")));
+    let (c, _, err) = bin(&["run", "--root", root, g.to_str().unwrap(), "g", "1"]);
     assert_eq!(c, 1, "{err}");
-    assert!(err.contains("`use` を含むプログラムの実行"), "{err}");
-    let out = t.0.join("out.bin");
-    let (c, _, err) = bin(&["build", p, "g", "-o", out.to_str().unwrap()]);
-    assert_eq!(c, 1, "{err}");
-    assert!(err.contains("`use` を含むプログラムの実行"), "{err}");
-    assert!(!out.exists());
+    assert!(err.contains("b.sigil:5:"), "{err}");
 }

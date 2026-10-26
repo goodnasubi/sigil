@@ -42,9 +42,9 @@ fn samples_build_and_match() {
     let own = example("03-ownership/ownership.sigil");
     both(&[&own], "main", &[]);
     let eff = example("04-effects/effects.sigil");
-    let entry = example("04-effects/entry.sigil");
-    assert_eq!(both(&[&eff, &entry], "bump_twice", &[]), "7");
-    both(&[&eff, &entry], "tax", &[]);
+    let [entry, eff_pub] = common::effects_pair();
+    assert_eq!(both(&[&entry, &eff_pub], "bump_twice", &[]), "7");
+    both(&[&entry, &eff_pub], "tax", &[]);
     both(&[&eff], "add_tax", &[Arg::Int(100), Arg::Int(10)]);
     let ctl = example("05-control/control.sigil");
     both(&[&ctl], "sum_range", &[Arg::Int(1), Arg::Int(10)]);
@@ -177,15 +177,20 @@ fn abnormal_stop_exits_70_with_report() {
 
 #[test]
 fn cli_build_and_trace_drops() {
-    let ctl = format!(
-        "{}/examples/05-control/control.sigil",
-        env!("CARGO_MANIFEST_DIR")
+    let (root, ctl) = common::stage_file(
+        "ctl",
+        &format!(
+            "{}/examples/05-control/control.sigil",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
+    let ctl = ctl.to_str().unwrap().to_string();
+    let root = root.to_str().unwrap().to_string();
     let dir = scratch("cli");
     let exe = dir.join("prog");
     let bin = env!("CARGO_BIN_EXE_sigil");
     let o = Command::new(bin)
-        .args(["build", &ctl, "sum_range", "-o"])
+        .args(["build", "--root", &root, &ctl, "sum_range", "-o"])
         .arg(&exe)
         .output()
         .unwrap();
@@ -197,7 +202,15 @@ fn cli_build_and_trace_drops() {
     );
     assert_eq!(exec(&exe, &[Arg::Int(1), Arg::Int(4)]).stdout, "10\n");
     let o = Command::new(bin)
-        .args(["build", "--trace-drops", &ctl, "sum_range", "-o"])
+        .args([
+            "build",
+            "--trace-drops",
+            "--root",
+            &root,
+            &ctl,
+            "sum_range",
+            "-o",
+        ])
         .arg(dir.join("x"))
         .output()
         .unwrap();
@@ -228,11 +241,14 @@ fn cli_run_and_build_trace_match() {
         let src = format!(
             "{HEAD}fn t() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{body}\n}}\n"
         );
-        let file = dir.join(format!("c{i}.sigil"));
+        let root = dir.join(format!("r{i}"));
+        let file = root.join("m/a.sigil");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, src).unwrap();
         let exe = dir.join(format!("c{i}"));
         let o = Command::new(bin)
-            .args(["build", "--trace-drops"])
+            .args(["build", "--trace-drops", "--root"])
+            .arg(&root)
             .arg(&file)
             .args(["t", "-o"])
             .arg(&exe)
@@ -247,7 +263,8 @@ fn cli_run_and_build_trace_match() {
         let built = exec(&exe, &[]);
         assert_eq!(built.code, Some(0), "{}", built.stderr);
         let ran = Command::new(bin)
-            .args(["run", "--trace-drops"])
+            .args(["run", "--trace-drops", "--root"])
+            .arg(&root)
             .arg(&file)
             .arg("t")
             .output()

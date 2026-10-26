@@ -76,17 +76,17 @@ fn load_prices_reads_lines_and_logs() {
     assert_eq!(r.value, "Err(IoError.NotFound(\"q\"))");
 }
 
-const ENTRY: &str = include_str!("../examples/04-effects/entry.sigil");
-
 #[test]
 fn count_up_shares_the_cell() {
-    let r = go(&[EFFECTS, ENTRY], "bump_twice", &[], &Options::default()).unwrap();
+    let [entry, eff] = common::effects_pair();
+    let r = go(&[&entry, &eff], "bump_twice", &[], &Options::default()).unwrap();
     assert_eq!(r.value, "7");
 }
 
 #[test]
 fn with_tax_applies_add_tax() {
-    let r = go(&[EFFECTS, ENTRY], "tax", &[], &Options::default()).unwrap();
+    let [entry, eff] = common::effects_pair();
+    let r = go(&[&entry, &eff], "tax", &[], &Options::default()).unwrap();
     assert_eq!(r.value, "[110, 275]");
 }
 
@@ -97,12 +97,17 @@ fn cli_fs_double_runs_read_port() {
     let f = dir.join("port.txt");
     std::fs::write(&f, "99999\n").unwrap();
     let bin = env!("CARGO_BIN_EXE_sigil");
-    let ex = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/examples/02-read-port/c-brace.sigil"
+    let (root, exf) = common::stage_file(
+        "fsd",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/02-read-port/c-brace.sigil"
+        ),
     );
+    let ex = exf.to_str().unwrap();
+    let root = root.to_str().unwrap();
     let o = std::process::Command::new(bin)
-        .args(["run", "--fs-double"])
+        .args(["run", "--root", root, "--fs-double"])
         .arg(format!("/etc/port={}", f.display()))
         .args([ex, "read_port", "/etc/port"])
         .output()
@@ -115,7 +120,14 @@ fn cli_fs_double_runs_read_port() {
     );
     // 差し替えがなければ実ファイルを読む（`/etc/port` はない）。
     let o = std::process::Command::new(bin)
-        .args(["run", ex, "read_port", "/nonexistent-sigil-dir/port"])
+        .args([
+            "run",
+            "--root",
+            root,
+            ex,
+            "read_port",
+            "/nonexistent-sigil-dir/port",
+        ])
         .output()
         .unwrap();
     assert!(o.status.success());

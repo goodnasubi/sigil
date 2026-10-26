@@ -3,8 +3,11 @@
 use sigil::json::{parse, Value};
 
 fn sigil_bin(args: &[&str]) -> (i32, String, String) {
+    // 根の既定は cwd（ADR 0021 2-2c）。試験の置き場所を根にする。
+    let mut full: Vec<String> = vec![args[0].to_string(), "--root".into(), tmp_root()];
+    full.extend(args[1..].iter().map(|a| a.to_string()));
     let o = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
-        .args(args)
+        .args(full)
         .output()
         .unwrap();
     (
@@ -14,10 +17,22 @@ fn sigil_bin(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+fn tmp_root() -> String {
+    std::env::temp_dir()
+        .join(format!("sigil-m6-check-json-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `m/<名前>.sigil` に書く。`module m.a` / `module m.b` は、パスに合わせて `m.<名前>` にする。
 fn temp_file(name: &str, src: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("sigil-m6-check-json-{}", std::process::id()));
+    let stem = name.trim_end_matches(".sigil");
+    let src = src
+        .replacen("module m.a\n", &format!("module m.x_{stem}\n"), 1)
+        .replacen("module m.b\n", &format!("module m.x_{stem}\n"), 1);
+    let dir = std::path::PathBuf::from(tmp_root()).join("m");
     std::fs::create_dir_all(&dir).unwrap();
-    let p = dir.join(name);
+    let p = dir.join(format!("x_{name}"));
     std::fs::write(&p, src).unwrap();
     p.to_string_lossy().into_owned()
 }
@@ -123,8 +138,8 @@ fn check_json_kinds() {
         Some(&Value::from("TrustBaseNotAllowed"))
     );
     for args in [
-        ["check", "--json", "--trust-base", "m.b", tb.as_str()],
-        ["check", "--trust-base", "m.b", "--json", tb.as_str()],
+        ["check", "--json", "--trust-base", "m.x_tb", tb.as_str()],
+        ["check", "--trust-base", "m.x_tb", "--json", tb.as_str()],
     ] {
         let (code, out, _) = sigil_bin(&args);
         assert_eq!(code, 0, "{args:?}");

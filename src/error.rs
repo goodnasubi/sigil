@@ -269,6 +269,26 @@ impl Error {
     }
 }
 
+impl Error {
+    /// 機械向けの診断（`sigil check --json`。ADR 0019 の決定 2）。`kind` は `ErrorKind` の変種の名前。
+    pub fn to_json(&self, file: &str) -> crate::json::Value {
+        let phase = match self.kind.phase() {
+            Phase::Lex => "lex",
+            Phase::Syntax => "syntax",
+            Phase::Fmt => "fmt",
+            Phase::Check => "check",
+        };
+        crate::json::obj(vec![
+            ("file", file.into()),
+            ("kind", format!("{:?}", self.kind).into()),
+            ("phase", phase.into()),
+            ("line", self.span.line.into()),
+            ("col", self.span.col.into()),
+            ("message", self.message.clone().into()),
+        ])
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let phase = match self.kind.phase() {

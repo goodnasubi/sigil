@@ -13,6 +13,7 @@ pub mod fmt;
 pub mod interp;
 pub mod ir;
 pub mod ir_eval;
+pub mod json;
 pub mod lexer;
 pub mod lower;
 pub mod native;

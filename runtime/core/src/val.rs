@@ -22,7 +22,8 @@
 
 use super::{
     new_str, s, sigil_rt_alloc, sigil_rt_free, sigil_rt_list_free, sigil_rt_list_get,
-    sigil_rt_list_len, sigil_rt_list_new, sigil_rt_list_push, text, RtList, RtStr,
+    sigil_rt_list_len, sigil_rt_list_new, sigil_rt_list_push, sigil_rt_str_clone,
+    sigil_rt_str_free, text, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::cmp::Ordering;
@@ -287,6 +288,8 @@ pub unsafe extern "C" fn sigil_rt_val_cmp(d: D, a: i64, b: i64) -> i32 {
 /// 塊の前に置く 2 語の見出し。`[大きさ（と黙ったかの印）][参照の数]` の後ろに中身が続く。
 const SILENT: i64 = 1 << 62;
 const HEAD: usize = 16;
+/// 解放した塊の参照の数の場所に書く印。
+const FREED: i64 = 0x5afe_dead_0000_0001;
 
 /// 見出しつきの塊を作る（参照の数 1）。戻り値は中身の先頭。
 unsafe fn blk_alloc(bytes: usize) -> *mut i64 {
@@ -294,12 +297,19 @@ unsafe fn blk_alloc(bytes: usize) -> *mut i64 {
     let h = sigil_rt_alloc(HEAD + n, 8) as *mut i64;
     *h = n as i64;
     *h.add(1) = 1;
+    super::live_blocks(1);
     h.add(2)
 }
 
 unsafe fn blk_free(p: *mut i64) {
     let h = p.sub(2);
+    // 二重解放は、解放済みの印が残っているうちなら見つけて止める（最善の努力。解放後にアロケータが印を上書きすれば見逃す）。
+    if *h.add(1) == FREED {
+        std::process::abort();
+    }
+    *h.add(1) = FREED;
     let n = (*h & !SILENT) as usize;
+    super::live_blocks(-1);
     sigil_rt_free(h as *mut u8, HEAD + n, 8);
 }
 
@@ -340,7 +350,7 @@ fn owning_kind(k: i64) -> bool {
 }
 
 /// `deep` が真なら `clone`（`Cell` は独立した複製）、偽なら `Copy`（共有するものは共有のまま）。
-/// 共有する `Cell`・`Shared`・クロージャは参照の数を増やす。文字列は共有のまま（解放しない）。
+/// 共有する `Cell`・`Shared`・クロージャは参照の数を増やす。文字列・パスは新しく複写する（所有するので）。
 unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
     let k = rd(d, 0);
     if w == 0 && owning_kind(k) {
@@ -402,6 +412,7 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             }
             w
         }
+        K_STR | K_PATH if w != 0 => sigil_rt_str_clone(w as *const RtStr) as i64,
         _ => w,
     }
 }
@@ -416,7 +427,7 @@ pub extern "C" fn sigil_rt_trace_on() {
 
 /// 値を破棄する。再帰せず、順序はインタープリタと同じ（値そのもの、次にフィールド・要素を宣言の順）。
 /// 構造体は、黙っておらず移動済みのフィールドがなければ、破棄の前に `drop: …` を出す。
-/// 文字列は解放しない（SIR は文字列の局所変数を破棄しないため、塊の中の文字列と共有されうる）。
+/// 文字列・パスも解放する（ADR 0018 の決定 5）。
 ///
 /// # Safety
 /// `d` は記述子、`w` はその型の値（0 は移動済み）。
@@ -424,7 +435,7 @@ pub extern "C" fn sigil_rt_trace_on() {
 pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
     let mut st: Vec<(D, i64)> = vec![];
     let push = |st: &mut Vec<(D, i64)>, d: D, w: i64| {
-        if w != 0 && owning_kind(rd(d, 0)) {
+        if w != 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH)) {
             st.push((d, w));
         }
     };
@@ -451,8 +462,10 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                 let n = rd(d, 3) as usize;
                 let b = w as *mut i64;
                 if trace && *b.sub(2) & SILENT == 0 {
-                    let moved =
-                        (0..n).any(|i| *b.add(i) == 0 && owning_kind(rd(dp(d, 4 + 3 * i + 2), 0)));
+                    let moved = (0..n).any(|i| {
+                        let k = rd(dp(d, 4 + 3 * i + 2), 0);
+                        *b.add(i) == 0 && (owning_kind(k) || matches!(k, K_STR | K_PATH))
+                    });
                     if !moved {
                         let mut t = String::new();
                         show_into(d, w, true, &mut t);
@@ -486,6 +499,7 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                     blk_free(b);
                 }
             }
+            K_STR | K_PATH => sigil_rt_str_free(w as *mut RtStr),
             _ => {}
         }
     }

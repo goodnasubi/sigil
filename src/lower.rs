@@ -53,8 +53,6 @@ fn needs_drop(t: &ir::Ty) -> bool {
             | ir::Ty::Float
             | ir::Ty::Bool
             | ir::Ty::Unit
-            | ir::Ty::Str
-            | ir::Ty::Path
             | ir::Ty::ParseError
             | ir::Ty::Ref(_)
             | ir::Ty::MutRef(_)

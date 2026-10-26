@@ -7,7 +7,7 @@
 //!
 //! 関数は `(語…) -> (値, 停止の符号)` の形で呼ぶ（符号が 0 でなければ停止中で、`Resume` が呼び出し元の `cleanup` へ返す）。
 //! 局所は 8 バイトの stack slot に置き、基本ブロックの境界をまたぐ値は slot を通す（ブロック引数は使わない）。
-//! 表示・比較・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。破棄は SIR の `Stmt::Drop`・`Stmt::Assign` の旧値で、型の記述子を使う `sigil_rt_val_drop` を呼んで行う（ヘッダつきの塊は参照数で解放し、`--trace-drops` では構造体の破棄を順に標準エラーへ出す）。既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期と停止の経路での漏れはインタプリタと厳密には揃えない。
+//! 表示・比較・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。破棄は SIR の `Stmt::Drop`・`Stmt::Assign` の旧値で、型の記述子を使う `sigil_rt_val_drop` を呼んで行う（ヘッダつきの塊は参照数で解放し、`--trace-drops` では構造体の破棄を順に標準エラーへ出す）。文字列・パスも同じ道で解放する（ADR 0018 の決定 5）。既知の制限: クロージャの破棄の時期と停止の経路での漏れはインタプリタと厳密には揃えない。
 //!
 //! 出せない構文・組み込みはない（SIR の不変条件が崩れたときだけ `CgError::Internal`）。
 
@@ -103,7 +103,7 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
         "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
         "trace_on" => ("", 'v'),
-        "print_result" => ("p", 'v'),
+        "print_result" | "str_free" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" | "list_best" => ("ppi", 'p'),
         "val_eq" | "val_cmp" => ("ppp", 'i'),

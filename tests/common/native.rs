@@ -95,8 +95,15 @@ pub struct Ran {
 }
 
 pub fn exec(exe: &std::path::Path, args: &[Arg]) -> Ran {
+    let args: Vec<String> = args.iter().map(arg_text).collect();
+    exec_env(exe, &args, &[])
+}
+
+/// 環境変数つきで走らせる（引数は書いたままの文字列）。
+pub fn exec_env(exe: &std::path::Path, args: &[String], env: &[(&str, &str)]) -> Ran {
     let o = Command::new(exe)
-        .args(args.iter().map(arg_text))
+        .args(args)
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     Ran {

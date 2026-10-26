@@ -1,0 +1,12 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..52f200c 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -773,6 +773,5 @@ impl<'a> L<'a> {
+         };
+         for &i in idxs.iter().rev() {
+-            let l = self.fb.reg[i].0;
+-            self.emit(Stmt::Drop(Place::local(l)));
++            let _l = self.fb.reg[i].0;
+         }
+         let tail: Vec<(usize, bool)> = self.fb.reg.drain(mark..).filter(|x| !x.1).collect();

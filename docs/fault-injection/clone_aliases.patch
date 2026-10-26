@@ -1,0 +1,11 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..f8086f2 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1902,5 +1902,5 @@ impl<'a> L<'a> {
+             let (p, ty) = self.expr_place(recv)?;
+             let ty = peel(&ty).clone();
+-            return Ok(self.fresh(Rvalue::Clone(Operand::Copy(p), ty.clone()), ty));
++            return Ok(self.fresh(Rvalue::Use(Operand::Copy(p)), ty));
+         }
+         use Builtin::*;

@@ -1,0 +1,12 @@
+diff --git a/src/lower.rs b/src/lower.rs
+index 36cff37..242b1e4 100644
+--- a/src/lower.rs
++++ b/src/lower.rs
+@@ -1094,6 +1094,5 @@ impl<'a> L<'a> {
+     /// `return`・失敗する `?`: 本体の局所を逆順に破棄して終わりの基本ブロックへ。
+     fn early_return(&mut self) {
+-        let base = self.fb.body_base;
+-        self.drop_from(base);
++        let _base = self.fb.body_base;
+         let epi = self.fb.epilogue;
+         self.goto(epi);

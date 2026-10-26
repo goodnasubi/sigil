@@ -28,7 +28,7 @@ use std::fmt;
 
 #[derive(Debug, Clone, Default)]
 pub struct Opts {
-    /// `--trace-drops`（この版では未対応。`compile` が `Unsupported` を返す）。
+    /// `--trace-drops`（破棄の記録を標準エラーに出す）。
     pub trace_drops: bool,
 }
 
@@ -95,11 +95,12 @@ pub(crate) fn norm(ty: &Ty) -> Ty {
 pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
         "alloc" | "str_new" | "str_concat" | "list_get" | "val_shadow" | "val_clone" => ("pp", 'p'),
-        "str_clone" | "str_data" | "str_bytes" | "str_len" | "str_trim" | "str_lines"
-        | "list_len" | "list_new" => ("p", 'p'),
+        "str_clone" | "blk_new" | "str_data" | "str_bytes" | "str_len" | "str_trim"
+        | "str_lines" | "list_len" | "list_new" => ("p", 'p'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
-        "list_push" | "console_log" | "os_buf_free" | "stop" => ("pp", 'v'),
+        "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
+        "trace_on" => ("", 'v'),
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" | "list_best" => ("ppi", 'p'),
@@ -125,6 +126,7 @@ pub(crate) struct Cg<'p> {
     fnblocks: HashMap<usize, DataId>,
     msgs: Vec<String>,
     msg_idx: HashMap<String, usize>,
+    pub trace: bool,
     pub fids: Vec<FuncId>,
     pub msg_table: DataId,
 }
@@ -388,12 +390,6 @@ fn supported_param(t: &Ty) -> bool {
 
 /// `p` をオブジェクトのバイト列にする。
 pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
-    if opts.trace_drops {
-        return Err(CgError::Unsupported {
-            line: 0,
-            msg: "--trace-drops はまだ対応していない（破棄の記録は実行ファイルに入らない）".into(),
-        });
-    }
     let entry: &Func = &p.funcs[p.entry];
     for &pi in &entry.params {
         if !supported_param(&entry.locals[pi].ty) {
@@ -453,6 +449,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fnblocks: HashMap::new(),
         msgs: vec![],
         msg_idx: HashMap::new(),
+        trace: opts.trace_drops,
         fids,
         msg_table,
     };

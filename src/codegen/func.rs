@@ -24,8 +24,12 @@ enum Cur {
     V(usize, usize),
 }
 
+/// 値の複写（影）と破棄が必要な型。`Str`・`Path`・スカラー・参照は含まない。
 fn aggregate(t: &Ty) -> bool {
-    matches!(t, Ty::Tuple(_) | Ty::Adt(_) | Ty::List(_))
+    matches!(
+        t,
+        Ty::Tuple(_) | Ty::Adt(_) | Ty::List(_) | Ty::Cell(_) | Ty::Shared(_) | Ty::FnRef(..)
+    )
 }
 
 fn strip(t: &Ty) -> Ty {
@@ -188,10 +192,24 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.rt("val_shadow", &[d, w])
     }
 
+    /// 見出しつきの塊（`sigil_rt_val_drop` が解放する）。
+    fn blk(&mut self, bytes: i64) -> Value {
+        let sz = self.ic(bytes);
+        self.rt("blk_new", &[sz])
+    }
+
+    /// 型 `t` の値 `w` を破棄する（0 は移動済みで何もしない）。
+    fn drop_val(&mut self, t: &Ty, w: Value) {
+        if !aggregate(t) {
+            return;
+        }
+        let d = self.desc_addr(&strip(t));
+        self.rt("val_drop", &[d, w]);
+    }
+
     fn mk_enum(&mut self, tag: Value, fields: &[Value]) -> Value {
         let size = std::cmp::max(16, 8 + 8 * fields.len() as i64);
-        let (sz, al) = (self.ic(size), self.ic(8));
-        let p = self.rt("alloc", &[sz, al]);
+        let p = self.blk(size);
         self.st(tag, p, 0);
         for (i, f) in fields.iter().enumerate() {
             self.st(*f, p, 8 + 8 * i as i32);
@@ -430,12 +448,26 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     /// 被演算子を語として読む（型・複製かどうかつき）。
     fn raw(&mut self, op: &Operand) -> (Value, Ty, bool) {
+        let (v, t, c, _) = self.raw_a(op);
+        (v, t, c)
+    }
+
+    /// `raw` に加えて、移動の元の番地（所有する型の場合だけ）を返す。
+    fn raw_a(&mut self, op: &Operand) -> (Value, Ty, bool, Option<Value>) {
+        if let Operand::Copy(p) | Operand::Move(p) = op {
+            let (a, c) = self.place(p);
+            let v = self.ld(a, 0);
+            let t = Self::cur_ty(&c);
+            let mv = matches!(op, Operand::Move(_)) && aggregate(&t);
+            return (v, t, matches!(op, Operand::Copy(_)), mv.then_some(a));
+        }
+        let (v, t, c) = self.raw_const(op);
+        (v, t, c, None)
+    }
+
+    fn raw_const(&mut self, op: &Operand) -> (Value, Ty, bool) {
         match op {
-            Operand::Copy(p) | Operand::Move(p) => {
-                let (a, c) = self.place(p);
-                let v = self.ld(a, 0);
-                (v, Self::cur_ty(&c), matches!(op, Operand::Copy(_)))
-            }
+            Operand::Copy(_) | Operand::Move(_) => unreachable!(),
             Operand::Const(c) => match c {
                 Const::Unit => (self.ic(0), Ty::Unit, false),
                 Const::Int(n) => (self.ic(*n), Ty::Int, false),
@@ -488,8 +520,13 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     fn argf(&mut self, op: &Operand, hint: Option<&Ty>) -> (Value, Ty) {
-        let (w, ty, c) = self.raw(op);
+        let (w, ty, c, moved) = self.raw_a(op);
         let v = self.finish(w, &ty, c, hint);
+        if let Some(a) = moved {
+            // 移動した元は空にする（インタープリタの `Empty` と同じ）。
+            let z = self.ic(0);
+            self.st(z, a, 0);
+        }
         let t = match (&ty, hint) {
             (Ty::Ref(i), Some(h)) if !matches!(h, Ty::Ref(_)) => (**i).clone(),
             _ => ty,
@@ -563,13 +600,36 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Drop(_) => {}
+            Stmt::Drop(pl) => {
+                let (a, c) = self.place(pl);
+                let t = match c {
+                    Cur::T(t) => t,
+                    Cur::V(t, _) => Ty::Adt(t),
+                };
+                if aggregate(&t) {
+                    let w = self.ld(a, 0);
+                    let z = self.ic(0);
+                    self.st(z, a, 0);
+                    self.drop_val(&t, w);
+                }
+            }
             Stmt::Assign(dest, rv) => {
                 let (da, dc) = self.place(dest);
                 let dty = Self::cur_ty(&dc);
                 let v = self.rvalue(rv, &dty);
-                self.st(v, da, 0);
+                self.store_drop(da, v, &dty);
             }
+        }
+    }
+
+    /// 場所へ書き、古い値を破棄する（新しい値を作った後に古い値を読む）。
+    fn store_drop(&mut self, addr: Value, v: Value, ty: &Ty) {
+        if aggregate(ty) {
+            let old = self.ld(addr, 0);
+            self.st(v, addr, 0);
+            self.drop_val(ty, old);
+        } else {
+            self.st(v, addr, 0);
         }
     }
 
@@ -617,8 +677,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                     AggKind::Variant(_, v) => self.mk_enum_c(*v as i64, &vals),
                     _ => {
                         let size = std::cmp::max(8, 8 * vals.len() as i64);
-                        let (sz, al) = (self.ic(size), self.ic(8));
-                        let blk = self.rt("alloc", &[sz, al]);
+                        let blk = self.blk(size);
                         for (i, x) in vals.iter().enumerate() {
                             self.st(*x, blk, 8 * i as i32);
                         }
@@ -644,9 +703,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                     | Ty::Unit
                     | Ty::Str
                     | Ty::Path
-                    | Ty::ParseError
-                    | Ty::FnRef(..)
-                    | Ty::Shared(_) => v,
+                    | Ty::ParseError => v,
                     _ => {
                         let d = self.desc_addr(&t);
                         self.rt("val_clone", &[d, v])
@@ -672,20 +729,26 @@ impl<'a, 'p> Fx<'a, 'p> {
                     vals.push(self.argf(o, hints.get(i)).0);
                 }
                 let size = std::cmp::max(8, 8 * vals.len() as i64);
-                let (sz, al) = (self.ic(size), self.ic(8));
-                let env = self.rt("alloc", &[sz, al]);
+                let env = self.blk(size);
                 for (i, x) in vals.iter().enumerate() {
                     self.st(*x, env, 8 * i as i32);
                 }
+                // 環境の型（クロージャを破棄するときに中身を破棄するため）。
+                let envty = if hints.len() == vals.len() {
+                    Ty::Tuple(hints.clone())
+                } else {
+                    Ty::Tuple(vec![Ty::Unit; vals.len()])
+                };
+                let envd = self.desc_addr(&envty);
                 let fr = self
                     .cg
                     .m
                     .declare_func_in_func(self.cg.fids[*f], self.b.func);
                 let fa = self.b.ins().func_addr(types::I64, fr);
-                let (sz, al) = (self.ic(16), self.ic(8));
-                let blk = self.rt("alloc", &[sz, al]);
+                let blk = self.blk(24);
                 self.st(fa, blk, 0);
                 self.st(env, blk, 8);
+                self.st(envd, blk, 16);
                 blk
             }
         }
@@ -934,7 +997,7 @@ impl<'a, 'p> Fx<'a, 'p> {
     fn finish_call(&mut self, v: Value, rty: &Ty, dty: &Ty, dest: &Place, next: usize) {
         let w = self.finish(v, rty, false, Some(dty));
         let (da, _) = self.place(dest);
-        self.st(w, da, 0);
+        self.store_drop(da, w, dty);
         self.b.ins().jump(self.blocks[next], NOARGS);
     }
 
@@ -1020,7 +1083,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             ListMap => {
                 let (l, lty) = self.val(&args[0]);
-                let (f, _) = self.own(&args[1]);
+                let (f, ft) = self.own(&args[1]);
                 let elem = match strip(&lty) {
                     Ty::List(e) => *e,
                     _ => Ty::Int,
@@ -1045,11 +1108,13 @@ impl<'a, 'p> Fx<'a, 'p> {
                     s.rt("list_push", &[ol, a]);
                 });
                 let oa = self.saddr(os);
-                (self.ld(oa, 0), u)
+                let out = self.ld(oa, 0);
+                self.drop_val(&ft, f);
+                (out, u)
             }
             ListFind => {
                 let (l, _) = self.val(&args[0]);
-                let (f, _) = self.own(&args[1]);
+                let (f, ft) = self.own(&args[1]);
                 let n = self.rt("list_len", &[l]);
                 let res = self.tmp(8);
                 let done = self.b.create_block();
@@ -1073,12 +1138,75 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.b.ins().jump(done, NOARGS);
                 self.b.switch_to_block(done);
                 let ra = self.saddr(res);
-                (self.ld(ra, 0), u)
+                let out = self.ld(ra, 0);
+                self.drop_val(&ft, f);
+                (out, u)
             }
-            ListMaxBy | ListMinBy => (
-                self.unsupported("List.max_by / min_by はまだネイティブに対応していない"),
-                u,
-            ),
+            ListMaxBy | ListMinBy => {
+                let (l, _) = self.val(&args[0]);
+                let (f, ft) = self.own(&args[1]);
+                let kt = match strip(&ft) {
+                    Ty::FnRef(_, r) => *r,
+                    _ => Ty::Int,
+                };
+                let kd = self.desc_addr(&strip(&kt));
+                let want = if b == ListMaxBy { 1 } else { -1 };
+                let n = self.rt("list_len", &[l]);
+                // 最良の鍵と、その要素の添字（-1 は未定）。
+                let (ks, is) = (self.tmp(8), self.tmp(8));
+                let (ka, ia) = (self.saddr(ks), self.saddr(is));
+                let z = self.ic(0);
+                self.st(z, ka, 0);
+                let m1 = self.ic(-1);
+                self.st(m1, ia, 0);
+                self.loop_range(n, |s, i| {
+                    let p = s.rt("list_get", &[l, i]);
+                    let k = s.call_fnref(f, &[p]);
+                    let (ka, ia) = (s.saddr(ks), s.saddr(is));
+                    let (bk, bi) = (s.ld(ka, 0), s.ld(ia, 0));
+                    let first = s.b.ins().icmp_imm_s(IntCC::Equal, bi, -1);
+                    let better = s.branch(
+                        first,
+                        |s| s.ic(1),
+                        |s| {
+                            let c = s.rt("val_cmp", &[kd, k, bk]);
+                            let e = s.b.ins().icmp_imm_s(IntCC::Equal, c, want);
+                            s.b2i(e)
+                        },
+                    );
+                    s.branch(
+                        better,
+                        |s| {
+                            s.drop_val(&kt, bk);
+                            let (ka, ia) = (s.saddr(ks), s.saddr(is));
+                            s.st(k, ka, 0);
+                            s.st(i, ia, 0);
+                            s.ic(0)
+                        },
+                        |s| {
+                            s.drop_val(&kt, k);
+                            s.ic(0)
+                        },
+                    );
+                });
+                let (ka, ia) = (self.saddr(ks), self.saddr(is));
+                let (bk, bi) = (self.ld(ka, 0), self.ld(ia, 0));
+                self.drop_val(&kt, bk);
+                self.drop_val(&ft, f);
+                let none = self.b.ins().icmp_imm_s(IntCC::Equal, bi, -1);
+                let r = self.branch(
+                    none,
+                    |s| {
+                        let z = s.ic(0);
+                        s.mk_enum_c(1, &[z])
+                    },
+                    |s| {
+                        let p = s.rt("list_get", &[l, bi]);
+                        s.mk_enum_c(0, &[p])
+                    },
+                );
+                (r, u)
+            }
             OptIsSome | ResIsOk => {
                 let (v, _) = self.val(&args[0]);
                 (self.tag_is(v, 0), u)
@@ -1092,47 +1220,93 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (d, dt) = self.own(&args[1]);
                 let tag = self.ld(v, 0);
                 let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 0);
-                let pay = self.ld(v, 8);
-                let _ = vt;
-                (self.b.ins().select(c, pay, d), dt)
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let pay = s.ld(v, 8);
+                        let z = s.ic(0);
+                        s.st(z, v, 8);
+                        s.drop_val(&vt, v);
+                        s.drop_val(&dt, d);
+                        pay
+                    },
+                    |s| {
+                        s.drop_val(&vt, v);
+                        d
+                    },
+                );
+                (r, dt)
             }
             OptMap => {
-                let (v, _) = self.own(&args[0]);
-                let (f, _) = self.own(&args[1]);
+                let (v, vt) = self.own(&args[0]);
+                let (f, ft) = self.own(&args[1]);
                 let tag = self.ld(v, 0);
                 let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 0);
                 let r = self.branch(
                     c,
                     |s| {
                         let x = s.ld(v, 8);
+                        let z = s.ic(0);
+                        s.st(z, v, 8);
+                        s.drop_val(&vt, v);
                         let r = s.call_fnref(f, &[x]);
                         s.mk_enum_c(0, &[r])
                     },
                     |s| {
+                        s.drop_val(&vt, v);
+                        let z = s.ic(0);
+                        s.mk_enum_c(1, &[z])
+                    },
+                );
+                self.drop_val(&ft, f);
+                (r, u)
+            }
+            OptOkOr => {
+                let (v, vt) = self.own(&args[0]);
+                let (e, et) = self.own(&args[1]);
+                let tag = self.ld(v, 0);
+                let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 0);
+                let pay = self.branch(
+                    c,
+                    |s| {
+                        let x = s.ld(v, 8);
+                        let z = s.ic(0);
+                        s.st(z, v, 8);
+                        s.drop_val(&vt, v);
+                        s.drop_val(&et, e);
+                        x
+                    },
+                    |s| {
+                        s.drop_val(&vt, v);
+                        e
+                    },
+                );
+                (self.mk_enum(tag, &[pay]), u)
+            }
+            ResOk => {
+                let (v, vt) = self.own(&args[0]);
+                let tag = self.ld(v, 0);
+                let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 0);
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let x = s.ld(v, 8);
+                        let z = s.ic(0);
+                        s.st(z, v, 8);
+                        s.drop_val(&vt, v);
+                        s.mk_enum_c(0, &[x])
+                    },
+                    |s| {
+                        s.drop_val(&vt, v);
                         let z = s.ic(0);
                         s.mk_enum_c(1, &[z])
                     },
                 );
                 (r, u)
             }
-            OptOkOr => {
-                let (v, _) = self.own(&args[0]);
-                let (e, _) = self.own(&args[1]);
-                let tag = self.ld(v, 0);
-                let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 0);
-                let x = self.ld(v, 8);
-                let pay = self.b.ins().select(c, x, e);
-                (self.mk_enum(tag, &[pay]), u)
-            }
-            ResOk => {
-                let (v, _) = self.own(&args[0]);
-                let tag = self.ld(v, 0);
-                let x = self.ld(v, 8);
-                (self.mk_enum(tag, &[x]), u)
-            }
             ResMap | ResMapErr => {
-                let (v, _) = self.own(&args[0]);
-                let (f, _) = self.own(&args[1]);
+                let (v, vt) = self.own(&args[0]);
+                let (f, ft) = self.own(&args[1]);
                 let tag = self.ld(v, 0);
                 let c = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 0);
                 let map_ok = b == ResMap;
@@ -1140,15 +1314,22 @@ impl<'a, 'p> Fx<'a, 'p> {
                     c,
                     |s| {
                         let x = s.ld(v, 8);
+                        let z = s.ic(0);
+                        s.st(z, v, 8);
+                        s.drop_val(&vt, v);
                         let y = if map_ok { s.call_fnref(f, &[x]) } else { x };
                         s.mk_enum_c(0, &[y])
                     },
                     |s| {
                         let x = s.ld(v, 8);
+                        let z = s.ic(0);
+                        s.st(z, v, 8);
+                        s.drop_val(&vt, v);
                         let y = if map_ok { x } else { s.call_fnref(f, &[x]) };
                         s.mk_enum_c(1, &[y])
                     },
                 );
+                self.drop_val(&ft, f);
                 (r, u)
             }
             StrLen => {
@@ -1225,8 +1406,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             CellNew | SharedNew => {
                 let (x, _) = self.own(&args[0]);
-                let (sz, al) = (self.ic(8), self.ic(8));
-                let blk = self.rt("alloc", &[sz, al]);
+                let blk = self.blk(8);
                 self.st(x, blk, 0);
                 (blk, u)
             }
@@ -1255,12 +1435,17 @@ impl<'a, 'p> Fx<'a, 'p> {
             SharedSet => {
                 let (v, ty) = self.val(&args[0]);
                 let (n, _) = self.own(&args[1]);
-                let cell = match strip(&ty) {
-                    Ty::Shared(i) if matches!(*i, Ty::Cell(_)) => self.ld(v, 0),
-                    Ty::Cell(_) => v,
+                let (cell, inner) = match strip(&ty) {
+                    Ty::Shared(i) => match *i {
+                        Ty::Cell(t) => (self.ld(v, 0), *t),
+                        _ => return (self.unsupported("set の対象が Shared<Cell> でない"), u),
+                    },
+                    Ty::Cell(t) => (v, *t),
                     _ => return (self.unsupported("set の対象が Shared<Cell> でない"), u),
                 };
+                let old = self.ld(cell, 0);
                 self.st(n, cell, 0);
+                self.drop_val(&inner, old);
                 (self.ic(0), u)
             }
             IntMinValue => (self.ic(i64::MIN), u),
@@ -1420,6 +1605,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         };
         let dtab = table(self, &dws);
         let ntab = table(self, &nws);
+        if self.cg.trace {
+            self.rt("trace_on", &[]);
+        }
         let (fp, fl) = match self.cg.bytes_data(f.name.as_bytes()) {
             Ok(d) => (self.data_addr(d), self.ic(f.name.len() as i64)),
             Err(e) => (self.fail(e), self.ic(0)),
@@ -1466,6 +1654,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let q = self.ic(1);
         let s = self.rt("val_show", &[d, r[0], q]);
         self.rt("print_result", &[s]);
+        self.drop_val(&rt, r[0]);
         let z = self.b.ins().iconst(types::I32, 0);
         self.b.ins().return_(&[z]);
     }

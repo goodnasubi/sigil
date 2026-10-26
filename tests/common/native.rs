@@ -190,10 +190,16 @@ pub fn check(
     if let Some(table) = &opts.fs_files {
         let root = dir.join("files");
         for (p, content) in table {
-            let rel = p.trim_start_matches('/');
-            if p.is_empty() || rel.is_empty() || rel.split('/').any(|c| c == "..") {
+            // 空のパスは Path の契約(requires)で fs に届く前に止まるので、移し替えない。
+            if p.is_empty() {
                 continue;
             }
+            let rel = p.trim_start_matches('/');
+            // 一時ディレクトリの外へ出るパスは移し替えられない。黙って本物のファイルを触らないよう、失敗させる。
+            assert!(
+                !rel.is_empty() && !rel.split('/').any(|c| c == ".."),
+                "{func}: fs_files のパス {p:?} は一時ディレクトリの下へ移し替えられない"
+            );
             let real = root.join(rel);
             std::fs::create_dir_all(real.parent().unwrap()).unwrap();
             std::fs::write(&real, content).unwrap();
@@ -212,9 +218,13 @@ pub fn check(
         args.iter().for_each(|a| paths(a, &mut extra));
         for p in extra {
             let rel = p.trim_start_matches('/');
-            if table.contains_key(&p) || rel.is_empty() || rel.split('/').any(|c| c == "..") {
+            if table.contains_key(&p) {
                 continue;
             }
+            assert!(
+                !rel.is_empty() && !rel.split('/').any(|c| c == ".."),
+                "{func}: 引数のパス {p:?} は一時ディレクトリの下へ移し替えられない"
+            );
             let real = root.join(rel);
             std::fs::create_dir_all(real.parent().unwrap()).unwrap();
             keys.push((p.clone(), real.to_string_lossy().into_owned()));

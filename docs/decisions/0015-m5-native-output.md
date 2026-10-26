@@ -1,6 +1,6 @@
 # 0015: M5 の範囲と、ネイティブ出力のコンパイラ構成（中間表現・ランタイム・リンカ）
 
-- **状態**: 承認（2026-10-25。所有者の委任を受けて Claude が決定。範囲は PR1〜PR3 のみ。依存の追加（Cranelift）・ビルド環境・CI は未承認で人間判断待ち）。2026-10-26 に所有者が承認した: PR4 以降の実装、Cranelift 依存（cranelift-codegen・cranelift-frontend・cranelift-module・cranelift-object の 4 クレート、最新安定版）の追加、ビルド環境（cc + glibc の静的リンク）、PR6 の前の CI の追加（CI は別 PR）
+- **状態**: M5 完了（2026-10-26。PR1〜PR6 が main に入り、完了条件のテストが CI で通る。下の「M5 の完了の記録」）。承認（2026-10-25。所有者の委任を受けて Claude が決定。範囲は PR1〜PR3 のみ。依存の追加（Cranelift）・ビルド環境・CI は未承認で人間判断待ち）。2026-10-26 に所有者が承認した: PR4 以降の実装、Cranelift 依存（cranelift-codegen・cranelift-frontend・cranelift-module・cranelift-object の 4 クレート、最新安定版）の追加、ビルド環境（cc + glibc の静的リンク）、PR6 の前の CI の追加（CI は別 PR）
 
 ## 背景
 
@@ -45,7 +45,7 @@ M5 の完了条件（ADR 0006）:
 
 - **対象の出力**: Linux x86-64 の、静的にリンクした ELF の実行ファイル（決定 6）。`targets` に `bare` を含むモジュールも同じ形で出力する（ADR 0014 の決定 1。実行環境なしの出力は P6）。`browser` だけのモジュールも、P0 では同じ形で出力する（`targets` は書けるコードの制約で、出力の指定ではない）。
 - **言語の範囲**: `sigil check` を通り、インタプリタが実行できるすべての構文と標準ライブラリ（ADR 0013 の決定 2 と ADR 0014 の決定 2 の一覧）。
-- **作りかけの間**: 未実装の構文は `sigil build` が `ErrorKind::BuildUnsupported`（新設。検査のエラーと同じ終了コード 1）で止める。M5 の完了は「`BuildUnsupported` を出す箇所が処理系に残っていない」ことを条件とする（下の完了条件のテスト `no_build_unsupported_left`）。
+- **作りかけの間**（PR4〜PR5。M5 の完了で終わった）: 未実装の構文は `sigil build` が `ErrorKind::BuildUnsupported`（新設。検査のエラーと同じ終了コード 1）で止める。M5 の完了は「`BuildUnsupported` を出す箇所が処理系に残っていない」ことを条件とした（完了条件のテスト `no_build_unsupported_left`）。PR6 で `ErrorKind::BuildUnsupported` を消した。入口の引数の型がコマンドラインで書けないときは入口の指定の誤り（`RunError::Entry`）、生成器の内部の不変条件の破れは `CgError::Internal` で報告する。
 - **一致の確かめ方**: 次のテストの、インタプリタを呼ぶ補助関数（`ok`・`stopped`・`run_sources_with` を包む関数など）の事例を、すべて実行ファイルでも動かして比べる（決定 8 の「差分の比較」）。
   - `tests/interp.rs`・`tests/m3_stdlib.rs`・`tests/m3_drop_order.rs`・`tests/m3_fs_cell.rs`・`tests/m4_effects.rs`・`tests/m4_core_split.rs` の実行の事例
   - 5 つのサンプル（`01`〜`05`）とテスト用の入口
@@ -275,8 +275,13 @@ SIR の型を、Cranelift の段で次の表現にする。表現は実行ファ
   - 異常停止: `Failure.error` の表示と標準エラーの 1 行、終了コード 70、停止の前の標準出力
   - `trace_drops` の事例: 破棄の記録の並び（`StackExhausted` の事例は、記録の数を比べず、各記録の表示がインタプリタの記録に含まれることだけを比べる）
 - **差し替えた `fs` の事例**: `Options::fs_files` の仮のパス `p` を、一時ディレクトリの下の `<tmp>/<p の先頭の / を除いたもの>` の実際のファイルにする。引数と、期待する出力の中の `p` も同じく置き換えて比べる。表にないパスは作らない（`NotFound` になる）。
-- 決定 1 の各テストファイルの、インタプリタを呼ぶ補助関数を `both` に替える。M5 の作りかけの間は、`SIGIL_NATIVE=1` のときだけ実行ファイルの側も動かす（`BuildUnsupported` の構文が残っている間に既存のテストを落とさないため）。M5 の完了で、この切替えをなくし常に両方を動かす。
+- 決定 1 の各テストファイルの、インタプリタを呼ぶ補助関数を `both` に替える。M5 の作りかけの間は、`SIGIL_NATIVE=1` のときだけ実行ファイルの側も動かした（`BuildUnsupported` の構文が残っている間に既存のテストを落とさないため）。M5 の完了（PR6）でこの切替えをなくし、常に両方を動かす。
 - `cc` か `libc.a` がない環境では、`both` は実行ファイルの側を動かさずに失敗する（黙って飛ばさない）。
+- **比べる範囲と飛ばす事例（PR6 の確定）**:
+  - `capture_console=false` の事例（`console.log` を本物の標準出力へ書く）は、出力以外を比べる: 値（成功のときの標準出力は、末尾の行が値であることだけを確かめる）、停止の報告と終了コード、破棄の順序。出力そのものは比べない。
+  - `fs_files` の事例は、表の内容を一時ディレクトリの実ファイルに置いて比べる。表にない絶対パスの引数も一時ディレクトリの下へ移す（親だけ作り、ファイルは作らない。`fs.write` が本物のファイルシステムを書き換えないため）。比べるのは値・出力・停止であり、最後の表の内容は比べない。
+  - 飛ばすのは次の 4 種類だけで、`scripts/native-report.sh` が理由別に数える（M5 の完了の時点で 9 件）: 停止でない失敗（検査・入口の指定のエラー。実行ファイルを作る前の話）／コマンドラインの書き方で表せない引数（`"21"` のように数に読める文字列など）／コマンドラインで受け取れない型の引数（空の `List<構造体>` など。インタプリタには渡せる）／スタックの枯渇のうち、実行ファイルでは枯渇しない事例（枠の大きさが実装で違う。枯渇した場合は報告の見出しと終了コード 70 を比べる）。
+  - CI は `scripts/native-report.sh` で飛ばしの上限（10 件）と突き合わせの下限（400 件）を検査し、超えたら失敗させる。事例を足して飛ばしが増えたら、理由を確かめてから上限を直す。
 - 異常停止の報告を標準エラーに出す前に、それまでの標準出力（`console.log` の出力）を書き出し切るのはランタイムの責務とする（`sigil_rt_core` の停止の処理が標準出力を flush してから報告を出し、終了コード 70 で終わる）。上の「停止の前の標準出力」の比較はこれに依存する。
 
 ## 決定 9: 「信頼基盤の宣言方法」の ADR との順序
@@ -319,8 +324,8 @@ ADR 0006 の M5 の完了条件を、次のテストで満たすとする。
 2. **PR2: SIR と lowering と評価器（決定 2・5）**: `src/ir.rs`・`src/lower.rs`・`src/ir_eval.rs`。単相化・契約・停止の経路・破棄の並び。`tests/m5_sir.rs` の `sir_eval_matches_interp`（決定 1 の事例）。インタプリタと評価器の食い違いは、仕様の想定に照らしてどちらが正しいかを PR に記録する。
 3. **PR3: 暫定ランタイムと意味の共有（決定 6）**: `runtime/core`・`runtime/os`、`src/shared/`、`build.rs`。ランタイムの単体テスト（表示・文字列・パスの関数がインタプリタと同じ結果）。Cranelift はまだ使わない。
 4. **PR4: Cranelift の出力とリンク（決定 4・6・7）**: `Cargo.toml` に Cranelift を足し、`src/codegen.rs`（SIR → Cranelift）と `src/native.rs`（オブジェクトの出力・ランタイムの書き出し・`cc` の呼び出し）、`sigil build`。`BuildUnsupported` で未実装の構文を止めてよい。`samples_build_and_match`・`core_only_*`・`executable_is_static`・`runs_without_toolchain`。
-5. **PR5: 差分の比較を全事例へ（決定 8）**: `tests/common/native.rs` の `both`、既存のテストの補助関数の置き換え（`SIGIL_NATIVE=1` の切替え）、`stop_kinds_match`、未実装の構文を埋める。**あわせて `Stmt::Drop`・`Stmt::Assign` の旧値の破棄の生成と解放、`--trace-drops` のネイティブ対応（破棄の順序をインタープリタと一致させる。`m3_drop_order` などが `SIGIL_NATIVE=1` で比べる）を含む。** `SIGIL_NATIVE=1 cargo test` の後に `scripts/native-report.sh` で、突き合わせた件数と飛ばした件数（理由別）を出す。既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期・停止の経路での漏れはインタプリタと厳密には揃えない（破棄の記録は揃う範囲で比べる）。
-6. **PR6: M5 の完了**: `SIGIL_NATIVE` の切替えをなくす、`no_build_unsupported_left`、`m3_drop_limits.rs` への実行ファイルの順序の記録、`runs_in_scratch_container` を手で実行した記録、ADR 0006 の M5 の記録。
+5. **PR5: 差分の比較を全事例へ（決定 8）**: `tests/common/native.rs` の `both`、既存のテストの補助関数の置き換え（当時は `SIGIL_NATIVE=1` の切替え。PR6 でなくした）、`stop_kinds_match`、未実装の構文を埋める。**あわせて `Stmt::Drop`・`Stmt::Assign` の旧値の破棄の生成と解放、`--trace-drops` のネイティブ対応（破棄の順序をインタープリタと一致させる。`m3_drop_order` などが `SIGIL_NATIVE=1` で比べる）を含む。** `SIGIL_NATIVE=1 cargo test` の後に `scripts/native-report.sh` で、突き合わせた件数と飛ばした件数（理由別）を出す。既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期・停止の経路での漏れはインタプリタと厳密には揃えない（破棄の記録は揃う範囲で比べる）。
+6. **PR6: M5 の完了**（実施済み）: `SIGIL_NATIVE` の切替えをなくして常に両方を比べる、`capture_console=false` と `fs_files` の事例の比較、`no_build_unsupported_left`（`ErrorKind::BuildUnsupported` の削除）、`m3_drop_limits.rs` への実行ファイルの順序の記録、飛ばし件数の上限の検査（CI）、`runs_in_scratch_container` を手で実行した記録、ADR 0006 の M5 の記録。
 
 ## 影響
 
@@ -357,3 +362,14 @@ ADR 0006 の M5 の完了条件を、次のテストで満たすとする。
   - 差分の比較で見つかった食い違いの数と、そのうちインタプリタの側を直したもの・実行ファイルの側を直したものの数
   - `m3_drop_limits.rs` の事例で、実行ファイルとインタプリタの順序が違ったものの数
   - SIR の評価器では見つからず、Cranelift の段で初めて見つかった誤りの数（多ければ評価器の役割を見直す）
+
+## M5 の完了の記録（2026-10-26）
+
+- 常に両方を比べる: `cargo test` が、インタプリタ・SIR の評価器・ネイティブの実行ファイルを毎回突き合わせる。突き合わせ 411 件、飛ばし 9 件（内訳は決定 8。2 回続けて実行しても同じ件数で、実行ごとには変わらない）。`cc` と `libc.a` がなければ失敗する。CI の上限 10・下限 400 は、実測にあえて近く置いてある（事例が増減したら、理由を確かめて手で直す運用。余裕を大きくして悪化を見逃さないため）。
+- `m3_drop_limits.rs`: 仕様の想定の順序は SIR の評価器と実行ファイルが出していて、二つの一致と、想定どおりであることを固定した。インタプリタだけが現状の順序のまま（既知の制限としてテストで固定）。スタックの枯渇の破棄は、実行ファイルでも「深い枠から浅い枠へ、各枠で後に宣言した値が先、最後に呼び出し元」の形になる（枠の数は違ってよい）。
+- `runs_in_scratch_container`（`cargo test --test m5_native -- --ignored runs_in_scratch_container`）を、docker 29.9.1 で 2026-10-26 に手で実行し、`FROM scratch` のイメージで `03-ownership` の `main` が `150`・`150`・`()` を出して終了コード 0 になった。CI には入れていない（`#[ignore]`）。
+
+### 追跡項目（M6 の早期に決める）
+
+- インタプリタの破棄の順序が仕様（ADR 0006 決定 3 の条件 9）と食い違う: `match` の束縛による移動、値を消費するメソッドの受け手、`move` クロージャの取り込み、クロージャを `Copyable` として扱うこと、構造体の一部の欄だけの移動。SIR の評価器と実行ファイルは仕様の想定どおりなので、`sigil run`（インタプリタ）と `sigil build` の実行ファイルで破棄の順序が違う（`tests/m3_drop_limits.rs` が両方を固定している）。
+- M6 の早期に、次のどちらかを決める: (a) インタプリタの移動の追跡を直して仕様に合わせる、(b) `sigil run` を SIR の評価器へ置き換える（インタプリタは基準としての役目を終える）。決めたら `tests/m3_drop_limits.rs` のインタプリタ側の固定を直す。

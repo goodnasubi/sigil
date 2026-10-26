@@ -187,6 +187,13 @@
 - 充足: サンプルの実行（01・02・04 は関数を直接、または `examples/04-effects/entry.sigil` を合わせて、03 は `main` が `150`・`150` を標準出力へ）、`02-read-port` の `OutOfRange`、`04-effects` の `load_prices`、`console`・`fs.read`・`fs.write`・`Shared`・`Cell`・`Path` の実行、決定 3 の条件 2（`tests/m4_effects.rs`）。
 - 未達だった 2 点（核の部分と OS の機能を使う部分のモジュール分割（ADR 0005）、決定 3 の条件 10 の M4 側）は、[ADR 0014](0014-core-and-os-split.md) で設計を決め、その完了条件のテスト（`tests/m4_core_split.rs` と `src/stdlib.rs` の単体テスト）に置き換えた。層と参照の検査は ADR 0014 の PR2a、複数のファイルの宣言の一致（`ModuleMismatch`）は PR2b で入った。
 
+**M5 の完了条件の充足（2026-10-26）**
+
+- 充足: 4 つのサンプル（と 04 のテスト用の入口）を `sigil build` で静的な実行ファイルにでき、標準出力・終了コード・異常停止の報告がインタプリタ・SIR の評価器と一致する（`tests/m5_native.rs`、および既存の全テストが `common::run*` 経由で毎回突き合わせる。突き合わせ 411 件、飛ばし 9 件。飛ばす事例の種類は ADR 0015 の決定 8）。差し替えた `fs.read` の入力は、一時ディレクトリの実ファイルとして置いて比べた。
+- 充足: 最小のコンテナで動く。`runs_in_scratch_container` を docker 29.9.1 で手で実行し、`FROM scratch` のイメージで `03-ownership` が `150`・`150` を出して終了コード 0 になった。`runs_without_toolchain`（空の環境で実行）は CI で常に通る。
+- 充足: 決定 3 の条件 9（破棄の順序。`tests/m3_drop_order.rs` と `tests/m3_drop_limits.rs` を実行ファイルでも比べる）・条件 10 の M5 側（`core_only_links_without_os_runtime`・`core_only_rejects_os_link`）。`sigil build` が `BuildUnsupported` で止める構文は残っていない（`no_build_unsupported_left`）。
+- 既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期と停止の経路での漏れはインタプリタと厳密には揃えない（ADR 0015 の PR5）。インタプリタの破棄の順序の既知の制限（決定 3 の条件 9）は、実行ファイル（と SIR の評価器）では仕様の想定どおりになっている。
+
 **M4**
 
 - 4 つのサンプルを実行できる（`main` がないサンプルには、テスト用の入口を同じディレクトリに加える）。`03-ownership` の出力が `150` と `150` の 2 行になる。

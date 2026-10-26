@@ -83,10 +83,7 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     fn unsupported(&mut self, msg: &str) -> Value {
         let line = self.line;
-        self.fail(CgError::Unsupported {
-            line,
-            msg: msg.to_string(),
-        })
+        self.fail(CgError::Internal(format!("{msg}（{line} 行付近）")))
     }
 
     fn ic(&mut self, n: i64) -> Value {

@@ -108,7 +108,7 @@ Sigilはみんなで育てるオープンソースの秘密基地です。
 Sigil（シジル）は、Java・React・Node.js に代わる言語を目指して開発する、AI 専用の汎用プログラミング言語です。
 コードは AI が書き、AI が保守します。人間は **仕様だけ** をレビューします。
 
-> **ステータス:** 設計段階が中心で、処理系（Rust 製）は M0〜M2 まで実装済みです。M0 は構文解析・`sigil fmt`・`sigil spec`、M1 は型検査と効果の検査（標準ライブラリは仮の最小範囲 `src/stdlib.rs`）、M2 は所有権・借用の検査（移動・借用・クロージャのとらえ方・篩型の借用・契約の式の規則・関数の値の移動・借用区間の部品 `src/borrow.rs`）で、5 つの例が `sigil check` を通ります。M3 以降は未着手です。
+> **ステータス:** 設計段階が中心で、処理系（Rust 製）は M0〜M5 まで実装済みです。M5 では `sigil build` が単一の静的な実行ファイル（Linux x86-64）を出力し、インタプリタと同じ結果になることをテストで確かめています（[ADR 0015](docs/decisions/0015-m5-native-output.md)）。M0 は構文解析・`sigil fmt`・`sigil spec`、M1 は型検査と効果の検査（標準ライブラリは仮の最小範囲 `src/stdlib.rs`）、M2 は所有権・借用の検査（移動・借用・クロージャのとらえ方・篩型の借用・契約の式の規則・関数の値の移動・借用区間の部品 `src/borrow.rs`）で、5 つの例が `sigil check` を通ります。M3・M4 はインタプリタ（`sigil run`）と標準ライブラリ・効果操作、M5 は Cranelift によるネイティブ出力です。M6 は未着手です。
 > P0（言語の核）の実装の進め方（Rust で書くコンパイラ、段階 M0〜M6）を [ADR 0006](docs/decisions/0006-p0-scope-and-bootstrap.md) で決めました。
 > 並行処理のモデル（中断を効果として扱う構造化並行処理）を [ADR 0007](docs/decisions/0007-concurrency-model.md) で決めました。
 > M0 の前に決める表記（`old`・篩型・モジュールの宣言・`sigil spec` の出力など）を [ADR 0008](docs/decisions/0008-m0-notation.md) で決めました。

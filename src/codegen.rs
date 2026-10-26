@@ -7,9 +7,9 @@
 //!
 //! 関数は `(語…) -> (値, 停止の符号)` の形で呼ぶ（符号が 0 でなければ停止中で、`Resume` が呼び出し元の `cleanup` へ返す）。
 //! 局所は 8 バイトの stack slot に置き、基本ブロックの境界をまたぐ値は slot を通す（ブロック引数は使わない）。
-//! 表示・比較・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。破棄は何もしない（メモリは解放しない）。
+//! 表示・比較・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。破棄は SIR の `Stmt::Drop`・`Stmt::Assign` の旧値で、型の記述子を使う `sigil_rt_val_drop` を呼んで行う（ヘッダつきの塊は参照数で解放し、`--trace-drops` では構造体の破棄を順に標準エラーへ出す）。既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期と停止の経路での漏れはインタプリタと厳密には揃えない。
 //!
-//! まだ出せない構文・組み込みは `CgError::Unsupported`（`sigil build` では `BuildUnsupported`）で止める。
+//! 出せない構文・組み込みはない（SIR の不変条件が崩れたときだけ `CgError::Internal`）。
 
 mod func;
 
@@ -34,8 +34,8 @@ pub struct Opts {
 
 #[derive(Debug, Clone)]
 pub enum CgError {
-    /// まだ出力できない構文・組み込み（`line` は近くの停止の地点の行。0 なら不明）。
-    Unsupported { line: u32, msg: String },
+    /// 入口の指定の誤り（引数の型がコマンドラインから受け取れないなど）。
+    Entry(String),
     /// 生成の失敗（Cranelift の検証の失敗など。不具合）。
     Internal(String),
 }
@@ -43,7 +43,7 @@ pub enum CgError {
 impl fmt::Display for CgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CgError::Unsupported { msg, .. } => write!(f, "{msg}"),
+            CgError::Entry(m) => write!(f, "{m}"),
             CgError::Internal(m) => write!(f, "内部エラー: {m}"),
         }
     }
@@ -393,13 +393,10 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     let entry: &Func = &p.funcs[p.entry];
     for &pi in &entry.params {
         if !supported_param(&entry.locals[pi].ty) {
-            return Err(CgError::Unsupported {
-                line: p.exit_line,
-                msg: format!(
-                    "入口の関数 {} の引数 {} の型は、コマンドラインから受け取れない（Int・Float・Bool・String・Path とその List だけ）",
-                    entry.name, entry.locals[pi].name
-                ),
-            });
+            return Err(CgError::Entry(format!(
+                "入口の関数 {} の引数 {} の型は、コマンドラインから受け取れない（Int・Float・Bool・String・Path とその List だけ）",
+                entry.name, entry.locals[pi].name
+            )));
         }
     }
 

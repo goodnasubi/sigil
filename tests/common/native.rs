@@ -1,23 +1,25 @@
 //! ネイティブ出力との突き合わせ（ADR 0015 の決定 1・4、PR4）。
 //!
-//! `SIGIL_NATIVE=1` のとき、`common::run*` が走らせた同じプログラムを `sigil::native::build` で
-//! 実行ファイルにして走らせ、インタープリタの結果（値・出力・終了コード・停止の報告）と突き合わせる。
-//! `BuildUnsupported` で止まる構文は、まだ出力できないものとして飛ばす（数を `SIGIL_NATIVE_VERBOSE=1` で表示）。
-//! `cc` や `libc.a` がなければ、飛ばさずに失敗させる（暗黙に通らないようにするため）。
+//! `common::run*` が走らせた同じプログラムを、常に `sigil::native::build` で実行ファイルにして走らせ、
+//! インタープリタの結果（値・出力・終了コード・停止の報告・破棄の順序）と突き合わせる。
+//! `cc` や `libc.a` がなければ、飛ばさずに失敗させる（暗黙に通らないようにするため。ADR 0015 の決定 8）。
+//!
+//! 突き合わせの範囲（ADR 0015 の決定 8）:
+//! - `fs_files` のある事例は、表の内容を一時ディレクトリの実ファイルに置き（仮想の `p` は `<一時>/<p の先頭の / を除いたもの>`）、
+//!   引数と期待値の `p` を実際のパスに置き換えて比べる。表の最後の内容は比べない。
+//! - `capture_console=false` の事例は、出力以外（値・停止の報告・破棄の順序・終了コード）を比べる。
+//!   成功のときの標準出力は、末尾が値であることだけを確かめる。
+//! - 飛ばすのは、停止でない失敗（検査・入口の指定のエラー）と、コマンドラインの書き方で表せない引数だけ。
 #![allow(dead_code)]
 
 use sigil::codegen::Opts;
 use sigil::interp::{Arg, Failure, Options, Outcome, RunError, StopKind};
-use sigil::native::{self, BuildError};
+use sigil::native;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-pub fn enabled() -> bool {
-    std::env::var("SIGIL_NATIVE").is_ok_and(|v| v == "1")
-}
 
 /// 作業ディレクトリ（`CARGO_TARGET_TMPDIR` の下。使い終えたら消す）。
 pub fn scratch(tag: &str) -> PathBuf {
@@ -51,21 +53,30 @@ fn ambiguous(a: &Arg) -> bool {
     }
 }
 
-/// 実行ファイルを作る。`Ok(None)` は「まだ出力できない構文」で飛ばすこと。
+/// 実行ファイルを作る。作れないのは（`cc` がないことを含め）失敗として返す。
 pub fn try_build(
     srcs: &[&str],
     func: &str,
     out: &std::path::Path,
     trace_drops: bool,
-) -> Result<Option<()>, String> {
-    match native::build(srcs, func, &Opts { trace_drops }, out) {
-        Ok(()) => Ok(Some(())),
-        Err(e @ (BuildError::Unsupported(_) | BuildError::Run(_))) => {
-            record("detail", &e.to_string().replace(['\n', '\t'], " "), func);
-            Ok(None)
-        }
-        Err(e) => Err(e.to_string()),
-    }
+) -> Result<(), String> {
+    native::build(srcs, func, &Opts { trace_drops }, out).map_err(|e| e.to_string())
+}
+
+/// 実行ファイルを `--trace-drops` つきで作って走らせ、標準エラーの破棄の記録（`drop: ` の後ろ）を返す。
+pub fn native_drops(srcs: &[&str], func: &str, args: &[Arg]) -> (Ran, Vec<String>) {
+    let dir = scratch("drops");
+    let exe = dir.join("prog");
+    try_build(srcs, func, &exe, true).unwrap_or_else(|e| panic!("{func}: {e}"));
+    let got = exec(&exe, args);
+    let _ = std::fs::remove_dir_all(&dir);
+    let drops = got
+        .stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("drop: "))
+        .map(str::to_string)
+        .collect();
+    (got, drops)
 }
 
 pub struct Ran {
@@ -122,6 +133,33 @@ fn note(what: &str) {
     }
 }
 
+/// `text` の中の `keys` の各語を、対応する値に置き換える（長い語を先に探す。置き換えた中身は探し直さない）。
+fn replace_keys(text: &str, keys: &[(String, String)]) -> String {
+    let mut out = String::new();
+    let mut i = 0;
+    'scan: while i < text.len() {
+        for (k, v) in keys {
+            if text[i..].starts_with(k.as_str()) {
+                out.push_str(v);
+                i += k.len();
+                continue 'scan;
+            }
+        }
+        let c = text[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+fn map_arg(a: &Arg, keys: &[(String, String)]) -> Arg {
+    match a {
+        Arg::Str(s) => Arg::Str(replace_keys(s, keys)),
+        Arg::List(xs) => Arg::List(xs.iter().map(|x| map_arg(x, keys)).collect()),
+        other => other.clone(),
+    }
+}
+
 /// インタープリタの結果 `want` と、ネイティブの実行結果を突き合わせる。
 pub fn check(
     srcs: &[&str],
@@ -130,48 +168,99 @@ pub fn check(
     opts: &Options,
     want: &Result<Outcome, Failure>,
 ) {
-    if !enabled() {
-        return;
-    }
     let skip = |why: &str| {
         SKIPPED.fetch_add(1, Ordering::SeqCst);
         record("skip", why, func);
         note(&format!("飛ばす: {why} {func}"));
     };
-    if opts.fs_files.is_some() {
-        return skip("仮想ファイルシステム（fs_files）");
-    }
-    if !opts.capture_console {
-        return skip("コンソールを取らない（capture_console=false）");
-    }
     // コマンドラインの書き方では文字列として渡せない引数（"21" など）は、型の違う引数になってしまう。
     if args.iter().any(ambiguous) {
         return skip("コマンドラインで書けない引数");
     }
     // 入口の指定や検査のエラーは、実行ファイルを作る前の話。
-    match want {
-        Err(f) if !matches!(f.error, RunError::Stop(_)) => return skip("停止でない失敗"),
-        Err(f) => {
-            if let RunError::Stop(s) = &f.error {
-                if s.kind == StopKind::StackExhausted {
-                    return skip("スタックの枯渇");
-                }
-            }
+    if let Err(f) = want {
+        if !matches!(f.error, RunError::Stop(_)) {
+            return skip("停止でない失敗");
         }
-        _ => {}
     }
     let dir = scratch("both");
     let exe = dir.join("prog");
-    match try_build(srcs, func, &exe, opts.trace_drops) {
-        Err(e) => panic!("{func}: ネイティブのビルドに失敗: {e}"),
-        Ok(None) => {
-            let _ = std::fs::remove_dir_all(&dir);
-            return skip("BuildUnsupported");
+    // fs_files は、実ファイルとして置く。仮想のパス p は `<dir>/files/<p の先頭の / を除いたもの>`。
+    let mut keys: Vec<(String, String)> = Vec::new();
+    if let Some(table) = &opts.fs_files {
+        let root = dir.join("files");
+        for (p, content) in table {
+            // 空のパスは Path の契約(requires)で fs に届く前に止まるので、移し替えない。
+            if p.is_empty() {
+                continue;
+            }
+            let rel = p.trim_start_matches('/');
+            // 一時ディレクトリの外へ出るパスは移し替えられない。黙って本物のファイルを触らないよう、失敗させる。
+            assert!(
+                !rel.is_empty() && !rel.split('/').any(|c| c == ".."),
+                "{func}: fs_files のパス {p:?} は一時ディレクトリの下へ移し替えられない"
+            );
+            let real = root.join(rel);
+            std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+            std::fs::write(&real, content).unwrap();
+            keys.push((p.clone(), real.to_string_lossy().into_owned()));
         }
-        Ok(Some(())) => {}
+        // 表にない絶対パスの引数も一時ディレクトリの下へ移す（親だけ作る。ファイルは作らない）。
+        // fs.write が本物のファイルシステムを書き換えないようにするため。
+        let mut extra = Vec::new();
+        fn paths(a: &Arg, out: &mut Vec<String>) {
+            match a {
+                Arg::Str(s) if s.starts_with('/') => out.push(s.clone()),
+                Arg::List(xs) => xs.iter().for_each(|x| paths(x, out)),
+                _ => {}
+            }
+        }
+        args.iter().for_each(|a| paths(a, &mut extra));
+        for p in extra {
+            let rel = p.trim_start_matches('/');
+            if table.contains_key(&p) {
+                continue;
+            }
+            assert!(
+                !rel.is_empty() && !rel.split('/').any(|c| c == ".."),
+                "{func}: 引数のパス {p:?} は一時ディレクトリの下へ移し替えられない"
+            );
+            let real = root.join(rel);
+            std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+            keys.push((p.clone(), real.to_string_lossy().into_owned()));
+        }
+        keys.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
     }
-    let got = exec(&exe, args);
+    let args: Vec<Arg> = args.iter().map(|a| map_arg(a, &keys)).collect();
+    match native::build(
+        srcs,
+        func,
+        &Opts {
+            trace_drops: opts.trace_drops,
+        },
+        &exe,
+    ) {
+        Ok(()) => {}
+        // コマンドラインで受け取れない型の引数（空の List<構造体> など）は、インタープリタには渡せても実行ファイルにはならない。
+        Err(native::BuildError::Run(RunError::Entry(m)))
+            if m.contains("コマンドラインから受け取れない") =>
+        {
+            let _ = std::fs::remove_dir_all(&dir);
+            return skip("コマンドラインで書けない引数の型");
+        }
+        Err(e) => panic!("{func}: ネイティブのビルドに失敗: {e}"),
+    }
+    let got = exec(&exe, &args);
     let _ = std::fs::remove_dir_all(&dir);
+    // スタックの枯渇は、インタープリタの枠の大きさで決まる。実行ファイルの枠は小さく、同じ深さでは枯渇しないことがある
+    // （その場合は止まらず値を返す）。止まったときだけ、止まり方を比べる。
+    if let Err(f) = want {
+        if matches!(&f.error, RunError::Stop(s) if s.kind == StopKind::StackExhausted)
+            && got.code != Some(70)
+        {
+            return skip("スタックの枯渇（実行ファイルでは枯渇しない）");
+        }
+    }
     CHECKED.fetch_add(1, Ordering::SeqCst);
     record("checked", "", func);
     // `--trace-drops` の行は標準エラーから外して、破棄の順序として比べる。
@@ -188,25 +277,55 @@ pub fn check(
         Ok(o) => o.drops.clone(),
         Err(f) => f.drops.to_vec(),
     };
-    if opts.trace_drops {
-        assert_eq!(drops, want_drops, "{func}: 破棄の順序");
-    }
     match want {
         Ok(o) => {
             assert_eq!(got.code, Some(0), "{func}: 終了コード\n{}", got.stderr);
-            assert_eq!(
-                got.stdout,
-                format!("{}{}\n", o.output, o.value),
-                "{func}: 標準出力"
-            );
+            let value = replace_keys(&o.value, &keys);
+            if opts.capture_console {
+                let output = replace_keys(&o.output, &keys);
+                assert_eq!(got.stdout, format!("{output}{value}\n"), "{func}: 標準出力");
+            } else {
+                // 本物の標準出力へ書いた出力は比べない。値だけが最後の行にある。
+                assert!(
+                    got.stdout.ends_with(&format!("{value}\n")),
+                    "{func}: 値 {value} が最後の行にない: {}",
+                    got.stdout
+                );
+            }
+            if opts.trace_drops {
+                assert_eq!(drops, want_drops, "{func}: 破棄の順序");
+            }
         }
         Err(f) => {
             let RunError::Stop(s) = &f.error else {
                 unreachable!()
             };
             assert_eq!(got.code, Some(70), "{func}: 終了コード\n{}", got.stderr);
-            assert_eq!(got.stdout, f.output, "{func}: 停止までの出力");
-            assert_eq!(stderr.trim_end(), s.to_string(), "{func}: 停止の報告");
+            if s.kind == StopKind::StackExhausted {
+                // 枠の数は実装で違うので、種類（報告の見出し）だけを比べる。破棄の順序の形は呼び出し側が確かめる。
+                let head = |t: &str| t.lines().next().unwrap_or("").to_string();
+                assert_eq!(
+                    head(stderr.trim_end()),
+                    head(&s.to_string()),
+                    "{func}: 停止の報告"
+                );
+                return;
+            }
+            if opts.capture_console {
+                assert_eq!(
+                    got.stdout,
+                    replace_keys(&f.output, &keys),
+                    "{func}: 停止までの出力"
+                );
+            }
+            assert_eq!(
+                stderr.trim_end(),
+                replace_keys(&s.to_string(), &keys),
+                "{func}: 停止の報告"
+            );
+            if opts.trace_drops {
+                assert_eq!(drops, want_drops, "{func}: 破棄の順序");
+            }
         }
     }
 }

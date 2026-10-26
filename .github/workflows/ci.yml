@@ -47,18 +47,14 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: test
+      - name: test（インタープリタ・SIR・ネイティブを突き合わせる）
         run: cargo test
 
-      - name: test (SIGIL_NATIVE=1)
-        run: cargo test
-        env:
-          SIGIL_NATIVE: "1"
-
-      - name: ネイティブの突き合わせ件数
+      - name: ネイティブの突き合わせ件数（飛ばしの上限を検査）
         run: scripts/native-report.sh
         env:
-          SIGIL_NATIVE: "1"
+          SIGIL_NATIVE_MAX_SKIP: "10"
+          SIGIL_NATIVE_MIN_CHECKED: "400"
 
       - name: runtime/core
         working-directory: runtime/core

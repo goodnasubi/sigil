@@ -1,0 +1,16 @@
+[package]
+name = "sigil_rt_core"
+version = "0.0.0"
+edition = "2021"
+description = "Sigil の暫定ランタイムの核（ADR 0015 の決定 6）。OS に依存しない部分"
+license = "MIT"
+publish = false
+
+# 外部のクレートに依存しない（標準ライブラリだけ）。ルートの Cargo.toml のワークスペースには入れない。
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[workspace]
+
+[profile.release]
+panic = "abort"

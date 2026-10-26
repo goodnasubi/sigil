@@ -50,6 +50,18 @@ fn render(src: &str, full: bool) -> Result<String, Error> {
     Ok(p.finish())
 }
 
+/// 腕の本体が `return 式;` だけ、または、すべての腕がそうである `match` だけ。
+fn returns_only(b: &Block) -> bool {
+    match b.stmts.as_slice() {
+        [st] => match &st.kind {
+            StmtKind::Return(Some(_)) => true,
+            StmtKind::Match { arms, .. } => arms.iter().all(|a| returns_only(&a.body)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// 正規形との最初の違い。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diff {
@@ -819,23 +831,37 @@ impl<'a> Printer<'a> {
 
     fn stmt_match(&mut self, scrutinee: &Expr, arms: &[StmtArm], end_line: u32, indent: usize) {
         // すべての腕が `return 式;` だけなら `return match ...;`（ADR 0009 の決定 7）。
-        let all_return = arms.iter().all(|a| {
-            a.body.stmts.len() == 1 && matches!(a.body.stmts[0].kind, StmtKind::Return(Some(_)))
-        });
-        self.w(if all_return {
-            "return match "
-        } else {
-            "match "
-        });
+        // 腕が、同じ条件を満たす入れ子の `match` だけのときも、その `match` は式として書く（整形の結果が不動点になる）。
+        let all_return = arms.iter().all(|a| returns_only(&a.body));
+        self.w(if all_return { "return " } else { "" });
+        self.match_body(scrutinee, arms, end_line, indent, all_return);
+        self.w(if all_return { ";" } else { "" });
+    }
+
+    fn match_body(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[StmtArm],
+        end_line: u32,
+        indent: usize,
+        as_expr: bool,
+    ) {
+        self.w("match ");
         self.expr(scrutinee, 0, true, indent);
         self.w(" {");
         for a in arms {
             self.plain_start(a.line, indent + 1);
             self.pattern(&a.pattern);
             self.w(" => ");
-            if all_return {
-                if let StmtKind::Return(Some(e)) = &a.body.stmts[0].kind {
-                    self.expr(e, 0, false, indent + 1);
+            if as_expr {
+                match &a.body.stmts[0].kind {
+                    StmtKind::Return(Some(e)) => self.expr(e, 0, false, indent + 1),
+                    StmtKind::Match {
+                        scrutinee,
+                        arms,
+                        end_line,
+                    } => self.match_body(scrutinee, arms, *end_line, indent + 1, true),
+                    _ => {}
                 }
                 self.w(",");
             } else {
@@ -845,7 +871,7 @@ impl<'a> Printer<'a> {
         let mut first = false;
         self.comments_before(end_line, indent + 1, false, &mut first);
         self.nl(indent, end_line);
-        self.w(if all_return { "};" } else { "}" });
+        self.w("}");
     }
 
     // ---- 式 ----

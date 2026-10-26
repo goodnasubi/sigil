@@ -195,6 +195,14 @@
 - 充足: 決定 3 の条件 9（破棄の順序。`tests/m3_drop_order.rs` と `tests/m3_drop_limits.rs` を実行ファイルでも比べる）・条件 10 の M5 側（`core_only_links_without_os_runtime`・`core_only_rejects_os_link`）。`sigil build` が `BuildUnsupported` で止める構文は残っていない（`no_build_unsupported_left`）。
 - 既知の制限: 文字列・パスは解放しない／クロージャの破棄の時期と停止の経路での漏れはインタプリタと厳密には揃えない（ADR 0015 の PR5）。インタプリタの破棄の順序の既知の制限（決定 3 の条件 9）は、実行ファイル（と SIR の評価器）では仕様の想定どおりになっている。
 
+**M6 の完了条件の充足（2026-10-26）と P0 の完了**
+
+- 充足: 診断。`sigil lsp` が M1・M2 の検査結果を `publishDiagnostics` で返す（`tests/m6_lsp.rs` の `lsp_samples_no_diagnostics`・`lsp_error_diagnostic` ほか。位置は UTF-16 と UTF-32 の両方）。
+- 充足: hover。関数・メソッドの宣言と同じモジュールの呼び出し、型の宣言の名前で `sigil spec` と同じ仕様を返す（`lsp_hover_matches_spec`、`lsp_hover_scope_and_methods`）。値に対するメソッド呼び出し・標準ライブラリ・ローカルに隠された名前は `null`（[ADR 0019](0019-m6-machine-spec-and-language-server.md) の決定 5）。
+- 充足: 上の 2 点を、言語サーバーを子プロセスで起動してサンプルを開く自動テストで確かめた。依存は足していない（JSON・LSP は自前）。
+- 既知の制限: hover のローカル変数の隠れ方は行単位の近似で、クロージャの引数は関数全体で名前を隠す側に倒している（ADR 0019 の実装の記録）。
+- これをもって **P0 は完了** とする（本 ADR の M6 の記述）。次は ADR 0018 の P1 の範囲に従う。
+
 **M4**
 
 - 4 つのサンプルを実行できる（`main` がないサンプルには、テスト用の入口を同じディレクトリに加える）。`03-ownership` の出力が `150` と `150` の 2 行になる。

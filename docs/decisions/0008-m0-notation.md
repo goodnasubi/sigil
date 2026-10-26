@@ -218,7 +218,7 @@ M0 の完了条件は、4 つのサンプル（`01-average/c-brace.sigil`・`02-
 
 ### 決定
 
-**B** を採用する。`sigil spec` は M0 では次の形のテキストを出す。条件の式（`requires`・`ensures`・篩型の条件。中の `old(...)` と `result` を含む）は訳さず、ソースの表記のまま示す（式の訳し方は IDE を作る P2 で改めて決める）。機械向けの形式は、言語サーバー（M6）の前に決める。
+**B** を採用する。`sigil spec` は M0 では次の形のテキストを出す。条件の式（`requires`・`ensures`・篩型の条件。中の `old(...)` と `result` を含む）は訳さず、ソースの表記のまま示す（式の訳し方は IDE を作る P2 で改めて決める）。機械向けの形式は、言語サーバー（M6）の前に決める（[ADR 0019](0019-m6-machine-spec-and-language-server.md) の決定 1 で決めた）。
 
 ```
 モジュール examples.ownership

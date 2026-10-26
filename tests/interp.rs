@@ -1,9 +1,9 @@
-//! M3 の最初の PR のテスト: インタープリタの土台と、4 種類の異常停止（契約違反・Int オーバーフロー・
+//! M3 の最初の PR のテスト: 実行の土台と、4 種類の異常停止（契約違反・Int オーバーフロー・
 //! 0 除算・スタック枯渇。ADR 0013 の決定 1）。
 
 mod common;
 use common::{run, run_with};
-use sigil::interp::{Arg, Clause, Options, RunError, Stop, StopKind};
+use sigil::exec::{Arg, Clause, Options, RunError, Stop, StopKind};
 
 const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
 
@@ -282,7 +282,6 @@ fn every_kind_of_abnormal_stop_exits_with_the_same_code() {
 const DROP_HEAD: &str = "module m.a\n  targets server\n  trust none\n\nstruct Probe {\n  id: Int,\n}\n\nfn mk(n: Int) -> Probe\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Probe { id: n };\n}\n\n";
 
 /// ADR 0017: `sigil run` は SIR の評価器で走るので、`--trace-drops` の破棄は仕様の順序（7、1、5）になる。
-/// （インタープリタでは 7、5、1 になる。）
 #[test]
 fn cli_run_uses_sir_evaluator() {
     let bin = env!("CARGO_BIN_EXE_sigil");

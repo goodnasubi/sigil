@@ -92,7 +92,7 @@ unsafe fn variant(d: D, tag: i64) -> (&'static str, usize, usize) {
 }
 
 unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
-    // 移動済み（空）の値は、インタープリタと同じく `()` と表示する。
+    // 移動済み（空）の値は、SIR の評価器と同じく `()` と表示する。
     if w == 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH)) {
         out.push_str("()");
         return;
@@ -425,7 +425,7 @@ pub extern "C" fn sigil_rt_trace_on() {
     TRACE.store(true, AOrd::Relaxed);
 }
 
-/// 値を破棄する。再帰せず、順序はインタープリタと同じ（値そのもの、次にフィールド・要素を宣言の順）。
+/// 値を破棄する。再帰せず、順序は SIR の評価器と同じ（値そのもの、次にフィールド・要素を宣言の順）。
 /// 構造体は、黙っておらず移動済みのフィールドがなければ、破棄の前に `drop: …` を出す。
 /// 文字列・パスも解放する（ADR 0018 の決定 5）。
 ///
@@ -592,7 +592,7 @@ fn kind_name(k: i64) -> &'static str {
     }
 }
 
-/// 引数を記述子の型の語にする（`interp` の `coerce` と同じ規則）。
+/// 引数を記述子の型の語にする（SIR の評価器の `coerce` と同じ規則）。
 unsafe fn coerce(a: &Arg, mut d: D) -> Result<i64, String> {
     while rd(d, 0) == K_REF {
         d = dp(d, 1);

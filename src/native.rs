@@ -4,7 +4,7 @@
 //! 書き出して、`cc -static -no-pie` でリンクする。一時ディレクトリは終わりに自分で消す。
 
 use crate::codegen::{self, CgError, Opts};
-use crate::interp::RunError;
+use crate::exec::RunError;
 use crate::ir::Program;
 use std::fmt;
 use std::path::{Path, PathBuf};

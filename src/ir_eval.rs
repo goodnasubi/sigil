@@ -1,6 +1,6 @@
-//! SIR の評価器（ADR 0015 の決定 2・5）。`lower` が作った `Program` を、インタプリタと同じ観測（値・出力・破棄の順・停止）で実行する。
+//! SIR の評価器（ADR 0015 の決定 2・5）。`lower` が作った `Program` を、値・出力・破棄の順・停止を観測として返して実行する。
 //!
-//! 値の持ち方（インタプリタとは別の作り）:
+//! 値の持ち方:
 //! - 局所はすべて `Slot`（`Rc<RefCell<Val>>`）。組・構造体・列挙型の腕・一覧は `Agg`（フィールドの並び）。
 //! - 参照は `Ptr`（スロットと、その中の位置の列）。借用の間は元の値が動かないことを検査器が保証する。
 //! - 移動は「読んで元を `Empty` にする」。`Drop` は `Empty` に対して何もしない。破棄は型でなく値の形から行う。
@@ -8,7 +8,7 @@
 //! - 複写（`Copy`）は破棄を記録しない写し（`silent`）。`clone` だけが破棄される値を増やす。
 
 use crate::ast::{File, Item, Type};
-use crate::interp::{Arg, Failure, Options, Outcome, RunError, Stop, StopKind};
+use crate::exec::{Arg, Failure, Options, Outcome, RunError, Stop, StopKind};
 use crate::ir::*;
 use crate::shared_args::arg_name;
 use crate::shared_path as spath;
@@ -1252,7 +1252,7 @@ fn to_val(a: &Arg) -> Val {
     }
 }
 
-/// 入口の引数を宣言の型に合わせて値にする（`interp` の `coerce` と同じ規則）。
+/// 入口の引数を宣言の型に合わせて値にする（`runtime/core` の `coerce` と同じ規則）。
 fn coerce(a: &Arg, ty: &Type) -> Result<Val, String> {
     let ty = match ty {
         Type::Ref { inner, .. } => inner,
@@ -1297,7 +1297,7 @@ pub fn lower_sources_with(
     func: &str,
     trust_base: &[String],
 ) -> Result<Program, RunError> {
-    let file = crate::interp::merge_sources(srcs).map_err(|f| f.error)?;
+    let file = crate::exec::merge_sources(srcs).map_err(|f| f.error)?;
     let opts = crate::effects::Options {
         trust_base: trust_base.to_vec(),
         ..Default::default()
@@ -1337,11 +1337,11 @@ pub fn run_sources_with(
             .spawn_scoped(s, || execute(srcs, func, args, opts));
         match spawned {
             Ok(h) => h.join().unwrap_or_else(|_| {
-                Err(crate::interp::fail(RunError::Entry(
+                Err(crate::exec::fail(RunError::Entry(
                     "評価器の内部エラー".into(),
                 )))
             }),
-            Err(e) => Err(crate::interp::fail(RunError::Entry(format!(
+            Err(e) => Err(crate::exec::fail(RunError::Entry(format!(
                 "スレッドを作れない: {e}"
             )))),
         }
@@ -1349,9 +1349,9 @@ pub fn run_sources_with(
 }
 
 fn execute(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
-    use crate::interp::fail;
-    let file: File = crate::interp::merge_sources(srcs)?;
-    let typed = crate::check::typed_with(&file, &crate::interp::check_options(opts))
+    use crate::exec::fail;
+    let file: File = crate::exec::merge_sources(srcs)?;
+    let typed = crate::check::typed_with(&file, &crate::exec::check_options(opts))
         .map_err(|e| fail(RunError::Check(e)))?;
     let decl = file.items.iter().find_map(|i| match i {
         Item::Fn(d) if d.name == func => Some(d),

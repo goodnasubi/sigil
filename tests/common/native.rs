@@ -1,7 +1,7 @@
 //! ネイティブ出力との突き合わせ（ADR 0015 の決定 1・4、PR4）。
 //!
 //! `common::run*` が走らせた同じプログラムを、常に `sigil::native::build` で実行ファイルにして走らせ、
-//! インタープリタの結果（値・出力・終了コード・停止の報告・破棄の順序）と突き合わせる。
+//! SIR の評価器の結果（値・出力・終了コード・停止の報告・破棄の順序）と突き合わせる。
 //! `cc` や `libc.a` がなければ、飛ばさずに失敗させる（暗黙に通らないようにするため。ADR 0015 の決定 8）。
 //!
 //! 突き合わせの範囲（ADR 0015 の決定 8）:
@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use sigil::codegen::Opts;
-use sigil::interp::{Arg, Failure, Options, Outcome, RunError, StopKind};
+use sigil::exec::{Arg, Failure, Options, Outcome, RunError, StopKind};
 use sigil::native;
 use std::path::PathBuf;
 use std::process::Command;
@@ -176,7 +176,7 @@ fn map_arg(a: &Arg, keys: &[(String, String)]) -> Arg {
     }
 }
 
-/// インタープリタの結果 `want` と、ネイティブの実行結果を突き合わせる。
+/// SIR の評価器の結果 `want` と、ネイティブの実行結果を突き合わせる。
 pub fn check(
     srcs: &[&str],
     func: &str,
@@ -258,7 +258,7 @@ pub fn check(
         &exe,
     ) {
         Ok(()) => {}
-        // コマンドラインで受け取れない型の引数（空の List<構造体> など）は、インタープリタには渡せても実行ファイルにはならない。
+        // コマンドラインで受け取れない型の引数（空の List<構造体> など）は、SIR の評価器には渡せても実行ファイルにはならない。
         Err(native::BuildError::Run(RunError::Entry(m)))
             if m.contains("コマンドラインから受け取れない") =>
         {
@@ -269,7 +269,7 @@ pub fn check(
     }
     let got = exec(&exe, &args);
     let _ = std::fs::remove_dir_all(&dir);
-    // スタックの枯渇は、インタープリタの枠の大きさで決まる。実行ファイルの枠は小さく、同じ深さでは枯渇しないことがある
+    // スタックの枯渇は、SIR の評価器の枠の大きさで決まる。実行ファイルの枠は小さく、同じ深さでは枯渇しないことがある
     // （その場合は止まらず値を返す）。止まったときだけ、止まり方を比べる。
     if let Err(f) = want {
         if matches!(&f.error, RunError::Stop(s) if s.kind == StopKind::StackExhausted)

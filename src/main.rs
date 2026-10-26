@@ -296,7 +296,7 @@ fn main() -> ExitCode {
             let args: Vec<String> = std::iter::once(args[0].clone())
                 .chain(args[i..].iter().cloned())
                 .collect();
-            let mut opts = sigil::interp::Options {
+            let mut opts = sigil::exec::Options {
                 trace_drops: trace,
                 trust_base,
                 ..Default::default()
@@ -340,7 +340,7 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(f) => match f.error {
-                    sigil::interp::RunError::Stop(s) => {
+                    sigil::exec::RunError::Stop(s) => {
                         show_drops(&f.drops);
                         eprintln!("{path}: {s}");
                         ExitCode::from(EXIT_ABNORMAL_STOP)

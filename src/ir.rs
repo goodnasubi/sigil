@@ -14,7 +14,7 @@
 //! - 空の場所の `Drop` は何もしない。破棄の旗は実行時の「空」の印で持ち、`cleanup` は登録された局所すべてを破棄する。
 //! - 型ごとの破棄は評価器が値の形から行う（`Ref`・`MutRef` は何も破棄しない）。
 
-use crate::interp::{Clause, StopKind};
+use crate::exec::{Clause, StopKind};
 use std::fmt;
 
 pub type LocalId = usize;

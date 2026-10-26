@@ -7,7 +7,7 @@
 
 use crate::ast as a;
 use crate::check::{ResKind, Resolved, Ty as CTy, Typed};
-use crate::interp::{collect_olds, Clause, StopKind};
+use crate::exec::{collect_olds, Clause, StopKind};
 use crate::ir::{
     self, AggKind, ArithOp, Builtin, Callee, Const, Operand, Place, Rvalue, Stmt, Term,
 };

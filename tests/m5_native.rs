@@ -6,7 +6,7 @@ mod common;
 
 use common::native::{arg_text, exec, scratch, try_build};
 use sigil::codegen::Opts;
-use sigil::interp::Arg;
+use sigil::exec::Arg;
 use sigil::native::{self, BuildError};
 use std::process::Command;
 
@@ -18,7 +18,7 @@ fn floats(xs: &[f64]) -> Arg {
     Arg::List(xs.iter().map(|x| Arg::Float(*x)).collect())
 }
 
-/// ビルドして走らせ、インタープリタ（`common::run*`）と同じ結果かを突き合わせる（`common` が行う）。
+/// ビルドして走らせ、SIR の評価器（`common::run*`）と同じ結果かを突き合わせる（`common` が行う）。
 fn both(srcs: &[&str], func: &str, args: &[Arg]) -> String {
     let r = common::run_sources(srcs, func, args).unwrap();
     // `common::run_sources` も突き合わせる。ここでは、飛ばされずに作れて走ることを確かめる。

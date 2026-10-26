@@ -46,7 +46,7 @@ fn peel(t: &ir::Ty) -> &ir::Ty {
 }
 
 /// 破棄の記録を残す値の型。
-fn needs_drop(t: &ir::Ty) -> bool {
+pub(crate) fn needs_drop(t: &ir::Ty) -> bool {
     !matches!(
         t,
         ir::Ty::Int

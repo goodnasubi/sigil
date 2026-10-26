@@ -29,6 +29,7 @@ pub mod shared_path;
 pub mod shared_text;
 pub mod spec;
 pub mod stdlib;
+pub mod verify;
 
 pub use error::{Error, ErrorKind, Phase, Span};
 pub use parser::{parse, parse_with_comments, Parsed};

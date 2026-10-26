@@ -13,6 +13,17 @@ use sigil::ir_eval;
 
 type Res = Result<Outcome, Failure>;
 
+/// SIR の検証器（ADR 0018 の決定 4）。テストの実行では常に通す。
+fn verify(srcs: &[&str], func: &str) {
+    if let Err(es) = sigil::verify::verify_sources(srcs, func) {
+        panic!(
+            "SIR の検証に失敗: {func}\n{}\n{}",
+            es.join("\n"),
+            srcs.join("\n---\n")
+        );
+    }
+}
+
 fn compare(label: &str, a: &Res, b: &Res) {
     match (a, b) {
         (Ok(x), Ok(y)) => {
@@ -46,6 +57,7 @@ fn show(r: &Res) -> String {
 }
 
 pub fn run(src: &str, func: &str, args: &[Arg]) -> Res {
+    verify(&[src], func);
     let a = interp::run(src, func, args);
     let b = ir_eval::run(src, func, args);
     compare(func, &a, &b);
@@ -54,6 +66,7 @@ pub fn run(src: &str, func: &str, args: &[Arg]) -> Res {
 }
 
 pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(&[src], func);
     let a = interp::run_with(src, func, args, opts);
     let b = ir_eval::run_with(src, func, args, opts);
     compare(func, &a, &b);
@@ -62,6 +75,7 @@ pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
 }
 
 pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
+    verify(srcs, func);
     let a = interp::run_sources(srcs, func, args);
     let b = ir_eval::run_sources(srcs, func, args);
     compare(func, &a, &b);
@@ -70,6 +84,7 @@ pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
 }
 
 pub fn run_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(srcs, func);
     let a = interp::run_sources_with(srcs, func, args, opts);
     let b = ir_eval::run_sources_with(srcs, func, args, opts);
     compare(func, &a, &b);
@@ -79,24 +94,28 @@ pub fn run_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options)
 
 /// インタプリタと食い違う既知の事例（破棄の順序など）を、SIR の評価器とネイティブだけで突き合わせたいときに使う。
 pub fn sir_native(src: &str, func: &str, args: &[Arg]) -> Res {
+    verify(&[src], func);
     let b = ir_eval::run(src, func, args);
     native::check(&[src], func, args, &Options::captured(), &b);
     b
 }
 
 pub fn sir_native_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(&[src], func);
     let b = ir_eval::run_with(src, func, args, opts);
     native::check(&[src], func, args, opts, &b);
     b
 }
 
 pub fn sir_native_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
+    verify(srcs, func);
     let b = ir_eval::run_sources(srcs, func, args);
     native::check(srcs, func, args, &Options::captured(), &b);
     b
 }
 
 pub fn sir_native_sources_with(srcs: &[&str], func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(srcs, func);
     let b = ir_eval::run_sources_with(srcs, func, args, opts);
     native::check(srcs, func, args, opts, &b);
     b

@@ -700,6 +700,7 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(!out.status.success(), "二重解放で止まらなかった");
+            // `code()` が `None` になるのは Unix でシグナルで終わった場合（Unix のシグナルが前提）。
             assert_eq!(
                 out.status.code(),
                 None,

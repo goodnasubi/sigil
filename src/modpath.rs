@@ -283,6 +283,42 @@ fn open_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
     o.open(path)
 }
 
+/// 開いたファイルが通常ファイルか確かめる（FIFO・デバイス・ディレクトリなどは拒否）。
+fn check_regular(h: &std::fs::File, file: &Path) -> Result<(), String> {
+    let meta = h.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!(
+            "`{}` は通常のファイルではない（FIFO・デバイスなどは読まない）",
+            file.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 上限 `MAX_SOURCE_BYTES` で打ち切って UTF-8 の文字列として読む（1 バイト余分に読んで超過を知る）。
+fn read_bounded(h: &mut std::fs::File, file: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = vec![];
+    h.take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(format!(
+            "`{}` が大きすぎる（上限 {MAX_SOURCE_BYTES} バイト）",
+            file.display()
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| "UTF-8 でない".to_string())
+}
+
+/// CLI・LSP の入口が使う、安全なソースの読み込み（通常ファイルだけ・`O_NONBLOCK` で開く・上限つき）。
+/// 根の確認はしない（根のない入口。`modpath::load` は根の確認つき）。
+pub fn read_source(path: &Path) -> Result<String, String> {
+    let mut h = open_nonblocking(path).map_err(|e| e.to_string())?;
+    check_regular(&h, path)?;
+    read_bounded(&mut h, path)
+}
+
 /// ファイルを開き、**その開いたファイルから**読み、同じ開いたファイルを実体の確認に使う
 /// （ADR 0021 の 2-2b の条件: 確認と読み込みを同じ開いたファイルで）。
 pub fn load(root: &Path, file: &Path) -> Result<(String, crate::ast::File), LoadError> {
@@ -296,16 +332,9 @@ pub fn load_with_hook(
     file: &Path,
     between: &mut dyn FnMut(),
 ) -> Result<(String, crate::ast::File), LoadError> {
-    use std::io::Read;
     let mut h = open_nonblocking(file).map_err(|e| LoadError::Io(e.to_string()))?;
-    // 読む前に種類を確かめる（FIFO・デバイスなど通常ファイル以外は読まない。`/dev/zero` への symlink もここまたは次で拒否）。
-    let meta = h.metadata().map_err(|e| LoadError::Io(e.to_string()))?;
-    if !meta.is_file() {
-        return Err(LoadError::Io(format!(
-            "`{}` は通常のファイルではない（FIFO・デバイスなどは読まない）",
-            file.display()
-        )));
-    }
+    // 読む前に種類を確かめる（FIFO・デバイスなど通常ファイル以外は読まない。`/dev/zero` への symlink もここで拒否）。
+    check_regular(&h, file).map_err(LoadError::Io)?;
     // 根の外の確認も読む前に行う（外のファイルの中身は一切読まない）。
     real_inside_root(root, file, Some(&h)).map_err(|m| {
         LoadError::Lang(Error::new(
@@ -314,19 +343,7 @@ pub fn load_with_hook(
             m,
         ))
     })?;
-    // 上限で打ち切る（1 バイト余分に読んで超過を知る）。
-    let mut bytes = vec![];
-    (&mut h)
-        .take(MAX_SOURCE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| LoadError::Io(e.to_string()))?;
-    if bytes.len() as u64 > MAX_SOURCE_BYTES {
-        return Err(LoadError::Io(format!(
-            "`{}` が大きすぎる（上限 {MAX_SOURCE_BYTES} バイト）",
-            file.display()
-        )));
-    }
-    let src = String::from_utf8(bytes).map_err(|_| LoadError::Io("UTF-8 でない".to_string()))?;
+    let src = read_bounded(&mut h, file).map_err(LoadError::Io)?;
     between();
     let f = crate::parse(&src).map_err(LoadError::Lang)?;
     verify_parsed(&f, root, file, Some(&h)).map_err(LoadError::Lang)?;

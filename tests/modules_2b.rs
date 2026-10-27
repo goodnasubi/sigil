@@ -287,21 +287,26 @@ fn use_conflicts() {
         &module(
             "app.a",
             "\nuse lib.other.f;\nuse lib.util.f;\n",
-            &pub_fn("h"),
+            &caller("h", "f"),
         ),
     );
+    // 曖昧な名前を書いた箇所（`use` の行ではない）
     assert_eq!(
         check(&t, "app/a.sigil"),
-        Err((ErrorKind::UseConflict, "app/a.sigil".into(), 6))
+        Err((ErrorKind::UseConflict, "app/a.sigil".into(), 14))
     );
     // 自分の宣言と同じ名前
     t.write(
         "app/b.sigil",
-        &module("app.b", "\nuse lib.util.f;\n", &pub_fn("f")),
+        &module(
+            "app.b",
+            "\nuse lib.util.f;\n",
+            &format!("{}\n{}", pub_fn("f"), caller("g", "f")),
+        ),
     );
     assert_eq!(
         check(&t, "app/b.sigil"),
-        Err((ErrorKind::UseConflict, "app/b.sigil".into(), 5))
+        Err((ErrorKind::UseConflict, "app/b.sigil".into(), 22))
     );
 }
 
@@ -345,6 +350,7 @@ fn hidden_dependency_types_come_along_but_conflict_with_own_names() {
     let mk = "pub fn mk(n: Int) -> P\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return P { a: n };\n}\n";
     t.write("lib/mk.sigil", &module("lib.mk", "\nuse lib.util.P;\n", mk));
     let user = "pub fn h(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let p = mk(n);\n  return n;\n}\n";
+    let own_use = "pub fn k(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let q = P { a: n };\n  return n;\n}\n";
     t.write(
         "app/main.sigil",
         &module("app.main", "\nuse lib.mk.mk;\n", user),
@@ -378,7 +384,7 @@ fn hidden_dependency_types_come_along_but_conflict_with_own_names() {
     assert_eq!(check(&t, "app/main.sigil"), Ok(()));
     // 隠れた依存の `P` と同じ名前を自分で宣言すると衝突
     let own = format!(
-        "pub struct P {{\n  a: Int,\n}}\n\n{}",
+        "pub struct P {{\n  a: Int,\n}}\n\n{}\n{own_use}",
         user.replace("mk(n)", "mkp(n)")
     );
     t.write(
@@ -387,7 +393,7 @@ fn hidden_dependency_types_come_along_but_conflict_with_own_names() {
     );
     assert_eq!(
         check(&t, "app/main.sigil"),
-        Err((ErrorKind::UseConflict, "app/main.sigil".into(), 5))
+        Err((ErrorKind::UseConflict, "app/main.sigil".into(), 27))
     );
 }
 

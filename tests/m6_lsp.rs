@@ -1106,7 +1106,45 @@ fn lsp_dependency_diagnostic_range_from_check_time_body() {
     let got = c.publishes(2);
     let d = by_uri(&got, &pe);
     assert_eq!(pos(&d[0]).0, want, "{d:?}");
+    // ディスクを書き換えても、すでに出した範囲は検査した本文のまま。書き換えが効くことは、
+    // 次の検査（入口の編集）で範囲が 3 行ずれることで確かめる。
     std::fs::write(&pe, format!("\n\n\n{bad}")).unwrap();
-    assert!(c.hover(&pn, 0, 0).is_none());
+    c.change(&pn, &main);
+    let got = c.publishes(2);
+    let d = by_uri(&got, &pe);
+    assert_eq!(pos(&d[0]).0, want + 3, "{d:?}");
+    assert_eq!(code(&d[0]), "TypeMismatch", "{d:?}");
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_use_line_matches_the_module_path_exactly() {
+    // 本文を持たない依存 `lib.a` の診断は、`lib.a` を取り込む `use` の行に出す。
+    // `lib.a.b` を取り込む行（`lib.a` で始まるが別のモジュール）には出さない。
+    let root = tmpdir("useexact");
+    let tail = "  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n";
+    let head = "module lib.a\n  targets server\n  trust none\n\n";
+    stage(
+        &root,
+        &format!("{head}pub fn f(n: Int) -> Int\n{tail}  let z: Int = true;\n  return n;\n}}\n"),
+    );
+    stage(
+        &root,
+        &format!(
+            "module lib.a.b\n  targets server\n  trust none\n\npub fn g(n: Int) -> Int\n{tail}  return n;\n}}\n"
+        ),
+    );
+    let main = format!(
+        "module app.main\n  targets server\n  trust none\n\nuse lib.a.b.g;\nuse lib.a.f;\n\npub fn main(n: Int) -> Int\n{tail}  return g(f(n));\n}}\n"
+    );
+    let pn = stage(&root, &main);
+    let mut c = Client::start(&[(sigil::lsp::DEP_CAP_ENV, "1")]);
+    c.initialize_root(&root);
+    c.open(&pn, &main);
+    let got = c.publishes(1);
+    let d = &got[0].1;
+    assert_eq!((d.len(), code(&d[0])), (1, "TypeMismatch"), "{d:?}");
+    let line = main.lines().position(|l| l == "use lib.a.f;").unwrap() as i64;
+    assert_eq!(pos(&d[0]), (line, 0, line, 12), "{d:?}");
     assert_eq!(c.finish().1, 0);
 }

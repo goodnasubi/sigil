@@ -5206,7 +5206,7 @@ mod typed_tests {
             Expr::Field { expr, .. } => {
                 // `ConfigError.NotFound`・`fs.read` の前置きは型・名前空間の名前で、値ではない
                 let ns = matches!(&**expr, Expr::Name(n)
-                    if n == "fs" || n == "console" || n.starts_with(|c: char| c.is_uppercase()));
+                    if n == "fs" || n == "console" || n.contains('.') || n.starts_with(|c: char| c.is_uppercase()));
                 if !ns {
                     walk_expr(expr, t, out)
                 }

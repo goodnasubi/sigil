@@ -4,7 +4,7 @@
 //! シグネチャだけを検査器に渡し（本体は見ない）、各モジュールを 1 度だけ検査する。
 //! ファイルは `modpath::load` で読む（開いたファイルから読み、同じファイルで実体を確かめる）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::*;
@@ -90,6 +90,7 @@ fn run_fs_with<'a>(
         mods: HashMap::new(),
         order: vec![],
         stack: vec![],
+        cands: HashMap::new(),
     };
     let (path, file) = p.load(entry, None)?;
     let name = file.module.name.join(".");
@@ -146,6 +147,7 @@ pub fn link_sources(srcs: &[&str], opts: &Options) -> R<File> {
         mods: HashMap::new(),
         order: vec![],
         stack: vec![],
+        cands: HashMap::new(),
     };
     p.visit(path, file)?;
     if let Src::Mem(rest) = &p.src {
@@ -188,6 +190,8 @@ struct Proj<'a> {
     order: Vec<String>,
     /// 検査中のモジュール（輪の検出）。
     stack: Vec<String>,
+    /// 検査し終えたモジュールごとの、名前の候補（ADR 0022 決定 1。リンクが同じ解決を再び使う）。
+    cands: HashMap<String, Cands>,
 }
 
 impl Proj<'_> {
@@ -289,14 +293,13 @@ impl Proj<'_> {
             file: path.to_path_buf(),
             error: Error::new(kind, span, msg),
         };
-        let own: HashSet<String> = file
-            .items
-            .iter()
-            .filter_map(|i| item_name(i).map(str::to_string))
-            .collect();
-        let mut externs: Vec<Item> = vec![];
-        // 取り込んだ名前（隠れた依存の型を含む）-> 元のモジュール
-        let mut provided: HashMap<String, String> = HashMap::new();
+        let mut cands = Cands::default();
+        for i in &file.items {
+            if let Some(n) = item_name(i) {
+                cands.add(n, name, true);
+            }
+        }
+        let mut found_all: Vec<(String, Item)> = vec![];
         for u in &file.uses {
             let (item, mpath) = u.path.split_last().expect("use の path は 2 つ以上");
             let mname = mpath.join(".");
@@ -372,39 +375,60 @@ impl Proj<'_> {
             }
             let mut found = vec![];
             self.exports(&mname, item, &mut found, &mut HashSet::new());
-            for (origin, it) in found {
+            for (k, (origin, it)) in found.into_iter().enumerate() {
                 if let Some(n) = item_name(&it) {
-                    if own.contains(n) {
-                        return Err(diag(
-                            u.span,
-                            ErrorKind::UseConflict,
-                            format!(
-                                "`use {}` が持ち込む名前 `{n}` が、このモジュールの宣言と同じ",
-                                u.path.join(".")
-                            ),
-                        ));
-                    }
-                    match provided.get(n) {
-                        Some(o) if *o == origin => continue,
-                        Some(o) => {
-                            return Err(diag(
-                                u.span,
-                                ErrorKind::UseConflict,
-                                format!("`use {}` が持ち込む名前 `{n}` が、モジュール `{o}` から取り込んだ同じ名前と衝突する（別名で逃がす手段はない。名前を変えるのは書き手の側）", u.path.join(".")),
-                            ));
-                        }
-                        None => {
-                            provided.insert(n.to_string(), origin);
-                        }
+                    // 先頭は `use` で名指しした宣言（明示）。ほかは隠れた依存の型（暗黙）。
+                    cands.add(n, &origin, k == 0);
+                    if found_all
+                        .iter()
+                        .any(|(o, x)| *o == origin && item_name(x) == Some(n))
+                    {
+                        continue;
                     }
                 }
-                externs.push(it);
+                found_all.push((origin, it));
             }
+        }
+        // 名前の解決。曖昧な名前は、書いた箇所（文・宣言）で `UseConflict`。
+        let picks = cands.picks();
+        let view = |origin: &str, n: &str| cands.view_name(name, origin, n);
+        let map: HashMap<String, Result<String, String>> = picks
+            .iter()
+            .map(|(n, r)| (n.clone(), r.clone().map(|o| view(&o, n))))
+            .collect();
+        let mut externs: Vec<Item> = vec![];
+        for (origin, mut it) in found_all {
+            // 取り込んだ宣言は、元のモジュールでの解決に従って名前を付け替える。
+            let omap: HashMap<String, Result<String, String>> = match self.cands.get(&origin) {
+                Some(oc) => oc
+                    .picks()
+                    .into_iter()
+                    .map(|(n, r)| {
+                        let r = r.map(|o| cands.view_name(name, &o, &n));
+                        (n, r)
+                    })
+                    .collect(),
+                None => HashMap::new(),
+            };
+            let mut decl = HashMap::new();
+            if let Some(n) = item_name(&it) {
+                decl.insert(n.to_string(), cands.view_name(name, &origin, n));
+            }
+            Walk::new(&omap, decl).item(&mut it);
+            externs.push(it);
+        }
+        let mut checked = file.clone();
+        let mut w = Walk::new(&map, HashMap::new());
+        for it in &mut checked.items {
+            w.item(it);
+        }
+        if let Some((span, msg)) = w.err {
+            return Err(diag(span, ErrorKind::UseConflict, msg));
         }
         for it in &file.items {
             if let Item::Impl(i) = it {
                 if let Type::Path { path: tp, .. } = &i.ty {
-                    if provided.contains_key(&tp[0]) {
+                    if matches!(picks.get(&tp[0]), Some(Ok(o)) if o != name) {
                         return Err(diag(
                             i.span,
                             ErrorKind::TypeMismatch,
@@ -414,12 +438,13 @@ impl Proj<'_> {
                 }
             }
         }
-        crate::check::check_module(file, &externs, self.opts).map_err(|error| {
+        crate::check::check_module(&checked, &externs, self.opts).map_err(|error| {
             ProjectError::Diag {
                 file: path.to_path_buf(),
                 error,
             }
         })?;
+        self.cands.insert(name.to_string(), cands);
         let used = used_names(file);
         for u in &file.uses {
             let item = u.path.last().expect("use の path は 2 つ以上");
@@ -630,74 +655,52 @@ pub fn private_in_public(file: &File) -> Option<(Span, String)> {
 }
 
 impl Proj<'_> {
-    /// 検査し終えたモジュールを 1 つのプログラムに結ぶ（ADR 0021 の 2-2c）。
-    /// 入口でないモジュールの関数は `<モジュール名>.<関数名>` に改め（`.` は利用者の名前に現れないので衝突しない）、
-    /// 各モジュールの関数の参照（自分の宣言・取り込んだ名前）を改めた名前に向ける。型の名前は改めない
-    /// （検査器の型は平らな名前なので、別のモジュールの同名の型は結べない）。
+    /// 検査し終えたモジュールを 1 つのプログラムに結ぶ（ADR 0021 の 2-2c、ADR 0022 決定 1）。
+    /// 入口でないモジュールの関数と型は `<モジュール名>.<名前>` に改め（`.` は利用者の名前に現れないので
+    /// 衝突しない）、各モジュールの参照を検査時と同じ解決で、改めた名前に向ける。
     fn link(&self, entry: &str) -> R<File> {
-        let diag = |m: &str, span: Span, kind: ErrorKind, msg: String| ProjectError::Diag {
-            file: self.mods[m].0.clone(),
-            error: Error::new(kind, span, msg),
-        };
-        let mut seen_types: HashMap<&str, &str> = HashMap::new();
         for m in &self.order {
             let (_, f) = &self.mods[m];
             if m != entry && f.module.trust == Trust::Base {
-                return Err(diag(
-                    m,
-                    f.module.span,
-                    ErrorKind::Unsupported,
-                    format!("入口でないモジュール `{m}` は `trust base` にできない（信頼基盤は入口のモジュールだけ。結合の対象外）"),
-                ));
-            }
-            for it in &f.items {
-                if let Item::Fn(_) | Item::Impl(_) = it {
-                    continue;
-                }
-                let n = item_name(it).expect("型の宣言は名前を持つ");
-                if let Some(o) = seen_types.insert(n, m) {
-                    let span = match it {
-                        Item::Type(t) => t.span,
-                        Item::Struct(s) => s.span,
-                        Item::Enum(e) => e.span,
-                        _ => f.module.span,
-                    };
-                    return Err(diag(
-                        m,
-                        span,
+                return Err(ProjectError::Diag {
+                    file: self.mods[m].0.clone(),
+                    error: Error::new(
                         ErrorKind::Unsupported,
-                        format!("型 `{n}` がモジュール `{o}` と `{m}` の両方にある（型の名前は平らで、別のモジュールの同名の型は結べない）"),
-                    ));
-                }
+                        f.module.span,
+                        format!("入口でないモジュール `{m}` は `trust base` にできない（信頼基盤は入口のモジュールだけ。結合の対象外）"),
+                    ),
+                });
             }
         }
         let mut items: Vec<Item> = vec![];
         for m in &self.order {
             let (_, f) = &self.mods[m];
-            let mut map: HashMap<String, String> = HashMap::new();
+            let map: HashMap<String, Result<String, String>> = self.cands[m]
+                .picks()
+                .into_iter()
+                .map(|(n, r)| {
+                    let r = r.map(|o| {
+                        if o == entry {
+                            n.clone()
+                        } else {
+                            format!("{o}.{n}")
+                        }
+                    });
+                    (n, r)
+                })
+                .collect();
+            let mut decl = HashMap::new();
             if m != entry {
                 for it in &f.items {
-                    if let Item::Fn(d) = it {
-                        map.insert(d.name.clone(), format!("{m}.{}", d.name));
+                    if let Some(n) = item_name(it) {
+                        decl.insert(n.to_string(), format!("{m}.{n}"));
                     }
                 }
             }
-            for u in &f.uses {
-                let (item, mpath) = u.path.split_last().expect("use の path は 2 つ以上");
-                let mname = mpath.join(".");
-                if mname != entry
-                    && matches!(find_decl(&self.mods[&mname].1, item), Some(Item::Fn(_)))
-                {
-                    map.insert(item.clone(), format!("{mname}.{item}"));
-                }
-            }
-            let mut rn = Rn {
-                map,
-                scopes: vec![],
-            };
+            let mut w = Walk::new(&map, decl);
             for it in &f.items {
                 let mut it = it.clone();
-                rn.item(&mut it);
+                w.item(&mut it);
                 items.push(it);
             }
         }
@@ -710,55 +713,216 @@ impl Proj<'_> {
     }
 }
 
-/// 関数の参照の付け替え（局所の束縛が同じ名前を隠すところは触らない）。
-struct Rn {
-    map: HashMap<String, String>,
-    scopes: Vec<Vec<String>>,
+/// 名前の候補（ADR 0022 決定 1）。短い名前 -> (明示の出どころ, 暗黙の出どころ)。
+/// 明示は自分の宣言と `use` で名指しした宣言、暗黙は取り込んだ宣言のシグネチャに現れる隠れた依存の型。
+#[derive(Default)]
+struct Cands {
+    names: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)>,
 }
 
-impl Rn {
+impl Cands {
+    fn add(&mut self, n: &str, origin: &str, explicit: bool) {
+        let e = self.names.entry(n.to_string()).or_default();
+        if explicit {
+            e.0.insert(origin.to_string());
+        } else {
+            e.1.insert(origin.to_string());
+        }
+    }
+
+    /// 書かれた名前 -> 出どころのモジュール、または曖昧の説明。
+    /// 出どころが 1 つならそれ。明示が 2 つ以上なら曖昧。明示が 1 つ X のとき、暗黙に別の出どころがあれば、
+    /// 暗黙にも X があるときだけ X（宣言が隠れた依存の型に乗っ取られない）。明示がなく暗黙が 2 つ以上なら曖昧。
+    fn picks(&self) -> HashMap<String, Result<String, String>> {
+        self.names
+            .iter()
+            .map(|(n, (e, i))| {
+                let all: BTreeSet<&String> = e.iter().chain(i.iter()).collect();
+                let list = all.iter().map(|o| format!("`{o}`")).collect::<Vec<_>>().join("・");
+                let r = if all.len() == 1 {
+                    Ok(all.iter().next().expect("1 つ").to_string())
+                } else if e.len() >= 2 {
+                    Err(format!("名前 `{n}` がどのモジュールの宣言か決まらない（{list} から取り込んだ同じ名前。別名で逃がす手段はない。名前を変えるのは書き手の側）"))
+                } else if e.len() == 1 {
+                    let x = e.iter().next().expect("1 つ");
+                    if i.contains(x) {
+                        Ok(x.clone())
+                    } else {
+                        Err(format!("名前 `{n}` がどのモジュールの宣言か決まらない（{list}。取り込んだ宣言のシグネチャに現れる別の `{n}` がある）"))
+                    }
+                } else {
+                    Err(format!("名前 `{n}` がどのモジュールの宣言か決まらない（{list} の型が、取り込んだ宣言のシグネチャに現れる）"))
+                };
+                (n.clone(), r)
+            })
+            .collect()
+    }
+
+    /// モジュール `m` の検査で、`origin` の宣言 `n` を指す名前。自分の宣言と、候補が 1 つだけの名前は
+    /// そのまま。同じ名前が複数の出どころにあるときは `<出どころ>.<名前>`。
+    fn view_name(&self, m: &str, origin: &str, n: &str) -> String {
+        if origin == m {
+            return n.to_string();
+        }
+        let mut all: BTreeSet<&str> = BTreeSet::new();
+        all.insert(origin);
+        if let Some((e, i)) = self.names.get(n) {
+            all.extend(e.iter().chain(i.iter()).map(String::as_str));
+        }
+        if all.len() <= 1 {
+            n.to_string()
+        } else {
+            format!("{origin}.{n}")
+        }
+    }
+}
+
+/// 名前の付け替え（局所の束縛・型引数が同じ名前を隠すところは触らない）。
+/// 曖昧な名前を書いた最初の箇所（文・宣言の位置）を `err` に残す。
+struct Walk<'a> {
+    map: &'a HashMap<String, Result<String, String>>,
+    /// 宣言の名前の付け替え。
+    decl: HashMap<String, String>,
+    scopes: Vec<Vec<String>>,
+    generics: Vec<String>,
+    span: Span,
+    err: Option<(Span, String)>,
+}
+
+impl<'a> Walk<'a> {
+    fn new(
+        map: &'a HashMap<String, Result<String, String>>,
+        decl: HashMap<String, String>,
+    ) -> Self {
+        Walk {
+            map,
+            decl,
+            scopes: vec![],
+            generics: vec![],
+            span: Span::default(),
+            err: None,
+        }
+    }
+
+    fn rename(&mut self, n: &mut String) {
+        if self.generics.iter().any(|g| g == n) {
+            return;
+        }
+        match self.map.get(n.as_str()) {
+            Some(Ok(m)) => *n = m.clone(),
+            Some(Err(msg)) if self.err.is_none() => {
+                self.err = Some((self.span, msg.clone()));
+            }
+            Some(Err(_)) | None => {}
+        }
+    }
+
+    fn decl_name(&self, n: &mut String) {
+        if let Some(m) = self.decl.get(n.as_str()) {
+            *n = m.clone();
+        }
+    }
+
+    fn with_generics(&mut self, gs: &[Generic], f: impl FnOnce(&mut Self)) {
+        let n = self.generics.len();
+        self.generics.extend(gs.iter().map(|g| g.name.clone()));
+        f(self);
+        self.generics.truncate(n);
+    }
+
+    fn ty(&mut self, t: &mut Type) {
+        match t {
+            Type::Path { path, args } => {
+                self.rename(&mut path[0]);
+                args.iter_mut().for_each(|a| self.ty(a));
+            }
+            Type::Ref { inner, .. } => self.ty(inner),
+            Type::Fn { params, ret } => {
+                params.iter_mut().for_each(|p| self.ty(p));
+                if let Some(r) = ret {
+                    self.ty(r);
+                }
+            }
+            Type::Tuple(ts) => ts.iter_mut().for_each(|t| self.ty(t)),
+        }
+    }
+
     fn item(&mut self, it: &mut Item) {
         match it {
             Item::Type(t) => {
+                self.span = t.span;
+                self.decl_name(&mut t.name);
+                self.ty(&mut t.base);
                 self.scopes.push(vec![]);
                 self.expr(&mut t.cond);
                 self.scopes.pop();
             }
-            Item::Struct(_) | Item::Enum(_) => {}
-            Item::Fn(f) => {
-                self.func(f, true);
+            Item::Struct(s) => {
+                self.span = s.span;
+                self.decl_name(&mut s.name);
+                let gs = s.generics.clone();
+                self.with_generics(&gs, |w| s.fields.iter_mut().for_each(|f| w.ty(&mut f.ty)));
             }
-            Item::Impl(im) => im.fns.iter_mut().for_each(|f| self.func(f, false)),
+            Item::Enum(e) => {
+                self.span = e.span;
+                self.decl_name(&mut e.name);
+                let gs = e.generics.clone();
+                self.with_generics(&gs, |w| {
+                    for v in &mut e.variants {
+                        v.fields.iter_mut().for_each(|t| w.ty(t));
+                    }
+                });
+            }
+            Item::Fn(f) => self.func(f, true),
+            Item::Impl(im) => {
+                self.span = im.span;
+                let gs = im.generics.clone();
+                self.with_generics(&gs, |w| {
+                    w.ty(&mut im.ty);
+                    im.fns.iter_mut().for_each(|f| w.func(f, false));
+                });
+            }
         }
     }
 
     fn func(&mut self, f: &mut FnDecl, is_free: bool) {
+        self.span = f.span;
         if is_free {
-            if let Some(n) = self.map.get(&f.name) {
-                f.name = n.clone();
+            self.decl_name(&mut f.name);
+        }
+        let gs = f.generics.clone();
+        self.with_generics(&gs, |w| {
+            for p in &mut f.params {
+                w.ty(&mut p.ty);
             }
-        }
-        self.scopes
-            .push(f.params.iter().map(|p| p.name.clone()).collect());
-        if let Some(e) = &mut f.requires {
-            self.expr(e);
-        }
-        if let Some(e) = &mut f.ensures {
-            self.expr(e);
-        }
-        self.block(&mut f.body);
-        self.scopes.pop();
+            if let Some(r) = &mut f.ret {
+                w.ty(r);
+            }
+            w.scopes
+                .push(f.params.iter().map(|p| p.name.clone()).collect());
+            if let Some(e) = &mut f.requires {
+                w.expr(e);
+            }
+            if let Some(e) = &mut f.ensures {
+                w.expr(e);
+            }
+            w.block(&mut f.body);
+            w.scopes.pop();
+        });
     }
 
     fn bound(&self, n: &str) -> bool {
         self.scopes.iter().any(|s| s.iter().any(|x| x == n))
     }
 
-    fn bind(&mut self, p: &Pattern) {
+    fn pat(&mut self, p: &mut Pattern) {
         match p {
             Pattern::Bind(n) => self.scopes.last_mut().expect("スコープ").push(n.clone()),
-            Pattern::Variant { args, .. } => args.iter().for_each(|a| self.bind(a)),
-            Pattern::Tuple(ps) => ps.iter().for_each(|a| self.bind(a)),
+            Pattern::Variant { path, args } => {
+                self.rename(&mut path[0]);
+                args.iter_mut().for_each(|a| self.pat(a));
+            }
+            Pattern::Tuple(ps) => ps.iter_mut().for_each(|a| self.pat(a)),
             _ => {}
         }
     }
@@ -770,10 +934,16 @@ impl Rn {
     }
 
     fn stmt(&mut self, s: &mut Stmt) {
+        self.span = s.span;
         match &mut s.kind {
-            StmtKind::Let { pattern, value, .. } => {
+            StmtKind::Let {
+                pattern, ty, value, ..
+            } => {
+                if let Some(t) = ty {
+                    self.ty(t);
+                }
                 self.expr(value);
-                self.bind(pattern);
+                self.pat(pattern);
             }
             StmtKind::Assign { target, value } => {
                 self.expr(target);
@@ -796,7 +966,7 @@ impl Rn {
                 self.expr(scrutinee);
                 for a in arms {
                     self.scopes.push(vec![]);
-                    self.bind(&a.pattern);
+                    self.pat(&mut a.pattern);
                     self.block(&mut a.body);
                     self.scopes.pop();
                 }
@@ -818,9 +988,7 @@ impl Rn {
         match e {
             Expr::Name(n) => {
                 if !self.bound(n) {
-                    if let Some(m) = self.map.get(n.as_str()) {
-                        *n = m.clone();
-                    }
+                    self.rename(n);
                 }
             }
             Expr::Old(x) | Expr::Paren(x) | Expr::Try(x) => self.expr(x),
@@ -835,14 +1003,17 @@ impl Rn {
                 self.expr(callee);
                 args.iter_mut().for_each(|a| self.expr(a));
             }
-            Expr::StructLit { fields, .. } => fields.iter_mut().for_each(|(_, x)| self.expr(x)),
+            Expr::StructLit { path, fields } => {
+                self.rename(&mut path[0]);
+                fields.iter_mut().for_each(|(_, x)| self.expr(x));
+            }
             Expr::Match {
                 scrutinee, arms, ..
             } => {
                 self.expr(scrutinee);
                 for a in arms {
                     self.scopes.push(vec![]);
-                    self.bind(&a.pattern);
+                    self.pat(&mut a.pattern);
                     self.expr(&mut a.body);
                     self.scopes.pop();
                 }

@@ -1001,3 +1001,112 @@ fn lsp_dependency_body_is_shared_between_entries() {
     assert_eq!(c.hover(&p2, l, 12), Some(a));
     assert_eq!(c.finish().1, 0);
 }
+
+#[test]
+fn lsp_dependency_cap_boundary_exact_and_one_below() {
+    // 上限がちょうど本文の大きさなら持ち、1 バイト足りなければ持たない。
+    let root = tmpdir("capedge");
+    let (pn, _, main, eff) = effects_staged(&root);
+    let l = main
+        .lines()
+        .position(|l| l.contains("with_tax(&xs)"))
+        .unwrap() as i64;
+    for (cap, kept) in [(eff.len(), true), (eff.len() - 1, false)] {
+        let cap = cap.to_string();
+        let mut c = Client::start(&[(sigil::lsp::DEP_CAP_ENV, &cap)]);
+        c.initialize_root(&root);
+        c.open(&pn, &main);
+        c.publish();
+        assert_eq!(c.hover(&pn, l, 12).is_some(), kept, "cap={cap}");
+        assert_eq!(c.finish().1, 0);
+    }
+}
+
+#[test]
+fn lsp_dropped_chain_reports_at_entry_head_with_note() {
+    // 入口 -> a -> b。a も b も本文を持たない（上限 1）。b の誤りは、取り込む `use` の行が見つからないので
+    // 入口の先頭に注記つきで出す。
+    let root = tmpdir("chain");
+    let h = "  targets server\n  trust none\n\n";
+    let f = |n: &str, body: &str| {
+        format!("fn {n}() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  {body}\n}}\n")
+    };
+    let b = format!(
+        "module chain.b\n{h}pub {}",
+        f("fb", "let z: Int = true;\n  return 1;")
+    );
+    let a = format!(
+        "module chain.a\n{h}use chain.b.fb;\n\npub {}",
+        f("fa", "return fb();")
+    );
+    let m = format!(
+        "module chain.m\n{h}use chain.a.fa;\n\n{}",
+        f("main2", "return fa();")
+    );
+    stage(&root, &b);
+    stage(&root, &a);
+    let pm = stage(&root, &m);
+    let mut c = Client::start(&[(sigil::lsp::DEP_CAP_ENV, "1")]);
+    c.initialize_root(&root);
+    c.open(&pm, &m);
+    let (u, d) = c.publish();
+    assert_eq!(u, path_to_uri(&pm));
+    assert_eq!((d.len(), code(&d[0])), (1, "TypeMismatch"), "{d:?}");
+    assert_eq!(pos(&d[0]), (0, 0, 0, 0));
+    let msg = d[0].get("message").and_then(Value::as_str).unwrap();
+    assert!(msg.contains("use") && msg.contains("b.sigil"), "{msg}");
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_dropped_dependency_recovers_when_held_bytes_shrink() {
+    // 上限は 1 つ分。入口 1 が依存 x を持つ間、入口 2 の依存 y は持てない。入口 1 を閉じて入口 2 を検査し直すと持てる。
+    let root = tmpdir("recover");
+    let h = "  targets server\n  trust none\n\n";
+    let f = "pub fn g() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 1;\n}\n";
+    let x = format!("module rec.x\n{h}{f}");
+    let y = format!("module rec.y\n{h}{f}\n");
+    let ma = format!("module rec.ma\n{h}use rec.x.g;\n\nfn t() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return g();\n}}\n");
+    let mb = ma.replace("rec.ma", "rec.mb").replace("rec.x", "rec.y");
+    stage(&root, &x);
+    stage(&root, &y);
+    let (pa, pb) = (stage(&root, &ma), stage(&root, &mb));
+    let l = ma.lines().position(|l| l.contains("return g()")).unwrap() as i64;
+    let cap = (y.len().max(x.len())).to_string();
+    let mut c = Client::start(&[(sigil::lsp::DEP_CAP_ENV, &cap)]);
+    c.initialize_root(&root);
+    c.open(&pa, &ma);
+    c.publish();
+    c.open(&pb, &mb);
+    c.publish();
+    assert!(c.hover(&pa, l, 9).is_some());
+    assert_eq!(c.hover(&pb, l, 9), None);
+    c.close(&pa);
+    c.publish();
+    c.change(&pb, &mb);
+    c.publish();
+    assert!(c.hover(&pb, l, 9).is_some());
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_dependency_diagnostic_range_from_check_time_body() {
+    // 開いていない依存の誤りの範囲は、検査した本文の行（ディスクを書き換えても変わらない）。
+    let root = tmpdir("range");
+    let (pn, pe, main, eff) = effects_staged(&root);
+    let bad = eff.replacen("return ", "let z: Int = true;\n  return ", 1);
+    std::fs::write(&pe, &bad).unwrap();
+    let want = bad
+        .lines()
+        .position(|l| l.contains("let z: Int = true"))
+        .unwrap() as i64;
+    let mut c = Client::start(&[]);
+    c.initialize_root(&root);
+    c.open(&pn, &main);
+    let got = c.publishes(2);
+    let d = by_uri(&got, &pe);
+    assert_eq!(pos(&d[0]).0, want, "{d:?}");
+    std::fs::write(&pe, format!("\n\n\n{bad}")).unwrap();
+    assert!(c.hover(&pn, 0, 0).is_none());
+    assert_eq!(c.finish().1, 0);
+}

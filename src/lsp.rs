@@ -24,6 +24,24 @@ pub const DEP_CAP_ENV: &str = "SIGIL_LSP_TEST_DEP_CAP";
 /// 言語サーバーが全体で持つ依存の本文の上限（ADR 0022 決定 4）。
 pub const MAX_DEP_BYTES: usize = 64 * 1024 * 1024;
 
+/// 依存の本文の保持量の上限。環境変数の値は下げる方向にだけ効く（`MAX_DEP_BYTES` を超えない）。
+fn dep_cap_from(v: Option<&str>) -> usize {
+    v.and_then(|s| s.parse::<usize>().ok())
+        .map_or(MAX_DEP_BYTES, |n| n.min(MAX_DEP_BYTES))
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    #[test]
+    fn cap_is_clamped() {
+        assert_eq!(dep_cap_from(None), MAX_DEP_BYTES);
+        assert_eq!(dep_cap_from(Some("5")), 5);
+        assert_eq!(dep_cap_from(Some("999999999999")), MAX_DEP_BYTES);
+        assert_eq!(dep_cap_from(Some("x")), MAX_DEP_BYTES);
+    }
+}
+
 /// 枠を 1 つ読んだ結果。
 #[derive(Debug, PartialEq)]
 pub enum Frame {
@@ -229,10 +247,7 @@ impl<W: Write> Server<W> {
             docs: HashMap::new(),
             root: None,
             results: HashMap::new(),
-            dep_cap: std::env::var(DEP_CAP_ENV)
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(MAX_DEP_BYTES),
+            dep_cap: dep_cap_from(std::env::var(DEP_CAP_ENV).ok().as_deref()),
             inject: std::env::var(INJECT_PANIC_ENV)
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -600,10 +615,10 @@ impl<W: Write> Server<W> {
             open.get(p).map(|t| t.to_string())
         };
         // 検査が実際に読んだ本文（構文解析に渡したもの）。診断の範囲と hover はこれを使う。
-        let mut read: Vec<(PathBuf, String)> = vec![];
+        let mut read: Vec<(PathBuf, Arc<str>)> = vec![];
         let mut on_text = |p: &Path, t: &str| {
             if p != path && !read.iter().any(|(q, _)| q == p) {
-                read.push((p.to_path_buf(), t.to_string()));
+                read.push((p.to_path_buf(), Arc::from(t)));
             }
         };
         let r = crate::project::check_project_overlay(
@@ -627,7 +642,7 @@ impl<W: Write> Server<W> {
             let cost = if shared { 0 } else { t.len() };
             if cost <= budget {
                 budget -= cost;
-                texts.push((p, Arc::from(t)));
+                texts.push((p, t));
             } else {
                 dropped.push(p);
             }
@@ -645,6 +660,7 @@ impl<W: Write> Server<W> {
             Err(crate::project::ProjectError::Diag { file, error }) => {
                 let mut at = file.clone();
                 let mut line_range: Option<(usize, usize)> = None;
+                let mut no_line = false;
                 if dropped.contains(&file) {
                     // 本文を持たない依存の診断は、それを取り込んだ `use` の行に出す。
                     if let Some((imp, ln, len)) =
@@ -653,7 +669,9 @@ impl<W: Write> Server<W> {
                         at = imp;
                         line_range = Some((ln, len));
                     } else {
+                        // 取り込んだ `use` の行が見つからない（取り込んだ側も本文を持たない）。入口の先頭に注記つきで出す。
                         at = path.clone();
+                        no_line = true;
                     }
                 }
                 let u = self.uri_for(&at);
@@ -666,6 +684,18 @@ impl<W: Write> Server<W> {
                         &format!("{:?}", error.kind),
                         &format!(
                             "`{}` の診断（本文を持たない）: {}",
+                            file.display(),
+                            error.message
+                        ),
+                    ),
+                    (None, _) if no_line => self.diag_at(
+                        0,
+                        0,
+                        0,
+                        0,
+                        &format!("{:?}", error.kind),
+                        &format!(
+                            "`{}` の診断（本文を持たず、取り込む `use` の行も見つからない）: {}",
                             file.display(),
                             error.message
                         ),
@@ -711,22 +741,17 @@ impl<W: Write> Server<W> {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect();
         let name = name.join(".");
+        let want: Vec<&str> = name.split('.').collect();
         let mut sources: Vec<(PathBuf, &str)> = vec![(entry.to_path_buf(), entry_text)];
         sources.extend(texts.iter().map(|(p, t)| (p.clone(), &**t)));
         for (p, t) in sources {
-            for (i, l) in t.split('\n').enumerate() {
-                let Some(rest) = l.trim_start().strip_prefix("use ") else {
-                    continue;
-                };
-                let rest = rest.trim_start();
-                if let Some(after) = rest.strip_prefix(name.as_str()) {
-                    if after
-                        .chars()
-                        .next()
-                        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
-                    {
-                        return Some((p, i, l.chars().count()));
-                    }
+            // 構文解析した `use` の位置を使う（文字列の中や注釈の `use` に引っかからない）。
+            let Ok(f) = crate::parse(t) else { continue };
+            for u in &f.uses {
+                if u.path.len() >= want.len() && u.path.iter().zip(&want).all(|(a, b)| a == b) {
+                    let ln = (u.span.line as usize).saturating_sub(1);
+                    let len = t.split('\n').nth(ln).map_or(0, |l| l.chars().count());
+                    return Some((p, ln, len));
                 }
             }
         }

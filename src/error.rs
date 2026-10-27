@@ -109,6 +109,8 @@ pub enum ErrorKind {
     UnusedUse,
     /// モジュールの参照の輪（ADR 0021 の決定 3）。
     ModuleCycle,
+    /// `use` の連鎖が深すぎる・辿るファイルが多すぎる（資源の上限。ADR 0021 2-2d 追補）。
+    ModuleLimit,
     /// 取り込む側の `targets` が、取り込まれる側の `targets` に含まれない（ADR 0021 の決定 5）。
     TargetMismatch,
     /// 公開の宣言のシグネチャが、非公開の型を名指しする（ADR 0021 の決定 4）。
@@ -219,6 +221,7 @@ impl ErrorKind {
             | UseConflict
             | UnusedUse
             | ModuleCycle
+            | ModuleLimit
             | TargetMismatch
             | PrivateInPublic
             | PrivateConstruction

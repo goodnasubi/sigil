@@ -168,6 +168,11 @@ enum Src<'a> {
     Mem(HashMap<String, (PathBuf, File)>),
 }
 
+/// `use` の連鎖の深さの上限（入口を 1 とする。再帰の深さをこれで抑える。ADR 0021 2-2d 追補）。
+pub const MAX_USE_DEPTH: usize = 64;
+/// 1 回の検査で読むファイル数の上限。
+pub const MAX_FILES: usize = 256;
+
 struct Proj<'a> {
     src: Src<'a>,
     opts: &'a Options,
@@ -300,6 +305,20 @@ impl Proj<'_> {
                 ));
             }
             if !self.mods.contains_key(&mname) {
+                if self.stack.len() >= MAX_USE_DEPTH {
+                    return Err(diag(
+                        u.span,
+                        ErrorKind::ModuleLimit,
+                        format!("`use` の連鎖が深すぎる（上限 {MAX_USE_DEPTH}）"),
+                    ));
+                }
+                if self.mods.len() + self.stack.len() >= MAX_FILES {
+                    return Err(diag(
+                        u.span,
+                        ErrorKind::ModuleLimit,
+                        format!("辿るファイルが多すぎる（上限 {MAX_FILES}）"),
+                    ));
+                }
                 let (tp, tf) = self.load_dep(mpath, (path, u))?;
                 self.visit(tp, tf)?;
             }

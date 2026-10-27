@@ -245,6 +245,44 @@ pub enum LoadError {
     Lang(Error),
 }
 
+/// 1 ファイルのソースの大きさの上限（バイト。ADR 0021 2-2d 追補）。超えたら読み込みの失敗。
+pub const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
+
+/// 読み取りで開く。Unix では `O_NONBLOCK` で開き、書き手のいない FIFO で `open` がブロックしないようにする
+/// （開いたあと通常ファイルか確かめ、そうでなければ読まない）。
+fn open_nonblocking(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "mips", target_arch = "mips64")
+        ))]
+        const O_NONBLOCK: i32 = 0x80;
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "sparc", target_arch = "sparc64")
+        ))]
+        const O_NONBLOCK: i32 = 0x4000;
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            not(any(
+                target_arch = "mips",
+                target_arch = "mips64",
+                target_arch = "sparc",
+                target_arch = "sparc64"
+            ))
+        ))]
+        const O_NONBLOCK: i32 = 0o4000;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const O_NONBLOCK: i32 = 0x4;
+        o.custom_flags(O_NONBLOCK);
+    }
+    o.open(path)
+}
+
 /// ファイルを開き、**その開いたファイルから**読み、同じ開いたファイルを実体の確認に使う
 /// （ADR 0021 の 2-2b の条件: 確認と読み込みを同じ開いたファイルで）。
 pub fn load(root: &Path, file: &Path) -> Result<(String, crate::ast::File), LoadError> {
@@ -259,10 +297,35 @@ pub fn load_with_hook(
     between: &mut dyn FnMut(),
 ) -> Result<(String, crate::ast::File), LoadError> {
     use std::io::Read;
-    let mut h = std::fs::File::open(file).map_err(|e| LoadError::Io(e.to_string()))?;
+    let mut h = open_nonblocking(file).map_err(|e| LoadError::Io(e.to_string()))?;
+    // 読む前に種類を確かめる（FIFO・デバイスなど通常ファイル以外は読まない。`/dev/zero` への symlink もここまたは次で拒否）。
+    let meta = h.metadata().map_err(|e| LoadError::Io(e.to_string()))?;
+    if !meta.is_file() {
+        return Err(LoadError::Io(format!(
+            "`{}` は通常のファイルではない（FIFO・デバイスなどは読まない）",
+            file.display()
+        )));
+    }
+    // 根の外の確認も読む前に行う（外のファイルの中身は一切読まない）。
+    real_inside_root(root, file, Some(&h)).map_err(|m| {
+        LoadError::Lang(Error::new(
+            ErrorKind::ModulePathMismatch,
+            Span::default(),
+            m,
+        ))
+    })?;
+    // 上限で打ち切る（1 バイト余分に読んで超過を知る）。
     let mut bytes = vec![];
-    h.read_to_end(&mut bytes)
+    (&mut h)
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| LoadError::Io(e.to_string()))?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(LoadError::Io(format!(
+            "`{}` が大きすぎる（上限 {MAX_SOURCE_BYTES} バイト）",
+            file.display()
+        )));
+    }
     let src = String::from_utf8(bytes).map_err(|_| LoadError::Io("UTF-8 でない".to_string()))?;
     between();
     let f = crate::parse(&src).map_err(LoadError::Lang)?;

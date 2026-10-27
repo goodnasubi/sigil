@@ -128,14 +128,13 @@ fn only_the_first_module_provides_entry_functions() {
 }
 
 #[test]
-fn same_named_types_in_two_modules_are_unsupported_at_link() {
-    // どちらも非公開の `P`。型の名前は記号と違って平らなので、結ぶと衝突する（今は未対応として止める）。
-    let s = "struct P {\n  a: Int,\n}\n";
+fn same_named_types_in_two_modules_are_linked_apart() {
+    // どちらも非公開の `P`（形も違う）。型も関数と同じく `<モジュール>.<名前>` に改めて結ぶ（ADR 0022 決定 1）。
     let m = module(
         "app.main",
         "\nuse lib.a.f;\n",
         &format!(
-            "{s}\n{}",
+            "struct P {{\n  a: Int,\n}}\n\n{}",
             func(
                 "pub fn main() -> Int",
                 "none",
@@ -147,22 +146,19 @@ fn same_named_types_in_two_modules_are_unsupported_at_link() {
         "lib.a",
         "",
         &format!(
-            "{s}\n{}",
+            "struct P {{\n  a: Int,\n  b: Int,\n}}\n\n{}",
             func(
                 "pub fn f(n: Int) -> Int",
                 "none",
-                "  let q = P { a: n };\n  return q.a;"
+                "  let q = P { a: n, b: 40 };\n  return q.a + q.b;"
             )
         ),
     );
-    let e = sigil::ir_eval::run_sources(&[&m, &a], "main", &[]).unwrap_err();
-    let text = e.error.to_string();
-    assert!(text.contains("`P`"), "{text}");
-    assert!(
-        matches!(&e.error, RunError::Unsupported(_))
-            || matches!(&e.error, RunError::Check(c) if c.kind == sigil::ErrorKind::Unsupported),
-        "{text}"
-    );
+    let r = common::run_sources(&[&m, &a], "main", &[]).unwrap();
+    assert_eq!(r.value, "41");
+    let p = sigil::ir_eval::lower_sources(&[&m, &a], "main").unwrap();
+    let dump = format!("{p:?}");
+    assert!(dump.contains("lib.a.P"), "{dump}");
 }
 
 #[test]

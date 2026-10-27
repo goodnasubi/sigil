@@ -748,7 +748,7 @@ impl<W: Write> Server<W> {
             // 構文解析した `use` の位置を使う（文字列の中や注釈の `use` に引っかからない）。
             let Ok(f) = crate::parse(t) else { continue };
             for u in &f.uses {
-                if u.path.len() >= want.len() && u.path.iter().zip(&want).all(|(a, b)| a == b) {
+                if u.path[..u.path.len() - 1] == want[..] {
                     let ln = (u.span.line as usize).saturating_sub(1);
                     let len = t.split('\n').nth(ln).map_or(0, |l| l.chars().count());
                     return Some((p, ln, len));

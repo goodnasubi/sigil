@@ -33,6 +33,19 @@ pub fn check_project(root: &Path, entry: &Path, opts: &Options) -> R<()> {
     check_project_with(root, entry, opts, &mut |_| {})
 }
 
+/// `check_project` の、開いている文書の中身を優先する版（言語サーバー用）。`overlay` は、読もうとする
+/// ファイルごとに呼ばれ、`Some(中身)` ならディスクの代わりにそれを使う（`None` ならディスクから読む）。
+/// パスと名前の対応・根の外の確認は、ディスクのファイルと同じ。
+pub fn check_project_overlay(
+    root: &Path,
+    entry: &Path,
+    opts: &Options,
+    overlay: &mut dyn FnMut(&Path) -> Option<String>,
+) -> R<()> {
+    let mut nop = |_: &Path| {};
+    run_fs_with(root, entry, opts, &mut nop, Some(overlay)).map(|_| ())
+}
+
 /// `check_project` の、各ファイルを読んだ直後（確認の前）に呼ぶ差し込み口つき（差し替えの試験用）。
 #[doc(hidden)]
 pub fn check_project_with(
@@ -50,8 +63,24 @@ fn run_fs<'a>(
     opts: &'a Options,
     on_read: &'a mut dyn FnMut(&Path),
 ) -> R<(Proj<'a>, String)> {
+    run_fs_with(root, entry, opts, on_read, None)
+}
+
+type Overlay<'a> = &'a mut dyn FnMut(&Path) -> Option<String>;
+
+fn run_fs_with<'a>(
+    root: &'a Path,
+    entry: &Path,
+    opts: &'a Options,
+    on_read: &'a mut dyn FnMut(&Path),
+    overlay: Option<Overlay<'a>>,
+) -> R<(Proj<'a>, String)> {
     let mut p = Proj {
-        src: Src::Fs { root, on_read },
+        src: Src::Fs {
+            root,
+            on_read,
+            overlay,
+        },
         opts,
         mods: HashMap::new(),
         order: vec![],
@@ -133,10 +162,16 @@ enum Src<'a> {
     Fs {
         root: &'a Path,
         on_read: &'a mut dyn FnMut(&Path),
+        overlay: Option<Overlay<'a>>,
     },
     /// 渡されたソース（モジュール名 -> 仮の位置と構文木）。辿ったものは取り除く。
     Mem(HashMap<String, (PathBuf, File)>),
 }
+
+/// `use` の連鎖の深さの上限（入口を 1 とする。再帰の深さをこれで抑える。ADR 0021 2-2d 追補）。
+pub const MAX_USE_DEPTH: usize = 64;
+/// 1 回の検査で読むファイル数の上限。
+pub const MAX_FILES: usize = 256;
 
 struct Proj<'a> {
     src: Src<'a>,
@@ -152,11 +187,22 @@ struct Proj<'a> {
 impl Proj<'_> {
     /// ファイルを読む。`from` は取り込んだ側の `use`（ファイルがないとき、その行の `UnresolvedUse` にする）。
     fn load(&mut self, path: &Path, from: Option<(&Path, &UseDecl)>) -> R<(PathBuf, File)> {
-        let Src::Fs { root, on_read } = &mut self.src else {
+        let Src::Fs {
+            root,
+            on_read,
+            overlay,
+        } = &mut self.src
+        else {
             unreachable!("ファイルから読むのは Fs だけ");
         };
         let mut hook = || (on_read)(path);
-        match modpath::load_with_hook(root, path, &mut hook) {
+        let loaded = match overlay.as_mut().and_then(|ov| ov(path)) {
+            Some(text) => crate::parse(&text)
+                .and_then(|f| modpath::verify_parsed(&f, root, path, None).map(|()| (text, f)))
+                .map_err(LoadError::Lang),
+            None => modpath::load_with_hook(root, path, &mut hook),
+        };
+        match loaded {
             Ok((_, f)) => Ok((path.to_path_buf(), f)),
             Err(LoadError::Lang(error)) => Err(ProjectError::Diag {
                 file: path.to_path_buf(),
@@ -259,6 +305,20 @@ impl Proj<'_> {
                 ));
             }
             if !self.mods.contains_key(&mname) {
+                if self.stack.len() >= MAX_USE_DEPTH {
+                    return Err(diag(
+                        u.span,
+                        ErrorKind::ModuleLimit,
+                        format!("`use` の連鎖が深すぎる（上限 {MAX_USE_DEPTH}）"),
+                    ));
+                }
+                if self.mods.len() + self.stack.len() >= MAX_FILES {
+                    return Err(diag(
+                        u.span,
+                        ErrorKind::ModuleLimit,
+                        format!("辿るファイルが多すぎる（上限 {MAX_FILES}）"),
+                    ));
+                }
                 let (tp, tf) = self.load_dep(mpath, (path, u))?;
                 self.visit(tp, tf)?;
             }

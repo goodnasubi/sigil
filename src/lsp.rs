@@ -155,45 +155,6 @@ pub fn path_to_uri(p: &Path) -> String {
     s
 }
 
-/// 組のファイルを合わせて検査し、最初のエラーを (ファイルの番号, エラー) で返す。
-/// 各ファイルの前に改行を足して行番号をずらし、エラーの行からファイルを特定してから戻す。
-fn check_files(texts: &[&str], opts: &crate::effects::Options) -> Option<(usize, Error)> {
-    let (mut offs, mut padded, mut off) = (vec![], vec![], 0usize);
-    for t in texts {
-        offs.push(off);
-        padded.push("\n".repeat(off) + t);
-        off += t.matches('\n').count() + 1;
-    }
-    let refs: Vec<&str> = padded.iter().map(String::as_str).collect();
-    let err = match merge_group(&refs) {
-        Err(e) => e,
-        Ok(file) => crate::check::check_file_with(&file, opts).err()?,
-    };
-    let i = offs.iter().rposition(|&o| (err.span.line as usize) > o)?;
-    let mut e = err;
-    e.span.line -= offs[i] as u32;
-    Some((i, e))
-}
-
-/// 同じモジュールの宣言（名前・`targets`・`trust` が同じ）を持つ組のファイルを 1 つのファイルに合わせる
-/// （組は `group` が作るので宣言は揃っている）。
-fn merge_group(srcs: &[&str]) -> Result<crate::ast::File, Error> {
-    let mut module = None;
-    let (mut items, mut uses) = (vec![], vec![]);
-    for s in srcs {
-        let f = crate::parse(s)?;
-        module.get_or_insert_with(|| f.module.clone());
-        uses.extend(f.uses);
-        items.extend(f.items);
-    }
-    let module = module.expect("組は空でない");
-    Ok(crate::ast::File {
-        module,
-        uses,
-        items,
-    })
-}
-
 /// 行頭から始まる字句の長さ（文字数）。字句が取れなければ `None`。
 fn token_len(rest: &[char]) -> Option<usize> {
     let lexed = lex(&rest.iter().collect::<String>()).ok()?;
@@ -227,12 +188,22 @@ pub struct Server<W: Write> {
     shutdown: bool,
     /// 開いている文書（URI -> 中身）。
     docs: HashMap<String, String>,
-    /// 文書ごとに、最後に診断を送った組（URI の並び）。
-    groups: HashMap<String, Vec<String>>,
+    /// ワークスペースの根（`initialize` の `rootUri`・`workspaceFolders`）。モジュールの名前とパスの対応の根。
+    root: Option<PathBuf>,
+    /// 開いている文書ごとの、最後の検査の結果（その文書を入口にして `use` を辿ったもの）。
+    results: HashMap<String, Checked>,
     inject: Option<String>,
 }
 
 type Diags = Vec<(String, Vec<Value>)>;
+
+/// 1 つの入口の検査の結果。
+struct Checked {
+    /// 読んだファイル（入口を含む。`use` で辿れたもの）。
+    deps: Vec<PathBuf>,
+    /// 診断（URI -> 診断）。入口の URI は、診断がなくても入れる。
+    diags: Diags,
+}
 
 impl<W: Write> Server<W> {
     pub fn new(out: W, trust_base: Vec<String>) -> Self {
@@ -246,7 +217,8 @@ impl<W: Write> Server<W> {
             initialized: false,
             shutdown: false,
             docs: HashMap::new(),
-            groups: HashMap::new(),
+            root: None,
+            results: HashMap::new(),
             inject: std::env::var(INJECT_PANIC_ENV)
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -340,6 +312,18 @@ impl<W: Write> Server<W> {
                     .and_then(|g| g.get("positionEncodings"))
                     .and_then(Value::as_array)
                     .unwrap_or(&[]);
+                self.root = params
+                    .get("rootUri")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        params
+                            .get("workspaceFolders")
+                            .and_then(Value::as_array)
+                            .and_then(|w| w.first())
+                            .and_then(|f| f.get("uri"))
+                            .and_then(Value::as_str)
+                    })
+                    .and_then(uri_to_path);
                 self.utf32 = encs.iter().any(|e| e.as_str() == Some("utf-32"));
                 self.initialized = true;
                 let enc = if self.utf32 { "utf-32" } else { "utf-16" };
@@ -365,7 +349,7 @@ impl<W: Write> Server<W> {
                 let text = doc.and_then(|d| d.get("text")).and_then(Value::as_str);
                 if let (Some(uri), Some(text)) = (uri, text) {
                     self.docs.insert(uri.into(), text.into());
-                    self.recheck(uri, text);
+                    self.recheck(uri);
                 }
             }
             ("textDocument/didChange", None) => {
@@ -379,7 +363,7 @@ impl<W: Write> Server<W> {
                 if let (Some(uri), Some(text)) = (uri.and_then(Value::as_str), text) {
                     if self.docs.contains_key(uri) {
                         self.docs.insert(uri.into(), text.into());
-                        self.recheck(uri, text);
+                        self.recheck(uri);
                     }
                 }
             }
@@ -425,14 +409,16 @@ impl<W: Write> Server<W> {
             units += if self.utf32 { 1 } else { cs[col].len_utf16() };
             col += 1;
         }
-        let specs: Vec<_> = self
-            .group(uri, &text)
-            .ok()?
-            .into_iter()
-            .map(|(u, t)| (u, crate::spec::extract_with(&t, &self.opts).ok()))
-            .collect();
-        let own = specs.iter().find(|s| s.0 == uri)?.1.clone()?;
-        let all: Vec<_> = specs.into_iter().filter_map(|s| s.1).collect();
+        let own = crate::spec::extract_with(&text, &self.opts).ok()?;
+        // 呼び出し先は、この文書から `use` で辿れるモジュール（最後の検査で読んだファイル）にある。
+        let mut all = vec![own.clone()];
+        let me = uri_to_path(uri);
+        for d in self.results.get(uri).map_or(&[][..], |r| &r.deps[..]) {
+            if Some(d) != me.as_ref() {
+                let t = self.text_of(&self.uri_for(d));
+                all.extend(t.and_then(|t| crate::spec::extract_with(&t, &self.opts).ok()));
+            }
+        }
         let value = hover::hover(&text, line as u32 + 1, col as u32 + 1, &own, &all)?;
         let md = obj(vec![("kind", "plaintext".into()), ("value", value.into())]);
         Some(obj(vec![("contents", md)]))
@@ -446,52 +432,80 @@ impl<W: Write> Server<W> {
             .or_else(|| uri_to_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))
     }
 
-    /// 閉じた文書をディスクの中身に戻して検査する。ディスクに無ければ、その診断を消し、残りの組を検査し直す。
+    /// 閉じた文書は入口でなくなる。その文書に出していた診断を消し、その文書を読んでいた入口は検査し直す。
     fn close(&mut self, uri: &str) {
         if self.docs.remove(uri).is_none() {
             return;
         }
-        match self.text_of(uri) {
-            Some(text) => self.recheck(uri, &text),
-            None => {
-                let old = self.groups.remove(uri).unwrap_or_default();
-                self.publish(uri, vec![]);
-                for u in old.into_iter().filter(|u| u != uri) {
-                    if let Some(t) = self.text_of(&u) {
-                        self.recheck(&u, &t);
+        let old = self.results.remove(uri);
+        let mut affected: Vec<String> = old
+            .iter()
+            .flat_map(|r| r.diags.iter().map(|d| d.0.clone()))
+            .collect();
+        affected.push(uri.to_string());
+        self.refresh(uri, &mut affected);
+    }
+
+    /// 検査し直して配信する。変わった文書と、それを `use` で読んでいる開いた文書を入口として検査し直す。
+    fn recheck(&mut self, uri: &str) {
+        let mut affected = vec![uri.to_string()];
+        self.refresh(uri, &mut affected);
+    }
+
+    /// `changed` が変わった（開いていれば入口にもする。閉じたときは入口にしない）。依存する入口と合わせて検査し直し、
+    /// 診断が変わりうる URI（`affected` に足す）へ、すべての入口の診断を合わせて送る。
+    fn refresh(&mut self, changed: &str, affected: &mut Vec<String>) {
+        let changed_path = uri_to_path(changed);
+        let mut entries: Vec<String> = vec![];
+        if self.docs.contains_key(changed) {
+            entries.push(changed.to_string());
+        }
+        let mut deps: Vec<String> = self
+            .results
+            .iter()
+            .filter(|(u, r)| {
+                u.as_str() != changed && changed_path.as_ref().is_some_and(|p| r.deps.contains(p))
+            })
+            .map(|(u, _)| u.clone())
+            .collect();
+        deps.sort();
+        entries.extend(deps);
+        for e in entries {
+            let Some(t) = self.docs.get(&e).cloned() else {
+                continue;
+            };
+            let r = self.guarded(&e, &t);
+            affected.extend(r.diags.iter().map(|d| d.0.clone()));
+            if let Some(old) = self.results.insert(e, r) {
+                affected.extend(old.diags.into_iter().map(|d| d.0));
+            }
+        }
+        let mut seen: Vec<String> = vec![];
+        for u in affected.drain(..) {
+            if seen.contains(&u) {
+                continue;
+            }
+            // すべての入口が出した、この文書の診断（同じものは 1 つ）。
+            let mut ds: Vec<Value> = vec![];
+            let mut keys: Vec<&String> = self.results.keys().collect();
+            keys.sort();
+            for k in keys {
+                for (x, d) in &self.results[k].diags {
+                    if *x == u {
+                        for v in d {
+                            if !ds.contains(v) {
+                                ds.push(v.clone());
+                            }
+                        }
                     }
                 }
             }
+            self.publish(&u, ds);
+            seen.push(u);
         }
     }
 
-    /// 検査し直して配信する。組を抜けたファイルが残した元の組も、その場で検査し直す（組の変更前と後の和集合）。
-    fn recheck(&mut self, uri: &str, text: &str) {
-        let mut todo = vec![(uri.to_string(), text.to_string())];
-        let mut done: Vec<String> = vec![];
-        while let Some((u, t)) = todo.pop() {
-            if done.contains(&u) {
-                continue;
-            }
-            done.push(u.clone());
-            let old = self.groups.get(&u).cloned().unwrap_or_default();
-            let (members, out) = self.guarded(&u, &t);
-            for m in &members {
-                self.groups.insert(m.clone(), members.clone());
-            }
-            for (x, d) in out {
-                self.publish(&x, d);
-            }
-            for o in old.into_iter().filter(|o| !members.contains(o)) {
-                self.groups.remove(&o);
-                if let Some(ot) = self.text_of(&o) {
-                    todo.push((o, ot));
-                }
-            }
-        }
-    }
-
-    fn guarded(&self, uri: &str, text: &str) -> (Vec<String>, Diags) {
+    fn guarded(&self, uri: &str, text: &str) -> Checked {
         match std::panic::catch_unwind(AssertUnwindSafe(|| self.compute(uri, text))) {
             Ok(x) => x,
             Err(p) => {
@@ -508,55 +522,106 @@ impl<W: Write> Server<W> {
                     "InternalError",
                     &format!("処理系の不具合（panic）: {msg}"),
                 );
-                let mut m = self.groups.get(uri).cloned().unwrap_or_default();
-                if !m.iter().any(|u| u == uri) {
-                    m.push(uri.to_string());
+                Checked {
+                    deps: uri_to_path(uri).into_iter().collect(),
+                    diags: vec![(uri.to_string(), vec![d])],
                 }
-                (m, vec![(uri.to_string(), vec![d])])
             }
         }
     }
 
-    /// 送る診断を求める。状態は書き換えない。(新しい組, 送る診断)。
-    fn compute(&self, uri: &str, text: &str) -> (Vec<String>, Diags) {
+    /// `uri` の文書を入口にして、`use` で辿れるモジュールを検査する（`project`。ファイルの読み込みと
+    /// 根の外・パスと名前の対応の確認は `modpath::load` と同じ）。状態は書き換えない。
+    fn compute(&self, uri: &str, text: &str) -> Checked {
         if let Some(m) = &self.inject {
             if text.contains(m.as_str()) {
                 panic!("注入された panic（{m}）");
             }
         }
-        let mut out: Diags = vec![];
-        let members: Vec<String> = match self.group(uri, text) {
-            Err(e) => {
-                out.push((uri.to_string(), vec![self.diag(&e, text)]));
-                vec![uri.to_string()]
-            }
-            Ok(ms) => {
-                let srcs: Vec<&str> = ms.iter().map(|m| m.1.as_str()).collect();
-                let hit = check_files(&srcs, &self.opts);
-                for (i, (u, t)) in ms.iter().enumerate() {
-                    let d = match &hit {
-                        Some((j, e)) if *j == i => vec![self.diag(e, t)],
-                        _ => vec![],
-                    };
-                    out.push((u.clone(), d));
-                }
-                ms.into_iter().map(|m| m.0).collect()
-            }
+        let own = (uri.to_string(), vec![]);
+        let Some(path) = uri_to_path(uri) else {
+            // ファイルでない文書: 単独で検査する（`use` は辿れない）。
+            let err =
+                crate::parse(text).and_then(|f| crate::check::check_file_with(&f, &self.opts));
+            let d = err.err().map(|e| self.diag(&e, text)).into_iter().collect();
+            return Checked {
+                deps: vec![],
+                diags: vec![(uri.to_string(), d)],
+            };
         };
-        for old in self.groups.get(uri).into_iter().flatten() {
-            if !members.contains(old) {
-                let d = match self.docs.get(old) {
-                    Some(t) => crate::parse(t)
-                        .err()
-                        .map(|e| self.diag(&e, t))
-                        .into_iter()
-                        .collect(),
-                    None => vec![],
+        let root = self.root_for(&path, text);
+        let open: HashMap<PathBuf, &String> = self
+            .docs
+            .iter()
+            .filter_map(|(u, t)| uri_to_path(u).map(|p| (p, t)))
+            .collect();
+        let mut deps: Vec<PathBuf> = vec![];
+        let mut overlay = |p: &Path| {
+            if !deps.iter().any(|d| d == p) {
+                deps.push(p.to_path_buf());
+            }
+            open.get(p).map(|t| t.to_string())
+        };
+        let r = crate::project::check_project_overlay(&root, &path, &self.opts, &mut overlay);
+        let mut diags: Diags = vec![own];
+        match r {
+            Ok(()) => {}
+            Err(crate::project::ProjectError::Diag { file, error }) => {
+                let u = self.uri_for(&file);
+                let t = if file == path {
+                    Some(text.to_string())
+                } else {
+                    self.text_of(&u)
                 };
-                out.push((old.clone(), d));
+                let d = match t {
+                    Some(t) => self.diag(&error, &t),
+                    None => self.diag_at(0, 0, 0, 0, &format!("{:?}", error.kind), &error.message),
+                };
+                match diags.iter_mut().find(|x| x.0 == u) {
+                    Some(x) => x.1.push(d),
+                    None => diags.push((u, vec![d])),
+                }
+            }
+            Err(crate::project::ProjectError::Read { file, msg }) => {
+                let d = self.diag_at(
+                    0,
+                    0,
+                    0,
+                    0,
+                    "Read",
+                    &format!("`{}` を読めない: {msg}", file.display()),
+                );
+                diags[0].1.push(d);
             }
         }
-        (members, out)
+        Checked { deps, diags }
+    }
+
+    /// モジュールの名前とパスの対応の根。ワークスペースの根の下にあればそれ、なければ
+    /// 文書の `module` の宣言の名前の分だけパスの末尾をはがしたもの（合わなければ置かれたディレクトリ。
+    /// 対応の誤りとして `modpath` が報告する）。
+    fn root_for(&self, path: &Path, text: &str) -> PathBuf {
+        if let Some(r) = self.root.as_ref().filter(|r| path.starts_with(r)) {
+            return r.clone();
+        }
+        let parent = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let Ok(f) = crate::parse(text) else {
+            return parent;
+        };
+        let mut want = std::path::PathBuf::new();
+        for seg in &f.module.name {
+            want.push(seg);
+        }
+        want.set_extension("sigil");
+        let mut root = path.to_path_buf();
+        for _ in want.components() {
+            root.pop();
+        }
+        if path.ends_with(&want) {
+            root
+        } else {
+            parent
+        }
     }
 
     fn uri_for(&self, p: &Path) -> String {
@@ -565,43 +630,6 @@ impl<W: Write> Server<W> {
             .keys()
             .find(|u| uri_to_path(u).as_deref() == Some(p));
         open.cloned().unwrap_or_else(|| path_to_uri(p))
-    }
-
-    /// 同じディレクトリで同じモジュールの宣言（名前・`targets`・`trust`）を持つファイル（(URI, 中身)。パスの順）。構文エラーなら、その文書自身のエラー。
-    fn group(&self, uri: &str, text: &str) -> Result<Vec<(String, String)>, Error> {
-        let module = crate::parse(text)?.module;
-        let same = |m: &crate::ast::ModuleDecl| {
-            m.name == module.name && m.targets == module.targets && m.trust == module.trust
-        };
-        let Some(path) = uri_to_path(uri) else {
-            return Ok(vec![(uri.into(), text.into())]);
-        };
-        let mut ms = vec![(path.clone(), uri.to_string(), text.to_string())];
-        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
-        for ent in std::fs::read_dir(dir.unwrap_or(Path::new(".")))
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let p = ent.path();
-            if p == path || p.extension().and_then(|e| e.to_str()) != Some("sigil") {
-                continue;
-            }
-            let u = self.uri_for(&p);
-            let Some(t) = self
-                .docs
-                .get(&u)
-                .cloned()
-                .or_else(|| std::fs::read_to_string(&p).ok())
-            else {
-                continue;
-            };
-            if crate::parse(&t).is_ok_and(|f| same(&f.module)) {
-                ms.push((p, u, t));
-            }
-        }
-        ms.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(ms.into_iter().map(|(_, u, t)| (u, t)).collect())
     }
 
     /// 決定 6 の範囲を持つ診断。

@@ -107,6 +107,18 @@ impl Client {
         r
     }
 
+    /// ワークスペースの根（`rootUri`）つきの `initialize`。
+    fn initialize_root(&mut self, root: &Path) {
+        let caps = obj(vec![("general", obj(vec![]))]);
+        let params = obj(vec![
+            ("capabilities", caps),
+            ("rootUri", path_to_uri(root).into()),
+        ]);
+        self.request(1, "initialize", params);
+        self.recv();
+        self.notify("initialized", obj(vec![]));
+    }
+
     fn open(&mut self, path: &Path, text: &str) {
         let doc = obj(vec![
             ("uri", path_to_uri(path).into()),
@@ -194,7 +206,34 @@ fn example(rel: &str) -> PathBuf {
         .join(rel)
 }
 
-const HEAD: &str = "module m.a\n  targets server\n  trust none\n\n";
+/// ソースを、`module` の宣言の名前に対応するパス（`<根>/a/b.sigil`）に置く。
+fn stage(root: &Path, text: &str) -> PathBuf {
+    let name = text
+        .lines()
+        .find_map(|l| l.strip_prefix("module "))
+        .unwrap()
+        .trim()
+        .replace('.', "/");
+    let p = root.join(format!("{name}.sigil"));
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, text).unwrap();
+    p
+}
+
+/// 例 04 の組（入口, `pub` にした取り込まれる側）を根の下に置く。(入口の位置, 取り込まれる側の位置, 入口の中身, 取り込まれる側の中身)。
+fn effects_staged(root: &Path) -> (PathBuf, PathBuf, String, String) {
+    let eff = std::fs::read_to_string(example("04-effects/effects.sigil"))
+        .unwrap()
+        .replace("\nfn count_up", "\npub fn count_up")
+        .replace("\nfn with_tax", "\npub fn with_tax");
+    let main = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/effects_main.sigil"),
+    )
+    .unwrap();
+    (stage(root, &main), stage(root, &eff), main, eff)
+}
+
+const HEAD: &str = "module m\n  targets server\n  trust none\n\n";
 const FN_HEAD: &str =
     "fn f(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n";
 
@@ -215,14 +254,21 @@ fn code(d: &Value) -> &str {
 
 #[test]
 fn lsp_samples_no_diagnostics() {
-    let files = [
+    // 例は `module` の名前がリポジトリの配置と合わないので、根の下に名前どおりのパスで複製して開く。
+    let root = tmpdir("samples");
+    let mut files: Vec<PathBuf> = [
         "01-average/c-brace.sigil",
         "02-read-port/c-brace.sigil",
         "03-ownership/ownership.sigil",
-        "04-effects/effects.sigil",
         "05-control/control.sigil",
-        "04-effects/entry.sigil",
-    ];
+    ]
+    .iter()
+    .map(|f| {
+        let p = example(f);
+        stage(&root, &std::fs::read_to_string(p).unwrap())
+    })
+    .collect();
+    let (main_p, eff_p, main, eff) = effects_staged(&root);
     let mut c = Client::start(&[]);
     let r = c.initialize(&[]);
     let caps = r.get("result").unwrap().get("capabilities").unwrap();
@@ -230,25 +276,25 @@ fn lsp_samples_no_diagnostics() {
         caps.get("positionEncoding").and_then(Value::as_str),
         Some("utf-16")
     );
-    for f in files {
-        let p = example(f);
-        c.open(&p, &std::fs::read_to_string(&p).unwrap());
+    for p in &files {
+        c.open(p, &std::fs::read_to_string(p).unwrap());
     }
+    c.open(&eff_p, &eff);
+    c.open(&main_p, &main);
+    files.push(eff_p);
+    files.push(main_p);
     let (got, code) = c.finish();
     assert_eq!(code, 0);
     for (uri, d) in &got {
         assert!(d.is_empty(), "{uri}: {d:?}");
     }
-    for f in files {
+    for p in &files {
         assert!(
-            got.iter().any(|(u, _)| *u == path_to_uri(&example(f))),
-            "{f} に診断が送られない"
+            got.iter().any(|(u, _)| *u == path_to_uri(p)),
+            "{} に診断が送られない",
+            p.display()
         );
     }
-    // 04-effects は 2 つのファイルを合わせて検査する（開いていない方にも送る）。
-    assert!(got
-        .iter()
-        .any(|(u, _)| u.ends_with("/04-effects/entry.sigil")));
 }
 
 fn move_src(second_use: &str) -> String {
@@ -258,7 +304,7 @@ fn move_src(second_use: &str) -> String {
 #[test]
 fn lsp_error_diagnostic() {
     let dir = tmpdir("error");
-    let p = dir.join("m.sigil");
+    let p = write(&dir, "m.sigil", &move_src(""));
     let mut c = Client::start(&[]);
     c.initialize(&[]);
     c.open(&p, &move_src("  take(s);\n"));
@@ -284,7 +330,7 @@ fn lsp_error_diagnostic() {
 #[test]
 fn lsp_utf16_positions() {
     let dir = tmpdir("utf16");
-    let p = dir.join("m.sigil");
+    let p = write(&dir, "m.sigil", "");
     // 12 行目: `  let s = "あ😀"; let t: Int = true;`。誤りは 2 つ目の `let`（文字の位置 16）
     let src = format!("{HEAD}{FN_HEAD}  let s = \"あ😀\"; let t: Int = true;\n  return n;\n}}\n");
     for (enc, expect) in [("utf-16", (10, 17, 10, 20)), ("utf-32", (10, 16, 10, 19))] {
@@ -345,12 +391,16 @@ fn lsp_shutdown() {
 #[test]
 fn lsp_internal_error_contained() {
     let dir = tmpdir("panic");
-    let ok_text = format!("{HEAD}{FN_HEAD}  return n;\n}}\n");
-    let bad = write(&dir, "bad.sigil", &format!("{HEAD}// PANIC_HERE\n"));
+    let bad_text = "module bad\n  targets server\n  trust none\n\n// PANIC_HERE\n";
+    let ok_text = format!(
+        "{}{FN_HEAD}  return n;\n}}\n",
+        "module ok\n  targets server\n  trust none\n\n"
+    );
+    let bad = write(&dir, "bad.sigil", bad_text);
     let ok = write(&dir, "ok.sigil", &ok_text);
     let mut c = Client::start(&[("SIGIL_LSP_TEST_PANIC", "PANIC_HERE")]);
     c.initialize(&[]);
-    c.open(&bad, &format!("{HEAD}// PANIC_HERE\n"));
+    c.open(&bad, bad_text);
     let (uri, d) = c.publish();
     assert_eq!(uri, path_to_uri(&bad));
     assert_eq!((d.len(), code(&d[0])), (1, "InternalError"));
@@ -360,13 +410,13 @@ fn lsp_internal_error_contained() {
         .and_then(Value::as_str)
         .unwrap()
         .contains("注入された panic"));
-    // 続けて次の要求に応える（状態は検査の前のまま）
-    c.open(&ok, &format!("{HEAD}{FN_HEAD}  return n;\n}}\n"));
-    // 同じディレクトリ・同じモジュールなので両方に配信される（注入は開いた文書の本文だけ）
-    let ps = c.publishes(2);
-    assert!(ps.iter().all(|(_, d)| d.is_empty()));
-    c.change(&bad, &format!("{HEAD}// 直した\n"));
-    assert!(c.publishes(2).iter().all(|(_, d)| d.is_empty()));
+    // 続けて次の要求に応える（状態は検査の前のまま。別のモジュールなので配信は開いた文書だけ）
+    c.open(&ok, &ok_text);
+    let (uri, d) = c.publish();
+    assert_eq!((uri, d.is_empty()), (path_to_uri(&ok), true));
+    c.change(&bad, &bad_text.replace("PANIC_HERE", "直した"));
+    let (uri, d) = c.publish();
+    assert_eq!((uri, d.is_empty()), (path_to_uri(&bad), true));
     assert_eq!(c.finish().1, 0);
 }
 
@@ -408,40 +458,108 @@ fn lsp_lex_error_ranges() {
 }
 
 #[test]
-fn lsp_multi_file_publish() {
-    let dir = tmpdir("multi");
-    let eff = std::fs::read_to_string(example("04-effects/effects.sigil")).unwrap();
-    let entry = std::fs::read_to_string(example("04-effects/entry.sigil")).unwrap();
-    let (pe, pn) = (
-        write(&dir, "effects.sigil", &eff),
-        write(&dir, "entry.sigil", &entry),
-    );
+fn lsp_use_publishes_across_modules() {
+    // 入口が `use` で取り込むモジュールの誤りは、取り込まれる側のファイルに診断として配信される。
+    let root = tmpdir("multi");
+    let (pn, pe, main, eff) = effects_staged(&root);
     let mut c = Client::start(&[]);
     c.initialize(&[]);
     c.open(&pe, &eff);
-    let got = c.publishes(2);
-    assert!(got.iter().all(|(_, d)| d.is_empty()));
-    // 開いた方の関数の名前を変えると、開いていない方（entry）の呼び出しが解決できなくなる
+    let (u, d) = c.publish();
+    assert_eq!((u, d.is_empty()), (path_to_uri(&pe), true));
+    c.open(&pn, &main);
+    let (u, d) = c.publish();
+    assert_eq!((u, d.is_empty()), (path_to_uri(&pn), true));
+    // 取り込まれる側の関数の名前を変えると、開いている入口の `use` が解決できなくなる
     c.change(&pe, &eff.replace("fn with_tax", "fn with_tax2"));
     let got = c.publishes(2);
-    assert_eq!(got[0].0, path_to_uri(&pe));
-    assert!(got[0].1.is_empty());
-    assert_eq!(got[1].0, path_to_uri(&pn));
-    assert_eq!(got[1].1.len(), 1, "{:?}", got[1].1);
+    assert_eq!(got[0].0.clone(), path_to_uri(&pe).min(path_to_uri(&pn)));
+    let by = |u: &str| got.iter().find(|g| g.0 == u).unwrap().1.clone();
+    assert!(by(&path_to_uri(&pe)).is_empty());
+    let d = by(&path_to_uri(&pn));
+    assert_eq!((d.len(), code(&d[0])), (1, "UnresolvedUse"), "{d:?}");
     // 戻すと、空の配列で消える
     c.change(&pe, &eff);
     assert!(c.publishes(2).iter().all(|(_, d)| d.is_empty()));
-    // モジュールの宣言を変えて組から外すと、外れた方に空の配列を送る
-    c.change(
-        &pe,
-        &eff.replace("module examples.effect_check", "module examples.other"),
-    );
+    // 取り込まれる側の本文の型の誤りは、その文書に 1 件だけ（入口からも自分自身からも見えるが、重ねない）
+    let bad = eff.replacen("return ", "let z: Int = true;\n  return ", 1);
+    c.change(&pe, &bad);
     let got = c.publishes(2);
-    assert_eq!(got.iter().filter(|(_, d)| !d.is_empty()).count(), 0);
-    assert!(got.iter().any(|(u, _)| *u == path_to_uri(&pn)));
-    // 閉じると、ディスクの中身で検査し直す
+    let d = by_uri(&got, &pe);
+    assert_eq!((d.len(), code(&d[0])), (1, "TypeMismatch"), "{got:?}");
+    assert!(by_uri(&got, &pn).is_empty());
+    // 閉じると、ディスクの中身（正しい）で入口を検査し直す
+    std::fs::write(&pe, &eff).unwrap();
     c.close(&pe);
-    c.publishes(1);
+    let got = c.publishes(2);
+    assert!(got.iter().all(|(_, d)| d.is_empty()), "{got:?}");
+    assert_eq!(c.finish().1, 0);
+}
+
+fn by_uri(got: &[(String, Vec<Value>)], p: &Path) -> Vec<Value> {
+    got.iter()
+        .find(|g| g.0 == path_to_uri(p))
+        .unwrap()
+        .1
+        .clone()
+}
+
+#[test]
+fn lsp_error_in_unopened_module_goes_to_its_file() {
+    let root = tmpdir("unopened");
+    let (pn, pe, main, eff) = effects_staged(&root);
+    std::fs::write(
+        &pe,
+        eff.replacen("return ", "let z: Int = true;\n  return ", 1),
+    )
+    .unwrap();
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    c.open(&pn, &main);
+    let got = c.publishes(2);
+    assert!(by_uri(&got, &pn).is_empty());
+    let d = by_uri(&got, &pe);
+    assert_eq!((d.len(), code(&d[0])), (1, "TypeMismatch"), "{d:?}");
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_path_must_match_module_name() {
+    // `module m` のファイルが `other.sigil` にある。名前とパスが合わない（CLI と同じ ModulePathMismatch）。
+    let dir = tmpdir("mismatch");
+    let p = write(
+        &dir,
+        "other.sigil",
+        &format!("{HEAD}{FN_HEAD}  return n;\n}}\n"),
+    );
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    c.open(&p, &format!("{HEAD}{FN_HEAD}  return n;\n}}\n"));
+    let (_, d) = c.publish();
+    assert_eq!((d.len(), code(&d[0])), (1, "ModulePathMismatch"), "{d:?}");
+    assert_eq!(c.finish().1, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_follows_use_only_inside_the_workspace_root() {
+    // 根の中の symlink が根の外のファイルを指していると、`use` で辿れない（`modpath::load` の確認を使う）。
+    let base = tmpdir("escape");
+    let root = base.join("ws");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let lib = "module lib.a\n  targets server\n  trust none\n\npub fn step(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return n;\n}\n";
+    std::fs::write(outside.join("a.sigil"), lib).unwrap();
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::os::unix::fs::symlink(outside.join("a.sigil"), root.join("lib/a.sigil")).unwrap();
+    let main = "module app\n  targets server\n  trust none\n\nuse lib.a.step;\n\nfn f(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return step(n);\n}\n";
+    let pm = write(&root, "app.sigil", main);
+    let mut c = Client::start(&[]);
+    c.initialize_root(&root);
+    c.open(&pm, main);
+    let got = c.publishes(2);
+    let d = by_uri(&got, &root.join("lib/a.sigil"));
+    assert_eq!((d.len(), code(&d[0])), (1, "ModulePathMismatch"), "{d:?}");
     assert_eq!(c.finish().1, 0);
 }
 
@@ -534,64 +652,6 @@ fn lsp_frame_limits_on_the_wire() {
     let mut c = Client::start(&[]);
     c.raw(b"Content-Length: abc\r\n\r\n");
     assert_eq!(c.exit_code(), 1);
-}
-
-#[test]
-fn lsp_group_split_rechecks_remaining() {
-    // a と c は同じ関数 f を持ち（重複）、b は別の関数。3 つとも m.a。
-    let dir = tmpdir("split");
-    let f = |name: &str| {
-        format!(
-            "{HEAD}{}  return n;\n}}\n",
-            FN_HEAD.replace("fn f(", &format!("fn {name}("))
-        )
-    };
-    let (a, b, c) = (
-        write(&dir, "a.sigil", &f("f")),
-        write(&dir, "b.sigil", &f("g")),
-        write(&dir, "c.sigil", &f("f")),
-    );
-    let mut cl = Client::start(&[]);
-    cl.initialize(&[]);
-    cl.open(&b, &f("g"));
-    let first = cl.publishes(3);
-    assert_eq!(
-        first.iter().map(|p| p.1.len()).sum::<usize>(),
-        1,
-        "重複が 1 件"
-    );
-    // b が別のモジュールへ移る。a と c の組は、b を抜けた後も検査し直されて重複が残る。
-    cl.change(&b, &f("g").replace("module m.a", "module m.b"));
-    let (got, code) = cl.finish();
-    assert_eq!(code, 0);
-    let last = |p: &Path| {
-        got.iter()
-            .rev()
-            .find(|g| g.0 == path_to_uri(p))
-            .map(|g| g.1.len())
-    };
-    assert_eq!(last(&b), Some(0));
-    assert_eq!([last(&a), last(&c)].iter().flatten().sum::<usize>(), 1);
-    // 閉じる（ディスクの中身は m.a）と b は元の組へ戻り、3 つのファイルのどれかに重複が 1 件残る。
-    let mut cl = Client::start(&[]);
-    cl.initialize(&[]);
-    cl.open(&b, &f("g"));
-    cl.publishes(3);
-    cl.change(&b, &f("g").replace("module m.a", "module m.b"));
-    cl.close(&b);
-    let (got, _) = cl.finish();
-    let n: usize = [&a, &b, &c]
-        .iter()
-        .map(|p| {
-            got.iter()
-                .rev()
-                .find(|g| g.0 == path_to_uri(p))
-                .unwrap()
-                .1
-                .len()
-        })
-        .sum();
-    assert_eq!(n, 1);
 }
 
 impl Client {
@@ -699,23 +759,20 @@ fn w(s: S) -> Int\n  intent \"w\"\n  requires none\n  ensures none\n  effects no
 
 #[test]
 fn lsp_hover_cross_file_and_utf16() {
-    // 開いたのは entry.sigil だけ。呼び出し先 `with_tax` は同じ組の effects.sigil にある。
-    let p = example("04-effects/entry.sigil");
-    let src = std::fs::read_to_string(&p).unwrap();
-    let other = std::fs::read_to_string(example("04-effects/effects.sigil")).unwrap();
+    // 開いたのは入口だけ。呼び出し先 `with_tax` は `use` で取り込んだモジュールにある。
+    let root = tmpdir("hoverx");
+    let (p, _, src, other) = effects_staged(&root);
     let mut c = Client::start(&[]);
     c.initialize(&[]);
     c.open(&p, &src);
-    c.publishes(2);
+    c.publish();
     let l = src
         .lines()
         .position(|l| l.contains("with_tax(&xs)"))
         .unwrap() as i64;
     let got = c.hover(&p, l, 12).unwrap();
-    assert!(got.starts_with("関数 with_tax（非公開）\n"), "{got}");
-    let spec = std::fs::read_to_string(example("04-effects/effects.spec")).unwrap();
-    assert!(spec.contains(&got));
-    assert!(other.contains("fn with_tax"));
+    assert!(got.starts_with("関数 with_tax（公開）\n"), "{got}");
+    assert!(sigil::spec::spec(&other).unwrap().contains(&got));
     assert_eq!(c.finish().1, 0);
 
     // 日本語の文字列（UTF-16 で 1 単位、UTF-8 で 3 バイト）と絵文字（UTF-16 で 2 単位）の後ろの呼び出し。

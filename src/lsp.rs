@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// `Content-Length` の上限（ADR 0020）。超えた本文は読まずに捨てる。
 pub const MAX_BODY: u64 = 64 * 1024 * 1024;
@@ -18,6 +19,10 @@ pub const MAX_BODY: u64 = 64 * 1024 * 1024;
 pub const MAX_HEADER_LINE: usize = 1024;
 /// 検査に panic を起こさせるテスト用の差し込み口（この環境変数の値を含む文書で panic する）。
 pub const INJECT_PANIC_ENV: &str = "SIGIL_LSP_TEST_PANIC";
+/// 依存の本文の保持量の上限を変えるテスト用の差し込み口（バイト数）。既定は `MAX_DEP_BYTES`。
+pub const DEP_CAP_ENV: &str = "SIGIL_LSP_TEST_DEP_CAP";
+/// 言語サーバーが全体で持つ依存の本文の上限（ADR 0022 決定 4）。
+pub const MAX_DEP_BYTES: usize = 64 * 1024 * 1024;
 
 /// 枠を 1 つ読んだ結果。
 #[derive(Debug, PartialEq)]
@@ -193,6 +198,8 @@ pub struct Server<W: Write> {
     /// 開いている文書ごとの、最後の検査の結果（その文書を入口にして `use` を辿ったもの）。
     results: HashMap<String, Checked>,
     inject: Option<String>,
+    /// 依存の本文の保持量の上限（バイト）。
+    dep_cap: usize,
 }
 
 type Diags = Vec<(String, Vec<Value>)>;
@@ -201,6 +208,9 @@ type Diags = Vec<(String, Vec<Value>)>;
 struct Checked {
     /// 読んだファイル（入口を含む。`use` で辿れたもの）。
     deps: Vec<PathBuf>,
+    /// 検査のときに読んだ依存（入口以外）の本文。パスごとに入口の間で共有する。上限を超えた分は持たない。
+    /// hover と診断の範囲はこれを使い、ディスクを読み直さない（ADR 0022 決定 4）。
+    texts: Vec<(PathBuf, Arc<str>)>,
     /// 診断（URI -> 診断）。入口の URI は、診断がなくても入れる。
     diags: Diags,
 }
@@ -219,6 +229,10 @@ impl<W: Write> Server<W> {
             docs: HashMap::new(),
             root: None,
             results: HashMap::new(),
+            dep_cap: std::env::var(DEP_CAP_ENV)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(MAX_DEP_BYTES),
             inject: std::env::var(INJECT_PANIC_ENV)
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -396,7 +410,7 @@ impl<W: Write> Server<W> {
         let pos = params.get("position")?;
         let line = pos.get("line")?.as_i64()? as usize;
         let ch = pos.get("character")?.as_i64()? as usize;
-        let text = self.text_of(uri)?;
+        let text = self.docs.get(uri)?.clone();
         if let Some(m) = &self.inject {
             if text.contains(m.as_str()) {
                 panic!("注入された panic（{m}）");
@@ -412,24 +426,13 @@ impl<W: Write> Server<W> {
         let own = crate::spec::extract_with(&text, &self.opts).ok()?;
         // 呼び出し先は、この文書から `use` で辿れるモジュール（最後の検査で読んだファイル）にある。
         let mut all = vec![own.clone()];
-        let me = uri_to_path(uri);
-        for d in self.results.get(uri).map_or(&[][..], |r| &r.deps[..]) {
-            if Some(d) != me.as_ref() {
-                let t = self.text_of(&self.uri_for(d));
-                all.extend(t.and_then(|t| crate::spec::extract_with(&t, &self.opts).ok()));
-            }
+        // 本文は検査のときに読んだもの（ディスクを読み直さない。上限を超えて持たない依存は出さない）。
+        for (_, t) in self.results.get(uri).map_or(&[][..], |r| &r.texts[..]) {
+            all.extend(crate::spec::extract_with(t, &self.opts).ok());
         }
         let value = hover::hover(&text, line as u32 + 1, col as u32 + 1, &own, &all)?;
         let md = obj(vec![("kind", "plaintext".into()), ("value", value.into())]);
         Some(obj(vec![("contents", md)]))
-    }
-
-    /// 文書の中身。開いていなければディスクの中身。
-    fn text_of(&self, uri: &str) -> Option<String> {
-        self.docs
-            .get(uri)
-            .cloned()
-            .or_else(|| uri_to_path(uri).and_then(|p| crate::modpath::read_source(&p).ok()))
     }
 
     /// 閉じた文書は入口でなくなる。その文書に出していた診断を消し、その文書を読んでいた入口は検査し直す。
@@ -474,7 +477,8 @@ impl<W: Write> Server<W> {
             let Some(t) = self.docs.get(&e).cloned() else {
                 continue;
             };
-            let r = self.guarded(&e, &t);
+            let mut r = self.guarded(&e, &t);
+            self.share_texts(&e, &mut r);
             affected.extend(r.diags.iter().map(|d| d.0.clone()));
             if let Some(old) = self.results.insert(e, r) {
                 affected.extend(old.diags.into_iter().map(|d| d.0));
@@ -505,6 +509,37 @@ impl<W: Write> Server<W> {
         }
     }
 
+    /// 検査の結果の本文を、他の入口が同じパス・同じ中身で持っているものと共有する。
+    fn share_texts(&self, entry: &str, r: &mut Checked) {
+        for (p, t) in r.texts.iter_mut() {
+            let same = self
+                .results
+                .iter()
+                .filter(|(u, _)| u.as_str() != entry)
+                .flat_map(|(_, o)| o.texts.iter())
+                .find(|(q, u)| q == p && **u == **t);
+            if let Some((_, u)) = same {
+                *t = Arc::clone(u);
+            }
+        }
+    }
+
+    /// 他の入口が持つ依存の本文の大きさ（パスと中身が同じものは 1 つと数える）。
+    fn held_bytes(&self, except: &str) -> usize {
+        let mut seen: Vec<*const str> = vec![];
+        let mut total = 0;
+        for (_, r) in self.results.iter().filter(|(u, _)| u.as_str() != except) {
+            for (_, t) in &r.texts {
+                let ptr = Arc::as_ptr(t);
+                if !seen.contains(&ptr) {
+                    seen.push(ptr);
+                    total += t.len();
+                }
+            }
+        }
+        total
+    }
+
     fn guarded(&self, uri: &str, text: &str) -> Checked {
         match std::panic::catch_unwind(AssertUnwindSafe(|| self.compute(uri, text))) {
             Ok(x) => x,
@@ -524,6 +559,7 @@ impl<W: Write> Server<W> {
                 );
                 Checked {
                     deps: uri_to_path(uri).into_iter().collect(),
+                    texts: vec![],
                     diags: vec![(uri.to_string(), vec![d])],
                 }
             }
@@ -546,6 +582,7 @@ impl<W: Write> Server<W> {
             let d = err.err().map(|e| self.diag(&e, text)).into_iter().collect();
             return Checked {
                 deps: vec![],
+                texts: vec![],
                 diags: vec![(uri.to_string(), d)],
             };
         };
@@ -562,20 +599,81 @@ impl<W: Write> Server<W> {
             }
             open.get(p).map(|t| t.to_string())
         };
-        let r = crate::project::check_project_overlay(&root, &path, &self.opts, &mut overlay);
+        // 検査が実際に読んだ本文（構文解析に渡したもの）。診断の範囲と hover はこれを使う。
+        let mut read: Vec<(PathBuf, String)> = vec![];
+        let mut on_text = |p: &Path, t: &str| {
+            if p != path && !read.iter().any(|(q, _)| q == p) {
+                read.push((p.to_path_buf(), t.to_string()));
+            }
+        };
+        let r = crate::project::check_project_overlay(
+            &root,
+            &path,
+            &self.opts,
+            &mut overlay,
+            &mut on_text,
+        );
+        // 持つ本文は、言語サーバー全体の上限（`dep_cap`）まで。超えた分は持たない（ディスクから読み直さない）。
+        let mut budget = self.dep_cap.saturating_sub(self.held_bytes(uri));
+        let mut texts: Vec<(PathBuf, Arc<str>)> = vec![];
+        let mut dropped: Vec<PathBuf> = vec![];
+        for (p, t) in read {
+            let shared = self
+                .results
+                .iter()
+                .filter(|(u, _)| u.as_str() != uri)
+                .flat_map(|(_, o)| o.texts.iter())
+                .any(|(q, u)| *q == p && **u == *t);
+            let cost = if shared { 0 } else { t.len() };
+            if cost <= budget {
+                budget -= cost;
+                texts.push((p, Arc::from(t)));
+            } else {
+                dropped.push(p);
+            }
+        }
+        let body_of = |p: &Path| -> Option<&str> {
+            if p == path {
+                Some(text)
+            } else {
+                texts.iter().find(|(q, _)| q == p).map(|(_, t)| &**t)
+            }
+        };
         let mut diags: Diags = vec![own];
         match r {
             Ok(()) => {}
             Err(crate::project::ProjectError::Diag { file, error }) => {
-                let u = self.uri_for(&file);
-                let t = if file == path {
-                    Some(text.to_string())
-                } else {
-                    self.text_of(&u)
-                };
-                let d = match t {
-                    Some(t) => self.diag(&error, &t),
-                    None => self.diag_at(0, 0, 0, 0, &format!("{:?}", error.kind), &error.message),
+                let mut at = file.clone();
+                let mut line_range: Option<(usize, usize)> = None;
+                if dropped.contains(&file) {
+                    // 本文を持たない依存の診断は、それを取り込んだ `use` の行に出す。
+                    if let Some((imp, ln, len)) =
+                        self.use_line_of(&root, &file, &path, text, &texts)
+                    {
+                        at = imp;
+                        line_range = Some((ln, len));
+                    } else {
+                        at = path.clone();
+                    }
+                }
+                let u = self.uri_for(&at);
+                let d = match (line_range, body_of(&at)) {
+                    (Some((ln, len)), _) => self.diag_at(
+                        ln,
+                        0,
+                        ln,
+                        len,
+                        &format!("{:?}", error.kind),
+                        &format!(
+                            "`{}` の診断（本文を持たない）: {}",
+                            file.display(),
+                            error.message
+                        ),
+                    ),
+                    (None, Some(t)) => self.diag(&error, t),
+                    (None, None) => {
+                        self.diag_at(0, 0, 0, 0, &format!("{:?}", error.kind), &error.message)
+                    }
                 };
                 match diags.iter_mut().find(|x| x.0 == u) {
                     Some(x) => x.1.push(d),
@@ -594,7 +692,45 @@ impl<W: Write> Server<W> {
                 diags[0].1.push(d);
             }
         }
-        Checked { deps, diags }
+        Checked { deps, texts, diags }
+    }
+
+    /// `file`（`root` の下のモジュール）を取り込む `use` の行を、入口と持っている本文から探す。
+    /// 見つかれば（取り込んだファイル、0 始まりの行、行の長さ）。
+    fn use_line_of(
+        &self,
+        root: &Path,
+        file: &Path,
+        entry: &Path,
+        entry_text: &str,
+        texts: &[(PathBuf, Arc<str>)],
+    ) -> Option<(PathBuf, usize, usize)> {
+        let rel = file.strip_prefix(root).ok()?.with_extension("");
+        let name: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        let name = name.join(".");
+        let mut sources: Vec<(PathBuf, &str)> = vec![(entry.to_path_buf(), entry_text)];
+        sources.extend(texts.iter().map(|(p, t)| (p.clone(), &**t)));
+        for (p, t) in sources {
+            for (i, l) in t.split('\n').enumerate() {
+                let Some(rest) = l.trim_start().strip_prefix("use ") else {
+                    continue;
+                };
+                let rest = rest.trim_start();
+                if let Some(after) = rest.strip_prefix(name.as_str()) {
+                    if after
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+                    {
+                        return Some((p, i, l.chars().count()));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// モジュールの名前とパスの対応の根。ワークスペースの根の下にあればそれ、なければ

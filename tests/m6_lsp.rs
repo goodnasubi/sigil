@@ -907,3 +907,97 @@ fn lsp_disk_read_rejects_fifo_device_and_huge_file() {
     assert_eq!(c.hover(&big, 0, 0), None);
     assert_eq!(c.finish().1, 0);
 }
+
+/// 例 04 の組を根の下に置き、入口を開いて、`with_tax` の呼び出しの位置を返す。
+fn hover_setup(c: &mut Client, root: &Path) -> (PathBuf, PathBuf, String, i64) {
+    let (p, pe, src, eff) = effects_staged(root);
+    c.open(&p, &src);
+    let l = src
+        .lines()
+        .position(|l| l.contains("with_tax(&xs)"))
+        .unwrap() as i64;
+    (p, pe, eff, l)
+}
+
+#[test]
+fn lsp_hover_uses_check_time_body_not_disk() {
+    // ADR 0022 決定 4: 検査のあとにディスクの依存を書き換えても、hover は検査した本文に基づく。
+    let root = tmpdir("hover-fresh");
+    let mut c = Client::start(&[]);
+    c.initialize_root(&root);
+    let (p, pe, eff, l) = hover_setup(&mut c, &root);
+    c.publish();
+    let want = sigil::spec::spec(&eff).unwrap();
+    let before = c.hover(&p, l, 12).unwrap();
+    assert!(want.contains(&before), "{before}");
+    // 1. 同じ場所の中身を、署名の違うものに書き換える（通知なし）。
+    std::fs::write(&pe, eff.replace("fn with_tax(", "fn with_tax_renamed(")).unwrap();
+    assert_eq!(c.hover(&p, l, 12), Some(before.clone()));
+    // 2. 根の外のファイルを指す symlink に差し替える。外の中身は読まない。
+    let outside = tmpdir("hover-fresh-out");
+    let out = write(
+        &outside,
+        "evil.sigil",
+        &eff.replace("fn with_tax(", "fn with_tax_evil("),
+    );
+    std::fs::remove_file(&pe).unwrap();
+    std::os::unix::fs::symlink(&out, &pe).unwrap();
+    assert_eq!(c.hover(&p, l, 12), Some(before));
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_dependency_body_cap_drops_hover_and_moves_diagnostic_to_use_line() {
+    // 保持量の上限を超えた依存は、本文を持たない（hover を出さず、ディスクも読み直さない）。診断は `use` の行に出す。
+    let root = tmpdir("depcap");
+    let (pn, pe, main, eff) = effects_staged(&root);
+    std::fs::write(
+        &pe,
+        eff.replacen("return ", "let z: Int = true;\n  return ", 1),
+    )
+    .unwrap();
+    let mut c = Client::start(&[(sigil::lsp::DEP_CAP_ENV, "1")]);
+    c.initialize_root(&root);
+    c.open(&pn, &main);
+    let got = c.publishes(1);
+    assert_eq!(got[0].0, path_to_uri(&pn));
+    let d = &got[0].1;
+    assert_eq!((d.len(), code(&d[0])), (1, "TypeMismatch"), "{d:?}");
+    let line = main
+        .lines()
+        .position(|l| l.starts_with("use examples.effect_check"))
+        .unwrap() as i64;
+    let len = main.lines().nth(line as usize).unwrap().chars().count() as i64;
+    assert_eq!(pos(&d[0]), (line, 0, line, len));
+    // 依存の本文を持たないので hover は出さない。
+    let l = main
+        .lines()
+        .position(|l| l.contains("with_tax(&xs)"))
+        .unwrap() as i64;
+    assert_eq!(c.hover(&pn, l, 12), None);
+    assert_eq!(c.finish().1, 0);
+}
+
+#[test]
+fn lsp_dependency_body_is_shared_between_entries() {
+    // 同じパス・同じ中身の依存の本文は入口の間で 1 つだけ持つ（上限は 1 つ分）。2 つ目の入口も hover が出る。
+    let root = tmpdir("depshare");
+    let (p1, _, main, eff) = effects_staged(&root);
+    let main2 = main.replace("effect_main", "effect_main2");
+    let p2 = stage(&root, &main2);
+    let cap = (eff.len() + 10).to_string();
+    let mut c = Client::start(&[(sigil::lsp::DEP_CAP_ENV, &cap)]);
+    c.initialize_root(&root);
+    c.open(&p1, &main);
+    c.publish();
+    c.open(&p2, &main2);
+    c.publish();
+    let l = main
+        .lines()
+        .position(|l| l.contains("with_tax(&xs)"))
+        .unwrap() as i64;
+    let a = c.hover(&p1, l, 12).unwrap();
+    assert!(a.starts_with("関数 with_tax"), "{a}");
+    assert_eq!(c.hover(&p2, l, 12), Some(a));
+    assert_eq!(c.finish().1, 0);
+}

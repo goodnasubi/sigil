@@ -332,6 +332,17 @@ pub fn load_with_hook(
     file: &Path,
     between: &mut dyn FnMut(),
 ) -> Result<(String, crate::ast::File), LoadError> {
+    load_full(root, file, between, &mut |_| {})
+}
+
+/// `load_with_hook` の、読んだ本文を構文解析の前に `sink` へ渡す版（構文解析に失敗した本文も受け取れる。
+/// 言語サーバーが診断の範囲に使う）。
+pub fn load_full(
+    root: &Path,
+    file: &Path,
+    between: &mut dyn FnMut(),
+    sink: &mut dyn FnMut(&str),
+) -> Result<(String, crate::ast::File), LoadError> {
     let mut h = open_nonblocking(file).map_err(|e| LoadError::Io(e.to_string()))?;
     // 読む前に種類を確かめる（FIFO・デバイスなど通常ファイル以外は読まない。`/dev/zero` への symlink もここで拒否）。
     check_regular(&h, file).map_err(LoadError::Io)?;
@@ -344,6 +355,7 @@ pub fn load_with_hook(
         ))
     })?;
     let src = read_bounded(&mut h, file).map_err(LoadError::Io)?;
+    sink(&src);
     between();
     let f = crate::parse(&src).map_err(LoadError::Lang)?;
     verify_parsed(&f, root, file, Some(&h)).map_err(LoadError::Lang)?;

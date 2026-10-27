@@ -429,7 +429,7 @@ impl<W: Write> Server<W> {
         self.docs
             .get(uri)
             .cloned()
-            .or_else(|| uri_to_path(uri).and_then(|p| std::fs::read_to_string(p).ok()))
+            .or_else(|| uri_to_path(uri).and_then(|p| crate::modpath::read_source(&p).ok()))
     }
 
     /// 閉じた文書は入口でなくなる。その文書に出していた診断を消し、その文書を読んでいた入口は検査し直す。

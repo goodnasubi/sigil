@@ -886,3 +886,24 @@ fn lsp_hover_panic_contained() {
     assert_eq!(c.hover(&p, 4, 4), None);
     assert_eq!(c.finish().1, 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn lsp_disk_read_rejects_fifo_device_and_huge_file() {
+    // 開いていない文書の hover はディスクから読む。FIFO・`/dev/zero`・巨大ファイルで固まらず、応答は null。
+    let dir = tmpdir("saferead");
+    let fifo = dir.join("pipe.sigil");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    let zero = dir.join("z.sigil");
+    std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+    let big = dir.join("big.sigil");
+    std::fs::write(&big, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    let mut c = Client::start(&[]);
+    c.initialize(&[]);
+    if matches!(made, Ok(s) if s.success()) {
+        assert_eq!(c.hover(&fifo, 0, 0), None);
+    }
+    assert_eq!(c.hover(&zero, 0, 0), None);
+    assert_eq!(c.hover(&big, 0, 0), None);
+    assert_eq!(c.finish().1, 0);
+}

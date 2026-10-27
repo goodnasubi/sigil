@@ -35,15 +35,17 @@ pub fn check_project(root: &Path, entry: &Path, opts: &Options) -> R<()> {
 
 /// `check_project` の、開いている文書の中身を優先する版（言語サーバー用）。`overlay` は、読もうとする
 /// ファイルごとに呼ばれ、`Some(中身)` ならディスクの代わりにそれを使う（`None` ならディスクから読む）。
-/// パスと名前の対応・根の外の確認は、ディスクのファイルと同じ。
+/// パスと名前の対応・根の外の確認は、ディスクのファイルと同じ。`on_text` は、検査が実際に読んだ本文
+/// （構文解析に渡したもの）をファイルごとに受け取る（ADR 0022 決定 4: 言語サーバーはこの本文を使い、読み直さない）。
 pub fn check_project_overlay(
     root: &Path,
     entry: &Path,
     opts: &Options,
     overlay: &mut dyn FnMut(&Path) -> Option<String>,
+    on_text: &mut dyn FnMut(&Path, &str),
 ) -> R<()> {
     let mut nop = |_: &Path| {};
-    run_fs_with(root, entry, opts, &mut nop, Some(overlay)).map(|_| ())
+    run_fs_with(root, entry, opts, &mut nop, Some(overlay), Some(on_text)).map(|_| ())
 }
 
 /// `check_project` の、各ファイルを読んだ直後（確認の前）に呼ぶ差し込み口つき（差し替えの試験用）。
@@ -63,10 +65,11 @@ fn run_fs<'a>(
     opts: &'a Options,
     on_read: &'a mut dyn FnMut(&Path),
 ) -> R<(Proj<'a>, String)> {
-    run_fs_with(root, entry, opts, on_read, None)
+    run_fs_with(root, entry, opts, on_read, None, None)
 }
 
 type Overlay<'a> = &'a mut dyn FnMut(&Path) -> Option<String>;
+type OnText<'a> = &'a mut dyn FnMut(&Path, &str);
 
 fn run_fs_with<'a>(
     root: &'a Path,
@@ -74,12 +77,14 @@ fn run_fs_with<'a>(
     opts: &'a Options,
     on_read: &'a mut dyn FnMut(&Path),
     overlay: Option<Overlay<'a>>,
+    on_text: Option<OnText<'a>>,
 ) -> R<(Proj<'a>, String)> {
     let mut p = Proj {
         src: Src::Fs {
             root,
             on_read,
             overlay,
+            on_text,
         },
         opts,
         mods: HashMap::new(),
@@ -163,6 +168,7 @@ enum Src<'a> {
         root: &'a Path,
         on_read: &'a mut dyn FnMut(&Path),
         overlay: Option<Overlay<'a>>,
+        on_text: Option<OnText<'a>>,
     },
     /// 渡されたソース（モジュール名 -> 仮の位置と構文木）。辿ったものは取り除く。
     Mem(HashMap<String, (PathBuf, File)>),
@@ -191,16 +197,29 @@ impl Proj<'_> {
             root,
             on_read,
             overlay,
+            on_text,
         } = &mut self.src
         else {
             unreachable!("ファイルから読むのは Fs だけ");
         };
         let mut hook = || (on_read)(path);
         let loaded = match overlay.as_mut().and_then(|ov| ov(path)) {
-            Some(text) => crate::parse(&text)
-                .and_then(|f| modpath::verify_parsed(&f, root, path, None).map(|()| (text, f)))
-                .map_err(LoadError::Lang),
-            None => modpath::load_with_hook(root, path, &mut hook),
+            Some(text) => {
+                if let Some(cb) = on_text.as_mut() {
+                    cb(path, &text);
+                }
+                crate::parse(&text)
+                    .and_then(|f| modpath::verify_parsed(&f, root, path, None).map(|()| (text, f)))
+                    .map_err(LoadError::Lang)
+            }
+            None => {
+                let mut sink = |t: &str| {
+                    if let Some(cb) = on_text.as_mut() {
+                        cb(path, t);
+                    }
+                };
+                modpath::load_full(root, path, &mut hook, &mut sink)
+            }
         };
         match loaded {
             Ok((_, f)) => Ok((path.to_path_buf(), f)),

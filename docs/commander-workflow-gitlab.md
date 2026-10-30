@@ -1,6 +1,9 @@
 # 司令塔方式の導入手順（ローカル Claude Code + GitLab）
 
-> **版**: 2026-10-30（v1.6）
+> **版**: 2026-10-30（v1.9）
+> - フック雛形を実物と同じ動きにそろえた（v1.9）
+> - フックで起動時に調整役の状態を画面へ表示（v1.8）
+> - 調整役の起動時確認を強化し、SessionStart フックの雛形を追加（v1.7）
 > - 調整役の定期確認の張り方を補強（v1.6）
 > - 中黒を読点などに言い換え（v1.5）
 > - 3.5 の導入手順と状態ファイルの雛形を補強（v1.4）
@@ -598,7 +601,7 @@ effort: medium
 **導入するとき**（人間が望んだ場合だけ）:
 
 1. 手順 2 の計画を示したあと、承認の前に、追加の AskUserQuestion を 1 回出して、導入を望むか聞く（選択肢: 「導入しない（推奨）」「導入する」）。「導入しない」なら、以降は行わない。
-2. AskUserQuestion で、下の穴埋めの値を聞く。推奨値を選択肢に入れる。
+2. AskUserQuestion で、下の穴埋めの値を聞く。推奨値を選択肢に入れる。あわせて、SessionStart フックを導入するか聞く（既定は導入する。人間が望まなければ、手順 7 は行わない）。
 3. 次の 3 か所へ置く。
    - (1) スキル `~/.claude/skills/coordinator-mode/SKILL.md`（雛形は下のスキルの雛形）。
    - (2) CLAUDE.md の節（既定はユーザー共通の `~/.claude/CLAUDE.md`。雛形は下の CLAUDE.md 節の雛形）。
@@ -606,7 +609,11 @@ effort: medium
 4. 既存の `SKILL.md` や同名の節がある場合は、手順 2 の 0（差分の問い合わせ）に従う。
 5. CronCreate、ListAgents、SendMessage は、遅延読み込みなら ToolSearch で読み込んでから使う。それでも使えない環境では、定期確認を省く。省いたことを、人に報告し、状態ファイルの雛形の「待ち」に残す。
 6. 置いたら、セッションの開き直しが要る（手順 9 と同じ理由）。
-7. 導入後の確認として、開き直したセッションで「調整役モード」と入力し、起動できるか試す。
+7. SessionStart フックを置く（既定は導入する）。雛形、登録、確認は、下の「SessionStart フックの雛形」に従う。
+8. 導入後の確認として、次の (a) から (c) を行う。
+   - (a) 開き直したセッションで「調整役モード」と入力し、起動できるか試す。
+   - (b) フックを入れた場合、開き直した直後に、画面へ【調整役】で始まる 1 行が出るか見る。
+   - (c) フックを入れた場合、状態ファイルが無いときに「状態ファイルが無い、または読めない」と出るか、下の「SessionStart フックの雛形」(3) の手順で確かめる。
 
 **穴埋めの値**:
 
@@ -615,6 +622,8 @@ effort: medium
 | `<共用の環境>` | 同時に 1 セッションだけが触れるもの | 本物の外部サービス、共用 DB、共用ポート |
 | `<状態ファイルのパス>` | 調整役だけが書く状態ファイル | `<リポのルートの絶対パス>/commander-coordinator.md`（絶対パスで埋める） |
 | `<対象セッションの範囲>` | 案内を送る範囲と、対象外の範囲 | 同じ cwd 配下のセッションが対象。別リポ配下は対象外（例: 対象は `<リポのルートの絶対パス>` 配下のセッション。対象外は別のリポジトリ配下のセッション） |
+| `<対象セッションの範囲のパス>` | フックが対象かどうかを cwd で判定するための、`<対象セッションの範囲>` のパス | `<リポのルートの絶対パス>`（その配下の cwd が対象。絶対パスで埋める） |
+| `<ホームの絶対パス>` | ユーザーのホームの絶対パス。フックの登録で使う | 各自の環境の値 |
 | `<優先順位の決め方>` | 資源を待つセッションの順 | イシュー番号の若い順（既定） |
 
 `<状態ファイルのパス>` は、相対パスにしない。雛形はユーザー共通の置き場に入り、どのセッションからも読まれるため。
@@ -681,11 +690,113 @@ description: 調整役モード。<対象セッションの範囲>のセッシ�
 ````markdown
 ## 調整役（<共用の環境>の排他）
 
-- <対象セッションの範囲>で作業する司令塔のセッションは、起動時に <状態ファイルのパス> を読み、ListAgents で調整役（先頭の「調整役:」の名前）が生きているか確認する。
+- <対象セッションの範囲>で作業する司令塔のセッションは、最初の応答で、ユーザーの用件より先に、次を行う。用件が雑談でも省かない。
+  1. <状態ファイルのパス> を読む。
+  2. ListAgents で、調整役（先頭の「調整役:」の名前）が生きているか確認する。
+  3. 結果を 1 行で報告する。
 - 調整役がいれば、<共用の環境>の切り替えと変更は、調整役へ申告して割り当てを受けてから行う。
 - 調整役がいなければ、これらには触れず、人にこう伝える:「調整役セッションを起動してください。起動したら『調整役モード』と入力してください。」
 - 共用の環境への書き込みは、割り当てを受けた後も、都度、人の本人から許可を得る。
 ````
+
+**SessionStart フックの雛形**（手順 7。人間が望まなければ置かない）:
+
+フックは補助。ListAgents は Claude が呼ぶ（フックは呼べない）。フックは、最初の応答で確認を行う旨と状態ファイルの先頭を、セッションの文脈に足す。あわせて、状態ファイルの最終更新時刻から古さを推定し、1 行を画面に出す（生存は判定しない）。起動時に画面へ 1 行出る。ListAgents での生存確認は、人の最初のメッセージのあと。
+
+(1) スクリプト `~/.claude/hooks/coordinator-check.mjs`:
+
+```js
+import fs from 'node:fs';
+import path from 'node:path';
+
+// 状態ファイル。環境変数 COORDINATOR_STATE_FILE があれば差し替える（確認用）
+const STATE_FILE = process.env.COORDINATOR_STATE_FILE || '<状態ファイルのパス>';
+const UNREADABLE = '【調整役】状態ファイルが無い、または読めない。調整役は未起動の可能性';
+// 古いと見なす分数。定期確認が 30 分おきで最終更新を書き換えるので、その 3 倍の 90 分。穴埋めの定期確認の間隔に合わせて調整してよい
+const STALE_MIN = 90;
+
+// 状態ファイルから 1 行の状態文を作る
+function buildStatus(text) {
+  const nameM = text.match(/^[-\s]*調整役[:：]\s*(.+)$/m);
+  const timeM = text.match(/^[-\s]*最終更新[^:：\n]*[:：]\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})/m);
+  if (!nameM || !timeM) return UNREADABLE;
+  // 名前は括弧書きの注記（「（旧 ref …」）の手前まで
+  const name = nameM[1].replace(/（.*$/, '').trim() || nameM[1].trim();
+  const [, y, mo, d, h, mi] = timeM;
+  const hh = h.padStart(2, '0');
+  const stamp = `${y}-${mo}-${d} ${hh}:${mi} JST`;
+  const t = Date.parse(`${y}-${mo}-${d}T${hh}:${mi}:00+09:00`);
+  if (Number.isNaN(t)) return UNREADABLE;
+  const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+  if (mins < STALE_MIN) return `【調整役】${name}（最終更新 ${stamp}、${mins} 分前）`;
+  return `【調整役】${name}（最終更新 ${stamp}、${Math.floor(mins / 60)} 時間前）。古いので不在の可能性。調整役セッションを起動して「調整役モード」と入力する`;
+}
+
+try {
+  let raw = '';
+  try {
+    raw = fs.readFileSync(0, 'utf8');
+  } catch {}
+  const input = raw.trim() ? JSON.parse(raw) : {};
+  const norm = (p) => {
+    const q = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? q.toLowerCase() : q;
+  };
+  const root = norm('<対象セッションの範囲のパス>');
+  const cwd = norm(input.cwd);
+  if (cwd === root || cwd.startsWith(root + '/')) {
+    let body;
+    let status = UNREADABLE;
+    try {
+      const text = fs.readFileSync(STATE_FILE, 'utf8');
+      body = text.split(/\r?\n/).slice(0, 20).join('\n');
+      status = buildStatus(text);
+    } catch {
+      body = '状態ファイルが無い';
+    }
+    const msg =
+      '【調整役の確認】最初の応答で、ユーザーの用件より先に、調整役の状態ファイル（' + path.basename(STATE_FILE) + '）の確認と、ListAgents での調整役の生存確認を行い、結果を 1 行で報告する。' +
+      'フックの判定（ListAgents の結果と突き合わせる）: ' +
+      status +
+      '\n状態ファイルの先頭 20 行: ' +
+      body;
+    process.stdout.write(JSON.stringify({
+      systemMessage: status,
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: msg },
+    }));
+  }
+} catch {
+  // 補助なので、失敗しても何も出さない
+}
+process.exit(0);
+```
+
+(2) `~/.claude/settings.json` の hooks.SessionStart へ登録する。既存の設定を消さず、既存の hooks や SessionStart の配列があれば、その配列へ要素を足す（上書きしない）。
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"<ホームの絶対パス>/.claude/hooks/coordinator-check.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+(3) 確認。3 パターンの stdin を渡して出力を見る。
+
+- 配下の cwd: `echo '{"cwd":"<対象セッションの範囲のパス>"}' | node ~/.claude/hooks/coordinator-check.mjs`。`additionalContext` を含む JSON が出る。
+- 配下でない cwd: `echo '{"cwd":"<配下でない任意のパス>"}' | node ~/.claude/hooks/coordinator-check.mjs`。何も出ない。
+- 状態ファイルが無い場合: 環境変数 `COORDINATOR_STATE_FILE` に存在しないパスを入れて、配下の cwd で実行する（例: `echo '{"cwd":"<対象セッションの範囲のパス>"}' | COORDINATOR_STATE_FILE=/nonexistent node ~/.claude/hooks/coordinator-check.mjs`）。`systemMessage` が「状態ファイルが無い、または読めない」になる。状態ファイルは触らない。
+
+フックが効くのは、セッションを開き直したあと。
 
 ## 4. 使い方
 

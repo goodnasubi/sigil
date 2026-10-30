@@ -1,6 +1,7 @@
 # 司令塔方式の導入手順（ローカル Claude Code + GitLab）
 
-> **版**: 2026-10-30（v1.9）
+> **版**: 2026-10-30（v1.10）
+> - 調整役が居ないときの画面メッセージを端的にした（v1.10）
 > - フック雛形を実物と同じ動きにそろえた（v1.9）
 > - フックで起動時に調整役の状態を画面へ表示（v1.8）
 > - 調整役の起動時確認を強化し、SessionStart フックの雛形を追加（v1.7）
@@ -701,7 +702,7 @@ description: 調整役モード。<対象セッションの範囲>のセッシ�
 
 **SessionStart フックの雛形**（手順 7。人間が望まなければ置かない）:
 
-フックは補助。ListAgents は Claude が呼ぶ（フックは呼べない）。フックは、最初の応答で確認を行う旨と状態ファイルの先頭を、セッションの文脈に足す。あわせて、状態ファイルの最終更新時刻から古さを推定し、1 行を画面に出す（生存は判定しない）。起動時に画面へ 1 行出る。ListAgents での生存確認は、人の最初のメッセージのあと。
+フックは補助。ListAgents は Claude が呼ぶ（フックは呼べない）。フックは、最初の応答で確認を行う旨と状態ファイルの先頭を、セッションの文脈に足す。あわせて、状態ファイルの最終更新時刻から古さを推定し、1 行を画面に出す（生存は判定しない）。起動時に画面へ 1 行出る。調整役が居ないと判定した場合（最終更新が 90 分以上前、状態ファイルが無い・読めない）は、「調整役がいないので、新しいセッションで、『調整役モード』と入力してください。」の 1 文だけを出す。ListAgents での生存確認は、人の最初のメッセージのあと。
 
 (1) スクリプト `~/.claude/hooks/coordinator-check.mjs`:
 
@@ -712,6 +713,8 @@ import path from 'node:path';
 // 状態ファイル。環境変数 COORDINATOR_STATE_FILE があれば差し替える（確認用）
 const STATE_FILE = process.env.COORDINATOR_STATE_FILE || '<状態ファイルのパス>';
 const UNREADABLE = '【調整役】状態ファイルが無い、または読めない。調整役は未起動の可能性';
+// 調整役が居ないと判定したときに画面へ出す文（Claude 向けの additionalContext は別）
+const ABSENT_SCREEN = '調整役がいないので、新しいセッションで、『調整役モード』と入力してください。';
 // 古いと見なす分数。定期確認が 30 分おきで最終更新を書き換えるので、その 3 倍の 90 分。穴埋めの定期確認の間隔に合わせて調整してよい
 const STALE_MIN = 90;
 
@@ -719,17 +722,23 @@ const STALE_MIN = 90;
 function buildStatus(text) {
   const nameM = text.match(/^[-\s]*調整役[:：]\s*(.+)$/m);
   const timeM = text.match(/^[-\s]*最終更新[^:：\n]*[:：]\s*(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})/m);
-  if (!nameM || !timeM) return UNREADABLE;
+  if (!nameM || !timeM) return { status: UNREADABLE, screen: ABSENT_SCREEN };
   // 名前は括弧書きの注記（「（旧 ref …」）の手前まで
   const name = nameM[1].replace(/（.*$/, '').trim() || nameM[1].trim();
   const [, y, mo, d, h, mi] = timeM;
   const hh = h.padStart(2, '0');
   const stamp = `${y}-${mo}-${d} ${hh}:${mi} JST`;
   const t = Date.parse(`${y}-${mo}-${d}T${hh}:${mi}:00+09:00`);
-  if (Number.isNaN(t)) return UNREADABLE;
+  if (Number.isNaN(t)) return { status: UNREADABLE, screen: ABSENT_SCREEN };
   const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
-  if (mins < STALE_MIN) return `【調整役】${name}（最終更新 ${stamp}、${mins} 分前）`;
-  return `【調整役】${name}（最終更新 ${stamp}、${Math.floor(mins / 60)} 時間前）。古いので不在の可能性。調整役セッションを起動して「調整役モード」と入力する`;
+  if (mins < STALE_MIN) {
+    const s = `【調整役】${name}（最終更新 ${stamp}、${mins} 分前）`;
+    return { status: s, screen: s };
+  }
+  return {
+    status: `【調整役】${name}（最終更新 ${stamp}、${Math.floor(mins / 60)} 時間前）。古いので不在の可能性。調整役セッションを起動して「調整役モード」と入力する`,
+    screen: ABSENT_SCREEN,
+  };
 }
 
 try {
@@ -747,10 +756,11 @@ try {
   if (cwd === root || cwd.startsWith(root + '/')) {
     let body;
     let status = UNREADABLE;
+    let screen = ABSENT_SCREEN;
     try {
       const text = fs.readFileSync(STATE_FILE, 'utf8');
       body = text.split(/\r?\n/).slice(0, 20).join('\n');
-      status = buildStatus(text);
+      ({ status, screen } = buildStatus(text));
     } catch {
       body = '状態ファイルが無い';
     }
@@ -761,7 +771,7 @@ try {
       '\n状態ファイルの先頭 20 行: ' +
       body;
     process.stdout.write(JSON.stringify({
-      systemMessage: status,
+      systemMessage: screen,
       hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: msg },
     }));
   }
@@ -794,7 +804,7 @@ process.exit(0);
 
 - 配下の cwd: `echo '{"cwd":"<対象セッションの範囲のパス>"}' | node ~/.claude/hooks/coordinator-check.mjs`。`additionalContext` を含む JSON が出る。
 - 配下でない cwd: `echo '{"cwd":"<配下でない任意のパス>"}' | node ~/.claude/hooks/coordinator-check.mjs`。何も出ない。
-- 状態ファイルが無い場合: 環境変数 `COORDINATOR_STATE_FILE` に存在しないパスを入れて、配下の cwd で実行する（例: `echo '{"cwd":"<対象セッションの範囲のパス>"}' | COORDINATOR_STATE_FILE=/nonexistent node ~/.claude/hooks/coordinator-check.mjs`）。`systemMessage` が「状態ファイルが無い、または読めない」になる。状態ファイルは触らない。
+- 状態ファイルが無い場合: 環境変数 `COORDINATOR_STATE_FILE` に存在しないパスを入れて、配下の cwd で実行する（例: `echo '{"cwd":"<対象セッションの範囲のパス>"}' | COORDINATOR_STATE_FILE=/nonexistent node ~/.claude/hooks/coordinator-check.mjs`）。`systemMessage` が「調整役がいないので、新しいセッションで、『調整役モード』と入力してください。」の 1 文だけになる（`additionalContext` 側は「状態ファイルが無い、または読めない」）。状態ファイルは触らない。
 
 フックが効くのは、セッションを開き直したあと。
 

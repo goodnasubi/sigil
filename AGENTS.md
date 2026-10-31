@@ -18,8 +18,16 @@ Sigil は、AI がコードを書き、人間は仕様と ADR だけをレビュ
 
 ## 作業開始の手順
 
-1. GitHub Issue（ラベル `lane:*`）を自分に割り当てる。**すでに assignee がいる Issue は取らない**。
-2. 最新の `main` から、ブランチ名 `<agent>/<lane>/<issue番号>-<slug>` で作る。`<agent>` は `claude` / `gemini` / `muse` / `codex`。
+1. **タスクの確保（排他ロック）**:
+   - 全エージェントが同じ GitHub アカウントを共有するため、**`agent:<agent>` ラベルを排他ロックとして使う**（`<agent>` は `claude` / `gemini` / `muse` / `codex`）。
+   - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認する。
+   - **すでに `agent:*` ラベルが付いている Issue や、同じ `lane:*` のオープン PR が存在するレーンの Issue は絶対に取らない**（1 レーンにつき同時に 1 PR まで）。
+   - 未着手の Issue を選んだら、即座に自分のラベルを付け、作業ブランチ名をコメントしてロックする:
+     ```
+     gh issue edit <番号> --add-label "agent:<agent>"
+     gh issue comment <番号> --body "着手: `<agent>/<lane>/<番号>-<slug>`"
+     ```
+2. 最新の `main` から、ブランチ名 `<agent>/<lane>/<issue番号>-<slug>` で作る。
 3. ローカルでは、独立した作業ツリーを作る。
    ```
    git fetch origin

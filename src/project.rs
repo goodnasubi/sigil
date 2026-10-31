@@ -518,7 +518,8 @@ fn item_name(i: &Item) -> Option<&str> {
         Item::Struct(s) => Some(&s.name),
         Item::Enum(e) => Some(&e.name),
         Item::Fn(f) => Some(&f.name),
-        Item::Impl(_) => None,
+        Item::Trait(t) => Some(&t.name),
+        Item::Impl(_) | Item::ImplFor(_) => None,
     }
 }
 
@@ -532,7 +533,8 @@ fn decl_is_pub(i: &Item) -> bool {
         Item::Struct(s) => s.is_pub,
         Item::Enum(e) => e.is_pub,
         Item::Fn(f) => f.is_pub,
-        Item::Impl(_) => false,
+        Item::Trait(t) => t.is_pub,
+        Item::Impl(_) | Item::ImplFor(_) => false,
     }
 }
 
@@ -582,6 +584,20 @@ fn decl_type_heads(i: &Item, out: &mut Vec<String>) {
         }
         Item::Type(t) => type_heads(&t.base, &mut hs),
         Item::Impl(im) => {
+            for f in &im.fns {
+                fn_sig_heads(f, &im.generics, &mut hs);
+            }
+        }
+        Item::Trait(t) => {
+            for f in &t.fns {
+                fn_sig_heads(f, &[], &mut hs);
+            }
+            // トレイトの関数に出る `Self` は宣言の名前ではないので除く。
+            hs.retain(|h| h != "Self");
+        }
+        Item::ImplFor(im) => {
+            hs.push(im.trait_name.clone());
+            type_heads(&im.ty, &mut hs);
             for f in &im.fns {
                 fn_sig_heads(f, &im.generics, &mut hs);
             }
@@ -882,6 +898,20 @@ impl<'a> Walk<'a> {
                     im.fns.iter_mut().for_each(|f| w.func(f, false));
                 });
             }
+            Item::Trait(t) => {
+                self.span = t.span;
+                self.decl_name(&mut t.name);
+                t.fns.iter_mut().for_each(|f| self.func(f, false));
+            }
+            Item::ImplFor(im) => {
+                self.span = im.span;
+                self.decl_name(&mut im.trait_name);
+                let gs = im.generics.clone();
+                self.with_generics(&gs, |w| {
+                    w.ty(&mut im.ty);
+                    im.fns.iter_mut().for_each(|f| w.func(f, false));
+                });
+            }
         }
     }
 
@@ -1053,6 +1083,12 @@ fn used_names(file: &File) -> HashSet<String> {
                 .for_each(|v| v.fields.iter().for_each(|t| ty(t, &mut u))),
             Item::Fn(f) => func(f, &mut u),
             Item::Impl(im) => {
+                ty(&im.ty, &mut u);
+                im.fns.iter().for_each(|f| func(f, &mut u));
+            }
+            Item::Trait(t) => t.fns.iter().for_each(|f| func(f, &mut u)),
+            Item::ImplFor(im) => {
+                u.insert(im.trait_name.clone());
                 ty(&im.ty, &mut u);
                 im.fns.iter().for_each(|f| func(f, &mut u));
             }

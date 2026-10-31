@@ -57,7 +57,15 @@ pub enum Body {
     },
     Fn {
         method: bool,
-        spec: FnSpec,
+        /// `impl トレイト for 型` の関数のとき、実装するトレイトの名前（ADR 0022 の決定 2）。
+        trait_name: Option<String>,
+        // `FnSpec` は大きく、他のバリアントとの差で `large_enum_variant` になるので箱に入れる。
+        spec: Box<FnSpec>,
+    },
+    /// トレイトの宣言（ADR 0022 の決定 2）。関数は 4 節つきのシグネチャだけを持つ。
+    Trait {
+        /// （関数の名前, 仕様）
+        fns: Vec<(String, FnSpec)>,
     },
 }
 
@@ -212,7 +220,7 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
                         .collect(),
                 },
             }),
-            Item::Fn(f) => items.push(fn_item(f, false, &f.name, &f.generics, reports)),
+            Item::Fn(f) => items.push(fn_item(f, false, None, &f.name, &f.generics, reports)),
             Item::Impl(i) => {
                 for f in &i.fns {
                     let name = format!("{}.{}", type_text(&i.ty), f.name);
@@ -223,7 +231,38 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
                         .chain(f.generics.iter())
                         .cloned()
                         .collect();
-                    items.push(fn_item(f, true, &name, &gs, reports));
+                    items.push(fn_item(f, true, None, &name, &gs, reports));
+                }
+            }
+            Item::Trait(t) => items.push(SpecItem {
+                name: t.name.clone(),
+                span: t.span,
+                public: Some(t.is_pub),
+                body: Body::Trait {
+                    fns: t
+                        .fns
+                        .iter()
+                        .map(|f| (f.name.clone(), make_fn_spec(f, &f.generics, reports)))
+                        .collect(),
+                },
+            }),
+            Item::ImplFor(i) => {
+                for f in &i.fns {
+                    let name = format!("{}.{}", type_text(&i.ty), f.name);
+                    let gs: Vec<Generic> = i
+                        .generics
+                        .iter()
+                        .chain(f.generics.iter())
+                        .cloned()
+                        .collect();
+                    items.push(fn_item(
+                        f,
+                        true,
+                        Some(i.trait_name.as_str()),
+                        &name,
+                        &gs,
+                        reports,
+                    ));
                 }
             }
         }
@@ -238,6 +277,7 @@ fn unchecked_count(items: &[Item]) -> usize {
         .map(|i| match i {
             Item::Fn(f) => usize::from(f.unchecked.is_some()),
             Item::Impl(i) => i.fns.iter().filter(|f| f.unchecked.is_some()).count(),
+            Item::ImplFor(i) => i.fns.iter().filter(|f| f.unchecked.is_some()).count(),
             _ => 0,
         })
         .sum()
@@ -281,7 +321,28 @@ fn param_spec(p: &Param) -> ParamSpec {
     }
 }
 
-fn fn_item(f: &FnDecl, method: bool, name: &str, gs: &[Generic], reports: &Reports) -> SpecItem {
+fn fn_item(
+    f: &FnDecl,
+    method: bool,
+    trait_name: Option<&str>,
+    name: &str,
+    gs: &[Generic],
+    reports: &Reports,
+) -> SpecItem {
+    SpecItem {
+        name: name.to_string(),
+        span: f.span,
+        public: Some(f.is_pub),
+        body: Body::Fn {
+            method,
+            trait_name: trait_name.map(str::to_string),
+            spec: Box::new(make_fn_spec(f, gs, reports)),
+        },
+    }
+}
+
+/// 関数・メソッド・トレイトの関数の仕様（4 節とシグネチャ）。
+fn make_fn_spec(f: &FnDecl, gs: &[Generic], reports: &Reports) -> FnSpec {
     let unchecked = f.unchecked.as_ref().map(|u| {
         let rep = match reports {
             Some(Some(m)) => m.get(&crate::check::fn_key(f)),
@@ -293,24 +354,16 @@ fn fn_item(f: &FnDecl, method: bool, name: &str, gs: &[Generic], reports: &Repor
             uninferred: rep.filter(|r| r.delegated).map(|r| r.not_inferred.clone()),
         }
     });
-    SpecItem {
-        name: name.to_string(),
-        span: f.span,
-        public: Some(f.is_pub),
-        body: Body::Fn {
-            method,
-            spec: FnSpec {
-                generics: generic_specs(gs),
-                intent: f.intent.clone(),
-                params: f.params.iter().map(param_spec).collect(),
-                // `-> Unit` は正規形では書かない（ADR 0011 の決定 2）ので、`Unit` も戻り値なしとする。
-                returns: f.ret.as_ref().filter(|r| !is_unit(r)).map(type_text),
-                requires: f.requires.as_ref().map(expr_lines),
-                ensures: f.ensures.as_ref().map(expr_lines),
-                effects: normalize_effects(&f.effects, &f.params),
-                unchecked,
-            },
-        },
+    FnSpec {
+        generics: generic_specs(gs),
+        intent: f.intent.clone(),
+        params: f.params.iter().map(param_spec).collect(),
+        // `-> Unit` は正規形では書かない（ADR 0011 の決定 2）ので、`Unit` も戻り値なしとする。
+        returns: f.ret.as_ref().filter(|r| !is_unit(r)).map(type_text),
+        requires: f.requires.as_ref().map(expr_lines),
+        ensures: f.ensures.as_ref().map(expr_lines),
+        effects: normalize_effects(&f.effects, &f.params),
+        unchecked,
     }
 }
 
@@ -325,6 +378,7 @@ impl SpecItem {
             Body::Enum { .. } => "enum",
             Body::Fn { method: false, .. } => "fn",
             Body::Fn { method: true, .. } => "method",
+            Body::Trait { .. } => "trait",
         }
     }
 
@@ -387,8 +441,36 @@ impl SpecItem {
                     vs.join("、")
                 )
             }
-            Body::Fn { method, spec } => {
-                fn_text(if *method { "メソッド" } else { "関数" }, &self.name, spec)
+            Body::Fn {
+                method,
+                trait_name,
+                spec,
+            } => {
+                let t = fn_text(if *method { "メソッド" } else { "関数" }, &self.name, spec);
+                match trait_name {
+                    // どのトレイトの実装かを、見出しの次の行に添える（ADR 0022 の決定 2）。
+                    Some(tr) => match t.split_once('\n') {
+                        Some((head, rest)) => format!("{head}\n  トレイト: {tr}\n{rest}"),
+                        None => format!("{t}  トレイト: {tr}\n"),
+                    },
+                    None => t,
+                }
+            }
+            Body::Trait { fns } => {
+                if fns.is_empty() {
+                    return format!("トレイト {}\n  関数: なし\n", self.name);
+                }
+                let mut s = format!("トレイト {}\n", self.name);
+                for (name, f) in fns {
+                    // トレイトの関数は、関数と同じ定型文を 1 段下げて並べる。
+                    let t = fn_text("関数", name, f);
+                    for line in t.lines() {
+                        s.push_str("  ");
+                        s.push_str(line);
+                        s.push('\n');
+                    }
+                }
+                s
             }
         }
     }
@@ -665,56 +747,82 @@ impl SpecItem {
                     ),
                 ));
             }
-            Body::Fn { spec: f, .. } => {
-                fields.push(("intent", f.intent.clone().into()));
+            Body::Fn {
+                spec: f,
+                trait_name,
+                ..
+            } => {
+                fields.extend(fn_spec_json(f));
+                // 実装するトレイトの名前（`impl トレイト for 型` の関数だけ。ADR 0022 の決定 2）。
+                fields.push(("trait", trait_name.clone().into()));
+            }
+            Body::Trait { fns } => {
                 fields.push((
-                    "params",
+                    "fns",
                     Value::Arr(
-                        f.params
-                            .iter()
-                            .map(|p| {
-                                let mode = match p.mode {
-                                    Mode::Own => "own",
-                                    Mode::Ref => "ref",
-                                    Mode::Mut => "mut",
-                                    Mode::Call => "call",
-                                };
-                                obj(vec![
-                                    ("name", p.name.clone().into()),
-                                    ("mode", mode.into()),
-                                    ("type", p.ty.clone().into()),
-                                ])
+                        fns.iter()
+                            .map(|(n, f)| {
+                                let mut fs = vec![("name", n.clone().into())];
+                                fs.extend(fn_spec_json(f));
+                                obj(fs)
                             })
                             .collect(),
                     ),
-                ));
-                fields.push(("returns", f.returns.clone().into()));
-                fields.push(("requires", cond_json(&f.requires)));
-                fields.push(("ensures", cond_json(&f.ensures)));
-                fields.push(("effects", f.effects.clone().into()));
-                fields.push(("generics", generics_json(&f.generics)));
-                let u = f.unchecked.as_ref();
-                fields.push(("unchecked", u.map(|u| u.premise.clone()).into()));
-                let raw_ops = u.and_then(|u| u.raw_ops.as_ref()).map_or(vec![], |ops| {
-                    ops.iter()
-                        .map(|(n, p)| {
-                            obj(vec![
-                                ("name", n.clone().into()),
-                                ("premise", p.clone().into()),
-                            ])
-                        })
-                        .collect()
-                });
-                fields.push(("raw_ops", Value::Arr(raw_ops)));
-                let unin = u.and_then(|u| u.uninferred.clone()).unwrap_or_default();
-                fields.push(("uninferred_effects", unin.into()));
-                // 検査が失敗して `raw_ops`・`uninferred_effects` が分からないとき真（空の配列と区別する）
-                fields.push((
-                    "unchecked_unresolved",
-                    u.is_some_and(|u| u.raw_ops.is_none()).into(),
                 ));
             }
         }
         obj(fields)
     }
+}
+
+/// 関数の仕様の JSON の欄（関数・メソッド・トレイトの関数で共通。ADR 0019 の決定 1）。
+fn fn_spec_json(f: &FnSpec) -> Vec<(&'static str, Value)> {
+    let mut fields: Vec<(&str, Value)> = vec![("intent", f.intent.clone().into())];
+    fields.push((
+        "params",
+        Value::Arr(
+            f.params
+                .iter()
+                .map(|p| {
+                    let mode = match p.mode {
+                        Mode::Own => "own",
+                        Mode::Ref => "ref",
+                        Mode::Mut => "mut",
+                        Mode::Call => "call",
+                    };
+                    obj(vec![
+                        ("name", p.name.clone().into()),
+                        ("mode", mode.into()),
+                        ("type", p.ty.clone().into()),
+                    ])
+                })
+                .collect(),
+        ),
+    ));
+    fields.push(("returns", f.returns.clone().into()));
+    fields.push(("requires", cond_json(&f.requires)));
+    fields.push(("ensures", cond_json(&f.ensures)));
+    fields.push(("effects", f.effects.clone().into()));
+    fields.push(("generics", generics_json(&f.generics)));
+    let u = f.unchecked.as_ref();
+    fields.push(("unchecked", u.map(|u| u.premise.clone()).into()));
+    let raw_ops = u.and_then(|u| u.raw_ops.as_ref()).map_or(vec![], |ops| {
+        ops.iter()
+            .map(|(n, p)| {
+                obj(vec![
+                    ("name", n.clone().into()),
+                    ("premise", p.clone().into()),
+                ])
+            })
+            .collect()
+    });
+    fields.push(("raw_ops", Value::Arr(raw_ops)));
+    let unin = u.and_then(|u| u.uninferred.clone()).unwrap_or_default();
+    fields.push(("uninferred_effects", unin.into()));
+    // 検査が失敗して `raw_ops`・`uninferred_effects` が分からないとき真（空の配列と区別する）
+    fields.push((
+        "unchecked_unresolved",
+        u.is_some_and(|u| u.raw_ops.is_none()).into(),
+    ));
+    fields
 }

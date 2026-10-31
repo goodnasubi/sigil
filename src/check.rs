@@ -1238,6 +1238,23 @@ impl Ck {
     }
 
     fn run(&mut self, file: &File) -> R<()> {
+        // 0'. トレイトは構文・整形・仕様の表示まで（PR 2-4b）。検査と実行は 2-4c なので、
+        // トレイトを含むプログラムはここで明確に止める（黙って通さない）。
+        // 取り込んだ宣言（externs）の中のトレイトも同じに扱う。
+        for item in file.items.iter().chain(self.externs.iter()) {
+            let span = match item {
+                Item::Trait(t) => Some(t.span),
+                Item::ImplFor(i) => Some(i.span),
+                _ => None,
+            };
+            if let Some(span) = span {
+                self.span = span;
+                return self.err(
+                    ErrorKind::Unsupported,
+                    "トレイト（`trait`・`impl トレイト for 型`）は、この版の型検査ではまだ扱えない（検査と実行は PR 2-4c で対応する）",
+                );
+            }
+        }
         // 0. モジュールの宣言（ADR 0016 の決定 3・6 の補足。名前の予約が許可より先）
         self.span = file.module.span;
         let mname = file.module.name.join(".");
@@ -1291,6 +1308,9 @@ impl Ck {
                 ),
                 Item::Fn(f) => (None, f.span, &f.generics[..], TypeDef::Alias(Ty::Unit)),
                 Item::Impl(i) => (None, i.span, &i.generics[..], TypeDef::Alias(Ty::Unit)),
+                // トレイトは上の 0' で止まるのでここには来ない。型の同一性としては名前を持つ（ADR 0022 の決定 1）。
+                Item::Trait(t) => (Some(&t.name), t.span, &[][..], TypeDef::Alias(Ty::Unit)),
+                Item::ImplFor(i) => (None, i.span, &i.generics[..], TypeDef::Alias(Ty::Unit)),
             };
             self.span = span;
             let Some(n) = name else { continue };
@@ -5326,6 +5346,8 @@ mod typed_tests {
                 }
                 Item::Type(d) => walk_expr(&d.cond, &t, &mut exprs),
                 Item::Struct(_) | Item::Enum(_) => {}
+                // トレイトを含むソースは `typed` の段階で止まるので、ここには来ない。
+                Item::Trait(_) | Item::ImplFor(_) => {}
             }
         }
         assert!(!exprs.is_empty(), "{label}: 式がない");

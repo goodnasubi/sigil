@@ -71,6 +71,8 @@ pub enum ErrorKind {
     OldOutsideEnsures,
     ResultOutsideEnsures,
     SelfOutsideRefinement,
+    /// 型の名前 `Self` をトレイトの宣言の外で書いた（ADR 0022 の決定 2）。
+    SelfOutsideTrait,
     ValueMatchArmBlock,
     StmtMatchArmNotBlock,
     StmtMatchArmComma,

@@ -91,7 +91,7 @@ impl Ck {
                     .map(|t| self.resolve(t, Pos::Other))
                     .collect::<R<_>>()?,
             )),
-            Type::Fn { params, ret } => {
+            Type::Fn { params, ret, .. } => {
                 if pos != Pos::Param {
                     return self.err(
                         ErrorKind::FnTypePosition,

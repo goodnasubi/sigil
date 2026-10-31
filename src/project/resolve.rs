@@ -158,7 +158,7 @@ impl<'a> Walk<'a> {
                 args.iter_mut().for_each(|a| self.ty(a));
             }
             Type::Ref { inner, .. } => self.ty(inner),
-            Type::Fn { params, ret } => {
+            Type::Fn { params, ret, .. } => {
                 params.iter_mut().for_each(|p| self.ty(p));
                 if let Some(r) = ret {
                     self.ty(r);

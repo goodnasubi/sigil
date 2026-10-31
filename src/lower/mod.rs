@@ -192,7 +192,7 @@ fn mentions(t: &a::Type, name: &str) -> bool {
             path.last().is_some_and(|n| n == name) || args.iter().any(|x| mentions(x, name))
         }
         a::Type::Ref { inner, .. } => mentions(inner, name),
-        a::Type::Fn { params, ret } => {
+        a::Type::Fn { params, ret, .. } => {
             params.iter().any(|x| mentions(x, name))
                 || ret.as_deref().is_some_and(|x| mentions(x, name))
         }
@@ -535,7 +535,7 @@ impl<'a> L<'a> {
                     ir::Ty::Ref(i)
                 }
             }
-            a::Type::Fn { params, ret } => {
+            a::Type::Fn { params, ret, .. } => {
                 let mut v = vec![];
                 for x in params {
                     v.push(self.conv_ast(x, m)?);

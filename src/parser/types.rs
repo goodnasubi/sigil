@@ -19,6 +19,58 @@ impl Parser {
         Ok(Effect::Category(v))
     }
 
+    /// 関数の型の効果 1 つ（ADR 0022 の決定 3）。カテゴリだけが書ける
+    /// （関数の型には引数の名前がないので `of(...)` は書けない）。
+    pub(super) fn fn_type_effect(&mut self) -> R<Effect> {
+        if self.at_kw("of") {
+            return Err(self.err(
+                ErrorKind::OfInFnType,
+                "関数の型の効果に `of(...)` は書けない（関数の型には引数の名前がない。ADR 0022 の決定 3）",
+            ));
+        }
+        let mut v = vec![self.snake_plain("効果のカテゴリ")?];
+        while self.eat_punct(".") {
+            v.push(self.snake_plain("効果のカテゴリ")?);
+        }
+        Ok(Effect::Category(v))
+    }
+
+    /// 関数の型の戻り値の後に続く効果節（ADR 0022 の決定 3）。書かれていなければ `None`、
+    /// `effects none` は空の `Some`。位置による必須・禁止の検査は型検査（PR 2-4d の 2/3）で行う。
+    pub(super) fn fn_type_effects(&mut self) -> R<Option<Vec<Effect>>> {
+        if !self.eat_kw("effects") {
+            return Ok(None);
+        }
+        if self.eat_kw("none") {
+            return Ok(Some(Vec::new()));
+        }
+        let mut v = vec![self.fn_type_effect()?];
+        loop {
+            if !self.at_punct(",") {
+                break;
+            }
+            // カンマが効果の続きか、外側の並び（フィールド・引数・組の要素）の区切りかは、
+            // 次がカテゴリとして読めて、その後に `:`（名前つきの並びの区切り）が来ないことで決める。
+            // 読めなければカンマを外側に返す（位置を戻す）。`of` のときだけは構文エラーのままにする。
+            let save = self.pos;
+            self.bump();
+            if self.at_kw("of") {
+                return Err(self.err(
+                    ErrorKind::OfInFnType,
+                    "関数の型の効果に `of(...)` は書けない（関数の型には引数の名前がない。ADR 0022 の決定 3）",
+                ));
+            }
+            match self.fn_type_effect() {
+                Ok(e) if !self.at_punct(":") => v.push(e),
+                _ => {
+                    self.pos = save;
+                    break;
+                }
+            }
+        }
+        Ok(Some(v))
+    }
+
     // ---- 型 ----
 
     pub(super) fn ty_inner(&mut self) -> R<Type> {
@@ -50,7 +102,12 @@ impl Parser {
                 } else {
                     None
                 };
-                Ok(Type::Fn { params, ret })
+                let effects = self.fn_type_effects()?;
+                Ok(Type::Fn {
+                    params,
+                    ret,
+                    effects,
+                })
             }
             Tok::Punct("(") => {
                 let sp = self.span();

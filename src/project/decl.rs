@@ -40,7 +40,7 @@ pub(super) fn type_heads(t: &Type, out: &mut Vec<String>) {
             args.iter().for_each(|a| type_heads(a, out));
         }
         Type::Ref { inner, .. } => type_heads(inner, out),
-        Type::Fn { params, ret } => {
+        Type::Fn { params, ret, .. } => {
             params.iter().for_each(|p| type_heads(p, out));
             if let Some(r) = ret {
                 type_heads(r, out);

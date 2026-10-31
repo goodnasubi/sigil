@@ -82,8 +82,6 @@ cargo test
 | D2 標準ライブラリ | `stdlib`, `runtime/core`, `runtime/os` |
 | E 文書 | `docs/**`, `examples/**`, `tests/**`（新規ファイルのみ） |
 
-> `src/check.rs` の分割が完了するまでは、`src/check.rs` を触るレーン B の作業は、Issue で調整役の許可を得てから始める。
-
 ## 触ってはいけない・特別な扱いのファイル
 
 | ファイル | 規則 |
@@ -128,4 +126,3 @@ cargo test
 ## 文書の言語
 
 README・ADR・コメント・コミットメッセージは日本語で書く（既存の慣習に従う）。
-

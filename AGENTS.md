@@ -1,0 +1,131 @@
+# AGENTS.md — Sigil の AI エージェント向け作業ルール
+
+このファイルは、Claude Code・Gemini・Meta Muse・Codex など、すべての AI エージェントが最初に読む**単体で完結する**指示書です。
+詳細は [docs/PARALLEL_DEV.md](docs/PARALLEL_DEV.md)（運用ルール）と [docs/CHECK_SPLIT_PLAN.md](docs/CHECK_SPLIT_PLAN.md)（`check.rs` 分割計画）にあります。迷ったら、そちらを読んでください。
+
+## プロジェクト
+
+Sigil は、AI がコードを書き、人間は仕様と ADR だけをレビューする言語です。処理系は Rust 製です。設計判断は `docs/decisions/` の ADR にあります。
+
+## 基本原則
+
+1. 1 エージェント = 1 作業ツリー = 1 ブランチ = 1 PR。作業ツリーを他のエージェントと共有しない。
+2. 担当レーンのファイルだけを変更する（下の表）。レーン外は最小の追加にとどめ、PR に理由を書く。
+3. 小さい PR を頻繁に出す。ブランチは 1 日以内に PR にする。
+4. 設計判断が要る変更は、ADR の PR を先に出す。ADR と食い違う実装を、黙って通さない。
+5. `main` に直接 push しない。必ず PR を経由する。
+6. 作者と別のエージェントがレビューする。自分の PR を自分で承認しない。
+
+## 作業開始の手順
+
+1. GitHub Issue（ラベル `lane:*`）を自分に割り当てる。**すでに assignee がいる Issue は取らない**。
+2. 最新の `main` から、ブランチ名 `<agent>/<lane>/<issue番号>-<slug>` で作る。`<agent>` は `claude` / `gemini` / `muse` / `codex`。
+3. ローカルでは、独立した作業ツリーを作る。
+   ```
+   git fetch origin
+   git worktree add <短いパス>/sigil-<agent>-<issue> -b <agent>/<lane>/<issue>-<slug> origin/main
+   ```
+   - Windows では短いパスを使う（例: `C:\w\sigil-codex-123`）。
+   - `CARGO_TARGET_DIR` を作業ツリーごとに分け、`CARGO_BUILD_JOBS` で CPU の使用を抑える。
+   - クラウドでは clone 自体が独立した作業ツリーなので、`git worktree` は不要。
+4. クラウドでは、**push していない成果は失われる**。こまめにコミットして push する。
+
+## コミットメッセージ
+
+どのエージェントがコミットしたかを、**すべてのコミットの末尾にトレーラー**で記録する。
+
+```
+<日本語の件名（1 行）>
+
+<本文（任意）>
+
+Agent: claude
+Agent-Model: <モデル名（分かれば）>
+Agent-Env: cloud
+```
+
+- `Agent:` は必須。値は `claude` / `gemini` / `muse` / `codex`（ブランチ名の `<agent>` と同じ）。
+- `Agent-Model:` は任意。分かるときだけ書く。
+- `Agent-Env:` は必須。値は `local-windows` / `cloud`。
+- トレーラーは本文との間に空行を 1 行あけ、末尾にまとめる。
+- 人間が手でコミットする場合は付けない（`Agent:` が無いコミット = 人間）。
+- 別のエージェントの作業を引き継いで追加コミットする場合は、**そのコミットを書いたエージェント自身**の名前を書く。
+- 履歴を書き換える操作（rebase・squash）では、トレーラーを失わない。squash するときは、含まれる全エージェントの `Agent:` 行を残す。
+- 確認: `git log --format='%h %(trailers:key=Agent,valueonly) %s'`
+
+## PR を出す前に必ず通す
+
+```
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+- `origin/main` にリベースしてから実行する。
+- `runtime/core`・`runtime/os` を変更した場合は、それぞれのディレクトリでも同じ 3 コマンドを実行する。
+- `scripts/*.sh`（ネイティブ出力の確認など）は bash 用。Windows では Git Bash か WSL でのみ動く。ネイティブ出力は Linux x86-64 のみなので、Windows ではその確認を CI に任せる。
+
+## レーン（担当ファイル）
+
+| レーン | 担当ファイル |
+|---|---|
+| A1 構文 | `lexer`, `parser`, `ast` の追加 |
+| A2 整形・仕様 | `fmt`, `spec`, `json` |
+| B1 型・解決 | `check/{types,unify,resolve,generics}` |
+| B2 トレイト | `check/{traits,register,items}` |
+| B3 所有権 | `check/ownership`, `borrow` |
+| B4 式・文 | `check/{stmt,expr,pattern,closure,call}`, `exhaustive` |
+| B5 効果・契約 | `check/{effects,fn_check}`, `effects`, `verify` |
+| C1 SIR | `lower`, `ir`, `ir_eval` |
+| C2 ネイティブ | `codegen/**`, `native`, `runtime/**` |
+| D1 ツール | `lsp/**`, `project`, `modpath`, `main` |
+| D2 標準ライブラリ | `stdlib`, `runtime/core`, `runtime/os` |
+| E 文書 | `docs/**`, `examples/**`, `tests/**`（新規ファイルのみ） |
+
+> `src/check.rs` の分割が完了するまでは、`src/check.rs` を触るレーン B の作業は、Issue で調整役の許可を得てから始める。
+
+## 触ってはいけない・特別な扱いのファイル
+
+| ファイル | 規則 |
+|---|---|
+| `.github/workflows/**`, `.github/CODEOWNERS` | 人間のみ変更する |
+| `src/limits.rs`, `tests/ct_rules.rs` | CODEOWNERS により人間のみ |
+| `src/ast.rs`, `src/ir.rs` | 契約変更。変更だけの小さい PR を単独で出し、`contract-change` ラベルを付ける |
+| `Cargo.toml`, `Cargo.lock` | 依存の追加は ADR が必要。単独の PR にする |
+| `src/lib.rs`, `src/error.rs` | 追加のみ。1 エントリ 1 行、アルファベット順、他の変更を混ぜない |
+
+- テストは原則、新しいファイル（`tests/<機能>.rs`）を足す。既存のテストファイルへの追記は、そのレーンの担当だけが行う。
+- 依存クレートは足さない方針（JSON も自前実装）。
+
+## レビューとマージ
+
+| 変更の種類 | 人間のレビュー | マージの条件 |
+|---|---|---|
+| コードのみ（仕様・ADR に影響しない） | 不要 | CI が緑 + 別系統のエージェントの承認 |
+| 仕様の変更（`sigil spec` の出力・文法・型規則） | **必須** | 人間の承認 |
+| ADR の追加・変更 | **必須** | 人間の承認 |
+| セキュリティ関連（ADR 0020、CODEOWNERS 対象） | **必須** | CODEOWNERS の承認 |
+
+- 仕様に影響するか迷う PR は、**人間のレビューに回す**。
+- PR の説明に、仕様の差分を `sigil spec` の出力で貼る。
+- PR の説明に、実行した環境（`local-windows` / `cloud`）を書く。
+- マージ順: 契約変更 → ADR → 実装 → サンプル・テスト。
+
+## ADR
+
+- ADR の PR は ADR だけにする（実装を混ぜない）。
+- 番号は、`docs/decisions/README.md` に「予約」の行を足して確保する。他の PR と番号を重ねない。
+- 実装中に ADR との食い違いを見つけたら、実装を止めて ADR の修正 PR を出す。
+
+## 困ったとき
+
+- 他のレーンのファイルを触る必要がある → その Issue にコメントして依頼する。
+- コンフリクト → 先にマージされた側を優先し、後の側がリベースして解消する。
+- CI が不安定 → 再実行は 1 回まで。再現するなら Issue を作る。
+- 作業を引き継ぐ → ブランチを push し、ブランチ名を Issue に書く。
+- 判断できない → 実装せず、Issue または PR にコメントして人間に確認する。
+
+## 文書の言語
+
+README・ADR・コメント・コミットメッセージは日本語で書く（既存の慣習に従う）。
+

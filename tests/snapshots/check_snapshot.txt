@@ -1,0 +1,306 @@
+=== examples/01-average/a-sexpr.sigil
+check: 1:4: 字句エラー: ASCII 以外の文字 `例` は文字列リテラルとコメントの中にだけ書ける
+spec: 1:4: 字句エラー: ASCII 以外の文字 `例` は文字列リテラルとコメントの中にだけ書ける
+=== examples/01-average/b-indent.sigil
+check: 1:1: 字句エラー: 使えない文字 `#`
+spec: 1:1: 字句エラー: 使えない文字 `#`
+=== examples/01-average/c-brace.sigil
+check: ok
+spec:
+モジュール examples.average
+  出力先: 実行環境なし, ブラウザ, サーバー
+  信頼基盤: いいえ
+
+関数 average（非公開）
+  意図: 数値列の算術平均を返す
+  引数: xs を受け取る（List<Float>）
+  戻り値: Float
+  事前条件: xs.len() > 0
+  事後条件: xs.min() <= result && result <= xs.max()
+  効果: なし
+
+=== examples/02-read-port/a-sexpr.sigil
+check: 1:4: 字句エラー: ASCII 以外の文字 `例` は文字列リテラルとコメントの中にだけ書ける
+spec: 1:4: 字句エラー: ASCII 以外の文字 `例` は文字列リテラルとコメントの中にだけ書ける
+=== examples/02-read-port/b-indent.sigil
+check: 1:1: 字句エラー: 使えない文字 `#`
+spec: 1:1: 字句エラー: 使えない文字 `#`
+=== examples/02-read-port/c-brace.sigil
+check: ok
+spec:
+モジュール examples.read_port
+  出力先: サーバー
+  信頼基盤: いいえ
+
+型 Port（非公開）
+  基にする型: Int
+  条件: 1 <= self && self <= 65535
+
+列挙型 ConfigError（非公開）
+  バリアント: Io（IoError）、NotANumber（String）、OutOfRange（Int）
+
+関数 read_port（非公開）
+  意図: 設定ファイルの内容を整数として読み、ポート番号として返す
+  引数: path を受け取る（Path）
+  戻り値: Result<Port, ConfigError>
+  事前条件: !path.is_empty()
+  事後条件: なし
+  効果: ファイルを読む
+
+=== examples/03-ownership/ownership.sigil
+check: ok
+spec:
+モジュール examples.ownership
+  出力先: ブラウザ, サーバー
+  信頼基盤: いいえ
+
+構造体 Account（非公開）
+  フィールド: owner（String）、balance（Int）
+
+関数 balance_of（非公開）
+  意図: 口座の残高を返す
+  引数: account を読む（Account）
+  戻り値: Int
+  事前条件: なし
+  事後条件: result == account.balance
+  効果: なし
+
+関数 deposit（非公開）
+  意図: 口座に入金する
+  引数: account を書き換える（Account）、amount を受け取る（Int）
+  戻り値: なし
+  事前条件: amount > 0
+  事後条件: account.balance == old(account.balance) + amount
+  効果: なし
+
+関数 close（非公開）
+  意図: 口座を閉じ、払い戻す金額を返す
+  引数: account を受け取る（Account）
+  戻り値: Int
+  事前条件: account.balance >= 0
+  事後条件: result == account.balance
+  効果: なし
+
+関数 richest（非公開）
+  意図: 残高が最大の口座を返す。口座がなければ none を返す
+  引数: accounts を読む（List<Account>）
+  戻り値: Option<&Account>
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+
+関数 main（非公開）
+  意図: 所有権と借用の使い方を示す
+  引数: なし
+  戻り値: なし
+  事前条件: なし
+  事後条件: なし
+  効果: コンソールに出力する
+
+=== examples/04-effects/effects.sigil
+check: ok
+spec:
+モジュール examples.effect_check
+  出力先: サーバー
+  信頼基盤: いいえ
+
+関数 add_tax（非公開）
+  意図: 税込み価格を返す
+  引数: price を受け取る（Int）、rate_percent を受け取る（Int）
+  戻り値: Int
+  事前条件: price >= 0 && rate_percent >= 0
+  事後条件: result >= price
+  効果: なし
+
+関数 load_prices（非公開）
+  意図: 価格の一覧をファイルから読む
+  引数: path を受け取る（Path）
+  戻り値: Result<List<Int>, IoError>
+  事前条件: !path.is_empty()
+  事後条件: なし
+  効果: コンソールに出力する、ファイルを読む
+
+関数 apply_all（非公開）
+  意図: 一覧の各要素に f を適用した一覧を返す
+  引数: xs を読む（List<Int>）、f を呼ぶ（fn(Int) -> Int）
+  戻り値: List<Int>
+  事前条件: なし
+  事後条件: result.len() == xs.len()
+  効果: f の効果
+
+関数 with_tax（非公開）
+  意図: すべての価格に 10% の税を加える
+  引数: prices を読む（List<Int>）
+  戻り値: List<Int>
+  事前条件: なし
+  事後条件: result.len() == prices.len()
+  効果: なし
+
+関数 count_up（非公開）
+  意図: 共有のカウンタを 1 増やす
+  引数: counter を読む（Shared<Cell<Int>>）
+  戻り値: なし
+  事前条件: なし
+  事後条件: なし
+  効果: 共有所有の型を通して値を書き換える
+
+=== examples/04-effects/entry.sigil
+check: 13:3: 型エラー: 関数 `count_up` が見つからない（この版の標準ライブラリにある関数は ADR 0013 の決定 2 の一覧に限る）
+spec:
+モジュール examples.effect_check
+  出力先: サーバー
+  信頼基盤: いいえ
+
+関数 bump_twice（非公開）
+  意図: x
+  引数: なし
+  戻り値: Int
+  事前条件: なし
+  事後条件: なし
+  効果: 共有所有の型を通して値を書き換える
+
+関数 tax（非公開）
+  意図: x
+  引数: なし
+  戻り値: List<Int>
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+
+=== examples/05-control/control.sigil
+check: ok
+spec:
+モジュール examples.control
+  出力先: ブラウザ, サーバー
+  信頼基盤: いいえ
+
+関数 sum_range（非公開）
+  意図: from 以上 to 以下の整数の合計を返す
+  引数: from を受け取る（Int）、to を受け取る（Int）
+  戻り値: Int
+  事前条件: from <= to
+  事後条件: なし
+  効果: なし
+
+関数 clamp（非公開）
+  意図: x を low 以上 high 以下に収める
+  引数: x を受け取る（Int）、low を受け取る（Int）、high を受け取る（Int）
+  戻り値: Int
+  事前条件: low <= high
+  事後条件: low <= result && result <= high
+  効果: なし
+
+関数 sign（非公開）
+  意図: x が負なら -1、それ以外なら 1 を返す
+  引数: x を受け取る（Int）
+  戻り値: Int
+  事前条件: なし
+  事後条件: result == -1 || result == 1
+  効果: なし
+
+関数 add_to（非公開）
+  意図: x に n を加えた値を返す
+  引数: n を受け取る（Int）、x を受け取る（Int）
+  戻り値: Int
+  事前条件: なし
+  事後条件: result == x + n
+  効果: なし
+
+=== tests/data/effects_main.sigil
+check: 5:1: 型エラー: `use` の先のモジュールを探す根がない（`sigil check --root <根>` で検査する）
+spec:
+モジュール examples.effect_main
+  出力先: サーバー
+  信頼基盤: いいえ
+  使う名前: examples.effect_check.count_up、examples.effect_check.with_tax
+
+関数 bump_twice（非公開）
+  意図: x
+  引数: なし
+  戻り値: Int
+  事前条件: なし
+  事後条件: なし
+  効果: 共有所有の型を通して値を書き換える
+
+関数 tax（非公開）
+  意図: x
+  引数: なし
+  戻り値: List<Int>
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+
+=== tests/data/messy.expected.sigil
+check: 34:1: 型エラー: 型引数 `E` が同じ名前の型を隠している
+spec:
+モジュール m.a
+  出力先: サーバー
+  信頼基盤: いいえ
+
+構造体 P（非公開）
+  フィールド: x（Int）、y（Int）
+
+列挙型 E（非公開）
+  バリアント: A、B（Int）
+
+関数 f（非公開）
+  意図: x
+  引数: x を受け取る（Int）、g を呼ぶ（fn(Int) -> Int）
+  戻り値: Int
+  事前条件: x > 0 && x < 10
+  事後条件: なし
+  効果: g の効果、コンソールに出力する、ファイルを読み書きする
+
+関数 h（非公開）
+  意図: x
+  引数: なし
+  戻り値: なし
+  事前条件: なし
+  事後条件: なし
+  効果: net.connect、net.listen、net.recv、net.send
+
+関数 k（非公開）
+  意図: x
+  引数: x を受け取る（Int）
+  戻り値: Int
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+
+=== tests/data/messy.sigil
+check: 34:1: 型エラー: 型引数 `E` が同じ名前の型を隠している
+spec:
+モジュール m.a
+  出力先: サーバー
+  信頼基盤: いいえ
+
+構造体 P（非公開）
+  フィールド: x（Int）、y（Int）
+
+列挙型 E（非公開）
+  バリアント: A、B（Int）
+
+関数 f（非公開）
+  意図: x
+  引数: x を受け取る（Int）、g を呼ぶ（fn(Int) -> Int）
+  戻り値: Int
+  事前条件: x > 0 && x < 10
+  事後条件: なし
+  効果: g の効果、コンソールに出力する、ファイルを読み書きする
+
+関数 h（非公開）
+  意図: x
+  引数: なし
+  戻り値: なし
+  事前条件: なし
+  事後条件: なし
+  効果: net.connect、net.listen、net.recv、net.send
+
+関数 k（非公開）
+  意図: x
+  引数: x を受け取る（Int）
+  戻り値: Int
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+

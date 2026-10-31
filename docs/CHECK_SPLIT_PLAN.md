@@ -58,7 +58,7 @@
 
 | 段階 | 内容 | 担当 |
 |---|---|---|
-| S0 | 凍結の宣言。進行中の `check.rs` を触る PR を先にマージするか破棄する。ベースラインとして `cargo test` の結果と、`sigil check`・`sigil spec --json` を全サンプルに対して実行した出力を保存する | 人間または調整役 1 体 |
+| S0 | 凍結の宣言。進行中の `check.rs` を触る PR を先にマージするか破棄する。ベースラインとして、`cargo test` の結果と、スナップショットテスト `tests/check_snapshot.rs`（`check`・`spec` の出力を固定）を用意する。進行中の PR は 2026-10-31 時点で 0 件 | 人間または調整役 1 体 |
 | S1 | `git mv src/check.rs src/check/mod.rs` だけの PR（内容変更なし）。マージ | 担当 1 体 |
 | S2 | `tests.rs`・`util.rs`・`types.rs` の抽出（`impl` を含まない部分） | 同じ担当 |
 | S3 | `impl Ck` を、小さい順（`closure` → `pattern` → `traits` …）に **1 ファイル 1 PR** で移す。各 PR で `cargo test` と §5 の検証を通す | 同じ担当（直列） |
@@ -73,7 +73,7 @@
 
 1. `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test`（既存のテスト全部）が通る。
 2. **差分が「移動と可視性の修飾子」だけである**: 分割前後でメソッドの本体を正規化して比較する（例: 移動前後の `check` 関連のソースから `pub(super)` を除き、メソッド単位で並べ替えて比較するスクリプトを `scripts/` に置く）。
-3. S0 で保存した、全サンプルへの `sigil check`・`sigil spec --json` の出力と、バイト単位で一致する。
+3. `tests/check_snapshot.rs` が通る（`examples/`・`tests/data/` の全 `.sigil` への `check`・`spec` の出力が、`tests/snapshots/check_snapshot.txt` と一致する）。分割の PR では、スナップショットを更新しない。
 4. ネイティブ出力の回帰（`scripts/native-report.sh`）が現行の閾値（`SIGIL_NATIVE_MIN_CHECKED=400`）を満たす。
 
 人間のレビューは不要（仕様に影響しない）。別系統のエージェントが、手順 2 の機械的な比較の結果を確認する。

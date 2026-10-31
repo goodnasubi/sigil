@@ -142,6 +142,12 @@ struct L<'a> {
     t: &'a Typed<'a>,
     fns: HashMap<&'a str, &'a a::FnDecl>,
     methods: HashMap<(String, String), &'a a::FnDecl>,
+    /// トレイトの実装の関数（トレイトの名前, 型の頭, 関数の名前, 宣言, 関数。ADR 0022 決定 2）。
+    trait_fns: Vec<(String, String, String, &'a a::ImplForDecl, &'a a::FnDecl)>,
+    /// 宣言の番地 -> 実体名（トレイトの実装の関数は `<型>/<トレイト>.<関数>`。ADR 0022 決定 1）。
+    names: HashMap<usize, String>,
+    /// ADT の ID -> 型引数（入れ子の深さの計算用）。
+    adt_args: HashMap<usize, Vec<ir::Ty>>,
     structs: HashMap<&'a str, &'a a::StructDecl>,
     enums: HashMap<&'a str, &'a a::EnumDecl>,
     refined: HashMap<&'a str, &'a a::TypeDecl>,
@@ -158,6 +164,11 @@ struct L<'a> {
     core_only: bool,
     fb: Fb,
 }
+
+/// 単相化の実体（関数と型の合計）の数の上限（ADR 0022 決定 2）。
+const MAX_INSTANCES: usize = 10_000;
+/// 実体の鍵の型引数の入れ子の深さの上限（ADR 0022 決定 2）。
+const MAX_TYPE_DEPTH: usize = 32;
 
 pub fn lower(typed: &Typed, entry: &str) -> Result<ir::Program, LowerError> {
     let mut l = L::new(typed);
@@ -200,6 +211,9 @@ impl<'a> L<'a> {
             t,
             fns: HashMap::new(),
             methods: HashMap::new(),
+            trait_fns: vec![],
+            names: HashMap::new(),
+            adt_args: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
             refined: HashMap::new(),
@@ -237,8 +251,26 @@ impl<'a> L<'a> {
                         }
                     }
                 }
-                // トレイトは型検査の段階で止まる（check の 0'）ので、ここには来ない。
-                a::Item::Trait(_) | a::Item::ImplFor(_) => {}
+                a::Item::ImplFor(im) => {
+                    if let Some(tn) = last_name(&im.ty) {
+                        for f in &im.fns {
+                            l.trait_fns.push((
+                                im.trait_name.clone(),
+                                tn.to_string(),
+                                f.name.clone(),
+                                im,
+                                f,
+                            ));
+                            // 実体名は `<型のモジュール>.<型>/<トレイトのモジュール>.<トレイト>.<関数>`
+                            // （ADR 0022 決定 1。固有のメソッドや、別のトレイトの同じ名前の関数と別の名前になる）。
+                            l.names.insert(
+                                f as *const a::FnDecl as usize,
+                                format!("{tn}/{}.{}", im.trait_name, f.name),
+                            );
+                        }
+                    }
+                }
+                a::Item::Trait(_) => {}
             }
         }
         l
@@ -325,6 +357,7 @@ impl<'a> L<'a> {
         if let Some(&f) = self.instances.get(&k) {
             return f;
         }
+        // 単相化の上限（数の上限）は、エラーを返せる `user_call` と `adt` で見る（ADR 0022 決定 2）。
         let fid = self.funcs.len();
         self.funcs.push(None);
         self.instances.insert(k, fid);
@@ -339,7 +372,13 @@ impl<'a> L<'a> {
         if let Some(&i) = self.type_ids.get(&key) {
             return Ok(i);
         }
+        if self.funcs.len() + self.types.len() >= MAX_INSTANCES {
+            return bail(format!(
+                "単相化の上限を超えた（InstanceLimit: 実体（関数と型）の数が上限 {MAX_INSTANCES} を超えた）"
+            ));
+        }
         let id = self.types.len();
+        self.adt_args.insert(id, args.clone());
         self.type_ids.insert(key, id);
         self.types.push(ir::TypeDef {
             name: name.to_string(),
@@ -896,7 +935,13 @@ impl<'a> L<'a> {
             Some(t) => self.conv_ast(t, &job.mono)?,
             None => ir::Ty::Unit,
         };
-        let fb = Fb::new(&decl.name, ret_ty, job.mono, decl.span.line);
+        // 実体名（ADR 0022 決定 1）。トレイトの実装の関数は登録側で付け替えた名前を使う。
+        let ename = self
+            .names
+            .get(&(decl as *const a::FnDecl as usize))
+            .cloned()
+            .unwrap_or_else(|| decl.name.clone());
+        let fb = Fb::new(&ename, ret_ty, job.mono, decl.span.line);
         let saved = std::mem::replace(&mut self.fb, fb);
         let r = self.fn_body(decl);
         let fb = std::mem::replace(&mut self.fb, saved);
@@ -912,6 +957,10 @@ impl<'a> L<'a> {
             let ty = self.conv_ast(&p.ty, &mono)?;
             let l = self.new_local(&p.name, ty.clone());
             self.fb.params.push(l);
+            if p.name == "self" {
+                // 本体の中の `self`（`Expr::SelfValue`）の場所。メソッドの受け手は先頭の引数。
+                self.fb.self_local = Some(l);
+            }
             if needs_drop(&ty) {
                 self.register(l, false);
             }
@@ -1746,6 +1795,28 @@ impl<'a> L<'a> {
         args: Vec<Operand>,
         ret: ir::Ty,
     ) -> R<Operand> {
+        // 単相化の上限（ADR 0022 決定 2）: 鍵の型引数の入れ子の深さ。
+        fn cty_depth(t: &CTy) -> usize {
+            match t {
+                CTy::Named(_, a) => 1 + a.iter().map(cty_depth).max().unwrap_or(0),
+                CTy::Ref(_, i) => 1 + cty_depth(i),
+                CTy::Tuple(ts) => 1 + ts.iter().map(cty_depth).max().unwrap_or(0),
+                CTy::Fn(ps, r) => {
+                    1 + ps
+                        .iter()
+                        .map(cty_depth)
+                        .max()
+                        .unwrap_or(0)
+                        .max(cty_depth(r))
+                }
+                _ => 0,
+            }
+        }
+        if targs.iter().any(|(_, t)| cty_depth(t) > MAX_TYPE_DEPTH) {
+            return bail(format!(
+                "単相化の上限を超えた（InstanceLimit: 型引数の入れ子の深さが上限 {MAX_TYPE_DEPTH} を超えた）"
+            ));
+        }
         let cm = self.fb.mono.clone();
         let mut mono = Mono::new();
         let mut key = vec![];
@@ -1754,8 +1825,125 @@ impl<'a> L<'a> {
             key.push(ty.clone());
             mono.insert(n.clone(), ty);
         }
+        self.user_call_ir(decl, mono, key, args, ret)
+    }
+
+    fn user_call_ir(
+        &mut self,
+        decl: &'a a::FnDecl,
+        mono: Mono,
+        key: Vec<ir::Ty>,
+        args: Vec<Operand>,
+        ret: ir::Ty,
+    ) -> R<Operand> {
+        if !self
+            .instances
+            .contains_key(&(decl as *const a::FnDecl as usize, key.clone()))
+            && self.funcs.len() + self.types.len() >= MAX_INSTANCES
+        {
+            return bail(format!(
+                "単相化の上限を超えた（InstanceLimit: 実体（関数と型）の数が上限 {MAX_INSTANCES} を超えた）"
+            ));
+        }
         let fid = self.instance(decl, mono, key);
         Ok(self.emit_call(Callee::Func(fid), args, ret))
+    }
+
+    /// トレイトの実装の関数を探す（トレイトの名前・型の頭・関数の名前。ADR 0022 決定 2）。
+    fn find_trait_fn(
+        &self,
+        trait_name: &str,
+        head: &str,
+        name: &str,
+    ) -> Option<(&'a a::ImplForDecl, &'a a::FnDecl)> {
+        self.trait_fns
+            .iter()
+            .find(|(t, h, n, _, _)| t == trait_name && h == head && n == name)
+            .map(|(_, _, _, im, f)| (*im, *f))
+    }
+
+    /// SIR の型の頭の名前（トレイトの実装を探す鍵。ADR 0022 決定 2）。
+    fn ir_head(&self, t: &ir::Ty) -> String {
+        match t {
+            ir::Ty::Adt(id) => self.types[*id].name.clone(),
+            ir::Ty::Int => "Int".into(),
+            ir::Ty::Float => "Float".into(),
+            ir::Ty::Bool => "Bool".into(),
+            ir::Ty::Str => "String".into(),
+            ir::Ty::List(_) => "List".into(),
+            ir::Ty::Path => "Path".into(),
+            ir::Ty::ParseError => "ParseError".into(),
+            ir::Ty::Shared(_) => "Shared".into(),
+            ir::Ty::Cell(_) => "Cell".into(),
+            ir::Ty::Ref(i) | ir::Ty::MutRef(i) => self.ir_head(i),
+            _ => String::new(),
+        }
+    }
+
+    /// SIR の型の型引数（`Adt` は登録時のもの、それ以外は中身）。
+    fn ir_args(&self, t: &ir::Ty) -> Vec<ir::Ty> {
+        match t {
+            ir::Ty::Adt(id) => self.adt_args.get(id).cloned().unwrap_or_default(),
+            ir::Ty::List(x) | ir::Ty::Shared(x) | ir::Ty::Cell(x) => vec![(**x).clone()],
+            ir::Ty::Tuple(ts) => ts.clone(),
+            _ => vec![],
+        }
+    }
+
+    /// 実装の型のパターン（型引数を含む AST の型）を具体的な型に対応させ、単相化の対応を作る。
+    fn impl_mono(&mut self, im: &a::ImplForDecl, concrete: &ir::Ty) -> R<(Mono, Vec<ir::Ty>)> {
+        fn go(l: &mut L, t: &a::Type, c: &ir::Ty, gens: &[String], mono: &mut Mono) -> R<()> {
+            match t {
+                a::Type::Path { path, args } => {
+                    let name = path.last().map(String::as_str).unwrap_or("");
+                    if args.is_empty() && gens.iter().any(|g| g == name) {
+                        mono.insert(name.to_string(), c.clone());
+                        return Ok(());
+                    }
+                    if l.ir_head(c) != name {
+                        return bail(format!(
+                            "トレイトの実装の型 `{name}` と具体的な型が合わない"
+                        ));
+                    }
+                    let ca = l.ir_args(c);
+                    if args.len() != ca.len() {
+                        return bail("トレイトの実装の型引数の数が合わない");
+                    }
+                    for (a, cc) in args.iter().zip(ca.iter()) {
+                        go(l, a, cc, gens, mono)?;
+                    }
+                    Ok(())
+                }
+                a::Type::Ref { inner, .. } => {
+                    let inner_c = match c {
+                        ir::Ty::Ref(i) | ir::Ty::MutRef(i) => (**i).clone(),
+                        other => other.clone(),
+                    };
+                    go(l, inner, &inner_c, gens, mono)
+                }
+                a::Type::Tuple(ts) => {
+                    let ca = l.ir_args(c);
+                    for (a, cc) in ts.iter().zip(ca.iter()) {
+                        go(l, a, cc, gens, mono)?;
+                    }
+                    Ok(())
+                }
+                a::Type::Fn { .. } => bail("トレイトの実装の型に関数の型は書けない"),
+            }
+        }
+        let gens: Vec<String> = im.generics.iter().map(|g| g.name.clone()).collect();
+        let mut mono = Mono::new();
+        go(self, &im.ty, concrete, &gens, &mut mono)?;
+        let mut key = vec![];
+        for g in &gens {
+            let Some(t) = mono.get(g) else {
+                return bail(format!(
+                    "トレイトの実装の型引数 `{g}` が具体的な型から決まらない"
+                ));
+            };
+            key.push(t.clone());
+        }
+        Ok((mono, key))
     }
 
     fn args_of(&mut self, args: &'a [a::Expr]) -> R<Vec<Operand>> {
@@ -1869,6 +2057,59 @@ impl<'a> L<'a> {
                 };
                 self.method_call(recv, name, args, &r, ret)
             }
+            ResKind::TraitMethod => {
+                let a::Expr::Field { expr: recv, name } = strip(callee) else {
+                    return bail("メソッド呼び出しの形");
+                };
+                // `トレイト.m(x, ...)` の修飾形は、受け手が最初の引数（ADR 0022 決定 2）。
+                if let a::Expr::Name(n) = strip(recv) {
+                    if r.owner.as_deref() == Some(n.as_str()) {
+                        let Some((first, rest)) = args.split_first() else {
+                            return bail("トレイトで選ぶ呼び出しに受け手がない");
+                        };
+                        return self.method_call(first, name, rest, &r, ret);
+                    }
+                }
+                self.method_call(recv, name, args, &r, ret)
+            }
+            ResKind::TraitTypeFn => {
+                let a::Expr::Field {
+                    expr: head_expr,
+                    name,
+                } = strip(callee)
+                else {
+                    return bail("型に属する関数の呼び出しの形");
+                };
+                let trait_name = r.owner.clone().unwrap_or_default();
+                let ops = self.args_of(args)?;
+                // 型引数 `T.f()`（検査側が単一の（型引数, Param）対応を 1 つ残す形）か、
+                // 具体的な型 `型.f()` かで、実装の探し方が違う（ADR 0022 決定 2）。
+                if r.targs.len() == 1
+                    && matches!(&r.targs[0].1, CTy::Param(q) if q == &r.targs[0].0)
+                {
+                    let pname = r.targs[0].0.clone();
+                    let Some(cty) = self.fb.mono.get(&pname).cloned() else {
+                        return bail(format!("型引数 `{pname}` の具体的な型が決まらない"));
+                    };
+                    let head = self.ir_head(&cty);
+                    let Some((im, decl)) = self.find_trait_fn(&trait_name, &head, name) else {
+                        return bail(format!(
+                            "型 `{head}` のトレイト `{trait_name}` の実装に関数 `{name}` がない"
+                        ));
+                    };
+                    let (mono, key) = self.impl_mono(im, &cty)?;
+                    return self.user_call_ir(decl, mono, key, ops, ret);
+                }
+                let a::Expr::Name(head) = strip(head_expr) else {
+                    return bail("型に属する関数の呼び出しの形");
+                };
+                let Some((_, decl)) = self.find_trait_fn(&trait_name, head, name) else {
+                    return bail(format!(
+                        "型 `{head}` のトレイト `{trait_name}` の実装に関数 `{name}` がない"
+                    ));
+                };
+                self.user_call(decl, &r.targs, ops, ret)
+            }
         }
     }
 
@@ -1880,6 +2121,36 @@ impl<'a> L<'a> {
         r: &Resolved,
         ret: ir::Ty,
     ) -> R<Operand> {
+        // トレイトの実装のメソッド（ADR 0022 決定 2）: 受け手の具体的な型の頭で実装を探す。
+        // `トレイト.m(x)` の修飾形も、検査側が同じ解決（TraitMethod）を残すのでここへ来る。
+        if r.kind == ResKind::TraitMethod {
+            let rty = self.ety(recv)?;
+            let peeled = peel(&rty).clone();
+            let head = self.ir_head(&peeled);
+            let trait_name = r.owner.clone().unwrap_or_default();
+            let Some((_, decl)) = self.find_trait_fn(&trait_name, &head, name) else {
+                return bail(format!(
+                    "型 `{head}` のトレイト `{trait_name}` の実装にメソッド `{name}` がない"
+                ));
+            };
+            let mut ops = vec![];
+            match decl.params.first().map(|p| &p.ty) {
+                Some(a::Type::Ref { mutable, .. }) => {
+                    let (p, ty) = self.expr_place(recv)?;
+                    let inner = Box::new(peel(&ty).clone());
+                    if *mutable {
+                        ops.push(self.fresh(Rvalue::RefMut(p), ir::Ty::MutRef(inner)));
+                    } else {
+                        ops.push(self.fresh(Rvalue::Ref(p), ir::Ty::Ref(inner)));
+                    }
+                }
+                _ => ops.push(self.expr(recv)?),
+            }
+            for x in args {
+                ops.push(self.expr(x)?);
+            }
+            return self.user_call(decl, &r.targs, ops, ret);
+        }
         let owner = r.owner.clone().unwrap_or_default();
         if let Some(&decl) = self.methods.get(&(owner.clone(), name.to_string())) {
             let mut ops = vec![];

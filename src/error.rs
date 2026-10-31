@@ -181,6 +181,16 @@ pub enum ErrorKind {
     PatternMismatch,
     InfiniteType,
     CloneOfCopyable,
+    /// `impl トレイト for 型` を、トレイトか型を宣言したモジュール以外に置いた（ADR 0022 決定 2）。
+    TraitImplPlacement,
+    /// 同じ（トレイト, 型の頭）の組に 2 つ目の実装がある（ADR 0022 決定 2）。
+    TraitImplDuplicate,
+    /// 実装がトレイトの宣言に合わない（関数の欠け・余り、シグネチャ・4 節の規則の違反。ADR 0022 決定 2）。
+    TraitImplMismatch,
+    /// 総称の関数の再帰が、呼ぶたびに大きくなる型を型引数に渡す（ADR 0022 決定 2 の単相化の上限）。
+    PolymorphicRecursion,
+    /// 単相化の実体の数が上限を超えた（ADR 0022 決定 2 の単相化の上限）。
+    InstanceLimit,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -287,7 +297,12 @@ impl ErrorKind {
             | TryOperand
             | PatternMismatch
             | InfiniteType
-            | CloneOfCopyable => Phase::Check,
+            | CloneOfCopyable
+            | TraitImplPlacement
+            | TraitImplDuplicate
+            | TraitImplMismatch
+            | PolymorphicRecursion
+            | InstanceLimit => Phase::Check,
             _ => Phase::Syntax,
         }
     }

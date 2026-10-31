@@ -93,7 +93,7 @@ impl ClosureInfo {
 
 /// ソースを検査して、クロージャごとのとらえた値の一覧を返す。
 pub fn closure_captures(src: &str) -> R<Vec<ClosureInfo>> {
-    analyze(&parse(src)?, &[], &Options::default()).map(|ck| ck.closures)
+    analyze(&parse(src)?, &[], &[], &Options::default()).map(|ck| ck.closures)
 }
 
 /// 関数の本体の検査中の、クロージャの枠。
@@ -137,6 +137,11 @@ pub(crate) enum ResKind {
     Check,
     /// 受け手のあるメソッド（`xs.push(..)`）。`owner` が受け手の型の名前。
     Method,
+    /// トレイトの実装のメソッド（`x.m(..)`・`トレイト.m(x)`）。`owner` がトレイトの名前（ADR 0022 決定 2）。
+    TraitMethod,
+    /// 型引数の制約を通した、受け手のないトレイトの関数（`T.f(..)`）。`owner` がトレイトの名前、
+    /// 型引数の名前と `Param` 型が `targs` に 1 つ入る（ADR 0022 決定 2）。
+    TraitTypeFn,
 }
 
 /// 呼び出しの解決（どの関数・メソッドか、型引数の具体化）。
@@ -177,7 +182,7 @@ pub fn typed(file: &File) -> R<Typed<'_>> {
 }
 
 pub fn typed_with<'a>(file: &'a File, opts: &Options) -> R<Typed<'a>> {
-    let ck = analyze(file, &[], opts)?;
+    let ck = analyze(file, &[], &[], opts)?;
     let t = ck.typed;
     Ok(Typed {
         file,
@@ -292,12 +297,45 @@ enum TypeDef {
 struct Sig {
     /// 型引数（`impl` のものを先に、関数のものを後に）と制約。
     generics: Vec<(String, Vec<Prop>)>,
+    /// 型引数のトレイトの制約（型引数の名前, トレイトの名前。ADR 0022 決定 2）。
+    trait_bounds: Vec<(String, String)>,
     params: Vec<(String, Ty)>,
     ret: Ty,
     effects_none: bool,
     /// 宣言した効果（`of(f)` は引数の位置で持つ）。
     effects: Vec<EffTerm>,
     has_self: bool,
+}
+
+/// トレイトの宣言（ADR 0022 決定 2）。関数のシグネチャは `Self` を `Param("Self")` として持つ。
+#[derive(Debug, Clone)]
+struct TraitDef {
+    fns: Vec<(FnDecl, Sig)>,
+}
+
+/// `impl トレイト for 型` の登録（ADR 0022 決定 2）。
+#[derive(Debug, Clone)]
+struct TraitImpl {
+    trait_name: String,
+    /// 型の頭（型の構築子の名前。`List<Int>` なら `List`、組み込みの型はその名前）。
+    head: String,
+    /// 実装する型（`impl` の型引数を `Param` として持つ）。
+    ty: Ty,
+    generics: Vec<(String, Vec<Prop>)>,
+    trait_bounds: Vec<(String, String)>,
+    fns: Vec<(FnDecl, Sig)>,
+    /// 同じ実装が複数の経路で届いたときの同一判定（宣言の位置と関数の構成）。
+    /// 取り込みは複製を作るので、番地では同一と分からない。
+    fp: (u32, u32, usize, String, u32),
+}
+
+/// 型が決まってから調べるトレイトの制約。
+struct TraitPending {
+    ty: Ty,
+    trait_name: String,
+    /// `{}` の位置に型を入れて表示する。
+    text: String,
+    span: Span,
 }
 
 /// シグネチャの効果の 1 項。
@@ -405,6 +443,25 @@ struct Ck {
     types: HashMap<String, TypeDef>,
     fns: HashMap<String, Sig>,
     methods: HashMap<(String, String), Sig>,
+    /// トレイトの宣言（名前 -> 関数の一覧。ADR 0022 決定 2）。
+    traits: HashMap<String, TraitDef>,
+    /// この検査で知っているトレイトの名前すべて（制約の名前の解決に使う）。
+    trait_names: HashSet<String>,
+    /// `impl トレイト for 型` の登録（自分のモジュールと、取り込んだもの。ADR 0022 決定 2）。
+    trait_impls: Vec<TraitImpl>,
+    /// `ImplForDecl` の番地 -> `trait_impls` の位置。
+    impl_index: HashMap<usize, usize>,
+    /// このファイルが宣言したトレイトと型の名前（置き場所の規則の判定に使う）。
+    own_traits: HashSet<String>,
+    own_types: HashSet<String>,
+    /// メソッドとして呼べるトレイト（自分の宣言と、`use` で名指しした取り込み。ADR 0022 決定 2）。
+    visible_traits: HashSet<String>,
+    /// いま検査している関数の型引数のトレイトの制約。
+    cur_trait_bounds: Vec<(String, String)>,
+    /// 型が決まってから調べるトレイトの制約。
+    trait_pending: Vec<TraitPending>,
+    /// 多相再帰の検査: 循環する総称の関数の名前 -> 強連結成分の番号（ADR 0022 決定 2）。
+    scc: HashMap<String, usize>,
     scopes: Vec<HashMap<String, Local>>,
     span: Span,
     ret: Ty,
@@ -536,7 +593,7 @@ pub fn fn_key(f: &FnDecl) -> usize {
 
 /// 検査して、関数ごとの記録を返す。`check_file_with` と同じ検査をする。
 pub fn fn_reports(file: &File, opts: &Options) -> R<HashMap<usize, FnReport>> {
-    analyze(file, &[], opts).map(|ck| ck.reports)
+    analyze(file, &[], &[], opts).map(|ck| ck.reports)
 }
 
 /// 移動の状態。移動した場所（`a`・`a.owner`）とその位置、そして経路が早期の戻りで終わったか。
@@ -607,13 +664,18 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
                 .to_string(),
         ));
     }
-    analyze(file, &[], opts).map(|_| ())
+    analyze(file, &[], &[], opts).map(|_| ())
 }
 
 /// 他のモジュールから取り込んだ宣言（`externs`。シグネチャだけを使い、本体は検査しない）を
 /// 加えて検査する（ADR 0021 の決定 3・5。`project` が集める）。
-pub fn check_module(file: &File, externs: &[Item], opts: &Options) -> R<()> {
-    analyze(file, externs, opts).map(|_| ())
+pub fn check_module(
+    file: &File,
+    externs: &[Item],
+    visible_traits: &[String],
+    opts: &Options,
+) -> R<()> {
+    analyze(file, externs, visible_traits, opts).map(|_| ())
 }
 
 /// 標準の名前空間の頭（`fs`・`console`・`raw`）と `std`。モジュール名の最初の部分には使えない（ADR 0021 の 2-2b の決め）。
@@ -630,7 +692,7 @@ pub fn is_std_name(n: &str) -> bool {
         || std_heads().contains(&n)
 }
 
-fn analyze(file: &File, externs: &[Item], opts: &Options) -> R<Ck> {
+fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Options) -> R<Ck> {
     let mut ck = Ck {
         externs: externs.to_vec(),
         extern_types: externs
@@ -645,6 +707,48 @@ fn analyze(file: &File, externs: &[Item], opts: &Options) -> R<Ck> {
         types: HashMap::new(),
         fns: HashMap::new(),
         methods: HashMap::new(),
+        traits: HashMap::new(),
+        trait_names: file
+            .items
+            .iter()
+            .chain(externs.iter())
+            .filter_map(|i| match i {
+                Item::Trait(t) => Some(t.name.clone()),
+                _ => None,
+            })
+            .collect(),
+        trait_impls: vec![],
+        impl_index: HashMap::new(),
+        own_traits: file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Trait(t) => Some(t.name.clone()),
+                _ => None,
+            })
+            .collect(),
+        own_types: file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Struct(s) => Some(s.name.clone()),
+                Item::Enum(e) => Some(e.name.clone()),
+                Item::Type(t) => Some(t.name.clone()),
+                _ => None,
+            })
+            .collect(),
+        visible_traits: file
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Trait(t) => Some(t.name.clone()),
+                _ => None,
+            })
+            .chain(visible_traits.iter().cloned())
+            .collect(),
+        cur_trait_bounds: vec![],
+        trait_pending: vec![],
+        scc: HashMap::new(),
         scopes: vec![],
         span: file.module.span,
         ret: Ty::Unit,
@@ -734,6 +838,390 @@ fn args_named(def: Option<&TypeDef>, m: &HashMap<String, Ty>) -> Vec<(String, Ty
             .filter_map(|p| m.get(p).map(|t| (p.clone(), t.clone())))
             .collect(),
         _ => vec![],
+    }
+}
+
+/// 型の頭（型の構築子の名前と型引数）。頭のない型（型引数そのもの・組・関数の型・参照でない基本でない型）は `None`。
+/// 参照は剥がして中を見る。
+fn head_of(t: &Ty) -> Option<(String, Vec<Ty>)> {
+    match t {
+        Ty::Named(n, a) => Some((n.clone(), a.clone())),
+        Ty::Int => Some(("Int".into(), vec![])),
+        Ty::Float => Some(("Float".into(), vec![])),
+        Ty::Bool => Some(("Bool".into(), vec![])),
+        Ty::Str => Some(("String".into(), vec![])),
+        Ty::Ref(_, i) => head_of(i),
+        _ => None,
+    }
+}
+
+/// 型引数を `Param` として持つ型のパターン `pat` を具体的な型 `z` に対応させ、型引数の対応を作る。
+fn match_pattern(ck: &Ck, pat: &Ty, z: &Ty) -> Option<HashMap<String, Ty>> {
+    fn go(ck: &Ck, pat: &Ty, z: &Ty, m: &mut HashMap<String, Ty>) -> Option<()> {
+        let z = ck.shallow(z);
+        match pat {
+            Ty::Param(p) => match m.get(p) {
+                Some(prev) => {
+                    if *prev == z {
+                        Some(())
+                    } else {
+                        None
+                    }
+                }
+                None => {
+                    m.insert(p.clone(), z.clone());
+                    Some(())
+                }
+            },
+            Ty::Named(n, a) => match &z {
+                Ty::Named(n2, a2) if n == n2 && a.len() == a2.len() => {
+                    for (x, y) in a.iter().zip(a2.iter()) {
+                        go(ck, x, y, m)?;
+                    }
+                    Some(())
+                }
+                _ => None,
+            },
+            Ty::Ref(mu, i) => match &z {
+                Ty::Ref(mu2, i2) if mu == mu2 => go(ck, i, i2, m),
+                _ => None,
+            },
+            Ty::Tuple(ts) => match &z {
+                Ty::Tuple(zs) if ts.len() == zs.len() => {
+                    for (x, y) in ts.iter().zip(zs.iter()) {
+                        go(ck, x, y, m)?;
+                    }
+                    Some(())
+                }
+                _ => None,
+            },
+            Ty::Fn(ps, r) => match &z {
+                Ty::Fn(ps2, r2) if ps.len() == ps2.len() => {
+                    for (x, y) in ps.iter().zip(ps2.iter()) {
+                        go(ck, x, y, m)?;
+                    }
+                    go(ck, r, r2, m)
+                }
+                _ => None,
+            },
+            other => {
+                if *other == z {
+                    Some(())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+    let mut m = HashMap::new();
+    go(ck, pat, z, &mut m)?;
+    Some(m)
+}
+
+/// 型が型引数 `p` を含むか。
+fn contains_param(t: &Ty, p: &str) -> bool {
+    match t {
+        Ty::Param(q) => q == p,
+        Ty::Tuple(ts) => ts.iter().any(|t| contains_param(t, p)),
+        Ty::Ref(_, i) => contains_param(i, p),
+        Ty::Named(_, a) => a.iter().any(|t| contains_param(t, p)),
+        Ty::Fn(ps, r) => ps.iter().any(|t| contains_param(t, p)) || contains_param(r, p),
+        _ => false,
+    }
+}
+
+/// 効果の集合 `e` が `d` 以下か（ADR 0022 決定 2 の効果の順序 ⊑）。
+/// カテゴリは葉のカテゴリへ広げて比べ、`of` は引数の位置で比べる。
+fn effects_subset(table: &crate::effects::EffectTable, e: &[EffTerm], d: &[EffTerm]) -> bool {
+    let mut datoms: HashSet<String> = HashSet::new();
+    let mut dofs: HashSet<usize> = HashSet::new();
+    for t in d {
+        match t {
+            EffTerm::Cat(c) => datoms.extend(table.atoms(c)),
+            EffTerm::Of(i) => {
+                dofs.insert(*i);
+            }
+        }
+    }
+    e.iter().all(|t| match t {
+        EffTerm::Cat(c) => table.atoms(c).iter().all(|a| datoms.contains(a)),
+        EffTerm::Of(i) => dofs.contains(i),
+    })
+}
+
+/// 式の中の名前を、対応表で置き換える（α 同値の比較用。ADR 0022 決定 2）。
+/// クロージャの引数と `match` の腕の束縛が隠す名前は置き換えない。
+fn rename_names(e: &Expr, map: &HashMap<String, String>) -> Expr {
+    rename_names_in(e, map, &mut vec![])
+}
+
+/// `rename_names` の、隠している名前を引き継ぐ版。
+fn rename_names_in(e: &Expr, map: &HashMap<String, String>, bound: &mut Vec<String>) -> Expr {
+    fn go(e: &Expr, map: &HashMap<String, String>, bound: &mut Vec<String>) -> Expr {
+        match e {
+            Expr::Name(n) => {
+                if bound.iter().any(|b| b == n) {
+                    e.clone()
+                } else if let Some(m) = map.get(n) {
+                    Expr::Name(m.clone())
+                } else {
+                    e.clone()
+                }
+            }
+            Expr::Old(x) => Expr::Old(Box::new(go(x, map, bound))),
+            Expr::Paren(x) => Expr::Paren(Box::new(go(x, map, bound))),
+            Expr::Try(x) => Expr::Try(Box::new(go(x, map, bound))),
+            Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| go(x, map, bound)).collect()),
+            Expr::Unary { op, expr: x } => Expr::Unary {
+                op: *op,
+                expr: Box::new(go(x, map, bound)),
+            },
+            Expr::Binary { op, lhs, rhs } => Expr::Binary {
+                op: *op,
+                lhs: Box::new(go(lhs, map, bound)),
+                rhs: Box::new(go(rhs, map, bound)),
+            },
+            Expr::Field { expr: x, name } => Expr::Field {
+                expr: Box::new(go(x, map, bound)),
+                name: name.clone(),
+            },
+            Expr::Call { callee, args } => Expr::Call {
+                callee: Box::new(go(callee, map, bound)),
+                args: args.iter().map(|a| go(a, map, bound)).collect(),
+            },
+            Expr::StructLit { path, fields } => Expr::StructLit {
+                path: path.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, x)| (n.clone(), go(x, map, bound)))
+                    .collect(),
+            },
+            Expr::Match {
+                scrutinee,
+                arms,
+                end_line,
+            } => Expr::Match {
+                scrutinee: Box::new(go(scrutinee, map, bound)),
+                arms: arms
+                    .iter()
+                    .map(|a| {
+                        let mut ns = vec![];
+                        pat_names(&a.pattern, &mut ns);
+                        let at = bound.len();
+                        bound.extend(ns);
+                        let body = go(&a.body, map, bound);
+                        bound.truncate(at);
+                        ExprArm {
+                            pattern: a.pattern.clone(),
+                            body,
+                            line: a.line,
+                        }
+                    })
+                    .collect(),
+                end_line: *end_line,
+            },
+            Expr::Closure {
+                is_move,
+                params,
+                body,
+            } => {
+                let at = bound.len();
+                bound.extend(params.iter().cloned());
+                let body = match body {
+                    ClosureBody::Expr(x) => ClosureBody::Expr(Box::new(go(x, map, bound))),
+                    ClosureBody::Block(b) => ClosureBody::Block(rename_block(b, map, bound)),
+                };
+                bound.truncate(at);
+                Expr::Closure {
+                    is_move: *is_move,
+                    params: params.clone(),
+                    body,
+                }
+            }
+            other => other.clone(),
+        }
+    }
+    go(e, map, bound)
+}
+
+/// `rename_names` のブロック版（`let` の束縛も隠す）。
+fn rename_block(b: &Block, map: &HashMap<String, String>, bound: &mut Vec<String>) -> Block {
+    // ブロックの中の式は `rename_names` に入り直す（束縛の共有のため、ここでは文の形だけをたどる）。
+    fn stmt(s: &Stmt, map: &HashMap<String, String>, bound: &mut Vec<String>) -> Stmt {
+        let kind = match &s.kind {
+            StmtKind::Let {
+                mutable,
+                pattern,
+                ty,
+                value,
+            } => {
+                let value = rename_names_in(value, map, bound);
+                let mut ns = vec![];
+                pat_names(pattern, &mut ns);
+                bound.extend(ns);
+                StmtKind::Let {
+                    mutable: *mutable,
+                    pattern: pattern.clone(),
+                    ty: ty.clone(),
+                    value,
+                }
+            }
+            StmtKind::Assign { target, value } => StmtKind::Assign {
+                target: rename_names_in(target, map, bound),
+                value: rename_names_in(value, map, bound),
+            },
+            StmtKind::Expr(e) => StmtKind::Expr(rename_names_in(e, map, bound)),
+            StmtKind::Return(e) => {
+                StmtKind::Return(e.as_ref().map(|e| rename_names_in(e, map, bound)))
+            }
+            StmtKind::If(i) => StmtKind::If(rename_if(i, map, bound)),
+            StmtKind::While { cond, body } => StmtKind::While {
+                cond: rename_names_in(cond, map, bound),
+                body: rename_block(body, map, bound),
+            },
+            StmtKind::Match {
+                scrutinee,
+                arms,
+                end_line,
+            } => StmtKind::Match {
+                scrutinee: rename_names_in(scrutinee, map, bound),
+                arms: arms
+                    .iter()
+                    .map(|a| {
+                        let mut ns = vec![];
+                        pat_names(&a.pattern, &mut ns);
+                        let at = bound.len();
+                        bound.extend(ns);
+                        let body = rename_block(&a.body, map, bound);
+                        bound.truncate(at);
+                        StmtArm {
+                            pattern: a.pattern.clone(),
+                            body,
+                            line: a.line,
+                        }
+                    })
+                    .collect(),
+                end_line: *end_line,
+            },
+        };
+        Stmt { kind, span: s.span }
+    }
+    fn rename_if(i: &IfStmt, map: &HashMap<String, String>, bound: &mut Vec<String>) -> IfStmt {
+        IfStmt {
+            line: i.line,
+            cond: rename_names_in(&i.cond, map, bound),
+            then: rename_block(&i.then, map, bound),
+            otherwise: match i.otherwise.as_deref() {
+                Some(Else::If(n)) => Some(Box::new(Else::If(rename_if(n, map, bound)))),
+                Some(Else::Block(b)) => Some(Box::new(Else::Block(rename_block(b, map, bound)))),
+                None => None,
+            },
+        }
+    }
+    let at = bound.len();
+    let stmts = b.stmts.iter().map(|s| stmt(s, map, bound)).collect();
+    bound.truncate(at);
+    Block {
+        stmts,
+        open_line: b.open_line,
+        end_line: b.end_line,
+    }
+}
+
+/// 式を最上位の `&&` で割り、条件の並びにする（括弧は剥がす）。
+fn conjuncts(e: &Expr, out: &mut Vec<Expr>) {
+    match e {
+        Expr::Paren(x) => conjuncts(x, out),
+        Expr::Binary {
+            op: BinOp::And,
+            lhs,
+            rhs,
+        } => {
+            conjuncts(lhs, out);
+            conjuncts(rhs, out);
+        }
+        other => out.push(other.clone()),
+    }
+}
+
+/// 本体の中の呼び出しの、呼ばれる側の名前（関数名・メソッド名）を集める（多相再帰の検査用）。
+fn collect_calls_block(b: &Block, out: &mut Vec<String>) {
+    for s in &b.stmts {
+        collect_calls_stmt(s, out);
+    }
+}
+
+fn collect_calls_stmt(s: &Stmt, out: &mut Vec<String>) {
+    match &s.kind {
+        StmtKind::Let { value, .. } => collect_calls_expr(value, out),
+        StmtKind::Assign { target, value } => {
+            collect_calls_expr(target, out);
+            collect_calls_expr(value, out);
+        }
+        StmtKind::Expr(e) | StmtKind::Return(Some(e)) => collect_calls_expr(e, out),
+        StmtKind::Return(None) => {}
+        StmtKind::If(i) => collect_calls_if(i, out),
+        StmtKind::While { cond, body } => {
+            collect_calls_expr(cond, out);
+            collect_calls_block(body, out);
+        }
+        StmtKind::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_calls_expr(scrutinee, out);
+            for a in arms {
+                collect_calls_block(&a.body, out);
+            }
+        }
+    }
+}
+
+fn collect_calls_if(i: &IfStmt, out: &mut Vec<String>) {
+    collect_calls_expr(&i.cond, out);
+    collect_calls_block(&i.then, out);
+    match i.otherwise.as_deref() {
+        Some(Else::If(n)) => collect_calls_if(n, out),
+        Some(Else::Block(b)) => collect_calls_block(b, out),
+        None => {}
+    }
+}
+
+fn collect_calls_expr(e: &Expr, out: &mut Vec<String>) {
+    match e {
+        Expr::Call { callee, args } => {
+            match &**callee {
+                Expr::Name(n) => out.push(n.clone()),
+                Expr::Field { name, .. } => out.push(name.clone()),
+                other => collect_calls_expr(other, out),
+            }
+            collect_calls_expr(callee, out);
+            for a in args {
+                collect_calls_expr(a, out);
+            }
+        }
+        Expr::Old(x) | Expr::Paren(x) | Expr::Try(x) => collect_calls_expr(x, out),
+        Expr::Tuple(xs) => xs.iter().for_each(|x| collect_calls_expr(x, out)),
+        Expr::Unary { expr: x, .. } | Expr::Field { expr: x, .. } => collect_calls_expr(x, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_calls_expr(lhs, out);
+            collect_calls_expr(rhs, out);
+        }
+        Expr::StructLit { fields, .. } => {
+            fields.iter().for_each(|(_, x)| collect_calls_expr(x, out))
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_calls_expr(scrutinee, out);
+            for a in arms {
+                collect_calls_expr(&a.body, out);
+            }
+        }
+        Expr::Closure { body, .. } => match body {
+            ClosureBody::Expr(x) => collect_calls_expr(x, out),
+            ClosureBody::Block(b) => collect_calls_block(b, out),
+        },
+        _ => {}
     }
 }
 
@@ -1192,8 +1680,16 @@ impl Ck {
     // ---------- 宣言の収集 ----------
 
     /// 総称の宣言の型引数と制約。`bounded` が偽なら制約を書けない（構造体・列挙型）。
-    fn generics(&self, gs: &[Generic], bounded: bool) -> R<Vec<(String, Vec<Prop>)>> {
+    /// 戻り値は（性質の制約, トレイトの制約）。制約に書けるのは性質と、この検査で見えるトレイト
+    /// （ADR 0022 決定 2。性質の名前は予約名なので、トレイトの名前と重ならない）。
+    #[allow(clippy::type_complexity)]
+    fn generics(
+        &self,
+        gs: &[Generic],
+        bounded: bool,
+    ) -> R<(Vec<(String, Vec<Prop>)>, Vec<(String, String)>)> {
         let mut out: Vec<(String, Vec<Prop>)> = vec![];
+        let mut tbounds: Vec<(String, String)> = vec![];
         for g in gs {
             if out.iter().any(|(n, _)| *n == g.name) {
                 return self.err(
@@ -1219,42 +1715,31 @@ impl Ck {
             let mut props = vec![];
             for b in &g.bounds {
                 let name = b.join(".");
-                let Some((_, p)) = PROPS.iter().find(|(n, _)| *n == name) else {
+                if let Some((_, p)) = PROPS.iter().find(|(n, _)| *n == name) {
+                    if !props.contains(p) {
+                        props.push(*p);
+                    }
+                } else if b.len() == 1 && self.trait_names.contains(&name) {
+                    let tb = (g.name.clone(), name);
+                    if !tbounds.contains(&tb) {
+                        tbounds.push(tb);
+                    }
+                } else {
                     return self.err(
                         ErrorKind::UnknownProperty,
                         format!(
-                            "性質 `{name}` はない（使えるのは {}）",
+                            "性質 `{name}` はない（使えるのは {} と、このモジュールで見えるトレイト）",
                             PROPS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("・")
                         ),
                     );
-                };
-                if !props.contains(p) {
-                    props.push(*p);
                 }
             }
             out.push((g.name.clone(), props));
         }
-        Ok(out)
+        Ok((out, tbounds))
     }
 
     fn run(&mut self, file: &File) -> R<()> {
-        // 0'. トレイトは構文・整形・仕様の表示まで（PR 2-4b）。検査と実行は 2-4c なので、
-        // トレイトを含むプログラムはここで明確に止める（黙って通さない）。
-        // 取り込んだ宣言（externs）の中のトレイトも同じに扱う。
-        for item in file.items.iter().chain(self.externs.iter()) {
-            let span = match item {
-                Item::Trait(t) => Some(t.span),
-                Item::ImplFor(i) => Some(i.span),
-                _ => None,
-            };
-            if let Some(span) = span {
-                self.span = span;
-                return self.err(
-                    ErrorKind::Unsupported,
-                    "トレイト（`trait`・`impl トレイト for 型`）は、この版の型検査ではまだ扱えない（検査と実行は PR 2-4c で対応する）",
-                );
-            }
-        }
         // 0. モジュールの宣言（ADR 0016 の決定 3・6 の補足。名前の予約が許可より先）
         self.span = file.module.span;
         let mname = file.module.name.join(".");
@@ -1326,7 +1811,7 @@ impl Ck {
                     format!("型 `{n}` が二重に宣言されている"),
                 );
             }
-            let gs = self.generics(generics, false)?;
+            let (gs, _) = self.generics(generics, false)?;
             let params: Vec<String> = gs.into_iter().map(|(n, _)| n).collect();
             let shell = match shell {
                 TypeDef::Struct { fields, .. } => TypeDef::Struct { params, fields },
@@ -1434,13 +1919,34 @@ impl Ck {
                             format!("関数 `{}` が二重に宣言されている", f.name),
                         );
                     }
-                    let sig = self.signature(f, None, &[])?;
+                    let sig = self.signature(f, None, &[], &[])?;
                     self.fns.insert(f.name.clone(), sig);
                 }
                 Item::Impl(i) => self.register_impl(i, false)?,
                 _ => {}
             }
         }
+        // 4.5. トレイトと、その実装（ADR 0022 決定 2）。取り込んだ実装は登録だけをし、
+        // 置き場所・適合の検査は、それを書いたモジュールの検査で済んでいるものとして扱う。
+        for item in &all {
+            if let Item::Trait(t) = item {
+                self.register_trait(t)?;
+            }
+        }
+        let n_externs = self.externs.len();
+        for (idx, item) in all.iter().enumerate() {
+            if let Item::ImplFor(i) = item {
+                // 同じ実装が複数の `use` の経路で届いても、登録は 1 回だけ（二重の実装ではない）。
+                if self
+                    .impl_index
+                    .contains_key(&(i as *const ImplForDecl as usize))
+                {
+                    continue;
+                }
+                self.register_impl_for(i, idx >= n_externs)?;
+            }
+        }
+        self.build_scc(file);
         // 5. 篩型の条件と関数の本体
         for item in &file.items {
             match item {
@@ -1456,6 +1962,22 @@ impl Ck {
                     let Ok(Ty::Named(tn, _)) = r else { continue };
                     for f in &i.fns {
                         let sig = self.methods[&(tn.clone(), f.name.clone())].clone();
+                        self.check_fn(f, &sig)?;
+                    }
+                }
+                Item::ImplFor(i) => {
+                    let Some(&idx) = self.impl_index.get(&(i as *const ImplForDecl as usize))
+                    else {
+                        continue;
+                    };
+                    let imp = self.trait_impls[idx].clone();
+                    for f in &i.fns {
+                        let sig = imp
+                            .fns
+                            .iter()
+                            .find(|(d, _)| d.name == f.name)
+                            .map(|(_, s)| s.clone())
+                            .expect("登録済みの実装の関数");
                         self.check_fn(f, &sig)?;
                     }
                 }
@@ -1492,7 +2014,7 @@ impl Ck {
 
     fn register_impl(&mut self, i: &ImplDecl, std: bool) -> R<()> {
         self.span = i.span;
-        let outer = self.generics(&i.generics, true)?;
+        let (outer, outer_tb) = self.generics(&i.generics, true)?;
         self.tparams = outer.iter().map(|(n, _)| n.clone()).collect();
         let ity = self.resolve(&i.ty, Pos::Other);
         self.tparams.clear();
@@ -1533,10 +2055,507 @@ impl Ck {
                     );
                 }
             }
-            let sig = self.signature(f, Some((&tn, &i.ty)), &outer)?;
+            let sig = self.signature(f, Some((&tn, &i.ty)), &outer, &outer_tb)?;
             self.methods.insert(key, sig);
         }
         Ok(())
+    }
+
+    /// トレイトの宣言を登録する（ADR 0022 決定 2）。シグネチャは `Self` を型引数として持つ。
+    fn register_trait(&mut self, t: &TraitDecl) -> R<()> {
+        self.span = t.span;
+        if self.traits.contains_key(&t.name) {
+            return self.err(
+                ErrorKind::DuplicateDefinition,
+                format!("トレイト `{}` が二重に宣言されている", t.name),
+            );
+        }
+        let self_ty = Type::Path {
+            path: vec!["Self".to_string()],
+            args: vec![],
+        };
+        let mut fns = vec![];
+        let mut seen = HashSet::new();
+        for f in &t.fns {
+            self.span = f.span;
+            if !seen.insert(f.name.clone()) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("トレイト `{}` に関数 `{}` が二重にある", t.name, f.name),
+                );
+            }
+            // `Self` を型引数として解決する（`Param("Self")` になる）。
+            self.tparams = vec!["Self".to_string()];
+            let sig = self.signature_in(f, Some((&t.name, &self_ty)), vec![], vec![]);
+            self.tparams.clear();
+            fns.push((f.clone(), sig?));
+        }
+        self.traits.insert(t.name.clone(), TraitDef { fns });
+        Ok(())
+    }
+
+    /// `impl トレイト for 型` の登録（ADR 0022 決定 2 の一貫性の規則）。
+    /// `own` のときだけ、置き場所と適合を検査する（取り込んだ実装は、書いたモジュールで検査済み）。
+    fn register_impl_for(&mut self, i: &ImplForDecl, own: bool) -> R<()> {
+        self.span = i.span;
+        let (generics, trait_bounds) = self.generics(&i.generics, true)?;
+        self.tparams = generics.iter().map(|(n, _)| n.clone()).collect();
+        let ity = self.resolve(&i.ty, Pos::Other);
+        self.tparams.clear();
+        let ity = ity?;
+        let Some((head, _)) = head_of(&ity) else {
+            return self.err(
+                ErrorKind::TraitImplMismatch,
+                "型の頭のない実装は書けない（`impl<T> トレイト for T` の形は書けない。型の構築子を持つ型に実装する）",
+            );
+        };
+        // 取り込んだ実装は、トレイト自体を取り込んでいなくても登録する（呼べるかどうかは見える範囲で決まる）。
+        let tdef = self.traits.get(&i.trait_name).cloned();
+        if own && tdef.is_none() {
+            return self.err(
+                ErrorKind::UnknownType,
+                format!("トレイト `{}` が見つからない", i.trait_name),
+            );
+        }
+        let fp = (
+            i.span.line,
+            i.span.col,
+            i.fns.len(),
+            i.fns.first().map(|f| f.name.clone()).unwrap_or_default(),
+            i.fns.first().map_or(0, |f| f.span.line),
+        );
+        if let Some((eidx, _)) = self
+            .trait_impls
+            .iter()
+            .enumerate()
+            .find(|(_, x)| x.trait_name == i.trait_name && x.head == head)
+        {
+            // 同じ実装が複数の `use` の経路で届いた場合は、二重ではなく同じものとして扱う。
+            if self.trait_impls[eidx].fp == fp {
+                self.impl_index
+                    .insert(i as *const ImplForDecl as usize, eidx);
+                return Ok(());
+            }
+            return self.err(
+                ErrorKind::TraitImplDuplicate,
+                format!(
+                    "トレイト `{}` の型 `{head}` への実装はすでに 1 つある（同じ（トレイト, 型の頭）の組の実装は 1 つだけ）",
+                    i.trait_name
+                ),
+            );
+        }
+        let mut fns = vec![];
+        for f in &i.fns {
+            self.span = f.span;
+            let sig = self.signature(f, Some((&head, &i.ty)), &generics, &trait_bounds)?;
+            fns.push((f.clone(), sig));
+        }
+        if own {
+            // 置ける場所: トレイトを宣言したモジュールか、型を宣言したモジュールだけ。
+            if !self.own_traits.contains(&i.trait_name) && !self.own_types.contains(&head) {
+                self.span = i.span;
+                return self.err(
+                    ErrorKind::TraitImplPlacement,
+                    format!(
+                        "`impl {} for {head}` は、トレイト `{}` を宣言したモジュールか、型 `{head}` を宣言したモジュールにだけ書ける",
+                        i.trait_name, i.trait_name
+                    ),
+                );
+            }
+            self.check_impl_conformance(
+                i,
+                tdef.as_ref().expect("自分の実装のトレイトは登録済み"),
+                &ity,
+                &fns,
+            )?;
+        }
+        let idx = self.trait_impls.len();
+        self.impl_index
+            .insert(i as *const ImplForDecl as usize, idx);
+        self.trait_impls.push(TraitImpl {
+            trait_name: i.trait_name.clone(),
+            head,
+            ty: ity,
+            generics,
+            trait_bounds,
+            fns,
+            fp,
+        });
+        Ok(())
+    }
+
+    /// 実装がトレイトの宣言に合うか（ADR 0022 決定 2 の 4 節の規則と、固有のメソッドとの名前の重なり）。
+    fn check_impl_conformance(
+        &mut self,
+        i: &ImplForDecl,
+        tdef: &TraitDef,
+        ity: &Ty,
+        fns: &[(FnDecl, Sig)],
+    ) -> R<()> {
+        let head = head_of(ity).map(|(h, _)| h).unwrap_or_default();
+        // 固有のメソッド・フィールドと、トレイトの関数の名前は重ねられない。
+        for (f, _) in fns {
+            self.span = f.span;
+            if self.methods.contains_key(&(head.clone(), f.name.clone())) {
+                return self.err(
+                    ErrorKind::TraitImplMismatch,
+                    format!(
+                        "型 `{head}` には固有のメソッド `{}` があり、トレイト `{}` の関数と同じ名前は付けられない",
+                        f.name, i.trait_name
+                    ),
+                );
+            }
+            if let Some(TypeDef::Struct { fields, .. }) = self.types.get(&head) {
+                if fields.iter().any(|(n, _)| *n == f.name) {
+                    return self.err(
+                        ErrorKind::TraitImplMismatch,
+                        format!(
+                            "型 `{head}` にはフィールド `{}` があり、トレイト `{}` の関数と同じ名前は付けられない",
+                            f.name, i.trait_name
+                        ),
+                    );
+                }
+            }
+        }
+        let subst: HashMap<String, Ty> = HashMap::from([("Self".to_string(), ity.clone())]);
+        for (tf, tsig) in &tdef.fns {
+            let Some((imf, isig)) = fns.iter().find(|(f, _)| f.name == tf.name) else {
+                self.span = i.span;
+                return self.err(
+                    ErrorKind::TraitImplMismatch,
+                    format!(
+                        "`impl {} for {}` に関数 `{}` がない（トレイトの関数はすべて実装する）",
+                        i.trait_name,
+                        show(ity),
+                        tf.name
+                    ),
+                );
+            };
+            self.check_fn_conformance(i, tf, tsig, imf, isig, &subst)?;
+        }
+        for (f, _) in fns {
+            if !tdef.fns.iter().any(|(tf, _)| tf.name == f.name) {
+                self.span = f.span;
+                return self.err(
+                    ErrorKind::TraitImplMismatch,
+                    format!(
+                        "`impl {} for {}` の関数 `{}` は、トレイト `{}` にない（余分な関数は書けない）",
+                        i.trait_name,
+                        show(ity),
+                        f.name,
+                        i.trait_name
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// トレイトの関数 1 つと実装の関数の対応（シグネチャと 4 節。ADR 0022 決定 2）。
+    fn check_fn_conformance(
+        &mut self,
+        i: &ImplForDecl,
+        tf: &FnDecl,
+        tsig: &Sig,
+        imf: &FnDecl,
+        isig: &Sig,
+        subst: &HashMap<String, Ty>,
+    ) -> R<()> {
+        self.span = imf.span;
+        let bad = |ck: &Ck, what: String| {
+            ck.err::<()>(
+                ErrorKind::TraitImplMismatch,
+                format!(
+                    "`impl {} for {}` の関数 `{}`: {what}",
+                    i.trait_name,
+                    show(&subst["Self"]),
+                    tf.name
+                ),
+            )
+        };
+        if !imf.generics.is_empty() {
+            return bad(
+                self,
+                "トレイトの関数に型引数はないので、実装の関数にも型引数は書けない".into(),
+            );
+        }
+        if tsig.has_self != isig.has_self {
+            return bad(self, "受け手（`self`）の有無がトレイトの宣言と違う".into());
+        }
+        if tsig.params.len() != isig.params.len() {
+            return bad(
+                self,
+                format!(
+                    "引数の数が違う（トレイトは {} 個、実装は {} 個）",
+                    tsig.params.len(),
+                    isig.params.len()
+                ),
+            );
+        }
+        for (k, ((_, tt), (_, it))) in tsig.params.iter().zip(isig.params.iter()).enumerate() {
+            let want = substitute(tt, subst);
+            if want != *it {
+                return bad(
+                    self,
+                    format!(
+                        "第 {} 引数の型が違う（トレイトは `{}`、実装は `{}`。`Self` と型引数を置き換えて同じでなければならない）",
+                        k + 1,
+                        show(&want),
+                        show(it)
+                    ),
+                );
+            }
+        }
+        let want_ret = substitute(&tsig.ret, subst);
+        if want_ret != isig.ret {
+            return bad(
+                self,
+                format!(
+                    "戻り値の型が違う（トレイトは `{}`、実装は `{}`）",
+                    show(&want_ret),
+                    show(&isig.ret)
+                ),
+            );
+        }
+        // 引数の名前の対応（位置で対応させる）。
+        let ren: HashMap<String, String> = tsig
+            .params
+            .iter()
+            .zip(isig.params.iter())
+            .map(|((a, _), (b, _))| (a.clone(), b.clone()))
+            .collect();
+        // requires: `Self` を置き換えたうえでの α 同値でなければならない。
+        match (&tf.requires, &imf.requires) {
+            (None, None) => {}
+            (Some(a), Some(b)) => {
+                if rename_names(a, &ren) != *b {
+                    return bad(
+                        self,
+                        "`requires` がトレイトの宣言と違う（同じものを書き直す。引数の名前の違いだけは許される）"
+                            .into(),
+                    );
+                }
+            }
+            _ => {
+                return bad(
+                    self,
+                    "`requires` がトレイトの宣言と違う（同じものを書き直す）".into(),
+                )
+            }
+        }
+        // ensures: トレイトの条件を消すことはできない（足すのはよい）。
+        if let Some(te) = &tf.ensures {
+            let want = rename_names(te, &ren);
+            let ok = match &imf.ensures {
+                Some(ie) => {
+                    let mut cs = vec![];
+                    conjuncts(ie, &mut cs);
+                    cs.contains(&want)
+                }
+                None => false,
+            };
+            if !ok {
+                return bad(
+                    self,
+                    "`ensures` からトレイトの条件が消えている（条件を足すのはよいが、消すことはできない）"
+                        .into(),
+                );
+            }
+        }
+        // effects: トレイト以下でなければならない（効果の順序 ⊑。ADR 0022 決定 2）。
+        if !effects_subset(&self.table, &isig.effects, &tsig.effects) {
+            return bad(
+                self,
+                "効果がトレイトの宣言を超えている（実装の効果はトレイト以下でなければならない）"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// 型引数のトレイトの制約を、型が決まってから調べるよう繰り延べる。
+    fn require_traits(&mut self, m: &HashMap<String, Ty>, tb: &[(String, String)], what: &str) {
+        for (p, tr) in tb {
+            if let Some(t) = m.get(p) {
+                self.trait_pending.push(TraitPending {
+                    ty: t.clone(),
+                    trait_name: tr.clone(),
+                    text: format!(
+                        "{what}の型引数 `{p}` はトレイト `{tr}` を実装しなければならないが、`{{}}` は実装していない"
+                    ),
+                    span: self.span,
+                });
+            }
+        }
+    }
+
+    /// 型 `ty` がトレイト `trait_name` を実装するか（`Some(true/false)`。決まらなければ `None`）。
+    fn trait_satisfied(&self, trait_name: &str, ty: &Ty, depth: u32) -> Option<bool> {
+        if depth > 16 {
+            return Some(false);
+        }
+        match self.shallow(ty) {
+            Ty::Var(_) => None,
+            Ty::Param(p) => Some(
+                self.cur_trait_bounds
+                    .iter()
+                    .any(|(n, t)| *n == p && t == trait_name),
+            ),
+            t => {
+                let z = self.zonk(&t);
+                let Some((head, _)) = head_of(&z) else {
+                    return Some(false);
+                };
+                // 実装がなければ「満たさない」（決まらない、ではない）。
+                let Some(imp) = self
+                    .trait_impls
+                    .iter()
+                    .find(|x| x.trait_name == trait_name && x.head == head)
+                else {
+                    return Some(false);
+                };
+                let Some(m) = match_pattern(self, &imp.ty, &z) else {
+                    return Some(false);
+                };
+                for (g, props) in &imp.generics {
+                    let Some(at) = m.get(g) else {
+                        return Some(false);
+                    };
+                    for p in props {
+                        match self.holds(at, *p, 0) {
+                            Some(true) => {}
+                            other => return other,
+                        }
+                    }
+                }
+                for (g, tr) in &imp.trait_bounds {
+                    let Some(at) = m.get(g) else {
+                        return Some(false);
+                    };
+                    match self.trait_satisfied(tr, at, depth + 1) {
+                        Some(true) => {}
+                        other => return other,
+                    }
+                }
+                Some(true)
+            }
+        }
+    }
+
+    /// 多相再帰の拒否（ADR 0022 決定 2）: 循環する総称の関数どうしの呼び出しで、呼ぶ側の型引数を
+    /// 真に含む型を型引数に渡していたら、その呼び出しの位置でエラーにする。
+    fn poly_check(&mut self, m: &HashMap<String, Ty>, callee: &str) -> R<()> {
+        let (Some(&a), Some(&b)) = (self.scc.get(&self.cur_fn), self.scc.get(callee)) else {
+            return Ok(());
+        };
+        if a != b {
+            return Ok(());
+        }
+        for t in m.values() {
+            let z = self.zonk(t);
+            if self
+                .tparams
+                .iter()
+                .any(|p| contains_param(&z, p) && z != Ty::Param(p.clone()))
+            {
+                return self.err(
+                    ErrorKind::PolymorphicRecursion,
+                    format!(
+                        "関数 `{}` から `{callee}` を呼ぶときに、型引数を真に含む型 `{}` を渡している（多相再帰は書けない。単相化が止まらなくなる）",
+                        self.cur_fn,
+                        show(&z)
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 循環する総称の関数の強連結成分を作る（名前で引く。メソッドとトレイトの関数も名前でまとめる）。
+    fn build_scc(&mut self, file: &File) {
+        let mut generic: HashSet<&str> = HashSet::new();
+        let mut bodies: Vec<(&str, &Block, bool)> = vec![];
+        for item in &file.items {
+            match item {
+                Item::Fn(f) => {
+                    let g = !f.generics.is_empty();
+                    if g {
+                        generic.insert(f.name.as_str());
+                    }
+                    bodies.push((f.name.as_str(), &f.body, g));
+                }
+                Item::Impl(i) => {
+                    let g = !i.generics.is_empty();
+                    for f in &i.fns {
+                        let gf = g || !f.generics.is_empty();
+                        if gf {
+                            generic.insert(f.name.as_str());
+                        }
+                        bodies.push((f.name.as_str(), &f.body, gf));
+                    }
+                }
+                Item::ImplFor(i) => {
+                    let g = !i.generics.is_empty();
+                    for f in &i.fns {
+                        let gf = g || !f.generics.is_empty();
+                        if gf {
+                            generic.insert(f.name.as_str());
+                        }
+                        bodies.push((f.name.as_str(), &f.body, gf));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
+        for (name, body, g) in &bodies {
+            if !g {
+                continue;
+            }
+            let mut called = vec![];
+            collect_calls_block(body, &mut called);
+            for c in called {
+                if generic.contains(c.as_str()) {
+                    edges.entry(name.to_string()).or_default().insert(c);
+                }
+            }
+        }
+        // 到達可能性で強連結成分に分ける（総称の関数の数は小さい）。
+        let nodes: Vec<&str> = generic.iter().copied().collect();
+        let reach = |from: &str, edges: &HashMap<String, HashSet<String>>| -> HashSet<String> {
+            let mut seen = HashSet::new();
+            let mut work: Vec<String> = edges
+                .get(from)
+                .map(|s| s.iter().cloned().collect())
+                .unwrap_or_default();
+            while let Some(n) = work.pop() {
+                if seen.insert(n.clone()) {
+                    if let Some(s) = edges.get(&n) {
+                        work.extend(s.iter().cloned());
+                    }
+                }
+            }
+            seen
+        };
+        let reaches: HashMap<&str, HashSet<String>> =
+            nodes.iter().map(|n| (*n, reach(n, &edges))).collect();
+        let mut comp: HashMap<String, usize> = HashMap::new();
+        let mut next = 0usize;
+        for &n in &nodes {
+            if !reaches[n].contains(n) {
+                continue; // 循環していない
+            }
+            if comp.contains_key(n) {
+                continue;
+            }
+            for &m in &nodes {
+                if reaches[n].contains(m) && reaches[m].contains(n) {
+                    comp.insert(m.to_string(), next);
+                }
+            }
+            next += 1;
+        }
+        self.scc = comp;
     }
 
     /// 関数のシグネチャ。`recv` は `impl` の中のとき（型の名前と、`impl` の型）。`outer` は `impl` の型引数。
@@ -1545,8 +2564,9 @@ impl Ck {
         f: &FnDecl,
         recv: Option<(&str, &Type)>,
         outer: &[(String, Vec<Prop>)],
+        outer_tb: &[(String, String)],
     ) -> R<Sig> {
-        let own = self.generics(&f.generics, true)?;
+        let (own, own_tb) = self.generics(&f.generics, true)?;
         let mut generics = outer.to_vec();
         for (n, ps) in own {
             if generics.iter().any(|(m, _)| *m == n) {
@@ -1557,8 +2577,18 @@ impl Ck {
             }
             generics.push((n, ps));
         }
+        let mut trait_bounds = outer_tb.to_vec();
+        for tb in own_tb {
+            if trait_bounds.iter().any(|(m, _)| *m == tb.0) {
+                return self.err(
+                    ErrorKind::DuplicateDefinition,
+                    format!("型引数 `{}` が `impl` の型引数と重なっている", tb.0),
+                );
+            }
+            trait_bounds.push(tb);
+        }
         self.tparams = generics.iter().map(|(n, _)| n.clone()).collect();
-        let r = self.signature_in(f, recv, generics);
+        let r = self.signature_in(f, recv, generics, trait_bounds);
         self.tparams.clear();
         r
     }
@@ -1568,6 +2598,7 @@ impl Ck {
         f: &FnDecl,
         recv: Option<(&str, &Type)>,
         generics: Vec<(String, Vec<Prop>)>,
+        trait_bounds: Vec<(String, String)>,
     ) -> R<Sig> {
         let mut params = vec![];
         let mut seen = HashSet::new();
@@ -1625,6 +2656,7 @@ impl Ck {
         let effects = self.effect_terms(&f.effects, &params)?;
         Ok(Sig {
             generics,
+            trait_bounds,
             params,
             ret,
             effects_none: f.effects.is_empty(),
@@ -1780,7 +2812,7 @@ impl Ck {
         let Some(Item::Fn(f)) = file.items.first() else {
             return self.err(ErrorKind::Unsupported, "標準ライブラリの表が読めない");
         };
-        let sig = self.signature(f, None, &[])?;
+        let sig = self.signature(f, None, &[], &[])?;
         Ok((f.name.clone(), sig))
     }
 
@@ -1801,7 +2833,7 @@ impl Ck {
                     format!("仮の関数 `{}` が二重にある", f.name),
                 );
             }
-            let mut sig = self.signature(f, None, &[])?;
+            let mut sig = self.signature(f, None, &[], &[])?;
             let fx: Vec<Effect> = p
                 .effects
                 .iter()
@@ -2014,6 +3046,7 @@ impl Ck {
     fn begin(&mut self) {
         self.subst.clear();
         self.pending.clear();
+        self.trait_pending.clear();
         self.must_know.clear();
         self.skipped = None;
         self.rec_ty.clear();
@@ -2080,6 +3113,20 @@ impl Ck {
                 Some(false) => {
                     return Err(Error::new(
                         p.kind.clone(),
+                        p.span,
+                        p.text.replace("{}", &self.sh(&p.ty)),
+                    ))
+                }
+                None => unknown = Some(p.span),
+            }
+        }
+        let tpend = std::mem::take(&mut self.trait_pending);
+        for p in &tpend {
+            match self.trait_satisfied(&p.trait_name, &p.ty, 0) {
+                Some(true) => {}
+                Some(false) => {
+                    return Err(Error::new(
+                        ErrorKind::ConstraintUnsatisfied,
                         p.span,
                         p.text.replace("{}", &self.sh(&p.ty)),
                     ))
@@ -2207,9 +3254,11 @@ impl Ck {
 
     fn check_fn(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
         self.env = sig.generics.iter().cloned().collect();
+        self.cur_trait_bounds = sig.trait_bounds.clone();
         self.tparams = sig.generics.iter().map(|(n, _)| n.clone()).collect();
         let r = self.check_fn_in(f, sig);
         self.env.clear();
+        self.cur_trait_bounds.clear();
         self.tparams.clear();
         self.skip = None;
         r
@@ -4240,6 +5289,7 @@ impl Ck {
 
     fn fn_type(&mut self, sig: &Sig, what: &str) -> R<Ty> {
         let m = self.instantiate(&sig.generics, what)?;
+        self.require_traits(&m, &sig.trait_bounds, what);
         Ok(Ty::Fn(
             sig.params.iter().map(|(_, t)| substitute(t, &m)).collect(),
             Box::new(substitute(&sig.ret, &m)),
@@ -4634,7 +5684,7 @@ impl Ck {
                 } else {
                     ResKind::Fn
                 };
-                self.set_resolved(kind, None, n, targs);
+                self.set_resolved(kind, None, n, targs.clone());
                 self.rec_expr(callee, &ft);
                 let eff = if self.lookup(n).is_some() {
                     if self.fn_params.contains(&n.to_string()) {
@@ -4654,7 +5704,15 @@ impl Ck {
                         ..Eff::default()
                     })
                 };
-                self.apply(ft, args, &format!("`{n}`"), eff)
+                let cspan = self.span;
+                let r = self.apply(ft, args, &format!("`{n}`"), eff)?;
+                if kind == ResKind::Fn {
+                    // 多相再帰の検査は、引数と対応づいて型引数が決まった後に行う。
+                    self.span = cspan;
+                    let m: HashMap<String, Ty> = targs.iter().cloned().collect();
+                    self.poly_check(&m, n)?;
+                }
+                Ok(r)
             }
             Expr::Field { expr, name } => {
                 // 名前空間の関数: `fs.read(p)`・`console.log(x)`。
@@ -4683,7 +5741,21 @@ impl Ck {
                         return self.apply(ft, args, &what, eff);
                     }
                 }
+                // 型引数に属する関数: `T.f(...)`（`T` はいまの関数の型引数で、制約のトレイトの
+                // 受け手のない関数を呼ぶ。ADR 0022 決定 2）。
+                if let Expr::Name(p) = &**expr {
+                    if self.lookup(p).is_none()
+                        && self.tparams.iter().any(|x| x == p)
+                        && !self.types.contains_key(p)
+                    {
+                        return self.trait_param_typefn(callee, p, name, args);
+                    }
+                }
                 if let Some(tn) = self.type_path(expr) {
+                    // `トレイト.m(x, ...)` の形（曖昧なメソッドをトレイトで選ぶ。ADR 0022 決定 2）。
+                    if self.traits.contains_key(&tn) {
+                        return self.trait_qualified_call(callee, &tn, name, args);
+                    }
                     if self.core && self.os_item_type_fn(&tn, name) {
                         return self.os_in_core(&format!("{tn}.{name}"));
                     }
@@ -4714,11 +5786,18 @@ impl Ck {
                         }
                         _ => {}
                     }
-                    let Some(sig) = self.methods.get(&(tn.clone(), name.clone())).cloned() else {
-                        return self.err(
-                            ErrorKind::NoSuchMember,
-                            format!("`{tn}` に `{name}` という関数・値がない"),
-                        );
+                    let inherent = self.methods.get(&(tn.clone(), name.clone())).cloned();
+                    let (sig, kind, owner) = match inherent {
+                        Some(s) => (s, ResKind::TypeFn, tn.clone()),
+                        None => match self.trait_typefn_sig(&tn, name)? {
+                            Some((s, tr)) => (s, ResKind::TraitTypeFn, tr),
+                            None => {
+                                return self.err(
+                                    ErrorKind::NoSuchMember,
+                                    format!("`{tn}` に `{name}` という関数・値がない"),
+                                )
+                            }
+                        },
                     };
                     if sig.has_self {
                         return self.err(
@@ -4729,7 +5808,9 @@ impl Ck {
                     let what = format!("`{tn}.{name}`");
                     let ft = self.fn_type(&sig, &what)?;
                     let targs = std::mem::take(&mut self.last_inst);
-                    self.set_resolved(ResKind::TypeFn, Some(&tn), name, targs);
+                    let m: HashMap<String, Ty> = targs.iter().cloned().collect();
+                    self.poly_check(&m, name)?;
+                    self.set_resolved(kind, Some(&owner), name, targs);
                     self.rec_expr(callee, &ft);
                     let eff = Eff {
                         terms: sig.effects.clone(),
@@ -4747,6 +5828,22 @@ impl Ck {
                 } else {
                     None
                 };
+                // 型引数の受け手は、制約のトレイトの関数としてだけ呼べる（ADR 0022 決定 2）。
+                // 組み込みの `clone` はこの限りでない（従来どおり型引数でも使える）。
+                let mut preset: Option<(Sig, ResKind, String)> = None;
+                if let Ty::Param(p) = &rt {
+                    if clone_sig.is_none() {
+                        match self.trait_param_method_sig(p, name)? {
+                            Some((s, tr)) => preset = Some((s, ResKind::TraitMethod, tr)),
+                            None => {
+                                return self.err(
+                                    ErrorKind::NoSuchMember,
+                                    format!("型引数 `{p}` にはメソッド `{name}` がない（性質の制約で使えるのは演算子だけ。トレイトの関数は、型引数の制約にそのトレイトを書いたときだけ呼べる）"),
+                                )
+                            }
+                        }
+                    }
+                }
                 let (tn, _) = match &rt {
                     _ if clone_sig.is_some() => (self.sh(&rt), vec![]),
                     Ty::Named(tn, a) => (tn.clone(), a.clone()),
@@ -4754,15 +5851,12 @@ impl Ck {
                     Ty::Var(_) => {
                         return self.err(
                             ErrorKind::CannotInfer,
-                            format!("メソッド `{name}` を呼ぶ式の型が決まっていない（先に型を決める）"),
+                            format!(
+                                "メソッド `{name}` を呼ぶ式の型が決まっていない（先に型を決める）"
+                            ),
                         )
                     }
-                    Ty::Param(p) => {
-                        return self.err(
-                            ErrorKind::NoSuchMember,
-                            format!("型引数 `{p}` にはメソッド `{name}` がない（性質の制約で使えるのは演算子だけ）"),
-                        )
-                    }
+                    Ty::Param(p) => (p.clone(), vec![]),
                     other => {
                         return self.unsupported(&format!(
                             "標準ライブラリの型 `{}` のメソッド `{name}`",
@@ -4770,16 +5864,29 @@ impl Ck {
                         ))
                     }
                 };
-                if self.core && clone_sig.is_none() && self.os_item_type_fn(&tn, name) {
+                if self.core
+                    && clone_sig.is_none()
+                    && preset.is_none()
+                    && self.os_item_type_fn(&tn, name)
+                {
                     return self.os_in_core(&format!("{tn}.{name}"));
                 }
-                let Some(sig) =
-                    clone_sig.or_else(|| self.methods.get(&(tn.clone(), name.clone())).cloned())
-                else {
-                    return self.err(
-                        ErrorKind::NoSuchMember,
-                        format!("型 `{tn}` にメソッド `{name}` がない"),
-                    );
+                let (sig, res_kind, res_owner) = match preset {
+                    Some(x) => x,
+                    None => match clone_sig
+                        .or_else(|| self.methods.get(&(tn.clone(), name.clone())).cloned())
+                    {
+                        Some(s) => (s, ResKind::Method, tn.clone()),
+                        None => match self.trait_method_sig(&rt, name)? {
+                            Some((s, tr)) => (s, ResKind::TraitMethod, tr),
+                            None => {
+                                return self.err(
+                                    ErrorKind::NoSuchMember,
+                                    format!("型 `{tn}` にメソッド `{name}` がない"),
+                                )
+                            }
+                        },
+                    },
                 };
                 if !sig.has_self {
                     return self.err(
@@ -4788,77 +5895,407 @@ impl Ck {
                     );
                 }
                 let what = format!("メソッド `{tn}.{name}`");
-                let m = self.instantiate(&sig.generics, &what)?;
-                let targs = std::mem::take(&mut self.last_inst);
-                self.set_resolved(ResKind::Method, Some(&tn), name, targs);
-                let selfty = self.peel(&substitute(&sig.params[0].1, &m));
-                if !self.try_unify(&selfty, &rt) {
-                    return self.err(
-                        ErrorKind::TypeMismatch,
-                        format!(
-                            "{what}の受け手は `{}` だが、`{}` である",
-                            self.sh(&selfty),
-                            self.sh(&rt)
-                        ),
-                    );
-                }
-                if let Ty::Ref(true, _) = sig.params[0].1 {
-                    let Some(root) = place_root(expr).map(str::to_string) else {
-                        return self.err(
-                            ErrorKind::BorrowOfNonPlace,
-                            format!("`{name}` は `&mut` の受け手を取るので、変数に対して呼ぶ"),
-                        );
-                    };
-                    self.assignable_place(&root, expr, false)?;
-                }
-                let mut srcs: Vec<Src> = vec![];
-                if let Ty::Ref(m, _) = sig.params[0].1 {
-                    // 借りる受け手
-                    let kind = if m { AccKind::Mut } else { AccKind::Shared };
-                    let place =
-                        place_path(strip_paren(expr)).filter(|(r, _)| self.lookup(r).is_some());
-                    if let Some((_, path)) = &place {
-                        self.log.truncate(mark);
-                        self.log_acc(path, kind);
-                        if m {
-                            self.touch(
-                                path,
-                                true,
-                                &format!("`&mut` を受け取るメソッド `{name}` の呼び出し"),
-                            );
-                        }
-                    }
-                    srcs = self.borrow_srcs(expr, m, &recv_res, &rt0);
-                } else {
-                    // 値で受け取る受け手（`opt.map(..)` など）は移動する
-                    srcs.extend(recv_res);
-                    self.consume(expr, &rt0)?;
-                }
-                let ps: Vec<Ty> = sig.params[1..]
-                    .iter()
-                    .map(|(_, t)| substitute(t, &m))
-                    .collect();
-                let eff = Eff {
-                    terms: sig.effects.clone(),
-                    off: 1,
-                    ..Eff::default()
-                };
-                let more = self.args(&ps, args, &what, &eff)?;
-                srcs.extend(more);
-                self.check_overlap(mark)?;
-                let ret = substitute(&sig.ret, &m);
-                self.rec_expr(callee, &Ty::Fn(ps.clone(), Box::new(ret.clone())));
-                let mut all: Vec<Ty> = vec![substitute(&sig.params[0].1, &m)];
-                all.extend(ps.iter().cloned());
-                self.sig_check(&all, &ret, &what);
-                self.set_res(&ret, srcs);
-                Ok(ret)
+                self.method_tail(
+                    callee, expr, &rt0, &rt, recv_res, mark, &sig, res_kind, &res_owner, name,
+                    args, &what,
+                )
             }
             _ => self.err(
                 ErrorKind::NotCallable,
                 "呼び出せるのは関数・メソッド・値の構築子だけ",
             ),
         }
+    }
+
+    /// 具体的な型の受け手に対する、トレイトの実装のメソッドのシグネチャ（ADR 0022 決定 2）。
+    /// 見えるトレイトの候補が 1 つならそれを返す。実装はあるが見えるトレイトがないときと、
+    /// 見えるトレイトが複数あるときはエラーにする。
+    fn trait_method_sig(&mut self, rt: &Ty, name: &str) -> R<Option<(Sig, String)>> {
+        let z = self.zonk(rt);
+        let Some((head, _)) = head_of(&z) else {
+            return Ok(None);
+        };
+        let mut cands: Vec<(Sig, String)> = vec![];
+        let mut hidden: Vec<String> = vec![];
+        for imp in &self.trait_impls {
+            if imp.head != head {
+                continue;
+            }
+            let Some((_, sig)) = imp.fns.iter().find(|(f, _)| f.name == name) else {
+                continue;
+            };
+            if self.visible_traits.contains(&imp.trait_name) {
+                cands.push((sig.clone(), imp.trait_name.clone()));
+            } else if !hidden.contains(&imp.trait_name) {
+                hidden.push(imp.trait_name.clone());
+            }
+        }
+        match cands.len() {
+            1 => Ok(Some(cands.pop().expect("1 つ"))),
+            0 => {
+                if hidden.is_empty() {
+                    Ok(None)
+                } else {
+                    self.err(
+                        ErrorKind::NoSuchMember,
+                        format!(
+                            "型 `{head}` のメソッド `{name}` はトレイト `{}` の実装にあるが、このモジュールではそのトレイトが見えていない（`use` で取り込む）",
+                            hidden.join("`・`")
+                        ),
+                    )
+                }
+            }
+            _ => {
+                let list = cands
+                    .iter()
+                    .map(|(_, t)| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join("・");
+                self.err(
+                    ErrorKind::UseConflict,
+                    format!(
+                        "メソッド `{name}` は見えている複数のトレイト（{list}）の実装にあり、どれを呼ぶか決まらない（`トレイト.{name}(受け手, ...)` と書いて選ぶ）"
+                    ),
+                )
+            }
+        }
+    }
+
+    /// 型に属する関数としての、トレイトの実装の関数（受け手のないもの。ADR 0022 決定 2）。
+    fn trait_typefn_sig(&mut self, tn: &str, name: &str) -> R<Option<(Sig, String)>> {
+        let mut cands: Vec<(Sig, String)> = vec![];
+        let mut hidden: Vec<String> = vec![];
+        for imp in &self.trait_impls {
+            if imp.head != tn {
+                continue;
+            }
+            let Some((_, sig)) = imp.fns.iter().find(|(f, s)| f.name == name && !s.has_self) else {
+                continue;
+            };
+            if self.visible_traits.contains(&imp.trait_name) {
+                cands.push((sig.clone(), imp.trait_name.clone()));
+            } else if !hidden.contains(&imp.trait_name) {
+                hidden.push(imp.trait_name.clone());
+            }
+        }
+        match cands.len() {
+            1 => Ok(Some(cands.pop().expect("1 つ"))),
+            0 => {
+                if hidden.is_empty() {
+                    Ok(None)
+                } else {
+                    self.err(
+                        ErrorKind::NoSuchMember,
+                        format!(
+                            "型 `{tn}` の関数 `{name}` はトレイト `{}` の実装にあるが、このモジュールではそのトレイトが見えていない（`use` で取り込む）",
+                            hidden.join("`・`")
+                        ),
+                    )
+                }
+            }
+            _ => {
+                let list = cands
+                    .iter()
+                    .map(|(_, t)| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join("・");
+                self.err(
+                    ErrorKind::UseConflict,
+                    format!(
+                        "関数 `{name}` は見えている複数のトレイト（{list}）の実装にあり、どれを呼ぶか決まらない"
+                    ),
+                )
+            }
+        }
+    }
+
+    /// 型引数 `p` の制約のトレイトから、受け手のある関数 `name` のシグネチャ（`Self` を `p` に置き換えたもの）。
+    fn trait_param_method_sig(&mut self, p: &str, name: &str) -> R<Option<(Sig, String)>> {
+        let bounds: Vec<String> = self
+            .cur_trait_bounds
+            .iter()
+            .filter(|(n, _)| n == p)
+            .map(|(_, t)| t.clone())
+            .collect();
+        let mut cands: Vec<(Sig, String)> = vec![];
+        for tr in &bounds {
+            let Some(tdef) = self.traits.get(tr) else {
+                continue;
+            };
+            if let Some((_, sig)) = tdef.fns.iter().find(|(f, s)| f.name == name && s.has_self) {
+                let subst = HashMap::from([("Self".to_string(), Ty::Param(p.to_string()))]);
+                let mut s = sig.clone();
+                s.params = s
+                    .params
+                    .iter()
+                    .map(|(n, t)| (n.clone(), substitute(t, &subst)))
+                    .collect();
+                s.ret = substitute(&s.ret, &subst);
+                s.generics = vec![];
+                s.trait_bounds = vec![];
+                cands.push((s, tr.clone()));
+            }
+        }
+        match cands.len() {
+            1 => Ok(Some(cands.pop().expect("1 つ"))),
+            0 => Ok(None),
+            _ => {
+                let list = cands
+                    .iter()
+                    .map(|(_, t)| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join("・");
+                self.err(
+                    ErrorKind::UseConflict,
+                    format!(
+                        "メソッド `{name}` は制約の複数のトレイト（{list}）にあり、どれを呼ぶか決まらない（`トレイト.{name}(受け手, ...)` と書いて選ぶ）"
+                    ),
+                )
+            }
+        }
+    }
+
+    /// `T.f(...)`（型引数の、受け手のないトレイトの関数。ADR 0022 決定 2）。
+    fn trait_param_typefn(&mut self, callee: &Expr, p: &str, name: &str, args: &[Expr]) -> R<Ty> {
+        let bounds: Vec<String> = self
+            .cur_trait_bounds
+            .iter()
+            .filter(|(n, _)| n == p)
+            .map(|(_, t)| t.clone())
+            .collect();
+        let mut cands: Vec<(Sig, String)> = vec![];
+        for tr in &bounds {
+            let Some(tdef) = self.traits.get(tr) else {
+                continue;
+            };
+            if let Some((_, sig)) = tdef.fns.iter().find(|(f, s)| f.name == name && !s.has_self) {
+                cands.push((sig.clone(), tr.clone()));
+            }
+        }
+        let what = format!("`{p}.{name}`");
+        let (sig, tr) = match cands.len() {
+            1 => cands.pop().expect("1 つ"),
+            0 => {
+                return self.err(
+                    ErrorKind::NoSuchMember,
+                    format!(
+                        "型引数 `{p}` の制約にあるトレイトに、受け手のない関数 `{name}` がない（`T.{name}(...)` で呼べるのは、制約のトレイトの関数だけ）"
+                    ),
+                )
+            }
+            _ => {
+                let list = cands
+                    .iter()
+                    .map(|(_, t)| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join("・");
+                return self.err(
+                    ErrorKind::UseConflict,
+                    format!(
+                        "関数 `{name}` は制約の複数のトレイト（{list}）にあり、どれを呼ぶか決まらない"
+                    ),
+                );
+            }
+        };
+        let subst = HashMap::from([("Self".to_string(), Ty::Param(p.to_string()))]);
+        let ft = Ty::Fn(
+            sig.params
+                .iter()
+                .map(|(_, t)| substitute(t, &subst))
+                .collect(),
+            Box::new(substitute(&sig.ret, &subst)),
+        );
+        self.set_resolved(
+            ResKind::TraitTypeFn,
+            Some(&tr),
+            name,
+            vec![(p.to_string(), Ty::Param(p.to_string()))],
+        );
+        self.rec_expr(callee, &ft);
+        let eff = Eff {
+            terms: sig.effects.clone(),
+            ..Eff::default()
+        };
+        self.apply(ft, args, &what, eff)
+    }
+
+    /// `トレイト.m(x, ...)`（受け手を最初の引数に渡してトレイトを選ぶ形。ADR 0022 決定 2）。
+    fn trait_qualified_call(
+        &mut self,
+        callee: &Expr,
+        tr: &str,
+        name: &str,
+        args: &[Expr],
+    ) -> R<Ty> {
+        let Some(tdef) = self.traits.get(tr).cloned() else {
+            return self.err(
+                ErrorKind::UnknownType,
+                format!("トレイト `{tr}` が見つからない"),
+            );
+        };
+        let Some((_, tsig)) = tdef.fns.iter().find(|(f, _)| f.name == name) else {
+            return self.err(
+                ErrorKind::NoSuchMember,
+                format!("トレイト `{tr}` に関数 `{name}` がない"),
+            );
+        };
+        if !tsig.has_self {
+            return self.err(
+                ErrorKind::NotCallable,
+                format!(
+                    "`{tr}.{name}` は受け手のない関数なので、型に対して `{name}(...)` の形では呼べない（受け手のある関数をトレイトで選ぶ形）"
+                ),
+            );
+        }
+        if args.is_empty() {
+            return self.err(
+                ErrorKind::ArgCount,
+                format!("`{tr}.{name}` は受け手を最初の引数に渡す形（`{tr}.{name}(受け手, ...)`）で呼ぶ"),
+            );
+        }
+        let (recv, rest) = args.split_first().expect("1 つ以上");
+        let mark = self.log.len();
+        let rt0 = self.expr(recv)?;
+        let recv_res = std::mem::take(&mut self.res);
+        let rt = self.peel(&rt0);
+        let (sig, kind) = match &rt {
+            Ty::Param(p) => {
+                if !self.cur_trait_bounds.iter().any(|(n, t)| n == p && t == tr) {
+                    return self.err(
+                        ErrorKind::NoSuchMember,
+                        format!(
+                            "型引数 `{p}` の制約にトレイト `{tr}` がないので、`{tr}.{name}(...)` の形では呼べない"
+                        ),
+                    );
+                }
+                let subst = HashMap::from([("Self".to_string(), Ty::Param(p.clone()))]);
+                let mut s = tsig.clone();
+                s.params = s
+                    .params
+                    .iter()
+                    .map(|(n, t)| (n.clone(), substitute(t, &subst)))
+                    .collect();
+                s.ret = substitute(&s.ret, &subst);
+                s.generics = vec![];
+                s.trait_bounds = vec![];
+                (s, ResKind::TraitMethod)
+            }
+            _ => {
+                let z = self.zonk(&rt);
+                let Some((head, _)) = head_of(&z) else {
+                    return self.err(
+                        ErrorKind::TypeMismatch,
+                        format!("`{tr}.{name}` の受け手の型が決まらない"),
+                    );
+                };
+                let Some(imp) = self
+                    .trait_impls
+                    .iter()
+                    .find(|x| x.trait_name == tr && x.head == head)
+                else {
+                    return self.err(
+                        ErrorKind::NoSuchMember,
+                        format!("型 `{head}` はトレイト `{tr}` を実装していない"),
+                    );
+                };
+                let Some((_, s)) = imp.fns.iter().find(|(f, _)| f.name == name) else {
+                    return self.err(
+                        ErrorKind::NoSuchMember,
+                        format!("型 `{head}` のトレイト `{tr}` の実装に関数 `{name}` がない"),
+                    );
+                };
+                (s.clone(), ResKind::TraitMethod)
+            }
+        };
+        let what = format!("メソッド `{tr}.{name}`");
+        self.method_tail(
+            callee, recv, &rt0, &rt, recv_res, mark, &sig, kind, tr, name, rest, &what,
+        )
+    }
+
+    /// メソッド呼び出しの末尾（シグネチャが決まった後。固有・トレイト共通）。
+    #[allow(clippy::too_many_arguments)]
+    fn method_tail(
+        &mut self,
+        callee: &Expr,
+        recv: &Expr,
+        rt0: &Ty,
+        rt: &Ty,
+        recv_res: Vec<Src>,
+        mark: usize,
+        sig: &Sig,
+        kind: ResKind,
+        owner: &str,
+        name: &str,
+        args: &[Expr],
+        what: &str,
+    ) -> R<Ty> {
+        let m = self.instantiate(&sig.generics, what)?;
+        self.require_traits(&m, &sig.trait_bounds, what);
+        let targs = std::mem::take(&mut self.last_inst);
+        self.poly_check(&m, name)?;
+        self.set_resolved(kind, Some(owner), name, targs);
+        let selfty = self.peel(&substitute(&sig.params[0].1, &m));
+        if !self.try_unify(&selfty, rt) {
+            return self.err(
+                ErrorKind::TypeMismatch,
+                format!(
+                    "{what}の受け手は `{}` だが、`{}` である",
+                    self.sh(&selfty),
+                    self.sh(rt)
+                ),
+            );
+        }
+        if let Ty::Ref(true, _) = sig.params[0].1 {
+            let Some(root) = place_root(recv).map(str::to_string) else {
+                return self.err(
+                    ErrorKind::BorrowOfNonPlace,
+                    format!("`{name}` は `&mut` の受け手を取るので、変数に対して呼ぶ"),
+                );
+            };
+            self.assignable_place(&root, recv, false)?;
+        }
+        let mut srcs: Vec<Src> = vec![];
+        if let Ty::Ref(m, _) = sig.params[0].1 {
+            // 借りる受け手
+            let kind = if m { AccKind::Mut } else { AccKind::Shared };
+            let place = place_path(strip_paren(recv)).filter(|(r, _)| self.lookup(r).is_some());
+            if let Some((_, path)) = &place {
+                self.log.truncate(mark);
+                self.log_acc(path, kind);
+                if m {
+                    self.touch(
+                        path,
+                        true,
+                        &format!("`&mut` を受け取るメソッド `{name}` の呼び出し"),
+                    );
+                }
+            }
+            srcs = self.borrow_srcs(recv, m, &recv_res, rt0);
+        } else {
+            // 値で受け取る受け手（`opt.map(..)` など）は移動する
+            srcs.extend(recv_res);
+            self.consume(recv, rt0)?;
+        }
+        let ps: Vec<Ty> = sig.params[1..]
+            .iter()
+            .map(|(_, t)| substitute(t, &m))
+            .collect();
+        let eff = Eff {
+            terms: sig.effects.clone(),
+            off: 1,
+            ..Eff::default()
+        };
+        let more = self.args(&ps, args, what, &eff)?;
+        srcs.extend(more);
+        self.check_overlap(mark)?;
+        let ret = substitute(&sig.ret, &m);
+        self.rec_expr(callee, &Ty::Fn(ps.clone(), Box::new(ret.clone())));
+        let mut all: Vec<Ty> = vec![substitute(&sig.params[0].1, &m)];
+        all.extend(ps.iter().cloned());
+        self.sig_check(&all, &ret, what);
+        self.set_res(&ret, srcs);
+        Ok(ret)
     }
 
     /// 組み込みの `clone(self: &T) -> T` のシグネチャ（ADR 0013 の決定 2）。受け手の型ごとに作る。
@@ -4887,6 +6324,7 @@ impl Ck {
         }
         Ok(Sig {
             generics: vec![],
+            trait_bounds: vec![],
             params: vec![("self".into(), Ty::Ref(false, Box::new(rt.clone())))],
             ret: rt.clone(),
             effects_none: true,

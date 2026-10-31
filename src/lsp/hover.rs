@@ -110,6 +110,8 @@ fn fns(file: &File) -> Vec<&FnDecl> {
         match it {
             Item::Fn(f) => v.push(f),
             Item::Impl(i) => v.extend(i.fns.iter()),
+            Item::ImplFor(i) => v.extend(i.fns.iter()),
+            Item::Trait(t) => v.extend(t.fns.iter()),
             _ => {}
         }
     }
@@ -199,7 +201,18 @@ pub fn hover(text: &str, line: u32, col: u32, own: &Spec, all: &[Spec]) -> Optio
         }
         name.to_string()
     };
-    all_items()
-        .find(|i| i.name == want && matches!(i.body, Body::Fn { .. }))
-        .map(|i| i.text())
+    if let Some(i) = all_items().find(|i| i.name == want && matches!(i.body, Body::Fn { .. })) {
+        return Some(i.text());
+    }
+    // `トレイト.m(x)` の修飾形（ADR 0022 決定 2）: 受け手がトレイトの名前なら、
+    // そのトレイトの仕様（関数の仕様を含む）を示す。
+    if let Some((tr, _)) = want.split_once('.') {
+        return all_items()
+            .find(|i| {
+                i.name == tr
+                    && matches!(&i.body, Body::Trait { fns } if fns.iter().any(|(n, _)| n == name))
+            })
+            .map(|i| i.text());
+    }
+    None
 }

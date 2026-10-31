@@ -1,7 +1,10 @@
 use crate::ast::*;
 
 use super::escape_str;
-use super::{returns_only, Printer, ADD, AND, CMP, LOWEST, MUL, OR, POSTFIX, PREFIX, PRIMARY};
+use super::{
+    returns_only, Printer, ADD, AND, BITAND, BITOR, BITXOR, CMP, LOWEST, MUL, OR, POSTFIX, PREFIX,
+    PRIMARY, SHIFT,
+};
 
 fn strip(mut e: &Expr) -> &Expr {
     while let Expr::Paren(inner) = e {
@@ -25,6 +28,10 @@ fn binop_level(op: BinOp) -> u8 {
         BinOp::Or => OR,
         BinOp::And => AND,
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => CMP,
+        BinOp::BitOr => BITOR,
+        BinOp::BitXor => BITXOR,
+        BinOp::BitAnd => BITAND,
+        BinOp::Shl | BinOp::Shr => SHIFT,
         BinOp::Add | BinOp::Sub => ADD,
         BinOp::Mul | BinOp::Div | BinOp::Rem => MUL,
     }
@@ -37,6 +44,11 @@ fn binop_str(op: BinOp) -> &'static str {
         BinOp::Mul => "*",
         BinOp::Div => "/",
         BinOp::Rem => "%",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
+        BinOp::BitAnd => "&",
+        BinOp::BitXor => "^",
+        BinOp::BitOr => "|",
         BinOp::Eq => "==",
         BinOp::Ne => "!=",
         BinOp::Lt => "<",
@@ -302,6 +314,7 @@ impl<'a> Printer<'a> {
                     UnOp::Neg => "-",
                     UnOp::Ref => "&",
                     UnOp::RefMut => "&mut ",
+                    UnOp::BitNot => "~",
                 });
                 // `&` が続くと `&&` になるので、参照の参照は括弧を残す。
                 let force = matches!(op, UnOp::Ref | UnOp::RefMut)

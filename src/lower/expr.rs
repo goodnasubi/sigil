@@ -23,6 +23,7 @@ fn cmp_op(op: a::BinOp) -> ir::BinOp {
         a::BinOp::Gt => ir::BinOp::Gt,
         a::BinOp::Ge => ir::BinOp::Ge,
         a::BinOp::And | a::BinOp::Or => ir::BinOp::Eq,
+        _ => todo!("bit ops in lower"),
     }
 }
 
@@ -218,6 +219,9 @@ impl<'a> L<'a> {
                 } else {
                     Ok(self.checked(ArithOp::Sub, Operand::Const(Const::Int(0)), a, "-"))
                 }
+            }
+            a::UnOp::BitNot => {
+                todo!("BitNot in lower")
             }
             a::UnOp::Ref | a::UnOp::RefMut => {
                 let (p, ty) = self.expr_place(inner)?;

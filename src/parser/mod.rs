@@ -199,7 +199,11 @@ impl Parser {
     }
 
     fn at_punct(&self, p: &str) -> bool {
-        matches!(self.tok(), Tok::Punct(q) if *q == p)
+        match self.tok() {
+            Tok::Punct(q) if *q == p => true,
+            Tok::Punct(">>") if p == ">" => true,
+            _ => false,
+        }
     }
 
     fn at_kw(&self, k: &str) -> bool {
@@ -207,11 +211,17 @@ impl Parser {
     }
 
     fn eat_punct(&mut self, p: &str) -> bool {
-        if self.at_punct(p) {
-            self.bump();
-            true
-        } else {
-            false
+        match self.tok() {
+            Tok::Punct(q) if *q == p => {
+                self.bump();
+                true
+            }
+            Tok::Punct(">>") if p == ">" => {
+                // `>>` を 1 つ目の `>` として消費し、2 つ目の `>` に置き換える
+                self.toks[self.pos].tok = Tok::Punct(">");
+                true
+            }
+            _ => false,
         }
     }
 

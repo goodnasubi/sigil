@@ -106,16 +106,20 @@ fn first_diff(src: &str, want: &str) -> Option<Diff> {
     None
 }
 
-// ---- 優先順位の段 ----
+// ---- 優先順位の段（ADR 0023 決定 3） ----
 pub(super) const LOWEST: u8 = 0; // クロージャ
-pub(super) const OR: u8 = 1;
-pub(super) const AND: u8 = 2;
-pub(super) const CMP: u8 = 3;
-pub(super) const ADD: u8 = 4;
-pub(super) const MUL: u8 = 5;
-pub(super) const PREFIX: u8 = 6;
-pub(super) const POSTFIX: u8 = 7;
-pub(super) const PRIMARY: u8 = 8;
+pub(super) const OR: u8 = 1; // ||
+pub(super) const AND: u8 = 2; // &&
+pub(super) const CMP: u8 = 3; // == != < <= > >=
+pub(super) const BITOR: u8 = 4; // |
+pub(super) const BITXOR: u8 = 5; // ^
+pub(super) const BITAND: u8 = 6; // &
+pub(super) const SHIFT: u8 = 7; // << >>
+pub(super) const ADD: u8 = 8; // + -
+pub(super) const MUL: u8 = 9; // * / %
+pub(super) const PREFIX: u8 = 10;
+pub(super) const POSTFIX: u8 = 11;
+pub(super) const PRIMARY: u8 = 12;
 
 struct Line {
     pub(super) text: String,

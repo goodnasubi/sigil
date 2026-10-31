@@ -389,6 +389,17 @@ impl Ck {
                 )?;
                 Ok(v)
             }
+            UnOp::BitNot => {
+                let t = self.expr(inner)?;
+                let v = self.val(&t);
+                if !self.try_unify(&v, &Ty::Int) {
+                    return self.err(
+                        ErrorKind::OperandTypes,
+                        format!("`~` は `Int` に使うが、`{}` である", self.sh(&t)),
+                    );
+                }
+                Ok(Ty::Int)
+            }
             UnOp::Ref | UnOp::RefMut => {
                 let mutable = op == UnOp::RefMut;
                 if !std::mem::take(&mut self.ref_ok) {
@@ -483,6 +494,15 @@ impl Ck {
                     return self.err(
                         ErrorKind::OperandTypes,
                         format!("`%` は `Int` に使うが、`{}` である", show(&t)),
+                    );
+                }
+                Ok(Ty::Int)
+            }
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                if !self.try_unify(&t, &Ty::Int) {
+                    return self.err(
+                        ErrorKind::OperandTypes,
+                        format!("`{sym}` は `Int` に使うが、`{}` である", show(&t)),
                     );
                 }
                 Ok(Ty::Int)

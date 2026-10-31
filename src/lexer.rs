@@ -337,7 +337,64 @@ impl Lexer {
         s
     }
 
+    fn hex_or_bin(&mut self, prefix: char, span: Span) -> Result<(), Error> {
+        self.bump(); // '0'
+        self.bump(); // 'x' | 'X' | 'b' | 'B'
+        let is_hex = prefix == 'x' || prefix == 'X';
+        let mut digits = String::new();
+        while let Some(c) = self.peek() {
+            if (is_hex && c.is_ascii_hexdigit()) || (!is_hex && (c == '0' || c == '1')) || c == '_'
+            {
+                digits.push(c);
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        let kind_str = if is_hex { "16 進" } else { "2 進" };
+        if digits.is_empty() {
+            return Err(err(
+                ErrorKind::BadNumber,
+                span,
+                format!("{kind_str}リテラルのプレフィックスの後に数字が要る"),
+            ));
+        }
+        let clean = digits.replace('_', "");
+        if clean.is_empty() {
+            return Err(err(
+                ErrorKind::BadNumber,
+                span,
+                format!("{kind_str}リテラルに数字が要る"),
+            ));
+        }
+        let radix = if is_hex { 16 } else { 2 };
+        let val = i64::from_str_radix(&clean, radix).map_err(|_| {
+            err(
+                ErrorKind::BadNumber,
+                span,
+                format!("{kind_str}リテラル `{clean}` の値が 64 ビット整数の範囲を超えている"),
+            )
+        })?;
+        if self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return Err(err(
+                ErrorKind::BadNumber,
+                span,
+                format!("{kind_str}リテラルの直後に不正な文字がある"),
+            ));
+        }
+        self.push(Tok::Int(val.to_string()), span);
+        Ok(())
+    }
+
     fn number(&mut self, span: Span) -> Result<(), Error> {
+        if self.peek() == Some('0') {
+            if let Some(p @ ('x' | 'X' | 'b' | 'B')) = self.peek_at(1) {
+                return self.hex_or_bin(p, span);
+            }
+        }
         let int = self.digits();
         if int.len() > 1 && int.starts_with('0') {
             return Err(err(
@@ -429,6 +486,8 @@ impl Lexer {
         let two: Option<&'static str> = match (c, n) {
             ('&', Some('&')) => Some("&&"),
             ('|', Some('|')) => Some("||"),
+            ('<', Some('<')) => Some("<<"),
+            ('>', Some('>')) => Some(">>"),
             ('=', Some('=')) => Some("=="),
             ('!', Some('=')) => Some("!="),
             ('<', Some('=')) => Some("<="),
@@ -481,6 +540,8 @@ impl Lexer {
             '/' => Some("/"),
             '%' => Some("%"),
             '!' => Some("!"),
+            '~' => Some("~"),
+            '^' => Some("^"),
             '&' => Some("&"),
             '|' => Some("|"),
             '=' => Some("="),

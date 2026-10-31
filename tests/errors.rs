@@ -73,10 +73,8 @@ fn lex_leading_zero() {
 
 #[test]
 fn lex_hex_and_exponent() {
-    assert_eq!(
-        kind(&fnsrc(&GOOD_FN.replace("return x;", "return 0x10;"))),
-        ErrorKind::BadNumber
-    );
+    ok(&fnsrc(&GOOD_FN.replace("return x;", "return 0x10;")));
+    ok(&fnsrc(&GOOD_FN.replace("return x;", "return 0b1010;")));
     assert_eq!(
         kind(&fnsrc(&GOOD_FN.replace("return x;", "return 1e3;"))),
         ErrorKind::BadNumber

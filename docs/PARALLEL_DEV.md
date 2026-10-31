@@ -67,7 +67,10 @@
 
 ## 5. 作業の流れ
 
-1. **タスクを取る**: GitHub Issue（ラベル `lane:B3` など）を自分に割り当てる（assignee が排他ロック）。割り当て済みは取らない。
+1. **タスクを取る（排他ロック）**:
+   - 全エージェントが同一の GitHub アカウントで動く場合、`assignee` だけではどのエージェントが担当しているか判別できないため、**`agent:<agent>` ラベル（`agent:claude` / `agent:gemini` / `agent:muse` / `agent:codex`）を排他ロックとして使う**。
+   - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認し、**すでに `agent:*` ラベルが付いている Issue や、同じ `lane:*` でオープン PR が出ているレーンの Issue は取らない**（1 レーン同時 1 PR 原則）。
+   - 対象 Issue を決めたら `gh issue edit <番号> --add-label "agent:<agent>"` を実行し、ブランチ名を Issue にコメントしてから作業を始める。
 2. **作業ツリーを作る**:
    ```
    git fetch origin

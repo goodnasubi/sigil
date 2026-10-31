@@ -1,0 +1,93 @@
+{
+  "unblock_rules": [
+    {
+      "issue": 108,
+      "depends_on": [105],
+      "description": "lower.rs 分割 (#105) 完了後に ir_eval.rs 分割 (#108) の blocked を解除"
+    },
+    {
+      "issue": 112,
+      "depends_on": [111],
+      "description": "PR 2-4d 構文 (#111) 完了後に PR 2-4d 型検査 (#112) の blocked を解除"
+    },
+    {
+      "issue": 113,
+      "depends_on": [112],
+      "description": "PR 2-4d 型検査 (#112) 完了後に PR 2-4d 実行・ネイティブ (#113) の blocked を解除"
+    }
+  ],
+  "spawn_rules": [
+    {
+      "id": "pr-2-5a-bytes-syntax-check",
+      "depends_on_issues": [114],
+      "title": "PR 2-5a: Bytes 型とビット演算の構文・整形・仕様・型検査（ADR 0023）",
+      "labels": ["lane:A1", "lane:B1", "lane:B4", "needs-human"],
+      "body": "## 背景・目的\n\nIssue #114（ADR 0023: `Bytes` とビット演算）の完了に伴い、`Bytes` 型およびビット演算の構文解析・整形・仕様表示・型検査・定数時間検査（ADR 0020 決定 1）を実装します。\n\n## 完了条件\n- [ ] ADR 0023 で定めた構文・型規則・標準ライブラリシグネチャを実装する\n- [ ] `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-2-5b-bytes-eval-native",
+      "depends_on_ids": ["pr-2-5a-bytes-syntax-check"],
+      "title": "PR 2-5b: Bytes 型とビット演算の lowering・SIR 評価器・ネイティブ出力（ADR 0023）",
+      "labels": ["lane:C1", "lane:C2", "lane:D2"],
+      "body": "## 背景・目的\n\n`PR 2-5a`（`Bytes` 型とビット演算の構文・型検査）の完了に伴い、lowering・SIR 評価器・Cranelift ネイティブコード生成およびランタイム操作を実装します。\n\n## 完了条件\n- [ ] ADR 0023 の全操作が SIR 検証器・評価器・ネイティブ実行ファイルで一致して動作すること\n- [ ] `Bytes` の破棄（解放漏れ・二重解放なし）が `SIGIL_RT_LIVE` で確認されていること\n"
+    },
+    {
+      "id": "pr-3-1-adr-runtime-replace",
+      "depends_on_issues": [113, 114, 116],
+      "depends_on_ids": ["pr-2-5b-bytes-eval-native"],
+      "title": "PR 3-1 (ADR): ランタイムの置き換え（原始操作・大域状態・確保器）の ADR（0024）を起草する",
+      "labels": ["lane:E", "needs-human"],
+      "body": "## 背景・目的\n\n[ADR 0018](docs/decisions/0018-p1-scope.md) の段階 2（PR 2-4d・PR 2-5）および PR 3-0 の完了に伴い、段階 3（ランタイムの置き換え P1-R）の設計を定める **ADR 0024（PR 3-1）** を起草します。\n\n## 含めるべき論点（ADR 0018 決定 6）\n- 原始操作（`raw.*`）の具体的な一覧と前提の文\n- 大域の状態の構文（ADR 0016 決定 5）\n- 確保器（アロケータ）の設計と前提条件\n- 標準ライブラリの性質（`Equatable` 等）とトレイトの関係\n- PR 3-2〜3-7 の分割計画\n\n## 完了条件\n- [ ] `docs/decisions/0024-runtime-replacement.md` の起草（実装は含めない）\n"
+    },
+    {
+      "id": "pr-6-1-adr-crypto",
+      "depends_on_issues": [114],
+      "depends_on_ids": ["pr-2-5b-bytes-eval-native"],
+      "title": "PR 6-1 (ADR): 暗号の基本部品（SHA-256・HMAC・PBKDF2・定数時間比較）の ADR を起草する",
+      "labels": ["lane:E", "needs-human"],
+      "body": "## 背景・目的\n\n[ADR 0018](docs/decisions/0018-p1-scope.md) 決定 3（「段階 6 の暗号の基本部品は、段階 2 の後ならいつでも始めてよい」）および [ADR 0020](docs/decisions/0020-p1-security-addendum.md) に基づき、PR 2-5（`Bytes` とビット演算）完了後に暗号の基本部品の ADR を起草します。\n\n## 含めるべき論点\n- SHA-256・HMAC-SHA-256・PBKDF2-HMAC-SHA-256・定数時間比較の API とモジュール構成\n- ADR 0020 の定数時間規則（`ct_rules`）・Cranelift 生成コードの定数時間性の検証方法・テストベクタとファジング（決定 5）\n\n## 完了条件\n- [ ] 暗号の基本部品の ADR の起草（実装は含めない）\n"
+    },
+    {
+      "id": "pr-3-2-raw-ops-check-eval",
+      "depends_on_ids": ["pr-3-1-adr-runtime-replace"],
+      "title": "PR 3-2: 原始操作（raw.*）の検査と SIR 評価器での実行（ADR 0018 段階 3）",
+      "labels": ["lane:B5", "lane:C1", "lane:D2", "needs-human"],
+      "body": "## 背景・目的\n\nPR 3-1（ランタイム置き換え ADR）の承認に伴い、原始操作（`raw.*`）の検査と SIR 評価器での実行を実装します。\n\n## 完了条件\n- [ ] ADR で定めた原始操作の表を実装し、`--trust-base` / 許可一覧による検査を通す\n- [ ] SIR 評価器で原始操作を実行できるようにし、テストを追加する\n"
+    },
+    {
+      "id": "pr-3-3-raw-ops-native-entry",
+      "depends_on_ids": ["pr-3-2-raw-ops-check-eval"],
+      "title": "PR 3-3: 原始操作のネイティブ生成と起動コード・システムコール入口（ADR 0018 段階 3）",
+      "labels": ["lane:C2"],
+      "body": "## 背景・目的\n\nPR 3-2 の完了に伴い、原始操作の Cranelift ネイティブコード生成と、Linux x86-64 の起動コード・システムコール入口を実装します。\n\n## 完了条件\n- [ ] 原始操作のネイティブ出力とシステムコール呼び出しが評価器と一致して動作すること\n"
+    },
+    {
+      "id": "pr-3-4-allocator-and-globals",
+      "depends_on_ids": ["pr-3-3-raw-ops-native-entry"],
+      "title": "PR 3-4: 確保器（アロケータ）と大域の状態の実装（ADR 0018 段階 3）",
+      "labels": ["lane:A1", "lane:B3", "lane:C1", "lane:C2", "needs-human"],
+      "body": "## 背景・目的\n\nPR 3-3 の完了に伴い、Sigil 製の確保器（アロケータ）と大域の状態の構文・検査・生成コードを実装します。\n\n## 完了条件\n- [ ] 確保器と大域の状態が評価器・ネイティブ出力の両方で動作し、前提条件とテストを満たすこと\n"
+    },
+    {
+      "id": "pr-3-5-std-core-sigil",
+      "depends_on_ids": ["pr-3-4-allocator-and-globals"],
+      "title": "PR 3-5: 標準ライブラリの核（String・List・Map 等）の Sigil 実装（ADR 0018 段階 3）",
+      "labels": ["lane:D2", "lane:C1", "lane:C2"],
+      "body": "## 背景・目的\n\nPR 3-4 の完了に伴い、標準ライブラリの核（文字列・一覧・表など）を Sigil で実装し、既存の Rust 組み込みとの突き合わせテストを通します。\n\n## 完了条件\n- [ ] 核の標準ライブラリが Sigil で実装され、全既存テストおよび突き合わせが通ること\n"
+    },
+    {
+      "id": "pr-3-6-std-os-sigil",
+      "depends_on_ids": ["pr-3-5-std-core-sigil"],
+      "title": "PR 3-6: 標準ライブラリの OS 依存部分（console・fs・path・env）の Sigil 実装（ADR 0018 段階 3）",
+      "labels": ["lane:D2", "lane:C2"],
+      "body": "## 背景・目的\n\nPR 3-5 の完了に伴い、OS 依存の標準ライブラリ（`console`・`fs`・`path`・`env`）を Sigil で実装します。\n\n## 完了条件\n- [ ] OS 依存部分が Sigil で実装され、全テストが通ること\n"
+    },
+    {
+      "id": "pr-3-7-remove-rust-runtime",
+      "depends_on_ids": ["pr-3-6-std-os-sigil"],
+      "title": "PR 3-7: 暫定 Rust ランタイム（runtime/）の削除と ADR 0016 見直し記録（ADR 0018 段階 3 完了）",
+      "labels": ["lane:C2", "lane:D2", "lane:E", "needs-human"],
+      "body": "## 背景・目的\n\nPR 3-6 の完了に伴い、暫定の Rust 製ランタイム（`runtime/core`, `runtime/os`）を削除し、出力に Rust や C のコードを含めない状態（段階 3 完了）にします。\n\n## 完了条件\n- [ ] `runtime/` を削除し、ネイティブ出力が Sigil のみで完結して全テストが通ること\n- [ ] ADR 0016 の決定 1・2 の見直し記録を文書に残すこと\n"
+    }
+  ]
+}

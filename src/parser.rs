@@ -45,6 +45,8 @@ pub const RESERVED_NAMES: &[&str] = &[
     "Sendable",
     "Shareable",
     "Displayable",
+    // トレイトの宣言の中でだけ書ける型の名前（ADR 0022 の決定 2）。
+    "Self",
     "Path",
     "IoError",
     "ParseError",
@@ -64,6 +66,17 @@ pub const TARGETS: &[&str] = &["bare", "browser", "server"];
 pub struct Parsed {
     pub file: File,
     pub comments: Vec<Comment>,
+}
+
+/// `fn_decl` が読む関数の置き場所。本体の有無と、受け手 `self`・型の名前 `Self` の扱いが違う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FnKind {
+    /// トップレベルの関数。
+    Free,
+    /// `impl` の中のメソッド（固有・トレイトの実装とも）。
+    Impl,
+    /// トレイトの宣言の中の関数（本体なし。`Self` を書ける）。
+    Trait,
 }
 
 pub fn parse(src: &str) -> Result<File, Error> {
@@ -90,6 +103,7 @@ fn parse_inner(src: &str, allow_reserved: bool) -> Result<Parsed, Error> {
         allow_result: false,
         allow_self: false,
         in_old: false,
+        in_trait: false,
         depth: 0,
     };
     let file = p.file()?;
@@ -140,6 +154,8 @@ struct Parser {
     allow_result: bool,
     allow_self: bool,
     in_old: bool,
+    /// トレイトの関数のシグネチャの中（型の名前 `Self` を書ける唯一の場所。ADR 0022 の決定 2）。
+    in_trait: bool,
     depth: usize,
 }
 
@@ -403,12 +419,13 @@ impl Parser {
                         Tok::Kw("type") => Item::Type(self.type_decl()?),
                         Tok::Kw("struct") => Item::Struct(self.struct_decl()?),
                         Tok::Kw("enum") => Item::Enum(self.enum_decl()?),
-                        Tok::Kw("fn") => Item::Fn(self.fn_decl(false)?),
+                        Tok::Kw("fn") => Item::Fn(self.fn_decl(FnKind::Free)?),
+                        Tok::Kw("trait") => Item::Trait(self.trait_decl()?),
                         _ => {
                             return Err(Error::new(
                                 ErrorKind::PubTarget,
                                 pub_span,
-                                "`pub` は `type`・`struct`・`enum`・`fn` の宣言にだけ付けられる（`impl` には付けず、メソッドごとに付ける）",
+                                "`pub` は `type`・`struct`・`enum`・`fn`・`trait` の宣言にだけ付けられる（`impl` には付けず、固有のメソッドはメソッドごとに付ける）",
                             ))
                         }
                     };
@@ -429,7 +446,12 @@ impl Parser {
                             f.is_pub = true;
                             Item::Fn(f)
                         }
+                        Item::Trait(mut t) => {
+                            t.is_pub = true;
+                            Item::Trait(t)
+                        }
                         Item::Impl(i) => Item::Impl(i),
+                        Item::ImplFor(i) => Item::ImplFor(i),
                     });
                 }
                 Tok::Kw("module") => {
@@ -441,8 +463,12 @@ impl Parser {
                 Tok::Kw("type") => items.push(Item::Type(self.type_decl()?)),
                 Tok::Kw("struct") => items.push(Item::Struct(self.struct_decl()?)),
                 Tok::Kw("enum") => items.push(Item::Enum(self.enum_decl()?)),
-                Tok::Kw("fn") => items.push(Item::Fn(self.fn_decl(false)?)),
-                Tok::Kw("impl") => items.push(Item::Impl(self.impl_decl()?)),
+                Tok::Kw("fn") => items.push(Item::Fn(self.fn_decl(FnKind::Free)?)),
+                Tok::Kw("trait") => items.push(Item::Trait(self.trait_decl()?)),
+                Tok::Kw("impl") => {
+                    let item = self.impl_decl()?;
+                    items.push(item);
+                }
                 Tok::Kw("let") => {
                     return Err(self.err(
                         ErrorKind::GlobalValue,
@@ -450,7 +476,8 @@ impl Parser {
                     ));
                 }
                 _ => {
-                    return Err(self.unexpected("`type`・`struct`・`enum`・`fn`・`impl` のいずれか"))
+                    return Err(self
+                        .unexpected("`type`・`struct`・`enum`・`fn`・`trait`・`impl` のいずれか"))
                 }
             }
         }
@@ -736,11 +763,77 @@ impl Parser {
         })
     }
 
-    fn impl_decl(&mut self) -> R<ImplDecl> {
+    /// `trait 名前 { fn ...; }`（ADR 0022 の決定 2）。型引数は持たない。
+    /// トレイトの関数は 4 節を持ち、本体なしで `;` で終わる（`pub` は関数ごとに書かない）。
+    fn trait_decl(&mut self) -> R<TraitDecl> {
+        let span = self.span();
+        self.bump();
+        let name = self.camel_def("トレイトの名前")?;
+        self.expect_punct("{")?;
+        let mut fns = Vec::new();
+        while !self.at_punct("}") {
+            if !self.at_kw("fn") {
+                return Err(self.unexpected("`fn` または `}`"));
+            }
+            fns.push(self.fn_decl(FnKind::Trait)?);
+        }
+        let end_line = self.span().line;
+        self.bump();
+        Ok(TraitDecl {
+            is_pub: false,
+            name,
+            fns,
+            span,
+            end_line,
+        })
+    }
+
+    /// `impl 型 { ... }` と `impl トレイト for 型 { ... }`（ADR 0022 の決定 2）。
+    /// 最初の型を読んでから `for` の有無で分ける。
+    fn impl_decl(&mut self) -> R<Item> {
         let span = self.span();
         self.bump();
         let generics = self.generics()?;
-        let ty = self.ty()?;
+        let first = self.ty()?;
+        if self.at_kw("for") {
+            // `impl トレイト for 型`。トレイトは修飾しない名前 1 つ（型引数は持たない）。
+            let Type::Path { path, args } = &first else {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    span,
+                    "`impl ... for ...` のトレイトは名前で書く（`impl Handler for Health { ... }`）",
+                ));
+            };
+            if path.len() != 1 || !args.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    span,
+                    "`impl` のトレイトは修飾しない名前 1 つで書き、型引数は付けない（ADR 0022 の決定 2）",
+                ));
+            }
+            let trait_name = path[0].clone();
+            self.bump();
+            let ty = self.ty()?;
+            if !matches!(ty, Type::Path { .. }) {
+                return Err(Error::new(
+                    ErrorKind::Unexpected,
+                    span,
+                    "`impl ... for` の対象は型の名前（`impl Handler for Health { ... }`）",
+                ));
+            }
+            let fns = self.impl_fns()?;
+            let end_line = self.span().line;
+            self.bump();
+            return Ok(Item::ImplFor(ImplForDecl {
+                generics,
+                trait_name,
+                ty,
+                fns,
+                span,
+                end_line,
+            }));
+        }
+        let ty = first;
         if !matches!(ty, Type::Path { .. }) {
             return Err(Error::new(
                 ErrorKind::Unexpected,
@@ -748,6 +841,20 @@ impl Parser {
                 "`impl` の対象は型の名前（`impl Account { ... }`）",
             ));
         }
+        let fns = self.impl_fns()?;
+        let end_line = self.span().line;
+        self.bump();
+        Ok(Item::Impl(ImplDecl {
+            generics,
+            ty,
+            fns,
+            span,
+            end_line,
+        }))
+    }
+
+    /// `impl` の波括弧の中の関数（メソッドごとに `pub` を付けられる）。
+    fn impl_fns(&mut self) -> R<Vec<FnDecl>> {
         self.expect_punct("{")?;
         let mut fns = Vec::new();
         while !self.at_punct("}") {
@@ -755,27 +862,19 @@ impl Parser {
             if !self.at_kw("fn") {
                 return Err(self.unexpected("`fn` または `}`"));
             }
-            let mut f = self.fn_decl(true)?;
+            let mut f = self.fn_decl(FnKind::Impl)?;
             f.is_pub = is_pub;
             fns.push(f);
         }
-        let end_line = self.span().line;
-        self.bump();
-        Ok(ImplDecl {
-            generics,
-            ty,
-            fns,
-            span,
-            end_line,
-        })
+        Ok(fns)
     }
 
-    fn fn_decl(&mut self, in_impl: bool) -> R<FnDecl> {
+    fn fn_decl(&mut self, kind: FnKind) -> R<FnDecl> {
         let span = self.span();
         self.bump();
         let name_span = self.span();
         let name = self.snake_def("関数名")?;
-        if in_impl && name == "clone" && !self.allow_reserved {
+        if kind == FnKind::Impl && name == "clone" && !self.allow_reserved {
             return Err(Error::new(
                 ErrorKind::ReservedNameDefined,
                 name_span,
@@ -790,11 +889,23 @@ impl Parser {
             ));
         }
         let generics = self.generics()?;
+        if kind == FnKind::Trait && !generics.is_empty() {
+            return Err(Error::new(
+                ErrorKind::NotInP0,
+                span,
+                "トレイトの関数に型引数は書けない（ADR 0022 の決定 2 の「持たないもの」）",
+            ));
+        }
         self.expect_punct("(")?;
         let mut first_param = true;
         let saved_self = self.allow_self;
+        // トレイトの関数のシグネチャの中だけ、型の名前 `Self` を書ける。
+        let saved_trait = self.in_trait;
+        if kind == FnKind::Trait {
+            self.in_trait = true;
+        }
         let params = self.comma_sep(")", |p| {
-            let name = if in_impl && first_param && p.at_kw("self") {
+            let name = if kind != FnKind::Free && first_param && p.at_kw("self") {
                 p.bump();
                 p.allow_self = true;
                 "self".to_string()
@@ -810,6 +921,7 @@ impl Parser {
             Ok(v) => v,
             Err(e) => {
                 self.allow_self = saved_self;
+                self.in_trait = saved_trait;
                 return Err(e);
             }
         };
@@ -818,12 +930,14 @@ impl Parser {
                 Ok(t) => Some(t),
                 Err(e) => {
                     self.allow_self = saved_self;
+                    self.in_trait = saved_trait;
                     return Err(e);
                 }
             }
         } else {
             None
         };
+        self.in_trait = saved_trait;
 
         let mut clause_lines = [0u32; clause::COUNT];
         clause_lines[clause::INTENT] = self.span().line;
@@ -878,6 +992,12 @@ impl Parser {
             }
         }
 
+        if kind == FnKind::Trait && self.at_kw("unchecked") {
+            return Err(self.err(
+                ErrorKind::NotInP0,
+                "`unchecked` は本体のある関数にだけ書ける（トレイトの関数は本体を持たない）",
+            ));
+        }
         let mut unchecked = None;
         if self.at_kw("unchecked") {
             clause_lines[clause::UNCHECKED] = self.span().line;
@@ -899,7 +1019,18 @@ impl Parser {
             }
         }
 
-        let body = self.block();
+        let body = if kind == FnKind::Trait {
+            // トレイトの関数は本体を持たず、`effects` 節の後の `;` で終わる。
+            // `body` は空とし、開き・閉じの行は `;` の行を指す（`ast::TraitDecl` の注記）。
+            let semi = self.span();
+            self.expect_punct(";").map(|_| Block {
+                stmts: Vec::new(),
+                open_line: semi.line,
+                end_line: semi.line,
+            })
+        } else {
+            self.block()
+        };
         self.allow_self = saved_self;
         let body = body?;
         Ok(FnDecl {
@@ -1003,12 +1134,31 @@ impl Parser {
                 Ok(Type::Tuple(ts))
             }
             Tok::Ident(_) => {
+                let start = self.span();
                 let path = self.path("型の名前")?;
                 let mut args = Vec::new();
                 if self.eat_punct("<") {
                     args = self.comma_sep(">", |p| p.ty())?;
                     if args.is_empty() {
                         return Err(self.unexpected("型引数"));
+                    }
+                }
+                if path[0] == "Self" {
+                    // `Self` はトレイトの宣言の中でのみ書ける型の名前（ADR 0022 の決定 2）。
+                    // `impl` の中では書かず、実装する型を書く。
+                    if path.len() != 1 || !args.is_empty() {
+                        return Err(Error::new(
+                            ErrorKind::Unexpected,
+                            start,
+                            "`Self` は単独で書く（`Self.名前` や `Self<...>` は書けない）",
+                        ));
+                    }
+                    if !self.in_trait {
+                        return Err(Error::new(
+                            ErrorKind::SelfOutsideTrait,
+                            start,
+                            "`Self` はトレイトの宣言の中でのみ書ける型の名前（`impl` の中では実装する型を書く。ADR 0022 の決定 2）",
+                        ));
                     }
                 }
                 Ok(Type::Path { path, args })

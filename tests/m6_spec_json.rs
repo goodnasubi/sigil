@@ -191,6 +191,8 @@ fn spec_json_fields() {
     let Value::Obj(fs) = &mut want else { panic!() };
     // 欄の追加は `format` を上げない（unchecked の関数でないので、解決できたかの欄は偽）。
     fs.push(("unchecked_unresolved".into(), false.into()));
+    // ADR 0022 の PR 2-4b: 実装するトレイトの名前（トレイトの実装でなければ null）。
+    fs.push(("trait".into(), Value::Null));
     fs.push(("visibility".into(), "private".into()));
     fs.push(("text".into(), deposit.get("text").unwrap().clone()));
     let Value::Obj(mut got) = deposit.clone() else {

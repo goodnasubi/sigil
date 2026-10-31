@@ -45,12 +45,41 @@ pub enum Item {
     Enum(EnumDecl),
     Fn(FnDecl),
     Impl(ImplDecl),
+    Trait(TraitDecl),
+    ImplFor(ImplForDecl),
 }
 
 /// `impl 型 { fn ... }`（ADR 0011 の決定 6。型に直接付けるメソッド）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDecl {
     pub generics: Vec<Generic>,
+    pub ty: Type,
+    pub fns: Vec<FnDecl>,
+    pub span: Span,
+    /// 閉じ波括弧の行。
+    pub end_line: u32,
+}
+
+/// `trait 名前 { fn ...; }`（ADR 0022 の決定 2。PR 2-4b は構文・整形・仕様の表示まで）。
+/// トレイトの関数は本体を持たない。`fns` の各 `FnDecl` の `body` は空で、
+/// `body.open_line`・`body.end_line` は `effects` 節の後の `;` の行を指す。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDecl {
+    /// `pub` を付けた宣言（ADR 0021 の決定 4。トレイトの関数はすべて公開される）。
+    pub is_pub: bool,
+    pub name: String,
+    pub fns: Vec<FnDecl>,
+    pub span: Span,
+    /// 閉じ波括弧の行。
+    pub end_line: u32,
+}
+
+/// `impl トレイト for 型 { fn ... }`（ADR 0022 の決定 2）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplForDecl {
+    pub generics: Vec<Generic>,
+    /// 実装するトレイトの名前（修飾しない名前 1 つ。書いたまま）。
+    pub trait_name: String,
     pub ty: Type,
     pub fns: Vec<FnDecl>,
     pub span: Span,

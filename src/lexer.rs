@@ -78,11 +78,14 @@ pub const KEYWORDS: &[&str] = &[
     "unchecked",
     "use",
     "pub",
+    // ADR 0022 の決定 2（PR 2-4b）: `trait` は宣言に、`for` は `impl トレイト for 型` の中だけに使う。
+    "trait",
+    "for",
 ];
 
 /// 将来のために予約する語。P0 では使えば字句エラー。
 pub const FUTURE_RESERVED: &[&str] = &[
-    "trait", "for", "in", "loop", "break", "continue", "const", "as", "async", "await",
+    "in", "loop", "break", "continue", "const", "as", "async", "await",
 ];
 
 fn keyword(s: &str) -> Option<&'static str> {

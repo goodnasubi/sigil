@@ -505,6 +505,8 @@ impl<'a> Printer<'a> {
                 Item::Enum(e) => self.enum_decl(e),
                 Item::Fn(d) => self.fn_decl(d, 0, true),
                 Item::Impl(i) => self.impl_decl(i),
+                Item::Trait(t) => self.trait_decl(t),
+                Item::ImplFor(i) => self.impl_for_decl(i),
             }
         }
         self.top_comments(u32::MAX, false, true);
@@ -602,8 +604,68 @@ impl<'a> Printer<'a> {
         self.w("}");
     }
 
+    fn trait_decl(&mut self, t: &TraitDecl) {
+        self.top_comments(t.span.line, true, false);
+        self.nl(0, t.span.line);
+        self.w(&format!("{}trait {}", pub_kw(t.is_pub), t.name));
+        if t.fns.is_empty() && !self.pending_before(t.end_line) {
+            self.w(" {}");
+            return;
+        }
+        self.w(" {");
+        for (k, f) in t.fns.iter().enumerate() {
+            if k > 0 {
+                self.blank();
+            }
+            self.fn_head(f, 1, k == 0);
+            self.w(";");
+        }
+        let mut first = t.fns.is_empty();
+        self.comments_before(t.end_line, 1, false, &mut first);
+        self.nl(0, t.end_line);
+        self.w("}");
+    }
+
+    fn impl_for_decl(&mut self, i: &ImplForDecl) {
+        self.top_comments(i.span.line, true, false);
+        self.nl(0, i.span.line);
+        self.w("impl");
+        if !i.generics.is_empty() {
+            self.generics(&i.generics);
+        }
+        self.w(&format!(" {} for ", i.trait_name));
+        self.ty(&i.ty);
+        self.w(" {");
+        for (k, f) in i.fns.iter().enumerate() {
+            if k > 0 {
+                self.blank();
+            }
+            self.fn_decl(f, 1, k == 0);
+        }
+        let mut first = i.fns.is_empty();
+        self.comments_before(i.end_line, 1, false, &mut first);
+        self.nl(0, i.end_line);
+        self.w("}");
+    }
+
     /// `ind` は宣言の字下げ（トップレベルは 0、`impl` の中は 1）。
     fn fn_decl(&mut self, d: &FnDecl, ind: usize, first: bool) {
+        self.fn_head(d, ind, first);
+        self.plain_start(d.body.open_line, ind);
+        // 戻り値のない関数の末尾の `return;` は書かない（ADR 0008 の決定 2）。
+        let drop_ret = d.ret.as_ref().is_none_or(is_unit)
+            && matches!(
+                d.body.stmts.last(),
+                Some(Stmt {
+                    kind: StmtKind::Return(None),
+                    ..
+                })
+            );
+        self.block(&d.body, ind, drop_ret);
+    }
+
+    /// シグネチャと契約節（`unchecked` まで）。本体（またはトレイトの関数の `;`）は呼び出し側が出す。
+    fn fn_head(&mut self, d: &FnDecl, ind: usize, first: bool) {
         if ind == 0 {
             self.top_comments(d.span.line, true, false);
         } else {
@@ -652,17 +714,6 @@ impl<'a> Printer<'a> {
             self.plain_start(d.clause_lines[clause::UNCHECKED], ind + 1);
             self.w(&format!("unchecked {}", escape_str(u)));
         }
-        self.plain_start(d.body.open_line, ind);
-        // 戻り値のない関数の末尾の `return;` は書かない（ADR 0008 の決定 2）。
-        let drop_ret = d.ret.as_ref().is_none_or(is_unit)
-            && matches!(
-                d.body.stmts.last(),
-                Some(Stmt {
-                    kind: StmtKind::Return(None),
-                    ..
-                })
-            );
-        self.block(&d.body, ind, drop_ret);
     }
 
     // ---- 型・パターン ----

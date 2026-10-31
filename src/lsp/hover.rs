@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::lexer::{lex, Tok, Token};
+use crate::project::TypeName;
 use crate::spec::{Body, Spec};
 
 /// 局所の名前が隠す行の範囲（両端を含む）。
@@ -143,7 +144,16 @@ fn is_punct(t: Option<&Token>, p: &str) -> bool {
 
 /// `(line, col)`（1 始まり、列は文字数）の位置の hover の文字列。返さないときは `None`。
 /// `own` はこの文書の仕様、`all` はこの文書から `use` で辿れるモジュールすべての仕様。
-pub fn hover(text: &str, line: u32, col: u32, own: &Spec, all: &[Spec]) -> Option<String> {
+/// `names` は入口のモジュールで型の名前が解決した先（ADR 0022 決定 1）。型の名前の上では、
+/// 修飾した名前（`<モジュール>.<型>`）と明示か暗黙かを返す（自分の宣言の名前の上は、従来どおり仕様の塊）。
+pub fn hover(
+    text: &str,
+    line: u32,
+    col: u32,
+    own: &Spec,
+    all: &[Spec],
+    names: &[TypeName],
+) -> Option<String> {
     let file = crate::parse(text).ok()?;
     let toks = lex(text).ok()?.tokens;
     let under = toks.iter().position(|t| {
@@ -156,6 +166,19 @@ pub fn hover(text: &str, line: u32, col: u32, own: &Spec, all: &[Spec]) -> Optio
     let cursor_tok = under.map(|i| &toks[i]);
     let item_at = |span: crate::error::Span| own.items.iter().find(|i| i.span == span);
     let all_items = || all.iter().flat_map(|s| s.items.iter());
+    // 型の名前: 解決した先の同一性。自分の宣言の名前の上は、次の「宣言」の分岐に任せる。
+    if let Some(Tok::Ident(n)) = cursor_tok.map(|t| &t.tok) {
+        let is_decl = own
+            .items
+            .iter()
+            .any(|i| i.span.line == line && i.name == *n && !matches!(i.body, Body::Fn { .. }));
+        if !is_decl {
+            if let Some(t) = names.iter().find(|t| t.name == *n) {
+                let kind = if t.explicit { "明示" } else { "暗黙" };
+                return Some(format!("{n}\n解決先: {}.{n}（{kind}）\n", t.origin));
+            }
+        }
+    }
     // 宣言: `fn` から本体の `{` の前まで。
     for f in fns(&file) {
         let open = f.body.open_line;

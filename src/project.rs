@@ -44,8 +44,37 @@ pub fn check_project_overlay(
     overlay: &mut dyn FnMut(&Path) -> Option<String>,
     on_text: &mut dyn FnMut(&Path, &str),
 ) -> R<()> {
+    check_project_names(root, entry, opts, overlay, on_text).0
+}
+
+/// 入口のモジュールで、型（トレイトを含む）の名前が解決した先（ADR 0022 決定 1。hover が示す）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeName {
+    /// 書いた名前（修飾しない）。
+    pub name: String,
+    /// 解決した先の型を宣言したモジュール。
+    pub origin: String,
+    /// 明示の名前（自分の宣言・`use`）なら `true`、暗黙の名前（隠れた依存の型）なら `false`。
+    pub explicit: bool,
+}
+
+/// `check_project_overlay` に、入口のモジュールの型の名前の解決結果を足した版（言語サーバーの hover 用）。
+/// 解決結果は、検査が通ったときだけ返す（失敗したときは空）。曖昧な名前は含めない。
+pub fn check_project_names(
+    root: &Path,
+    entry: &Path,
+    opts: &Options,
+    overlay: &mut dyn FnMut(&Path) -> Option<String>,
+    on_text: &mut dyn FnMut(&Path, &str),
+) -> (R<()>, Vec<TypeName>) {
     let mut nop = |_: &Path| {};
-    run_fs_with(root, entry, opts, &mut nop, Some(overlay), Some(on_text)).map(|_| ())
+    match run_fs_with(root, entry, opts, &mut nop, Some(overlay), Some(on_text)) {
+        Ok((p, name)) => {
+            let names = p.cands.get(&name).map_or_else(Vec::new, |c| c.type_names());
+            (Ok(()), names)
+        }
+        Err(e) => (Err(e), vec![]),
+    }
 }
 
 /// `check_project` の、各ファイルを読んだ直後（確認の前）に呼ぶ差し込み口つき（差し替えの試験用）。
@@ -772,6 +801,23 @@ impl Cands {
         } else {
             e.1.insert(origin.to_string());
         }
+    }
+
+    /// 型・トレイトの名前（大文字で始まるもの）の、解決した先と明示か暗黙か。曖昧な名前は含めない。
+    fn type_names(&self) -> Vec<TypeName> {
+        let picks = self.picks();
+        self.names
+            .iter()
+            .filter(|(n, _)| n.starts_with(|c: char| c.is_uppercase()))
+            .filter_map(|(n, (e, _))| match picks.get(n) {
+                Some(Ok(o)) => Some(TypeName {
+                    name: n.clone(),
+                    origin: o.clone(),
+                    explicit: e.contains(o),
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// 書かれた名前 -> 出どころのモジュール、または曖昧の説明。

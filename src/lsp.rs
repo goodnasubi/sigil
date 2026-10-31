@@ -229,6 +229,8 @@ struct Checked {
     /// 検査のときに読んだ依存（入口以外）の本文。パスごとに入口の間で共有する。上限を超えた分は持たない。
     /// hover と診断の範囲はこれを使い、ディスクを読み直さない（ADR 0022 決定 4）。
     texts: Vec<(PathBuf, Arc<str>)>,
+    /// 入口のモジュールで、型の名前が解決した先（検査が通ったときだけ。hover が示す）。
+    names: Vec<crate::project::TypeName>,
     /// 診断（URI -> 診断）。入口の URI は、診断がなくても入れる。
     diags: Diags,
 }
@@ -445,7 +447,8 @@ impl<W: Write> Server<W> {
         for (_, t) in self.results.get(uri).map_or(&[][..], |r| &r.texts[..]) {
             all.extend(crate::spec::extract_with(t, &self.opts).ok());
         }
-        let value = hover::hover(&text, line as u32 + 1, col as u32 + 1, &own, &all)?;
+        let names = self.results.get(uri).map_or(&[][..], |r| &r.names[..]);
+        let value = hover::hover(&text, line as u32 + 1, col as u32 + 1, &own, &all, names)?;
         let md = obj(vec![("kind", "plaintext".into()), ("value", value.into())]);
         Some(obj(vec![("contents", md)]))
     }
@@ -575,6 +578,7 @@ impl<W: Write> Server<W> {
                 Checked {
                     deps: uri_to_path(uri).into_iter().collect(),
                     texts: vec![],
+                    names: vec![],
                     diags: vec![(uri.to_string(), vec![d])],
                 }
             }
@@ -598,6 +602,7 @@ impl<W: Write> Server<W> {
             return Checked {
                 deps: vec![],
                 texts: vec![],
+                names: vec![],
                 diags: vec![(uri.to_string(), d)],
             };
         };
@@ -621,7 +626,7 @@ impl<W: Write> Server<W> {
                 read.push((p.to_path_buf(), Arc::from(t)));
             }
         };
-        let r = crate::project::check_project_overlay(
+        let (r, names) = crate::project::check_project_names(
             &root,
             &path,
             &self.opts,
@@ -722,7 +727,12 @@ impl<W: Write> Server<W> {
                 diags[0].1.push(d);
             }
         }
-        Checked { deps, texts, diags }
+        Checked {
+            deps,
+            texts,
+            names,
+            diags,
+        }
     }
 
     /// `file`（`root` の下のモジュール）を取り込む `use` の行を、入口と持っている本文から探す。

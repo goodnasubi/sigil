@@ -41,7 +41,7 @@ impl Parser {
     }
 
     fn or_expr(&mut self) -> R<Expr> {
-        let mut lhs = self.cmp_expr()?;
+        let mut lhs = self.bit_or_expr()?;
         let (op, tok, other) = if self.at_punct("&&") {
             (BinOp::And, "&&", "||")
         } else if self.at_punct("||") {
@@ -54,7 +54,7 @@ impl Parser {
             self.enter()?;
             links += 1;
             self.bump();
-            let rhs = self.cmp_expr()?;
+            let rhs = self.bit_or_expr()?;
             lhs = Expr::Binary {
                 op,
                 lhs: Box::new(lhs),
@@ -71,6 +71,60 @@ impl Parser {
         Ok(lhs)
     }
 
+    fn bit_or_expr(&mut self) -> R<Expr> {
+        let mut lhs = self.bit_xor_expr()?;
+        let mut links = 0;
+        while self.at_punct("|") {
+            self.enter()?;
+            links += 1;
+            self.bump();
+            let rhs = self.bit_xor_expr()?;
+            lhs = Expr::Binary {
+                op: BinOp::BitOr,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+        self.depth -= links;
+        Ok(lhs)
+    }
+
+    fn bit_xor_expr(&mut self) -> R<Expr> {
+        let mut lhs = self.bit_and_expr()?;
+        let mut links = 0;
+        while self.at_punct("^") {
+            self.enter()?;
+            links += 1;
+            self.bump();
+            let rhs = self.bit_and_expr()?;
+            lhs = Expr::Binary {
+                op: BinOp::BitXor,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+        self.depth -= links;
+        Ok(lhs)
+    }
+
+    fn bit_and_expr(&mut self) -> R<Expr> {
+        let mut lhs = self.cmp_expr()?;
+        let mut links = 0;
+        while self.at_punct("&") {
+            self.enter()?;
+            links += 1;
+            self.bump();
+            let rhs = self.cmp_expr()?;
+            lhs = Expr::Binary {
+                op: BinOp::BitAnd,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+        self.depth -= links;
+        Ok(lhs)
+    }
+
     fn cmp_op(&self) -> Option<BinOp> {
         match self.tok() {
             Tok::Punct("==") => Some(BinOp::Eq),
@@ -84,12 +138,12 @@ impl Parser {
     }
 
     fn cmp_expr(&mut self) -> R<Expr> {
-        let lhs = self.add_expr()?;
+        let lhs = self.shift_expr()?;
         let Some(op) = self.cmp_op() else {
             return Ok(lhs);
         };
         self.bump();
-        let rhs = self.add_expr()?;
+        let rhs = self.shift_expr()?;
         if self.cmp_op().is_some() {
             return Err(self.err(
                 ErrorKind::ComparisonChain,
@@ -101,6 +155,30 @@ impl Parser {
             lhs: Box::new(lhs),
             rhs: Box::new(rhs),
         })
+    }
+
+    fn shift_expr(&mut self) -> R<Expr> {
+        let mut lhs = self.add_expr()?;
+        let mut links = 0;
+        loop {
+            let op = match self.tok() {
+                Tok::Punct("<<") => BinOp::Shl,
+                Tok::Punct(">>") => BinOp::Shr,
+                _ => {
+                    self.depth -= links;
+                    return Ok(lhs);
+                }
+            };
+            self.enter()?;
+            links += 1;
+            self.bump();
+            let rhs = self.add_expr()?;
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
     }
 
     fn add_expr(&mut self) -> R<Expr> {
@@ -156,6 +234,7 @@ impl Parser {
         let op = match self.tok() {
             Tok::Punct("!") => UnOp::Not,
             Tok::Punct("-") => UnOp::Neg,
+            Tok::Punct("~") => UnOp::BitNot,
             Tok::Punct("&") => {
                 self.bump();
                 let op = if self.eat_kw("mut") {

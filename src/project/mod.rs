@@ -15,8 +15,10 @@ mod decl;
 mod link;
 mod load;
 mod resolve;
+mod trust_base;
 
 pub use decl::private_in_public;
+pub use trust_base::{load_trust_base_file, parse_trust_base_list, TRUST_BASE_FILE};
 
 /// 検査の失敗。診断は、どのファイルのものかを持つ。
 #[derive(Debug)]

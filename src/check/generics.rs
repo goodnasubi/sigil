@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use super::{args_named, Ck, Prop, Ty, TypeDef, PROPS, R};
+use super::types::PROPS;
+use super::{args_named, Ck, Prop, Ty, TypeDef, R};
 use crate::ast::*;
 use crate::error::ErrorKind;
 

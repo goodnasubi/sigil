@@ -145,6 +145,21 @@ impl<'a, 'p> Fx<'a, 'p> {
                             self.b.ins().srem(x, y)
                         }
                     }
+                    ArithOp::Shl | ArithOp::Shr => {
+                        let neg = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, y, 0);
+                        let ge64 = self
+                            .b
+                            .ins()
+                            .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, y, 64);
+                        let bad = self.b.ins().bor(neg, ge64);
+                        self.fail_if(bad, code);
+                        if *op == ArithOp::Shl {
+                            self.b.ins().ishl(x, y)
+                        } else {
+                            // 論理右シフト (ushr)
+                            self.b.ins().ushr(x, y)
+                        }
+                    }
                 };
                 let (da, _) = self.place(dest);
                 self.st(r, da, 0);

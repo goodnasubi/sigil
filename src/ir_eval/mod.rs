@@ -159,6 +159,21 @@ impl<'p> M<'p> {
                         ArithOp::Mul => x.checked_mul(y),
                         ArithOp::Div => x.checked_div(y),
                         ArithOp::Rem => x.checked_rem(y),
+                        ArithOp::Shl => {
+                            if (0..64).contains(&y) {
+                                Some(x.wrapping_shl(y as u32))
+                            } else {
+                                None
+                            }
+                        }
+                        ArithOp::Shr => {
+                            if (0..64).contains(&y) {
+                                // 論理右シフト（ADR 0023 決定 3）
+                                Some((x as u64).wrapping_shr(y as u32) as i64)
+                            } else {
+                                None
+                            }
+                        }
                     };
                     match r {
                         Some(n) => {

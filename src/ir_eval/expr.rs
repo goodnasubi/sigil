@@ -94,12 +94,16 @@ impl<'p> M<'p> {
             Rvalue::Unary(op, a) => match (op, self.scalar(locals, a)) {
                 (UnOp::Not, Val::Bool(b)) => Val::Bool(!b),
                 (UnOp::NegFloat, Val::Float(x)) => Val::Float(-x),
+                (UnOp::BitNot, Val::Int(x)) => Val::Int(!x),
                 _ => Val::Unit,
             },
             Rvalue::Binary(op, a, b) => {
                 let x = self.scalar(locals, a);
                 let y = self.scalar(locals, b);
                 match (op, &x, &y) {
+                    (BinOp::BitAnd, Val::Int(p), Val::Int(q)) => Val::Int(p & q),
+                    (BinOp::BitOr, Val::Int(p), Val::Int(q)) => Val::Int(p | q),
+                    (BinOp::BitXor, Val::Int(p), Val::Int(q)) => Val::Int(p ^ q),
                     (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, ..) => {
                         Val::Bool(compare(*op, &x, &y))
                     }

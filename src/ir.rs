@@ -197,6 +197,8 @@ pub enum ArithOp {
     Mul,
     Div,
     Rem,
+    Shl,
+    Shr,
 }
 
 /// 停止しない 2 項演算（比較は構造的。`Add` は `Float` か `String`）。
@@ -213,12 +215,16 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Not,
     NegFloat,
+    BitNot,
 }
 
 #[derive(Debug, Clone, PartialEq)]

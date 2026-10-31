@@ -1,5 +1,5 @@
 //! ADR 0022 の PR 2-4b: `trait` 宣言と `impl トレイト for 型` の構文・整形・仕様の表示。
-//! 検査と実行は 2-4c の範囲なので、check/run/build は `Unsupported` で明確に止まる。
+//! 検査と実行は 2-4c で対応した（規則の試験は traits_2_4c.rs）。
 //! 期待値は決め打ち（エラーの種類と位置）。
 
 mod common;
@@ -201,18 +201,14 @@ fn spec_json_has_trait_kind_and_trait_field() {
     assert_eq!(blocks.join("\n"), sigil::spec::spec(SRC).unwrap());
 }
 
-// ---- 検査系の暫定扱い（2-4c まで Unsupported で止まる）----
+// ---- 検査系（2-4c で検査・実行に対応。規則の詳細は traits_2_4c.rs）----
 
 #[test]
-fn check_stops_with_unsupported() {
-    // トレイトの宣言の位置（13 行目）で止まる
-    match sigil::check::check(SRC) {
-        Ok(()) => panic!("トレイトを含むプログラムが検査を通ってしまった"),
-        Err(e) => {
-            assert_eq!(e.kind, ErrorKind::Unsupported);
-            assert_eq!(e.span.line, 13);
-        }
-    }
+fn check_accepts_trait_program() {
+    // 2-4b では `Unsupported` で止まったプログラムが、2-4c では検査を通る
+    // （`Response.ok()` は実在しない関数なので、構造体の構築に置き換えた形で確かめる）。
+    let src = SRC.replace("Response.ok()", "Response { status: 200 }");
+    sigil::check::check(&src).unwrap();
     // トレイトを使わないプログラムの挙動は変えない
     let plain = format!(
         "{HEAD}fn f(x: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return x;\n}}\n"
@@ -233,24 +229,26 @@ fn bin(args: &[&str]) -> (i32, String, String) {
 }
 
 #[test]
-fn cli_check_run_build_stop_with_unsupported() {
-    // 入口の関数を足しても、検査の段階で止まる。
+fn cli_check_run_build_accept_trait_program() {
+    // 2-4c: 検査・実行・ネイティブ化が通る（入口はトレイトのメソッドを呼ぶ）。
+    let body = SRC
+        .replace("Response.ok()", "Response { status: 200 }")
+        .replace("struct Request {}", "struct Request {\n  id: Int,\n}")
+        .replace("struct Health {}", "struct Health {\n  up: Int,\n}");
     let src = format!(
-        "{}\nfn main() -> Int\n  intent \"入口\"\n  requires none\n  ensures none\n  effects none\n{{\n  return 0;\n}}\n",
-        SRC.trim_end()
+        "{}\nfn main() -> Int\n  intent \"入口\"\n  requires none\n  ensures none\n  effects none\n{{\n  let h = Health {{ up: 1 }};\n  let r = h.handle(Request {{ id: 7 }});\n  return r.status;\n}}\n",
+        body.trim_end()
     );
     let (root, file) = common::stage_src("traits-gate", &src);
     let root_s = root.to_str().unwrap();
     let file_s = file.to_str().unwrap();
 
     let (c, _, err) = bin(&["check", "--root", root_s, file_s]);
-    assert_eq!(c, 1, "{err}");
-    assert!(err.contains("トレイト"), "{err}");
-    assert!(err.contains("2-4c"), "{err}");
+    assert_eq!(c, 0, "{err}");
 
-    let (c, _, err) = bin(&["run", "--root", root_s, file_s, "main"]);
-    assert_eq!(c, 1, "{err}");
-    assert!(err.contains("トレイト"), "{err}");
+    let (c, out_s, err) = bin(&["run", "--root", root_s, file_s, "main"]);
+    assert_eq!(c, 0, "{err}");
+    assert_eq!(out_s.trim(), "200");
 
     let out = root.join("a.out");
     let (c, _, err) = bin(&[
@@ -262,8 +260,10 @@ fn cli_check_run_build_stop_with_unsupported() {
         "-o",
         out.to_str().unwrap(),
     ]);
-    assert_eq!(c, 1, "{err}");
-    assert!(err.contains("トレイト"), "{err}");
+    assert_eq!(c, 0, "{err}");
+    let o2 = std::process::Command::new(&out).output().unwrap();
+    assert_eq!(o2.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&o2.stdout).trim(), "200");
 
     // spec は止まらない（2-4b の範囲）
     let (c, out, err) = bin(&["spec", "--root", root_s, file_s]);

@@ -300,6 +300,9 @@ impl Proj<'_> {
             }
         }
         let mut found_all: Vec<(String, Item)> = vec![];
+        let mut visible_traits: Vec<String> = vec![];
+        let mut trait_uses: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for u in &file.uses {
             let (item, mpath) = u.path.split_last().expect("use の path は 2 つ以上");
             let mname = mpath.join(".");
@@ -358,6 +361,13 @@ impl Proj<'_> {
                     ErrorKind::PrivateImport,
                     format!("`{mname}` の `{item}` は非公開（`pub` がない）ので取り込めない"),
                 ));
+            }
+            if let Item::Trait(td) = decl {
+                visible_traits.push(cands.view_name(name, &mname, item));
+                trait_uses.insert(
+                    item.to_string(),
+                    td.fns.iter().map(|f| f.name.clone()).collect(),
+                );
             }
             if let Some(t) = file
                 .module
@@ -438,14 +448,24 @@ impl Proj<'_> {
                 }
             }
         }
-        crate::check::check_module(&checked, &externs, self.opts).map_err(|error| {
-            ProjectError::Diag {
+        crate::check::check_module(&checked, &externs, &visible_traits, self.opts).map_err(
+            |error| ProjectError::Diag {
                 file: path.to_path_buf(),
                 error,
-            }
-        })?;
+            },
+        )?;
         self.cands.insert(name.to_string(), cands);
-        let used = used_names(file);
+        let mut used = used_names(file);
+        if !trait_uses.is_empty() {
+            // トレイトの取り込みは、そのトレイトの関数をメソッドの形で呼んでいれば使っている
+            // （呼び出しにトレイトの名前は現れない。ADR 0022 決定 2）。
+            let fc = field_call_names(file);
+            for (item, fns) in &trait_uses {
+                if fns.iter().any(|f| fc.contains(f)) {
+                    used.insert(item.clone());
+                }
+            }
+        }
         for u in &file.uses {
             let item = u.path.last().expect("use の path は 2 つ以上");
             if !used.contains(item.as_str()) {
@@ -483,6 +503,14 @@ impl Proj<'_> {
                         let mut i = i.clone();
                         i.fns.retain(|f| f.is_pub);
                         items.push(Item::Impl(i));
+                    }
+                }
+                // トレイトの実装は、トレイトか型を取り込む側へ一緒に渡す（ADR 0022 決定 2:
+                // 実装を探す範囲は依存の閉包の全体。`impl` 自体に公開・非公開はない）。
+                if let Item::ImplFor(im) = it {
+                    let ty_head = matches!(&im.ty, Type::Path { path, .. } if path[0] == item);
+                    if im.trait_name == item || ty_head {
+                        items.push(Item::ImplFor(im.clone()));
                     }
                 }
             }
@@ -839,6 +867,17 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// 型引数の制約に書かれた名前（トレイトの名前）の付け替え。性質の名前は候補にないので触らない。
+    fn bounds(&mut self, gs: &mut [Generic]) {
+        for g in gs {
+            for b in &mut g.bounds {
+                if let Some(first) = b.first_mut() {
+                    self.rename(first);
+                }
+            }
+        }
+    }
+
     fn with_generics(&mut self, gs: &[Generic], f: impl FnOnce(&mut Self)) {
         let n = self.generics.len();
         self.generics.extend(gs.iter().map(|g| g.name.clone()));
@@ -876,12 +915,14 @@ impl<'a> Walk<'a> {
             Item::Struct(s) => {
                 self.span = s.span;
                 self.decl_name(&mut s.name);
+                self.bounds(&mut s.generics);
                 let gs = s.generics.clone();
                 self.with_generics(&gs, |w| s.fields.iter_mut().for_each(|f| w.ty(&mut f.ty)));
             }
             Item::Enum(e) => {
                 self.span = e.span;
                 self.decl_name(&mut e.name);
+                self.bounds(&mut e.generics);
                 let gs = e.generics.clone();
                 self.with_generics(&gs, |w| {
                     for v in &mut e.variants {
@@ -892,6 +933,7 @@ impl<'a> Walk<'a> {
             Item::Fn(f) => self.func(f, true),
             Item::Impl(im) => {
                 self.span = im.span;
+                self.bounds(&mut im.generics);
                 let gs = im.generics.clone();
                 self.with_generics(&gs, |w| {
                     w.ty(&mut im.ty);
@@ -905,7 +947,13 @@ impl<'a> Walk<'a> {
             }
             Item::ImplFor(im) => {
                 self.span = im.span;
-                self.decl_name(&mut im.trait_name);
+                // トレイトの名前は、自分の宣言なら宣言の付け替え、取り込んだものなら候補からの解決。
+                if self.decl.contains_key(&im.trait_name) {
+                    self.decl_name(&mut im.trait_name);
+                } else {
+                    self.rename(&mut im.trait_name);
+                }
+                self.bounds(&mut im.generics);
                 let gs = im.generics.clone();
                 self.with_generics(&gs, |w| {
                     w.ty(&mut im.ty);
@@ -920,6 +968,7 @@ impl<'a> Walk<'a> {
         if is_free {
             self.decl_name(&mut f.name);
         }
+        self.bounds(&mut f.generics);
         let gs = f.generics.clone();
         self.with_generics(&gs, |w| {
             for p in &mut f.params {
@@ -1067,6 +1116,100 @@ impl<'a> Walk<'a> {
 }
 
 // ---- 名前の使用の収集（未使用の `use` の検出。字面で見る。同じ名前の局所変数があれば使用に数える）----
+
+/// 呼び出しの形（`受け手.名前(...)`・`型.名前(...)`）で現れる名前の集合。
+/// トレイトの取り込みが「使われている」かの判定に使う（メソッドの呼び出しはトレイトの名前を書かない）。
+fn field_call_names(file: &File) -> HashSet<String> {
+    fn ex(e: &Expr, out: &mut HashSet<String>) {
+        match e {
+            Expr::Call { callee, args } => {
+                if let Expr::Field { name, .. } = callee.as_ref() {
+                    out.insert(name.clone());
+                }
+                ex(callee, out);
+                args.iter().for_each(|a| ex(a, out));
+            }
+            Expr::Old(x) | Expr::Paren(x) | Expr::Try(x) => ex(x, out),
+            Expr::Tuple(xs) => xs.iter().for_each(|x| ex(x, out)),
+            Expr::Unary { expr: x, .. } => ex(x, out),
+            Expr::Binary { lhs, rhs, .. } => {
+                ex(lhs, out);
+                ex(rhs, out);
+            }
+            Expr::Field { expr: x, .. } => ex(x, out),
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|(_, x)| ex(x, out)),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                ex(scrutinee, out);
+                for a in arms {
+                    ex(&a.body, out);
+                }
+            }
+            Expr::Closure { body, .. } => match body {
+                ClosureBody::Expr(x) => ex(x, out),
+                ClosureBody::Block(b) => bl(b, out),
+            },
+            _ => {}
+        }
+    }
+    fn bl(b: &Block, out: &mut HashSet<String>) {
+        for s in &b.stmts {
+            match &s.kind {
+                StmtKind::Let { value, .. } => ex(value, out),
+                StmtKind::Assign { target, value } => {
+                    ex(target, out);
+                    ex(value, out);
+                }
+                StmtKind::Expr(e) | StmtKind::Return(Some(e)) => ex(e, out),
+                StmtKind::Return(None) => {}
+                StmtKind::If(i) => {
+                    ex(&i.cond, out);
+                    bl(&i.then, out);
+                    match i.otherwise.as_deref() {
+                        Some(Else::If(n)) => {
+                            ex(&n.cond, out);
+                            bl(&n.then, out);
+                        }
+                        Some(Else::Block(b2)) => bl(b2, out),
+                        None => {}
+                    }
+                }
+                StmtKind::While { cond, body } => {
+                    ex(cond, out);
+                    bl(body, out);
+                }
+                StmtKind::Match {
+                    scrutinee, arms, ..
+                } => {
+                    ex(scrutinee, out);
+                    for a in arms {
+                        bl(&a.body, out);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    for i in &file.items {
+        let fns: Vec<&FnDecl> = match i {
+            Item::Fn(f) => vec![f],
+            Item::Impl(im) => im.fns.iter().collect(),
+            Item::ImplFor(im) => im.fns.iter().collect(),
+            _ => vec![],
+        };
+        for f in fns {
+            if let Some(e) = &f.requires {
+                ex(e, &mut out);
+            }
+            if let Some(e) = &f.ensures {
+                ex(e, &mut out);
+            }
+            bl(&f.body, &mut out);
+        }
+    }
+    out
+}
 
 fn used_names(file: &File) -> HashSet<String> {
     let mut u = HashSet::new();

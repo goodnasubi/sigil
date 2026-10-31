@@ -67,22 +67,25 @@
 
 ## 5. 作業の流れ
 
-1. **タスクを取る（排他ロック）**:
+1. **バックログの同期（アンロック・自動起票）**:
+   - [docs/BACKLOG.json](BACKLOG.json) に Issue 間の依存関係（`unblock_rules`）と、前提完了時に自動起票する後続タスク定義（`spawn_rules`）を管理している。
+   - 着手前および PR マージ直後に `pwsh -File scripts/sync-issues.ps1`（Windows）または `bash scripts/sync-issues.sh`（Linux / Cloud）を実行すると、前提が `CLOSED` になった Issue の `blocked` ラベル解除と、次段階の Issue の自動作成が行われる。
+2. **タスクを取る（排他ロック）**:
    - 全エージェントが同一の GitHub アカウントで動く場合、`assignee` だけではどのエージェントが担当しているか判別できないため、**`agent:<agent>` ラベル（`agent:claude` / `agent:gemini` / `agent:muse` / `agent:codex`）を排他ロックとして使う**。
-   - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認し、**すでに `agent:*` ラベルが付いている Issue や、同じ `lane:*` でオープン PR が出ているレーンの Issue は取らない**（1 レーン同時 1 PR 原則）。
+   - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認し、**すでに `agent:*` ラベルや `blocked` ラベルが付いている Issue、または同じ `lane:*` でオープン PR が出ているレーンの Issue は取らない**（1 レーン同時 1 PR 原則）。
    - 対象 Issue を決めたら `gh issue edit <番号> --add-label "agent:<agent>"` を実行し、ブランチ名を Issue にコメントしてから作業を始める。
-2. **作業ツリーを作る**:
+3. **作業ツリーを作る**:
    ```
    git fetch origin
    git worktree add ../sigil-wt/<agent>-<issue> -b <agent>/<lane>/<issue>-<slug> origin/main
    ```
    - `<agent>` は `claude` / `gemini` / `muse` / `codex`。
    - ビルドの競合を避けるため、作業ツリーごとに `CARGO_TARGET_DIR` を分ける（例: `../sigil-wt/target-<agent>-<issue>`）。
-3. **実装**: レーン内のファイルだけを変更する。仕様や ADR に影響する変更は §8 に従う。
-4. **PR 前**: `origin/main` にリベースし、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` を通す。
-5. **PR を出す**: テンプレートの項目（レーン・Issue・ADR の要否・仕様の差分）を埋める。
-6. **レビューを受ける**（§6）。マージ後は作業ツリーとブランチを削除する（`git worktree remove`、`git push origin --delete`）。
-7. **マージ順**: 契約変更 → ADR → 実装 → サンプル・テスト。同じレーンの PR は番号の若い順。
+4. **実装**: レーン内のファイルだけを変更する。仕様や ADR に影響する変更は §8 に従う。
+5. **PR 前**: `origin/main` にリベースし、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` を通す。
+6. **PR を出す**: テンプレートの項目（レーン・`Closes #<番号>`・ADR の要否・仕様の差分）を埋める。
+7. **レビューを受ける**（§6）。マージ後は `scripts/sync-issues.ps1`（または `.sh`）で後続 Issue を解放・補充し、作業ツリーとブランチを削除する（`git worktree remove`、`git push origin --delete`）。
+8. **マージ順**: 契約変更 → ADR → 実装 → サンプル・テスト。同じレーンの PR は番号の若い順。
 
 ### 5.1 コミットへのエージェントの記録
 

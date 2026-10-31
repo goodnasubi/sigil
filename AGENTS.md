@@ -18,17 +18,22 @@ Sigil は、AI がコードを書き、人間は仕様と ADR だけをレビュ
 
 ## 作業開始の手順
 
-1. **タスクの確保（排他ロック）**:
+1. **バックログの同期（アンロック・自動起票）**:
+   - Issue を選ぶ前、および自分の PR がマージされて Issue がクローズされた直後に、バックログ同期スクリプトを実行して後続 Issue の `blocked` 解除と新規起票を行う:
+     - Windows (PowerShell): `pwsh -File scripts/sync-issues.ps1`
+     - Linux / Cloud (Bash): `bash scripts/sync-issues.sh`
+2. **タスクの確保（排他ロック）**:
    - 全エージェントが同じ GitHub アカウントを共有するため、**`agent:<agent>` ラベルを排他ロックとして使う**（`<agent>` は `claude` / `gemini` / `muse` / `codex`）。
    - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認する。
-   - **すでに `agent:*` ラベルが付いている Issue や、同じ `lane:*` のオープン PR が存在するレーンの Issue は絶対に取らない**（1 レーンにつき同時に 1 PR まで）。
+   - **すでに `agent:*` ラベルや `blocked` ラベルが付いている Issue、または同じ `lane:*` のオープン PR が存在するレーンの Issue は絶対に取らない**（1 レーンにつき同時に 1 PR まで）。
    - 未着手の Issue を選んだら、即座に自分のラベルを付け、作業ブランチ名をコメントしてロックする:
      ```
      gh issue edit <番号> --add-label "agent:<agent>"
      gh issue comment <番号> --body "着手: `<agent>/<lane>/<番号>-<slug>`"
      ```
-2. 最新の `main` から、ブランチ名 `<agent>/<lane>/<issue番号>-<slug>` で作る。
-3. ローカルでは、独立した作業ツリーを作る。
+   - PR 本文には必ず `Closes #<番号>` を含め、PR マージ時に Issue が自動クローズされるようにする。
+3. 最新の `main` から、ブランチ名 `<agent>/<lane>/<issue番号>-<slug>` で作る。
+4. ローカルでは、独立した作業ツリーを作る。
    ```
    git fetch origin
    git worktree add <短いパス>/sigil-<agent>-<issue> -b <agent>/<lane>/<issue>-<slug> origin/main
@@ -36,7 +41,7 @@ Sigil は、AI がコードを書き、人間は仕様と ADR だけをレビュ
    - Windows では短いパスを使う（例: `C:\w\sigil-codex-123`）。
    - `CARGO_TARGET_DIR` を作業ツリーごとに分け、`CARGO_BUILD_JOBS` で CPU の使用を抑える。
    - クラウドでは clone 自体が独立した作業ツリーなので、`git worktree` は不要。
-4. クラウドでは、**push していない成果は失われる**。こまめにコミットして push する。
+5. クラウドでは、**push していない成果は失われる**。こまめにコミットして push する。
 
 ## コミットメッセージ
 

@@ -590,6 +590,198 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (y, _) = self.val(&args[1]);
                 (self.compare(op, &tx, x, y), u)
             }
+            CtEq => {
+                let (a, _) = self.val(&args[0]);
+                let (b, _) = self.val(&args[1]);
+                let eq = self.rt("bytes_ct_eq", &[a, b]);
+                (self.b.ins().uextend(types::I64, eq), u)
+            }
+            StrAsBytes => {
+                let (s, _) = self.val(&args[0]);
+                (self.rt("str_as_bytes", &[s]), u)
+            }
+            IntRotl => {
+                let (x, _) = self.val(&args[0]);
+                let (n, _) = self.val(&args[1]);
+                let (w, _) = self.val(&args[2]);
+                (self.rt("int_rotl", &[x, n, w]), u)
+            }
+            IntRotr => {
+                let (x, _) = self.val(&args[0]);
+                let (n, _) = self.val(&args[1]);
+                let (w, _) = self.val(&args[2]);
+                (self.rt("int_rotr", &[x, n, w]), u)
+            }
+            IntRotr32 => {
+                let (x, _) = self.val(&args[0]);
+                let (n, _) = self.val(&args[1]);
+                (self.rt("int_rotr32", &[x, n]), u)
+            }
+            IntAshr => {
+                let (x, _) = self.val(&args[0]);
+                let (n, _) = self.val(&args[1]);
+                (self.b.ins().sshr(x, n), u)
+            }
+            BytesNew => (self.rt("bytes_new", &[]), u),
+            BytesWithCapacity => {
+                let (c, _) = self.val(&args[0]);
+                (self.rt("bytes_with_capacity", &[c]), u)
+            }
+            BytesFromList => {
+                let (l, _) = self.val(&args[0]);
+                let out = self.zero_tmp(8);
+                let err = self.zero_tmp(8);
+                let ok = self.rt("bytes_from_list", &[l, out, err]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let res = s.ld(out, 0);
+                        s.mk_enum_c(0, &[res])
+                    },
+                    |s| {
+                        let e = s.ld(err, 0);
+                        s.mk_enum_c(1, &[e])
+                    },
+                );
+                (r, u)
+            }
+            BytesLen => {
+                let (b, _) = self.val(&args[0]);
+                (self.rt("bytes_len", &[b]), u)
+            }
+            BytesIsEmpty => {
+                let (b, _) = self.val(&args[0]);
+                let res = self.rt("bytes_is_empty", &[b]);
+                (self.b.ins().uextend(types::I64, res), u)
+            }
+            BytesGet => {
+                let (b, _) = self.val(&args[0]);
+                let (i, _) = self.val(&args[1]);
+                let out = self.zero_tmp(8);
+                let ok = self.rt("bytes_get", &[b, i, out]);
+                let isbad = self.b.ins().icmp_imm_s(IntCC::Equal, ok, 0);
+                let tag = self.b2i(isbad);
+                let good = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let n = self.ld(out, 0);
+                let z = self.ic(0);
+                let pay = self.b.ins().select(good, n, z);
+                (self.mk_enum(tag, &[pay]), u)
+            }
+            BytesSet => {
+                let (b, _) = self.val(&args[0]);
+                let (i, _) = self.val(&args[1]);
+                let (val, _) = self.val(&args[2]);
+                let err = self.zero_tmp(8);
+                let ok = self.rt("bytes_set", &[b, i, val, err]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let z = s.ic(0);
+                        s.mk_enum_c(0, &[z])
+                    },
+                    |s| {
+                        let e = s.ld(err, 0);
+                        s.mk_enum_c(1, &[e])
+                    },
+                );
+                (r, u)
+            }
+            BytesPush => {
+                let (b, _) = self.val(&args[0]);
+                let (val, _) = self.val(&args[1]);
+                self.rt("bytes_push", &[b, val]);
+                (self.ic(0), u)
+            }
+            BytesSlice => {
+                let (b, _) = self.val(&args[0]);
+                let (st, _) = self.val(&args[1]);
+                let (en, _) = self.val(&args[2]);
+                let out = self.zero_tmp(8);
+                let err = self.zero_tmp(8);
+                let ok = self.rt("bytes_slice", &[b, st, en, out, err]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let res = s.ld(out, 0);
+                        s.mk_enum_c(0, &[res])
+                    },
+                    |s| {
+                        let e = s.ld(err, 0);
+                        s.mk_enum_c(1, &[e])
+                    },
+                );
+                (r, u)
+            }
+            BytesConcat => {
+                let (b1, _) = self.val(&args[0]);
+                let (b2, _) = self.val(&args[1]);
+                (self.rt("bytes_concat", &[b1, b2]), u)
+            }
+            BytesExtend => {
+                let (b1, _) = self.val(&args[0]);
+                let (b2, _) = self.val(&args[1]);
+                self.rt("bytes_extend", &[b1, b2]);
+                (self.ic(0), u)
+            }
+            BytesToStringUtf8 => {
+                let (b, _) = self.val(&args[0]);
+                let out = self.zero_tmp(8);
+                let err = self.zero_tmp(8);
+                let ok = self.rt("bytes_to_string_utf8", &[b, out, err]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let res = s.ld(out, 0);
+                        s.mk_enum_c(0, &[res])
+                    },
+                    |s| {
+                        let e = s.ld(err, 0);
+                        s.mk_enum_c(1, &[e])
+                    },
+                );
+                (r, u)
+            }
+            BytesPushU16Be => {
+                let (b, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                self.rt("bytes_push_u16_be", &[b, v]);
+                (self.ic(0), u)
+            }
+            BytesPushU32Be => {
+                let (b, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                self.rt("bytes_push_u32_be", &[b, v]);
+                (self.ic(0), u)
+            }
+            BytesPushU64Be => {
+                let (b, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                self.rt("bytes_push_u64_be", &[b, v]);
+                (self.ic(0), u)
+            }
+            BytesPushU32Le => {
+                let (b, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                self.rt("bytes_push_u32_le", &[b, v]);
+                (self.ic(0), u)
+            }
+            BytesReadU32Be => {
+                let (b, _) = self.val(&args[0]);
+                let (o, _) = self.val(&args[1]);
+                let out = self.zero_tmp(8);
+                let ok = self.rt("bytes_read_u32_be", &[b, o, out]);
+                let isbad = self.b.ins().icmp_imm_s(IntCC::Equal, ok, 0);
+                let tag = self.b2i(isbad);
+                let good = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let n = self.ld(out, 0);
+                let z = self.ic(0);
+                let pay = self.b.ins().select(good, n, z);
+                (self.mk_enum(tag, &[pay]), u)
+            }
         }
     }
 

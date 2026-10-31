@@ -36,6 +36,7 @@ fn aggregate(t: &Ty) -> bool {
             | Ty::Shared(_)
             | Ty::FnRef(..)
             | Ty::Str
+            | Ty::Bytes
             | Ty::Path
     )
 }

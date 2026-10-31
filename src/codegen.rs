@@ -99,6 +99,20 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "alloc" | "str_new" | "str_concat" | "list_get" | "val_shadow" | "val_clone" => ("pp", 'p'),
         "str_clone" | "blk_new" | "str_data" | "str_bytes" | "str_len" | "str_trim"
         | "str_lines" | "list_len" | "list_new" => ("p", 'p'),
+        "bytes_new" => ("", 'p'),
+        "bytes_with_capacity" | "bytes_clone" | "bytes_len" | "str_as_bytes" => ("p", 'p'),
+        "bytes_concat" => ("pp", 'p'),
+        "bytes_push" | "bytes_extend" | "bytes_push_u16_be" | "bytes_push_u32_be"
+        | "bytes_push_u64_be" | "bytes_push_u32_le" => ("pp", 'v'),
+        "bytes_free" => ("p", 'v'),
+        "bytes_is_empty" => ("p", 'i'),
+        "bytes_ct_eq" | "int_rotr32" => ("pp", 'i'),
+        "bytes_get" | "bytes_read_u32_be" | "bytes_from_list" | "bytes_to_string_utf8" => {
+            ("ppp", 'i')
+        }
+        "int_rotl" | "int_rotr" => ("ppp", 'i'),
+        "bytes_set" => ("pppp", 'i'),
+        "bytes_slice" => ("ppppp", 'i'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
         "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
@@ -248,6 +262,7 @@ impl<'p> Cg<'p> {
             Ty::Float => ws.push(W::I(2)),
             Ty::Bool => ws.push(W::I(3)),
             Ty::Str => ws.push(W::I(4)),
+            Ty::Bytes => ws.push(W::I(15)),
             Ty::Path => ws.push(W::I(5)),
             Ty::ParseError => ws.push(W::I(6)),
             Ty::List(e) => {

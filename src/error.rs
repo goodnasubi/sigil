@@ -83,6 +83,8 @@ pub enum ErrorKind {
     BadTuple,
     NotInP0,
     TooDeep,
+    /// 関数の型の効果に `of(...)` を書いた（関数の型には引数の名前がない。ADR 0022 の決定 3）。
+    OfInFnType,
     // --- 型検査（ADR 0011） ---
     /// PR1 の範囲外の構文・型（総称・標準ライブラリの型・`match`・クロージャ・`?`）。
     Unsupported,

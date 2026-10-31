@@ -107,7 +107,11 @@ impl<'a> Printer<'a> {
                 self.w(if *mutable { "&mut " } else { "&" });
                 self.ty(inner);
             }
-            Type::Fn { params, ret } => {
+            Type::Fn {
+                params,
+                ret,
+                effects,
+            } => {
                 self.w("fn(");
                 for (i, a) in params.iter().enumerate() {
                     if i > 0 {
@@ -119,6 +123,15 @@ impl<'a> Printer<'a> {
                 if let Some(r) = ret.as_deref().filter(|r| !is_unit(r)) {
                     self.w(" -> ");
                     self.ty(r);
+                }
+                // 効果節は書かれたときだけ出す（ADR 0022 の決定 3）。並びは関数の節と同じ正規形。
+                if let Some(es) = effects {
+                    self.w(" effects ");
+                    if es.is_empty() {
+                        self.w("none");
+                    } else {
+                        self.w(&normalize_effects(es, &[]).join(", "));
+                    }
                 }
             }
             Type::Tuple(ts) => {

@@ -202,6 +202,11 @@ pub enum Type {
     Fn {
         params: Vec<Type>,
         ret: Option<Box<Type>>,
+        /// 戻り値の後に書かれた効果節（ADR 0022 の決定 3。PR 2-4d の 1/3 で構文だけ）。
+        /// `None` は書かれていない（引数の位置・従来形）。`Some` の空は `effects none`、
+        /// それ以外は `effects カテゴリ, ...`（`of(...)` は構文で弾くので入らない）。
+        /// 位置による必須・禁止の検査と、型の同一性への反映は PR 2-4d の 2/3（型検査）。
+        effects: Option<Vec<Effect>>,
     },
     Tuple(Vec<Type>),
 }

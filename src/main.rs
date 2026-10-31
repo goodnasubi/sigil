@@ -168,11 +168,24 @@ fn main() -> ExitCode {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
+            let root_dir = root_dir(root.as_deref());
+            match sigil::project::load_trust_base_file(&root_dir) {
+                Ok(modules) => {
+                    for m in modules {
+                        if !trust_base.contains(&m) {
+                            trust_base.push(m);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            }
             let copts = sigil::effects::Options {
                 trust_base,
                 ..Default::default()
             };
-            let root_dir = root_dir(root.as_deref());
             let mut failed = false;
             let mut diagnostics = vec![];
             for path in &args[i..] {
@@ -368,6 +381,20 @@ fn main() -> ExitCode {
             let args: Vec<String> = std::iter::once(args[0].clone())
                 .chain(args[i..].iter().cloned())
                 .collect();
+            let root_dir = root_dir(root.as_deref());
+            match sigil::project::load_trust_base_file(&root_dir) {
+                Ok(modules) => {
+                    for m in modules {
+                        if !trust_base.contains(&m) {
+                            trust_base.push(m);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            }
             let mut opts = sigil::exec::Options {
                 trace_drops: trace,
                 trust_base,
@@ -384,7 +411,6 @@ fn main() -> ExitCode {
                 opts.fs_files = Some(m);
             }
             let path = &args[1];
-            let root_dir = root_dir(root.as_deref());
             let call = match args[3..]
                 .iter()
                 .map(|a| parse_arg(a))
@@ -462,12 +488,26 @@ fn main() -> ExitCode {
             let out = rest[n - 1].clone();
             let func = rest[n - 3].clone();
             let file = rest[0];
+            let root_dir = root_dir(root.as_deref());
+            match sigil::project::load_trust_base_file(&root_dir) {
+                Ok(modules) => {
+                    for m in modules {
+                        if !trust_base.contains(&m) {
+                            trust_base.push(m);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            }
             let opts = sigil::codegen::Opts {
                 trace_drops: trace,
                 trust_base,
             };
             match sigil::native::build_project(
-                &root_dir(root.as_deref()),
+                &root_dir,
                 std::path::Path::new(file),
                 &func,
                 &opts,

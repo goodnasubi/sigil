@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use super::util::block_returns;
 use super::{
-    analyze, block_returns, contains_ref, contains_ref_outside_fn, show, AccKind, Ck, Local, Prop,
-    Ty, R,
+    analyze, contains_ref, contains_ref_outside_fn, show, AccKind, Ck, Local, Prop, Ty, R,
 };
 use crate::ast::*;
 use crate::effects::Options;

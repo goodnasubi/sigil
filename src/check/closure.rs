@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::util::block_returns;
+use super::util::{block_returns, strip_paren};
 use super::{
     analyze, contains_ref, contains_ref_outside_fn, show, AccKind, Ck, Local, Prop, Ty, R,
 };
@@ -102,7 +102,8 @@ pub(super) struct RawClosure {
     pub(super) escaping: bool,
     pub(super) is_move: bool,
     pub(super) bound: Option<String>,
-    pub(super) caps: Vec<(String, Ty, CapMode)>,
+    /// とらえた値（名前・型・とらえ方・書き換えるか）。
+    pub(super) caps: Vec<(String, Ty, CapMode, bool)>,
 }
 
 impl Ck {
@@ -123,7 +124,7 @@ impl Ck {
             );
         }
         let (hps, hret) = match hint.map(|h| self.shallow(h)) {
-            Some(Ty::Fn(ps, r)) => (Some(ps), Some(*r)),
+            Some(Ty::Fn(ps, r, _)) => (Some(ps), Some(*r)),
             _ => (None, None),
         };
         if let Some(ps) = &hps {
@@ -176,28 +177,54 @@ impl Ck {
         let sp = self.span;
         self.closure_depth += 1;
         let res: R<()> = match body {
-            ClosureBody::Expr(e) => match self.expr(e) {
-                Ok(t) => {
-                    self.span = sp;
-                    if contains_ref(&self.zonk(&t)) {
-                        self.return_roots(e)?;
-                    }
-                    self.consume(e, &t)?;
-                    if self.coerce(&r, &t, e) {
-                        Ok(())
-                    } else {
-                        self.err(
-                            ErrorKind::TypeMismatch,
-                            format!(
-                                "クロージャの戻り値は `{}` でなければならないが、`{}` である",
-                                self.sh(&r),
-                                self.sh(&t)
-                            ),
-                        )
-                    }
+            ClosureBody::Expr(e) => {
+                // 本体がクロージャそのものなら、その効果を取り分けておき、戻り値の型が
+                // 置ける位置の関数の型なら入れる検査をする。そうでなければ効果は
+                // このクロージャ自身の効果に数える。
+                let inner = matches!(strip_paren(e), Expr::Closure { .. });
+                if inner {
+                    self.defer = true;
                 }
-                Err(e) => Err(e),
-            },
+                let got = self.expr(e);
+                let ce = if inner {
+                    self.defer = false;
+                    std::mem::take(&mut self.last_closure)
+                } else {
+                    Vec::new()
+                };
+                match got {
+                    Ok(t) => {
+                        self.span = sp;
+                        if contains_ref(&self.zonk(&t)) {
+                            self.return_roots(e)?;
+                        }
+                        self.consume(e, &t)?;
+                        if self.coerce(&r, &t, e) {
+                            match self.zonk(&r) {
+                                Ty::Fn(_, _, Some(d)) if inner => {
+                                    self.check_fn_insert(&d, e, &t, Some(&ce))
+                                }
+                                _ => {
+                                    for a in ce {
+                                        self.add_eff(a);
+                                    }
+                                    Ok(())
+                                }
+                            }
+                        } else {
+                            self.err(
+                                ErrorKind::TypeMismatch,
+                                format!(
+                                    "クロージャの戻り値は `{}` でなければならないが、`{}` である",
+                                    self.sh(&r),
+                                    self.sh(&t)
+                                ),
+                            )
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             ClosureBody::Block(b) => self.block(b).and_then(|()| {
                 self.span = sp;
                 if !block_returns(b) && !self.try_unify(&r, &Ty::Unit) {
@@ -232,7 +259,7 @@ impl Ck {
         res?;
         self.span = sp;
         self.apply_captures(frame, escaping, is_move)?;
-        Ok(Ty::Fn(pts, Box::new(r)))
+        Ok(Ty::Fn(pts, Box::new(r), None))
     }
 
     /// クロージャがとらえた外側の値のとらえ方を決めて、外側の流れに足す（ADR 0012 の決定 1 の 5）。
@@ -309,7 +336,7 @@ impl Ck {
                     }
                 }
             }
-            caps.push((c.name.clone(), ty, mode));
+            caps.push((c.name.clone(), ty, mode, c.write));
         }
         self.cur_closures.push(RawClosure {
             span: self.span,

@@ -5,8 +5,10 @@ use crate::borrow::TEMP;
 use crate::error::{Error, ErrorKind};
 
 use super::types::{show, Ty};
-use super::util::{contains_ref, pat_names, place_path, place_root, strip_paren, strip_refs};
-use super::{merge, Ck, Flow, Local, Pos, R};
+use super::util::{
+    contains_ref_outside_fn, pat_names, place_path, place_root, strip_paren, strip_refs,
+};
+use super::{merge, Atom, Ck, Flow, Local, Pos, R};
 
 impl Ck {
     pub(super) fn expect(&mut self, expected: &Ty, e: &Expr, what: &str) -> R<()> {
@@ -64,9 +66,11 @@ impl Ck {
                 let let_srcs = std::mem::take(&mut self.res);
                 let vt_moved = vt.clone();
                 self.fn_value_form(value, &vt)?;
+                let mut value_closure_effs: Option<Vec<Atom>> = None;
                 if closure {
                     if let Pattern::Bind(n) = pattern {
                         let effs = std::mem::take(&mut self.last_closure);
+                        value_closure_effs = Some(effs.clone());
                         self.local_eff.insert(n.clone(), effs);
                         if let Some(c) = self.cur_closures.last_mut() {
                             c.bound = Some(n.clone());
@@ -88,7 +92,7 @@ impl Ck {
                 let fin = match ty {
                     None => vt,
                     Some(t) => {
-                        let d = self.resolve(t, Pos::Other)?;
+                        let d = self.resolve(t, Pos::Placed)?;
                         let i = self.annot_n;
                         self.annot_n += 1;
                         if self.skip == Some(i) {
@@ -116,7 +120,14 @@ impl Ck {
                 if self.skip.is_none() {
                     self.rec_lets.push((s as *const Stmt as usize, fin.clone()));
                 }
-                if *mutable && contains_ref(&self.zonk(&fin)) {
+                // 置ける位置の型注釈に入れる値の検査（効果の順序・とらえ方。
+                // ADR 0022 決定 3）。注釈の要否の再検査（skip）では行わない。
+                if self.skip.is_none() {
+                    if let Ty::Fn(_, _, Some(d)) = self.zonk(&fin) {
+                        self.check_fn_insert(&d, value, &vt_moved, value_closure_effs.as_deref())?;
+                    }
+                }
+                if *mutable && contains_ref_outside_fn(&self.zonk(&fin)) {
                     return self.err(
                         ErrorKind::LetMutRef,
                         "型が参照を含む変数（`&T`・`Option<&T>` など）は `let mut` で宣言できない（参照を別の参照で束縛し直す操作はない）",
@@ -151,7 +162,7 @@ impl Ck {
                     && let_srcs.iter().any(|(p, _)| p == TEMP)
                     && names.iter().any(|n| {
                         self.lookup(n)
-                            .is_some_and(|l| contains_ref(&self.zonk(&l.ty)))
+                            .is_some_and(|l| contains_ref_outside_fn(&self.zonk(&l.ty)))
                     })
                 {
                     self.span = s.span;
@@ -221,7 +232,7 @@ impl Ck {
                         }
                         Ok(())
                     }
-                    Some(e) if contains_ref(&self.zonk(&ret)) => {
+                    Some(e) if contains_ref_outside_fn(&self.zonk(&ret)) => {
                         // 参照を返す関数（ADR 0012 の決定 1）。`return 場所;` は場所への参照を返す
                         // ので、型は参照を外して比べる。どの場所を返せるかは所有権の検査で調べる。
                         let t = self.expr(e)?;
@@ -243,7 +254,29 @@ impl Ck {
                         Ok(())
                     }
                     Some(e) => {
-                        let t = self.expect_ty(&ret, e, "戻り値")?;
+                        // 戻すクロージャの効果は取り分けて、入れる検査に使う
+                        let closure = matches!(strip_paren(e), Expr::Closure { .. });
+                        if closure {
+                            self.defer = true;
+                        }
+                        let t = self.expect_ty(&ret, e, "戻り値");
+                        let ce = if closure {
+                            self.defer = false;
+                            std::mem::take(&mut self.last_closure)
+                        } else {
+                            vec![]
+                        };
+                        let t = t?;
+                        // 置ける位置の戻り値に入れる値の検査（ADR 0022 決定 3）
+                        if let Ty::Fn(_, _, Some(d)) = self.zonk(&ret) {
+                            self.fn_value_form(e, &t)?;
+                            self.check_fn_insert(
+                                &d,
+                                e,
+                                &t,
+                                if closure { Some(&ce) } else { None },
+                            )?;
+                        }
                         self.consume(e, &t)?;
                         self.ens_check()?;
                         self.flow.dead = true;

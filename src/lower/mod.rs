@@ -502,7 +502,7 @@ impl<'a> L<'a> {
                 None => return bail(format!("型引数 {p} が具体化されていない")),
             },
             CTy::Var(_) => ir::Ty::Unit,
-            CTy::Fn(ps, r) => {
+            CTy::Fn(ps, r, _) => {
                 let mut v = vec![];
                 for x in ps {
                     v.push(self.conv(x, m)?);

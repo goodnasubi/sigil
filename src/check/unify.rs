@@ -35,7 +35,7 @@ impl Ck {
             Ty::Tuple(ts) => Ty::Tuple(go(&ts)),
             Ty::Ref(m, i) => Ty::Ref(m, Box::new(self.zonk(&i))),
             Ty::Named(n, a) => Ty::Named(n, go(&a)),
-            Ty::Fn(ps, r) => Ty::Fn(go(&ps), Box::new(self.zonk(&r))),
+            Ty::Fn(ps, r, e) => Ty::Fn(go(&ps), Box::new(self.zonk(&r)), e),
             t => t,
         }
     }
@@ -50,7 +50,7 @@ impl Ck {
             Ty::Tuple(ts) => ts.iter().any(|t| self.occurs(v, t)),
             Ty::Ref(_, i) => self.occurs(v, &i),
             Ty::Named(_, a) => a.iter().any(|t| self.occurs(v, t)),
-            Ty::Fn(ps, r) => ps.iter().any(|t| self.occurs(v, t)) || self.occurs(v, &r),
+            Ty::Fn(ps, r, _) => ps.iter().any(|t| self.occurs(v, t)) || self.occurs(v, &r),
             _ => false,
         }
     }
@@ -77,7 +77,9 @@ impl Ck {
             (Ty::Named(n, xs), Ty::Named(m, ys)) if n == m && xs.len() == ys.len() => {
                 self.unify_all(xs, ys)
             }
-            (Ty::Fn(ps, r), Ty::Fn(qs, s)) if ps.len() == qs.len() => {
+            // 効果節は比べない。置ける位置の宣言との効果の順序（⊑）は、
+            // 値を入れる場所で別に確かめる（ADR 0022 決定 3）。
+            (Ty::Fn(ps, r, _), Ty::Fn(qs, s, _)) if ps.len() == qs.len() => {
                 self.unify_all(ps, qs)?;
                 self.unify(r, s)
             }
@@ -222,7 +224,12 @@ impl Ck {
                 Prop::Shareable if m => Some(false),
                 _ => self.holds(&i, p, d),
             },
-            Ty::Fn(..) => Some(false),
+            // 置ける位置の関数の型は `Sendable`・`Shareable` を持ち、他の性質は持たない
+            // （ADR 0022 決定 3。ADR 0011 決定 6 の関数の型の扱いの改訂）。
+            Ty::Fn(_, _, eff) => match eff {
+                Some(_) => Some(matches!(p, Prop::Sendable | Prop::Shareable)),
+                None => Some(false),
+            },
             Ty::Param(n) => {
                 let bs = self.env.get(&n).map(|v| &v[..]).unwrap_or(&[]);
                 Some(bs.contains(&p) || (p == Prop::Comparable && bs.contains(&Prop::Numeric)))

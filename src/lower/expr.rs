@@ -23,7 +23,10 @@ fn cmp_op(op: a::BinOp) -> ir::BinOp {
         a::BinOp::Gt => ir::BinOp::Gt,
         a::BinOp::Ge => ir::BinOp::Ge,
         a::BinOp::And | a::BinOp::Or => ir::BinOp::Eq,
-        _ => todo!("bit ops in lower"),
+        a::BinOp::BitAnd => ir::BinOp::BitAnd,
+        a::BinOp::BitOr => ir::BinOp::BitOr,
+        a::BinOp::BitXor => ir::BinOp::BitXor,
+        a::BinOp::Shl | a::BinOp::Shr => unreachable!("shift is arith"),
     }
 }
 
@@ -221,7 +224,8 @@ impl<'a> L<'a> {
                 }
             }
             a::UnOp::BitNot => {
-                todo!("BitNot in lower")
+                let a = self.expr(inner)?;
+                Ok(self.fresh(Rvalue::Unary(ir::UnOp::BitNot, a), ir::Ty::Int))
             }
             a::UnOp::Ref | a::UnOp::RefMut => {
                 let (p, ty) = self.expr_place(inner)?;
@@ -330,16 +334,23 @@ impl<'a> L<'a> {
             ));
         }
         match lty {
-            ir::Ty::Int => {
-                let aop = match op {
-                    a::BinOp::Add => ArithOp::Add,
-                    a::BinOp::Sub => ArithOp::Sub,
-                    a::BinOp::Mul => ArithOp::Mul,
-                    a::BinOp::Div => ArithOp::Div,
-                    _ => ArithOp::Rem,
-                };
-                Ok(self.checked(aop, a_, b_, ""))
-            }
+            ir::Ty::Int => match op {
+                a::BinOp::BitAnd | a::BinOp::BitOr | a::BinOp::BitXor => {
+                    Ok(self.fresh(Rvalue::Binary(cmp_op(op), a_, b_), ir::Ty::Int))
+                }
+                a::BinOp::Shl => Ok(self.checked(ArithOp::Shl, a_, b_, "<<")),
+                a::BinOp::Shr => Ok(self.checked(ArithOp::Shr, a_, b_, ">>")),
+                _ => {
+                    let aop = match op {
+                        a::BinOp::Add => ArithOp::Add,
+                        a::BinOp::Sub => ArithOp::Sub,
+                        a::BinOp::Mul => ArithOp::Mul,
+                        a::BinOp::Div => ArithOp::Div,
+                        _ => ArithOp::Rem,
+                    };
+                    Ok(self.checked(aop, a_, b_, ""))
+                }
+            },
             ir::Ty::Float => Ok(self.fresh(Rvalue::Binary(cmp_op(op), a_, b_), ir::Ty::Float)),
             ir::Ty::Str => Ok(self.fresh(Rvalue::Binary(ir::BinOp::Add, a_, b_), ir::Ty::Str)),
             t => bail(format!("二項演算の型 {t:?}")),

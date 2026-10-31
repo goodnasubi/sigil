@@ -161,6 +161,7 @@ impl<'a> Fn<'a> {
             Rvalue::Use(o) => self.op_ty(o)?,
             Rvalue::Unary(UnOp::Not, _) => Ty::Bool,
             Rvalue::Unary(UnOp::NegFloat, _) => Ty::Float,
+            Rvalue::Unary(UnOp::BitNot, _) => Ty::Int,
             Rvalue::Binary(op, a, _) => match op {
                 BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Ty::Bool,
                 _ => self.op_ty(a)?,

@@ -196,6 +196,10 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let n = self.b.ins().fneg(f);
                 self.b.ins().bitcast(types::I64, MemFlagsData::new(), n)
             }
+            Rvalue::Unary(UnOp::BitNot, op) => {
+                let (v, _) = self.val(op);
+                self.b.ins().bnot(v)
+            }
             Rvalue::Binary(op, a, b) => {
                 let (x, tx) = self.val(a);
                 let (y, _) = self.val(b);
@@ -334,6 +338,12 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     fn binary(&mut self, op: BinOp, t: &Ty, x: Value, y: Value) -> Value {
         match t {
+            Ty::Int if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor) => match op {
+                BinOp::BitAnd => self.b.ins().band(x, y),
+                BinOp::BitOr => self.b.ins().bor(x, y),
+                BinOp::BitXor => self.b.ins().bxor(x, y),
+                _ => unreachable!(),
+            },
             Ty::Int | Ty::Bool | Ty::Unit => {
                 let cc = match op {
                     BinOp::Eq => IntCC::Equal,

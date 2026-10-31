@@ -1,0 +1,473 @@
+//! SIR の評価器（ADR 0015 の決定 2・5）。`lower` が作った `Program` を、値・出力・破棄の順・停止を観測として返して実行する。
+//!
+//! 値の持ち方:
+//! - 局所はすべて `Slot`（`Rc<RefCell<Val>>`）。組・構造体・列挙型の腕・一覧は `Agg`（フィールドの並び）。
+//! - 参照は `Ptr`（スロットと、その中の位置の列）。借用の間は元の値が動かないことを検査器が保証する。
+//! - 移動は「読んで元を `Empty` にする」。`Drop` は `Empty` に対して何もしない。破棄は型でなく値の形から行う。
+//! - 構造体の破棄は、自分、次にフィールドを宣言の順（`Agg` の `Drop` と `drain`）。移動した部分を持つ構造体は、自分を記録しない（Rust と同じ）。
+//! - 複写（`Copy`）は破棄を記録しない写し（`silent`）。`clone` だけが破棄される値を増やす。
+
+mod call;
+mod expr;
+mod value;
+
+use crate::ast::{File, Item, Type};
+use crate::exec::{Arg, Failure, Options, Outcome, RunError, Stop, StopKind};
+use crate::ir::*;
+use crate::shared_args::arg_name;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use value::{
+    list_of, locate, new_slot, shadow, show_val, stack_addr, types, with_val, with_val_mut, Ptr,
+    Val, DEEP, DROP_LOG, STACK_LIMIT, TYPES,
+};
+
+type Slot = Rc<RefCell<Val>>;
+type E = Box<Stop>;
+
+// ---------------------------------------------------------------------------
+// 評価器
+
+struct M<'p> {
+    p: &'p Program,
+    strs: Vec<Rc<str>>,
+    out: String,
+    capture: bool,
+    fs: Option<BTreeMap<String, String>>,
+    canon: Vec<usize>,
+    opt: usize,
+    res: usize,
+    io: usize,
+}
+
+impl<'p> M<'p> {
+    fn stop_at(&self, id: StopId, kind: Option<StopKind>, detail: Option<&str>) -> E {
+        let s = &self.p.stop_sites[id];
+        Box::new(Stop {
+            kind: kind.unwrap_or(s.kind),
+            func: s.func.clone(),
+            line: s.line,
+            during: s.during.clone(),
+            detail: detail.map_or_else(|| s.detail.clone(), str::to_string),
+        })
+    }
+
+    fn after_deep(&self, loc: StopId) -> Result<(), E> {
+        if DEEP.with(|d| d.replace(false)) {
+            Err(self.stop_at(
+                loc,
+                Some(StopKind::StackExhausted),
+                Some("値の入れ子が深すぎる"),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn exec(&mut self, locals: &[Slot], s: &Stmt) {
+        match s {
+            Stmt::Assign(pl, rv) => {
+                let v = self.rvalue(locals, rv);
+                self.write(locals, pl, v);
+            }
+            Stmt::Drop(pl) => {
+                let (s, p) = locate(locals, pl);
+                let old = with_val_mut(&s, &p, |v| match v {
+                    Val::Ref(_) | Val::Fn(_) => Val::Empty,
+                    _ => std::mem::replace(v, Val::Empty),
+                });
+                drop(old);
+            }
+        }
+    }
+
+    fn run_func(&mut self, fid: FuncId, args: Vec<Val>, loc: StopId) -> Result<Val, E> {
+        let (base, budget) = STACK_LIMIT.with(|c| c.get());
+        if base.abs_diff(stack_addr()) > budget {
+            return Err(self.stop_at(loc, Some(StopKind::StackExhausted), Some("")));
+        }
+        let p = self.p;
+        let f = &p.funcs[fid];
+        let locals: Vec<Slot> = (0..f.locals.len()).map(|_| new_slot(Val::Empty)).collect();
+        for (a, &pi) in args.into_iter().zip(&f.params) {
+            *locals[pi].borrow_mut() = a;
+        }
+        let mut bb = 0usize;
+        let mut pending: Option<E> = None;
+        loop {
+            let blk = &f.blocks[bb];
+            for s in &blk.stmts {
+                self.exec(&locals, s);
+            }
+            match &blk.term {
+                Term::Goto(b) => bb = *b,
+                Term::Branch(c, t, e) => bb = if self.read_bool(&locals, c) { *t } else { *e },
+                Term::Switch(c, arms, d) => {
+                    let n = self.read_int(&locals, c);
+                    bb = arms.iter().find(|(k, _)| *k == n).map_or(*d, |(_, b)| *b);
+                }
+                Term::Call {
+                    func,
+                    args,
+                    dest,
+                    next,
+                    cleanup,
+                    stop,
+                } => {
+                    let r = match func {
+                        Callee::Func(g) => {
+                            let argv: Vec<Val> =
+                                args.iter().map(|a| self.read(&locals, a)).collect();
+                            self.run_func(*g, argv, *stop)
+                        }
+                        Callee::Indirect(op) => {
+                            let (s, pth) = self.view(&locals, op);
+                            let fv = with_val(&s, &pth, shadow);
+                            let argv: Vec<Val> =
+                                args.iter().map(|a| self.read(&locals, a)).collect();
+                            self.call_val(&fv, argv, *stop)
+                        }
+                        Callee::Builtin(b) => self.builtin(&locals, *b, args, *stop),
+                    };
+                    match r {
+                        Ok(v) => {
+                            self.write(&locals, dest, v);
+                            bb = *next;
+                        }
+                        Err(e) => {
+                            pending = Some(e);
+                            bb = *cleanup;
+                        }
+                    }
+                }
+                Term::CheckedOp {
+                    op,
+                    a,
+                    b,
+                    dest,
+                    next,
+                    stop,
+                    cleanup,
+                } => {
+                    let x = self.read_int(&locals, a);
+                    let y = self.read_int(&locals, b);
+                    let r = match op {
+                        ArithOp::Add => x.checked_add(y),
+                        ArithOp::Sub => x.checked_sub(y),
+                        ArithOp::Mul => x.checked_mul(y),
+                        ArithOp::Div => x.checked_div(y),
+                        ArithOp::Rem => x.checked_rem(y),
+                    };
+                    match r {
+                        Some(n) => {
+                            self.write(&locals, dest, Val::Int(n));
+                            bb = *next;
+                        }
+                        None => {
+                            pending = Some(self.stop_at(*stop, None, None));
+                            bb = *cleanup;
+                        }
+                    }
+                }
+                Term::Assert {
+                    cond,
+                    stop,
+                    next,
+                    cleanup,
+                } => {
+                    if self.read_bool(&locals, cond) {
+                        bb = *next;
+                    } else {
+                        pending = Some(self.stop_at(*stop, None, None));
+                        bb = *cleanup;
+                    }
+                }
+                Term::Return => {
+                    let v = std::mem::replace(&mut *locals[0].borrow_mut(), Val::Empty);
+                    return Ok(v);
+                }
+                Term::Unreachable => unreachable!("到達しない基本ブロックに来た"),
+                Term::Resume => {
+                    return Err(pending
+                        .take()
+                        .unwrap_or_else(|| self.stop_at(loc, None, None)));
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 入口
+
+fn to_val(a: &Arg) -> Val {
+    match a {
+        Arg::Int(n) => Val::Int(*n),
+        Arg::Float(x) => Val::Float(*x),
+        Arg::Bool(b) => Val::Bool(*b),
+        Arg::Str(s) => Val::Str(s.as_str().into()),
+        Arg::List(xs) => list_of(xs.iter().map(to_val).collect()),
+    }
+}
+
+/// 入口の引数を宣言の型に合わせて値にする（`runtime/core` の `coerce` と同じ規則）。
+fn coerce(a: &Arg, ty: &Type) -> Result<Val, String> {
+    let ty = match ty {
+        Type::Ref { inner, .. } => inner,
+        t => t,
+    };
+    let Type::Path { path, args } = ty else {
+        return Ok(to_val(a));
+    };
+    let name = path.last().map(String::as_str).unwrap_or("");
+    let mismatch = || Err(format!("{name} が要るが、{}が渡された", arg_name(a)));
+    match (name, a) {
+        ("Int", Arg::Int(n)) => Ok(Val::Int(*n)),
+        ("Float", Arg::Float(x)) => Ok(Val::Float(*x)),
+        ("Float", Arg::Int(n)) => Ok(Val::Float(*n as f64)),
+        ("Bool", Arg::Bool(b)) => Ok(Val::Bool(*b)),
+        ("String", Arg::Str(x)) => Ok(Val::Str(x.as_str().into())),
+        ("Path", Arg::Str(x)) => Ok(Val::Path(x.as_str().into())),
+        ("List", Arg::List(xs)) => {
+            let elem = args.first();
+            let mut items = Vec::with_capacity(xs.len());
+            for x in xs {
+                items.push(match elem {
+                    Some(t) => coerce(x, t)?,
+                    None => to_val(x),
+                });
+            }
+            Ok(list_of(items))
+        }
+        ("Int" | "Float" | "Bool" | "String" | "Path" | "List", _) => mismatch(),
+        _ => Ok(to_val(a)),
+    }
+}
+
+/// ソースの並び（先頭が入口のモジュール。残りは `use` で辿られるモジュール）を結んで、
+/// 入口の関数から SIR にする（ネイティブ出力の入口）。
+pub fn lower_sources(srcs: &[&str], func: &str) -> Result<Program, RunError> {
+    lower_sources_with(srcs, func, &[])
+}
+
+/// `lower_sources` に `--trust-base` のモジュール名を渡す版。
+pub fn lower_sources_with(
+    srcs: &[&str],
+    func: &str,
+    trust_base: &[String],
+) -> Result<Program, RunError> {
+    let opts = crate::effects::Options {
+        trust_base: trust_base.to_vec(),
+        ..Default::default()
+    };
+    let file =
+        crate::project::link_sources(srcs, &opts).map_err(|e| crate::exec::link_error(e, true))?;
+    lower_file(&file, func, &opts)
+}
+
+/// ファイルの `use` を `root` から辿って結び、入口の関数から SIR にする（`sigil build`）。
+pub fn lower_project(
+    root: &std::path::Path,
+    entry: &std::path::Path,
+    func: &str,
+    trust_base: &[String],
+) -> Result<Program, RunError> {
+    let opts = crate::effects::Options {
+        trust_base: trust_base.to_vec(),
+        ..Default::default()
+    };
+    let file = crate::project::link_project(root, entry, &opts)
+        .map_err(|e| crate::exec::link_error(e, false))?;
+    lower_file(&file, func, &opts)
+}
+
+fn lower_file(
+    file: &File,
+    func: &str,
+    opts: &crate::effects::Options,
+) -> Result<Program, RunError> {
+    let typed = crate::check::typed_with(file, opts).map_err(RunError::Check)?;
+    let found = file
+        .items
+        .iter()
+        .any(|i| matches!(i, Item::Fn(d) if d.name == func));
+    if !found {
+        return Err(RunError::Entry(format!("関数 {func} がない")));
+    }
+    crate::lower::lower(&typed, func).map_err(|e| RunError::Unsupported(e.0))
+}
+
+/// 実行の入力。ソースの並び、またはファイル（`root` と入口）。
+enum Input<'a> {
+    Sources(&'a [&'a str]),
+    Project(&'a std::path::Path, &'a std::path::Path),
+}
+
+pub fn run(src: &str, func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
+    run_sources_with(&[src], func, args, &Options::captured())
+}
+
+pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+    run_sources_with(&[src], func, args, opts)
+}
+
+pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Result<Outcome, Failure> {
+    run_sources_with(srcs, func, args, &Options::captured())
+}
+
+pub fn run_sources_with(
+    srcs: &[&str],
+    func: &str,
+    args: &[Arg],
+    opts: &Options,
+) -> Result<Outcome, Failure> {
+    run_input(Input::Sources(srcs), func, args, opts)
+}
+
+/// 入口のファイルから `use` を `root` で辿って結び、関数を実行する（`sigil run`）。
+pub fn run_project_with(
+    root: &std::path::Path,
+    entry: &std::path::Path,
+    func: &str,
+    args: &[Arg],
+    opts: &Options,
+) -> Result<Outcome, Failure> {
+    run_input(Input::Project(root, entry), func, args, opts)
+}
+
+fn run_input(input: Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+    std::thread::scope(|s| {
+        let spawned = std::thread::Builder::new()
+            .stack_size(opts.stack_bytes)
+            .spawn_scoped(s, || execute(&input, func, args, opts));
+        match spawned {
+            Ok(h) => h.join().unwrap_or_else(|_| {
+                Err(crate::exec::fail(RunError::Entry(
+                    "評価器の内部エラー".into(),
+                )))
+            }),
+            Err(e) => Err(crate::exec::fail(RunError::Entry(format!(
+                "スレッドを作れない: {e}"
+            )))),
+        }
+    })
+}
+
+fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+    use crate::exec::fail;
+    let copts = crate::exec::check_options(opts);
+    let file: File = match input {
+        Input::Sources(srcs) => crate::project::link_sources(srcs, &copts)
+            .map_err(|e| fail(crate::exec::link_error(e, true)))?,
+        Input::Project(root, entry) => crate::project::link_project(root, entry, &copts)
+            .map_err(|e| fail(crate::exec::link_error(e, false)))?,
+    };
+    let typed = crate::check::typed_with(&file, &copts).map_err(|e| fail(RunError::Check(e)))?;
+    let decl = file.items.iter().find_map(|i| match i {
+        Item::Fn(d) if d.name == func => Some(d),
+        _ => None,
+    });
+    let Some(decl) = decl else {
+        return Err(fail(RunError::Entry(format!("関数 {func} がない"))));
+    };
+    if decl.params.len() != args.len() {
+        return Err(fail(RunError::Entry(format!(
+            "{func} は引数を {} 個とる（{} 個渡された）",
+            decl.params.len(),
+            args.len()
+        ))));
+    }
+    let mut argv = Vec::with_capacity(args.len());
+    for (p, a) in decl.params.iter().zip(args) {
+        match coerce(a, &p.ty) {
+            Ok(v) => argv.push(if matches!(p.ty, Type::Ref { .. }) {
+                Val::Ref(Ptr {
+                    slot: new_slot(v),
+                    path: vec![],
+                })
+            } else {
+                v
+            }),
+            Err(m) => {
+                return Err(fail(RunError::Entry(format!(
+                    "引数 {} の型が合わない: {m}",
+                    p.name
+                ))))
+            }
+        }
+    }
+    let program = match crate::lower::lower(&typed, func) {
+        Ok(p) => p,
+        Err(e) => return Err(fail(RunError::Unsupported(e.0))),
+    };
+    drop(typed);
+
+    let (base, budget) = (stack_addr(), opts.stack_bytes / 4 * 3);
+    STACK_LIMIT.with(|c| c.set((base, budget)));
+    DEEP.with(|d| d.set(false));
+    DROP_LOG.with(|l| *l.borrow_mut() = opts.trace_drops.then(Vec::new));
+    TYPES.with(|t| *t.borrow_mut() = Rc::new(program.types.clone()));
+
+    let mut canon = Vec::with_capacity(program.types.len());
+    for (i, t) in program.types.iter().enumerate() {
+        canon.push(
+            program
+                .types
+                .iter()
+                .position(|u| u.name == t.name)
+                .unwrap_or(i),
+        );
+    }
+    let find = |n: &str| program.types.iter().position(|t| t.name == n).unwrap_or(0);
+    let mut m = M {
+        p: &program,
+        strs: program.strings.iter().map(|s| s.as_str().into()).collect(),
+        out: String::new(),
+        capture: opts.capture_console,
+        fs: opts.fs_files.clone(),
+        opt: find("Option"),
+        res: find("Result"),
+        io: find("IoError"),
+        canon,
+    };
+    let result = m.run_func(program.entry, argv, 0);
+    let output = std::mem::take(&mut m.out);
+    let res = match result {
+        Ok(v) => {
+            let ts = types();
+            let value = show_val(&ts, &v, true);
+            drop(v);
+            if DEEP.with(|d| d.replace(false)) {
+                Err((
+                    RunError::Stop(Box::new(Stop {
+                        kind: StopKind::StackExhausted,
+                        func: func.to_string(),
+                        line: program.exit_line,
+                        during: None,
+                        detail: "値の入れ子が深すぎる".into(),
+                    })),
+                    output,
+                ))
+            } else {
+                Ok((value, output))
+            }
+        }
+        Err(s) => Err((RunError::Stop(s), output)),
+    };
+    drop(m);
+    let drops = DROP_LOG.with(|l| l.borrow_mut().take()).unwrap_or_default();
+    match res {
+        Ok((value, output)) => Ok(Outcome {
+            value,
+            output,
+            drops,
+        }),
+        Err((error, output)) => Err(Failure {
+            error,
+            output,
+            drops: drops.into_boxed_slice(),
+        }),
+    }
+}

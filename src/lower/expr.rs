@@ -631,12 +631,12 @@ impl<'a> L<'a> {
                         ir::Ty::Adt(tid),
                     ))
                 }
-                "to_float" | "to_int" if !self.fns.contains_key(r.name.as_str()) => {
+                "to_float" | "to_int" | "ct_eq" if !self.fns.contains_key(r.name.as_str()) => {
                     let ops = self.args_of(args)?;
-                    let b = if r.name == "to_float" {
-                        Builtin::ToFloat
-                    } else {
-                        Builtin::ToInt
+                    let b = match r.name.as_str() {
+                        "to_float" => Builtin::ToFloat,
+                        "to_int" => Builtin::ToInt,
+                        _ => Builtin::CtEq,
                     };
                     Ok(self.emit_call(Callee::Builtin(b), ops, ret))
                 }
@@ -701,6 +701,9 @@ impl<'a> L<'a> {
                     ("Cell", "new") => Builtin::CellNew,
                     ("Shared", "new") => Builtin::SharedNew,
                     ("Int", "min_value") => Builtin::IntMinValue,
+                    ("Bytes", "new") => Builtin::BytesNew,
+                    ("Bytes", "with_capacity") => Builtin::BytesWithCapacity,
+                    ("Bytes", "from_list") => Builtin::BytesFromList,
                     (o, n) => return bail(format!("型の関数 {o}.{n}")),
                 };
                 let ops = self.args_of(args)?;
@@ -868,6 +871,25 @@ impl<'a> L<'a> {
             ("String", "trim") => (StrTrim, false),
             ("String", "lines") => (StrLines, false),
             ("String", "parse_int") => (StrParseInt, false),
+            ("String", "as_bytes") => (StrAsBytes, false),
+            ("Int", "rotl") => (IntRotl, false),
+            ("Int", "rotr") => (IntRotr, false),
+            ("Int", "rotr32") => (IntRotr32, false),
+            ("Int", "ashr") => (IntAshr, false),
+            ("Bytes", "len") => (BytesLen, false),
+            ("Bytes", "is_empty") => (BytesIsEmpty, false),
+            ("Bytes", "get") => (BytesGet, false),
+            ("Bytes", "set") => (BytesSet, false),
+            ("Bytes", "push") => (BytesPush, false),
+            ("Bytes", "slice") => (BytesSlice, false),
+            ("Bytes", "concat") => (BytesConcat, false),
+            ("Bytes", "extend") => (BytesExtend, false),
+            ("Bytes", "to_string_utf8") => (BytesToStringUtf8, false),
+            ("Bytes", "push_u16_be") => (BytesPushU16Be, false),
+            ("Bytes", "push_u32_be") => (BytesPushU32Be, false),
+            ("Bytes", "push_u64_be") => (BytesPushU64Be, false),
+            ("Bytes", "push_u32_le") => (BytesPushU32Le, false),
+            ("Bytes", "read_u32_be") => (BytesReadU32Be, false),
             ("Path", "is_empty") => (PathIsEmpty, false),
             ("Path", "join") => (PathJoin, false),
             ("Path", "file_name") => (PathFileName, false),

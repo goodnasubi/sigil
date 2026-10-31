@@ -424,6 +424,277 @@ impl<'p> M<'p> {
                     self.none()
                 }
             }
+            CtEq => {
+                let (s1, p1) = self.view(locals, &args[0]);
+                let (s2, p2) = self.view(locals, &args[1]);
+                let eq = with_val(&s1, &p1, |v1| {
+                    with_val(&s2, &p2, |v2| match (v1, v2) {
+                        (Val::Bytes(b1), Val::Bytes(b2)) => {
+                            let (b1, b2) = (b1.borrow(), b2.borrow());
+                            if b1.len() != b2.len() {
+                                false
+                            } else {
+                                let mut diff = 0u8;
+                                for (&x, &y) in b1.iter().zip(b2.iter()) {
+                                    diff |= x ^ y;
+                                }
+                                diff == 0
+                            }
+                        }
+                        _ => false,
+                    })
+                });
+                Val::Bool(eq)
+            }
+            StrAsBytes => {
+                let text = self.text_of(locals, &args[0]);
+                Val::Bytes(Rc::new(RefCell::new(text.as_bytes().to_vec())))
+            }
+            IntRotl => {
+                let val = self.read_int(locals, &args[0]);
+                let n = self.read_int(locals, &args[1]);
+                let width = self.read_int(locals, &args[2]);
+                if width == 32 {
+                    let u = (val as u32).rotate_left((n % 32) as u32);
+                    Val::Int(u as i64)
+                } else {
+                    let u = (val as u64).rotate_left((n % 64) as u32);
+                    Val::Int(u as i64)
+                }
+            }
+            IntRotr => {
+                let val = self.read_int(locals, &args[0]);
+                let n = self.read_int(locals, &args[1]);
+                let width = self.read_int(locals, &args[2]);
+                if width == 32 {
+                    let u = (val as u32).rotate_right((n % 32) as u32);
+                    Val::Int(u as i64)
+                } else {
+                    let u = (val as u64).rotate_right((n % 64) as u32);
+                    Val::Int(u as i64)
+                }
+            }
+            IntRotr32 => {
+                let val = self.read_int(locals, &args[0]);
+                let n = self.read_int(locals, &args[1]);
+                let u = (val as u32).rotate_right((n % 32) as u32);
+                Val::Int(u as i64)
+            }
+            IntAshr => {
+                let val = self.read_int(locals, &args[0]);
+                let n = self.read_int(locals, &args[1]);
+                Val::Int(val >> n)
+            }
+            BytesNew => Val::Bytes(Rc::new(RefCell::new(Vec::new()))),
+            BytesWithCapacity => {
+                let cap = self.read_int(locals, &args[0]).max(0) as usize;
+                Val::Bytes(Rc::new(RefCell::new(Vec::with_capacity(cap))))
+            }
+            BytesFromList => {
+                let (s, p) = self.view(locals, &args[0]);
+                let res = with_val(&s, &p, |v| match v {
+                    Val::Agg(a) if a.tag == Tag::List => {
+                        let mut bytes = Vec::with_capacity(a.f.len());
+                        for item in &a.f {
+                            let n = int_of(item);
+                            if (0..=255).contains(&n) {
+                                bytes.push(n as u8);
+                            } else {
+                                return Err("0..=255 の範囲外".to_string());
+                            }
+                        }
+                        Ok(bytes)
+                    }
+                    _ => Err("リストでない".to_string()),
+                });
+                match res {
+                    Ok(b) => self.ok(Val::Bytes(Rc::new(RefCell::new(b)))),
+                    Err(e) => self.err(Val::Str(e.into())),
+                }
+            }
+            BytesLen => {
+                let (s, p) = self.view(locals, &args[0]);
+                let len = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) => b.borrow().len() as i64,
+                    _ => 0,
+                });
+                Val::Int(len)
+            }
+            BytesIsEmpty => {
+                let (s, p) = self.view(locals, &args[0]);
+                let is_empty = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) => b.borrow().is_empty(),
+                    _ => true,
+                });
+                Val::Bool(is_empty)
+            }
+            BytesGet => {
+                let (s, p) = self.view(locals, &args[0]);
+                let idx = self.read_int(locals, &args[1]);
+                let opt = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) if idx >= 0 => {
+                        b.borrow().get(idx as usize).copied().map(|x| x as i64)
+                    }
+                    _ => None,
+                });
+                match opt {
+                    Some(n) => self.some(Val::Int(n)),
+                    None => self.none(),
+                }
+            }
+            BytesSet => {
+                let (s, p) = self.view(locals, &args[0]);
+                let idx = self.read_int(locals, &args[1]);
+                let val = self.read_int(locals, &args[2]);
+                let res = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) if idx >= 0 && (0..=255).contains(&val) => {
+                        let mut b = b.borrow_mut();
+                        if let Some(slot) = b.get_mut(idx as usize) {
+                            *slot = val as u8;
+                            Ok(())
+                        } else {
+                            Err("インデックス範囲外".to_string())
+                        }
+                    }
+                    _ => Err("不正な引数".to_string()),
+                });
+                match res {
+                    Ok(()) => self.ok(Val::Unit),
+                    Err(e) => self.err(Val::Str(e.into())),
+                }
+            }
+            BytesPush => {
+                let (s, p) = self.view(locals, &args[0]);
+                let val = self.read_int(locals, &args[1]);
+                with_val(&s, &p, |v| {
+                    if let Val::Bytes(b) = v {
+                        b.borrow_mut().push(val as u8);
+                    }
+                });
+                Val::Unit
+            }
+            BytesSlice => {
+                let (s, p) = self.view(locals, &args[0]);
+                let start = self.read_int(locals, &args[1]);
+                let end = self.read_int(locals, &args[2]);
+                let res = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) if start >= 0 && start <= end => {
+                        let b = b.borrow();
+                        if end as usize <= b.len() {
+                            Ok(b[start as usize..end as usize].to_vec())
+                        } else {
+                            Err("範囲外".to_string())
+                        }
+                    }
+                    _ => Err("範囲不正".to_string()),
+                });
+                match res {
+                    Ok(v) => self.ok(Val::Bytes(Rc::new(RefCell::new(v)))),
+                    Err(e) => self.err(Val::Str(e.into())),
+                }
+            }
+            BytesConcat => {
+                let (s1, p1) = self.view(locals, &args[0]);
+                let (s2, p2) = self.view(locals, &args[1]);
+                let out = with_val(&s1, &p1, |v1| {
+                    with_val(&s2, &p2, |v2| match (v1, v2) {
+                        (Val::Bytes(b1), Val::Bytes(b2)) => {
+                            let mut v = b1.borrow().clone();
+                            v.extend_from_slice(&b2.borrow());
+                            v
+                        }
+                        _ => Vec::new(),
+                    })
+                });
+                Val::Bytes(Rc::new(RefCell::new(out)))
+            }
+            BytesExtend => {
+                let (s1, p1) = self.view(locals, &args[0]);
+                let (s2, p2) = self.view(locals, &args[1]);
+                with_val(&s1, &p1, |v1| {
+                    with_val(&s2, &p2, |v2| {
+                        if let (Val::Bytes(b1), Val::Bytes(b2)) = (v1, v2) {
+                            b1.borrow_mut().extend_from_slice(&b2.borrow());
+                        }
+                    })
+                });
+                Val::Unit
+            }
+            BytesToStringUtf8 => {
+                let (s, p) = self.view(locals, &args[0]);
+                let res = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) => match String::from_utf8(b.borrow().clone()) {
+                        Ok(s) => Ok(s),
+                        Err(e) => Err(e.to_string()),
+                    },
+                    _ => Err("Bytes でない".to_string()),
+                });
+                match res {
+                    Ok(s) => self.ok(Val::Str(s.into())),
+                    Err(e) => self.err(Val::Str(e.into())),
+                }
+            }
+            BytesPushU16Be => {
+                let (s, p) = self.view(locals, &args[0]);
+                let val = self.read_int(locals, &args[1]) as u16;
+                with_val(&s, &p, |v| {
+                    if let Val::Bytes(b) = v {
+                        b.borrow_mut().extend_from_slice(&val.to_be_bytes());
+                    }
+                });
+                Val::Unit
+            }
+            BytesPushU32Be => {
+                let (s, p) = self.view(locals, &args[0]);
+                let val = self.read_int(locals, &args[1]) as u32;
+                with_val(&s, &p, |v| {
+                    if let Val::Bytes(b) = v {
+                        b.borrow_mut().extend_from_slice(&val.to_be_bytes());
+                    }
+                });
+                Val::Unit
+            }
+            BytesPushU64Be => {
+                let (s, p) = self.view(locals, &args[0]);
+                let val = self.read_int(locals, &args[1]) as u64;
+                with_val(&s, &p, |v| {
+                    if let Val::Bytes(b) = v {
+                        b.borrow_mut().extend_from_slice(&val.to_be_bytes());
+                    }
+                });
+                Val::Unit
+            }
+            BytesPushU32Le => {
+                let (s, p) = self.view(locals, &args[0]);
+                let val = self.read_int(locals, &args[1]) as u32;
+                with_val(&s, &p, |v| {
+                    if let Val::Bytes(b) = v {
+                        b.borrow_mut().extend_from_slice(&val.to_le_bytes());
+                    }
+                });
+                Val::Unit
+            }
+            BytesReadU32Be => {
+                let (s, p) = self.view(locals, &args[0]);
+                let off = self.read_int(locals, &args[1]);
+                let opt = with_val(&s, &p, |v| match v {
+                    Val::Bytes(b) if off >= 0 => {
+                        let b = b.borrow();
+                        let o = off as usize;
+                        if o + 4 <= b.len() {
+                            let bytes: [u8; 4] = b[o..o + 4].try_into().unwrap();
+                            Some(u32::from_be_bytes(bytes) as i64)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                });
+                match opt {
+                    Some(n) => self.some(Val::Int(n)),
+                    None => self.none(),
+                }
+            }
             ConsoleLog => {
                 let (s, p) = self.view(locals, &args[0]);
                 let ts = types();

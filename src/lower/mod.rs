@@ -453,6 +453,7 @@ impl<'a> L<'a> {
             "Float" => ir::Ty::Float,
             "Bool" => ir::Ty::Bool,
             "String" => ir::Ty::Str,
+            "Bytes" => ir::Ty::Bytes,
             "Unit" => ir::Ty::Unit,
             "Map" | "Set" | "Addr" => return bail(format!("{n} は SIR の対象外")),
             _ => {

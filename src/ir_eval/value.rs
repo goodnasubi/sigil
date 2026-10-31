@@ -21,6 +21,7 @@ pub(super) enum Val {
     Fn(FuncId),
     Cell(Rc<RefCell<Val>>),
     Shared(Rc<Val>),
+    Bytes(Rc<RefCell<Vec<u8>>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -189,6 +190,7 @@ pub(super) fn shadow(v: &Val) -> Val {
         Val::Fn(f) => Val::Fn(*f),
         Val::Cell(c) => Val::Cell(c.clone()),
         Val::Shared(s) => Val::Shared(s.clone()),
+        Val::Bytes(b) => Val::Bytes(b.clone()),
     }
 }
 
@@ -201,6 +203,7 @@ pub(super) fn deep_clone(v: &Val) -> Val {
             silent: false,
         })),
         Val::Cell(c) => Val::Cell(Rc::new(RefCell::new(deep_clone(&c.borrow())))),
+        Val::Bytes(b) => Val::Bytes(Rc::new(RefCell::new(b.borrow().clone()))),
         Val::Ref(p) => p.with(deep_clone),
         other => shadow(other),
     }
@@ -345,6 +348,7 @@ pub(super) fn show_val(ts: &[TypeDef], v: &Val, quote: bool) -> String {
         Val::Closure(_) | Val::Fn(_) => "<関数>".into(),
         Val::Cell(c) => format!("Cell({})", show_val(ts, &c.borrow(), true)),
         Val::Shared(s) => format!("Shared({})", show_val(ts, s, true)),
+        Val::Bytes(b) => format!("Bytes({:?})", *b.borrow()),
     }
 }
 
@@ -367,6 +371,7 @@ fn val_eq(a: &Val, b: &Val) -> bool {
         }
         (Val::Cell(x), Val::Cell(y)) => Rc::ptr_eq(x, y) || val_eq(&x.borrow(), &y.borrow()),
         (Val::Shared(x), Val::Shared(y)) => Rc::ptr_eq(x, y) || val_eq(x, y),
+        (Val::Bytes(x), Val::Bytes(y)) => *x.borrow() == *y.borrow(),
         _ => false,
     }
 }
@@ -382,6 +387,7 @@ pub(super) fn cmp_val(a: &Val, b: &Val) -> Option<Ordering> {
         (Val::Float(x), Val::Float(y)) => x.partial_cmp(y),
         (Val::Bool(x), Val::Bool(y)) => Some(x.cmp(y)),
         (Val::Str(x), Val::Str(y)) => Some(x.cmp(y)),
+        (Val::Bytes(x), Val::Bytes(y)) => Some(x.borrow().cmp(&*y.borrow())),
         (Val::Agg(x), Val::Agg(y)) if x.tag == y.tag && matches!(x.tag, Tag::Tuple | Tag::List) => {
             for (p, q) in x.f.iter().zip(&y.f) {
                 match cmp_val(p, q)? {

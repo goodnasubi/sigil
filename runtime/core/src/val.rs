@@ -21,9 +21,9 @@
 //! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
 
 use super::{
-    new_str, s, sigil_rt_alloc, sigil_rt_free, sigil_rt_list_free, sigil_rt_list_get,
-    sigil_rt_list_len, sigil_rt_list_new, sigil_rt_list_push, sigil_rt_str_clone,
-    sigil_rt_str_free, text, RtList, RtStr,
+    bytes_slice, new_str, s, sigil_rt_alloc, sigil_rt_bytes_clone, sigil_rt_bytes_free,
+    sigil_rt_free, sigil_rt_list_free, sigil_rt_list_get, sigil_rt_list_len, sigil_rt_list_new,
+    sigil_rt_list_push, sigil_rt_str_clone, sigil_rt_str_free, text, RtBytes, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::cmp::Ordering;
@@ -45,6 +45,7 @@ const K_REF: i64 = 11;
 const K_SHARED: i64 = 12;
 const K_CELL: i64 = 13;
 const K_FN: i64 = 14;
+const K_BYTES: i64 = 15;
 
 type D = *const i64;
 
@@ -93,7 +94,7 @@ unsafe fn variant(d: D, tag: i64) -> (&'static str, usize, usize) {
 
 unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
     // 移動済み（空）の値は、SIR の評価器と同じく `()` と表示する。
-    if w == 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH)) {
+    if w == 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH | K_BYTES)) {
         out.push_str("()");
         return;
     }
@@ -109,6 +110,10 @@ unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
             } else {
                 out.push_str(t);
             }
+        }
+        K_BYTES => {
+            let bytes = bytes_slice(w as *const RtBytes);
+            out.push_str(&format!("Bytes({:?})", bytes));
         }
         K_PARSE_ERROR => out.push_str("ParseError"),
         K_LIST => {
@@ -199,6 +204,7 @@ unsafe fn eq(d: D, a: i64, b: i64) -> bool {
         K_INT | K_BOOL => a == b,
         K_FLOAT => f64::from_bits(a as u64) == f64::from_bits(b as u64),
         K_STR | K_PATH => s(a as *const RtStr) == s(b as *const RtStr),
+        K_BYTES => bytes_slice(a as *const RtBytes) == bytes_slice(b as *const RtBytes),
         K_LIST => {
             let (x, y) = (
                 list_items(a as *const RtList),
@@ -244,6 +250,7 @@ unsafe fn cmp(d: D, a: i64, b: i64) -> Option<Ordering> {
         K_INT | K_BOOL => Some(a.cmp(&b)),
         K_FLOAT => f64::from_bits(a as u64).partial_cmp(&f64::from_bits(b as u64)),
         K_STR => Some(s(a as *const RtStr).cmp(s(b as *const RtStr))),
+        K_BYTES => Some(bytes_slice(a as *const RtBytes).cmp(bytes_slice(b as *const RtBytes))),
         K_LIST => {
             let (x, y) = (
                 list_items(a as *const RtList),
@@ -413,6 +420,7 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             w
         }
         K_STR | K_PATH if w != 0 => sigil_rt_str_clone(w as *const RtStr) as i64,
+        K_BYTES if w != 0 => sigil_rt_bytes_clone(w as *const RtBytes) as i64,
         _ => w,
     }
 }
@@ -435,7 +443,7 @@ pub extern "C" fn sigil_rt_trace_on() {
 pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
     let mut st: Vec<(D, i64)> = vec![];
     let push = |st: &mut Vec<(D, i64)>, d: D, w: i64| {
-        if w != 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH)) {
+        if w != 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH | K_BYTES)) {
             st.push((d, w));
         }
     };
@@ -464,7 +472,7 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                 if trace && *b.sub(2) & SILENT == 0 {
                     let moved = (0..n).any(|i| {
                         let k = rd(dp(d, 4 + 3 * i + 2), 0);
-                        *b.add(i) == 0 && (owning_kind(k) || matches!(k, K_STR | K_PATH))
+                        *b.add(i) == 0 && (owning_kind(k) || matches!(k, K_STR | K_PATH | K_BYTES))
                     });
                     if !moved {
                         let mut t = String::new();
@@ -500,6 +508,7 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                 }
             }
             K_STR | K_PATH => sigil_rt_str_free(w as *mut RtStr),
+            K_BYTES => sigil_rt_bytes_free(w as *mut RtBytes),
             _ => {}
         }
     }

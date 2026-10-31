@@ -222,6 +222,287 @@ pub unsafe extern "C" fn sigil_rt_str_lines(p: *const RtStr) -> *mut RtList {
 }
 
 // ---------------------------------------------------------------------------
+// Bytes（バイト列。可変長、8 バイト境界）
+
+pub struct RtBytes(Vec<u8>);
+
+fn new_bytes(v: Vec<u8>) -> *mut RtBytes {
+    live_blocks(1);
+    Box::into_raw(Box::new(RtBytes(v)))
+}
+
+unsafe fn bytes_slice<'a>(p: *const RtBytes) -> &'a [u8] {
+    &(*p).0
+}
+
+unsafe fn bytes_vec<'a>(p: *mut RtBytes) -> &'a mut Vec<u8> {
+    &mut (*p).0
+}
+
+#[no_mangle]
+pub extern "C" fn sigil_rt_bytes_new() -> *mut RtBytes {
+    new_bytes(Vec::new())
+}
+
+#[no_mangle]
+pub extern "C" fn sigil_rt_bytes_with_capacity(capacity: i64) -> *mut RtBytes {
+    new_bytes(Vec::with_capacity(capacity.max(0) as usize))
+}
+
+/// # Safety
+/// `p` は `sigil_rt_bytes_*` が返したもの（または null）。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_free(p: *mut RtBytes) {
+    if !p.is_null() {
+        live_blocks(-1);
+        drop(Box::from_raw(p));
+    }
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_clone(p: *const RtBytes) -> *mut RtBytes {
+    new_bytes(bytes_slice(p).to_vec())
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_len(p: *const RtBytes) -> i64 {
+    bytes_slice(p).len() as i64
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_is_empty(p: *const RtBytes) -> i32 {
+    if bytes_slice(p).is_empty() {
+        1
+    } else {
+        0
+    }
+}
+
+/// # Safety
+/// `p` は有効。`out` は書ける。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_get(p: *const RtBytes, index: i64, out: *mut i64) -> i32 {
+    if index >= 0 && (index as usize) < bytes_slice(p).len() {
+        *out = bytes_slice(p)[index as usize] as i64;
+        1
+    } else {
+        0
+    }
+}
+
+/// # Safety
+/// `p` は有効。`err` は書ける。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_set(
+    p: *mut RtBytes,
+    index: i64,
+    byte: i64,
+    err: *mut *mut RtStr,
+) -> i32 {
+    if index < 0 || (index as usize) >= bytes_vec(p).len() {
+        *err = new_str("インデックスが範囲外".to_string());
+        0
+    } else if !(0..=255).contains(&byte) {
+        *err = new_str("バイト値が 0..=255 の範囲外".to_string());
+        0
+    } else {
+        bytes_vec(p)[index as usize] = byte as u8;
+        1
+    }
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_push(p: *mut RtBytes, byte: i64) {
+    bytes_vec(p).push(byte as u8);
+}
+
+/// # Safety
+/// `p` は有効。`out`・`err` は書ける。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_slice(
+    p: *const RtBytes,
+    start: i64,
+    end: i64,
+    out: *mut *mut RtBytes,
+    err: *mut *mut RtStr,
+) -> i32 {
+    let len = bytes_slice(p).len() as i64;
+    if start >= 0 && start <= end && end <= len {
+        *out = new_bytes(bytes_slice(p)[start as usize..end as usize].to_vec());
+        1
+    } else {
+        *err = new_str("スライス範囲が不正".to_string());
+        0
+    }
+}
+
+/// # Safety
+/// `a`・`b_ptr` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_concat(
+    a: *const RtBytes,
+    b_ptr: *const RtBytes,
+) -> *mut RtBytes {
+    let mut v = Vec::with_capacity(bytes_slice(a).len() + bytes_slice(b_ptr).len());
+    v.extend_from_slice(bytes_slice(a));
+    v.extend_from_slice(bytes_slice(b_ptr));
+    new_bytes(v)
+}
+
+/// # Safety
+/// `a`・`b_ptr` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_extend(a: *mut RtBytes, b_ptr: *const RtBytes) {
+    bytes_vec(a).extend_from_slice(bytes_slice(b_ptr));
+}
+
+/// # Safety
+/// `p` は有効。`out`・`err` は書ける。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_to_string_utf8(
+    p: *const RtBytes,
+    out: *mut *mut RtStr,
+    err: *mut *mut RtStr,
+) -> i32 {
+    match String::from_utf8(bytes_slice(p).to_vec()) {
+        Ok(s) => {
+            *out = new_str(s);
+            1
+        }
+        Err(e) => {
+            *err = new_str(e.to_string());
+            0
+        }
+    }
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_str_as_bytes(p: *const RtStr) -> *mut RtBytes {
+    new_bytes(s(p).as_bytes().to_vec())
+}
+
+/// # Safety
+/// `l` は有効。`out`・`err` は書ける。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_from_list(
+    l: *const RtList,
+    out: *mut *mut RtBytes,
+    err: *mut *mut RtStr,
+) -> i32 {
+    let n = (*l).len;
+    let mut v = Vec::with_capacity(n);
+    for i in 0..n {
+        let val = *((*l).buf as *const i64).add(i);
+        if !(0..=255).contains(&val) {
+            *err = new_str("0..=255 の範囲外".to_string());
+            return 0;
+        }
+        v.push(val as u8);
+    }
+    *out = new_bytes(v);
+    1
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_push_u16_be(p: *mut RtBytes, value: i64) {
+    bytes_vec(p).extend_from_slice(&(value as u16).to_be_bytes());
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_push_u32_be(p: *mut RtBytes, value: i64) {
+    bytes_vec(p).extend_from_slice(&(value as u32).to_be_bytes());
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_push_u64_be(p: *mut RtBytes, value: i64) {
+    bytes_vec(p).extend_from_slice(&(value as u64).to_be_bytes());
+}
+
+/// # Safety
+/// `p` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_push_u32_le(p: *mut RtBytes, value: i64) {
+    bytes_vec(p).extend_from_slice(&(value as u32).to_le_bytes());
+}
+
+/// # Safety
+/// `p` は有効。`out` は書ける。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_read_u32_be(
+    p: *const RtBytes,
+    offset: i64,
+    out: *mut i64,
+) -> i32 {
+    if offset >= 0 && (offset as usize + 4) <= bytes_slice(p).len() {
+        let off = offset as usize;
+        let bytes: [u8; 4] = bytes_slice(p)[off..off + 4].try_into().unwrap();
+        *out = u32::from_be_bytes(bytes) as i64;
+        1
+    } else {
+        0
+    }
+}
+
+/// # Safety
+/// `a`・`b_ptr` は有効。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_bytes_ct_eq(a: *const RtBytes, b_ptr: *const RtBytes) -> i32 {
+    let ba = bytes_slice(a);
+    let bb = bytes_slice(b_ptr);
+    if ba.len() != bb.len() {
+        return 0;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in ba.iter().zip(bb.iter()) {
+        diff |= x ^ y;
+    }
+    if diff == 0 {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sigil_rt_int_rotl(x: i64, n: i64, width: i64) -> i64 {
+    if width == 32 {
+        (x as u32).rotate_left((n % 32) as u32) as i64
+    } else {
+        (x as u64).rotate_left((n % 64) as u32) as i64
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sigil_rt_int_rotr(x: i64, n: i64, width: i64) -> i64 {
+    if width == 32 {
+        (x as u32).rotate_right((n % 32) as u32) as i64
+    } else {
+        (x as u64).rotate_right((n % 64) as u32) as i64
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn sigil_rt_int_rotr32(x: i64, n: i64) -> i64 {
+    (x as u32).rotate_right((n % 32) as u32) as i64
+}
+
+// ---------------------------------------------------------------------------
 // List（要素の大きさは生成したコードが渡す。要素は 16 バイト境界に置く）
 
 pub struct RtList {
@@ -780,6 +1061,38 @@ mod tests {
             let bad = sigil_rt_arg_parse(b"99999999999999999999".as_ptr(), 20, &mut err);
             assert!(bad.is_null());
             assert!(!s(err).is_empty());
+        }
+    }
+
+    #[test]
+    fn bytes_operations() {
+        unsafe {
+            let b = sigil_rt_bytes_new();
+            assert_eq!(sigil_rt_bytes_len(b), 0);
+            assert_eq!(sigil_rt_bytes_is_empty(b), 1);
+            sigil_rt_bytes_push(b, 0x12);
+            sigil_rt_bytes_push_u16_be(b, 0x3456);
+            assert_eq!(sigil_rt_bytes_len(b), 3);
+            let mut val = 0i64;
+            assert_eq!(sigil_rt_bytes_get(b, 0, &mut val), 1);
+            assert_eq!(val, 0x12);
+            let mut read_u32 = 0i64;
+            assert_eq!(sigil_rt_bytes_read_u32_be(b, 0, &mut read_u32), 0);
+            sigil_rt_bytes_push(b, 0x78);
+            assert_eq!(sigil_rt_bytes_read_u32_be(b, 0, &mut read_u32), 1);
+            assert_eq!(read_u32, 0x12345678);
+
+            let b2 = sigil_rt_bytes_clone(b);
+            assert_eq!(sigil_rt_bytes_ct_eq(b, b2), 1);
+
+            let mut out = std::ptr::null_mut();
+            let mut err = std::ptr::null_mut();
+            assert_eq!(sigil_rt_bytes_slice(b, 1, 3, &mut out, &mut err), 1);
+            assert_eq!(sigil_rt_bytes_len(out), 2);
+            sigil_rt_bytes_free(out);
+
+            sigil_rt_bytes_free(b);
+            sigil_rt_bytes_free(b2);
         }
     }
 }

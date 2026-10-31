@@ -764,20 +764,20 @@ fn lsp_hover_type_identity() {
     let lib = "module lib.a\n  targets server\n  trust none\n\npub struct Config {\n  v: Int,\n}\n\npub fn load() -> Config\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Config { v: 1 };\n}\n";
     stage(&root, lib);
     let app = |uses: &str| {
-        format!("module app\n  targets server\n  trust none\n\n{uses}\nfn f() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let c: Config = load();\n  return c.v;\n}}\n")
+        format!("module app\n  targets server\n  trust none\n\n{uses}\nfn g(c: Config) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return c.v;\n}}\n\nfn f() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return g(load());\n}}\n")
     };
     // (ソース, 型の名前を見る行の目印, 期待する hover)
     let cases = [
         // 暗黙: `load` のシグネチャに現れる隠れた依存の型。
         (
             app("use lib.a.load;\n"),
-            "let c: Config",
+            "fn g(c: Config)",
             "Config\n解決先: lib.a.Config（暗黙）\n",
         ),
         // 明示: `use` で取り込んだ型。`use` の行と使った箇所の両方。
         (
             app("use lib.a.Config;\nuse lib.a.load;\n"),
-            "let c: Config",
+            "fn g(c: Config)",
             "Config\n解決先: lib.a.Config（明示）\n",
         ),
         (
@@ -801,7 +801,7 @@ fn lsp_hover_type_identity() {
             "{n}"
         );
         // 型の名前でない箇所（`load` の呼び出し先の名前は関数なので、型の同一性は出ない）。
-        let l = src.lines().position(|l| l.contains("load();")).unwrap();
+        let l = src.lines().position(|l| l.contains("g(load())")).unwrap();
         let lc = src.lines().nth(l).unwrap().find("load").unwrap();
         let got = c.hover(&p, l as i64, lc as i64 + 1);
         assert!(!got.is_some_and(|s| s.contains("解決先")), "{n}");

@@ -244,6 +244,9 @@ impl Ck {
                     _ if clone_sig.is_some() => (self.sh(&rt), vec![]),
                     Ty::Named(tn, a) => (tn.clone(), a.clone()),
                     Ty::Str => ("String".to_string(), vec![]),
+                    Ty::Int => ("Int".to_string(), vec![]),
+                    Ty::Float => ("Float".to_string(), vec![]),
+                    Ty::Bool => ("Bool".to_string(), vec![]),
                     Ty::Var(_) => {
                         return self.err(
                             ErrorKind::CannotInfer,

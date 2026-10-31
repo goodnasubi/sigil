@@ -36,6 +36,7 @@ pub type Entry = (&'static str, &'static str);
 
 /// 標準の型で、中身を見せないもの（名前, 型引数の数）。
 pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
+    ("Bytes", 0, Layer::Core),
     ("List", 1, Layer::Core),
     ("Path", 0, Layer::Os),
     ("IoError", 0, Layer::Os),
@@ -73,6 +74,7 @@ pub const RAW_OPS: &[RawRow] = &[];
 pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (Layer::Core, "to_float(n: Int) -> Float", "none"),
     (Layer::Core, "to_int(x: Float) -> Option<Int>", "none"),
+    (Layer::Core, "ct_eq(a: &Bytes, b: &Bytes) -> Bool", "none"),
 ];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
@@ -146,7 +148,17 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("max(self: &List<T>) -> &T", "none"),
         ],
     ),
-    (Layer::Core, "Int", &[("min_value() -> Int", "none")]),
+    (
+        Layer::Core,
+        "Int",
+        &[
+            ("min_value() -> Int", "none"),
+            ("rotl(self: Int, n: Int, width: Int) -> Int", "none"),
+            ("rotr(self: Int, n: Int, width: Int) -> Int", "none"),
+            ("rotr32(self: Int, n: Int) -> Int", "none"),
+            ("ashr(self: Int, n: Int) -> Int", "none"),
+        ],
+    ),
     (
         Layer::Core,
         "<T> Option<T>",
@@ -192,6 +204,45 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("lines(self: &String) -> List<String>", "none"),
             (
                 "parse_int(self: &String) -> Result<Int, ParseError>",
+                "none",
+            ),
+            ("as_bytes(self: &String) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "Bytes",
+        &[
+            ("new() -> Bytes", "none"),
+            ("with_capacity(capacity: Int) -> Bytes", "none"),
+            (
+                "from_list(bytes: &List<Int>) -> Result<Bytes, String>",
+                "none",
+            ),
+            ("len(self: &Bytes) -> Int", "none"),
+            ("is_empty(self: &Bytes) -> Bool", "none"),
+            ("get(self: &Bytes, index: Int) -> Option<Int>", "none"),
+            (
+                "set(self: &mut Bytes, index: Int, byte: Int) -> Result<Unit, String>",
+                "none",
+            ),
+            ("push(self: &mut Bytes, byte: Int)", "none"),
+            (
+                "slice(self: &Bytes, start: Int, end: Int) -> Result<Bytes, String>",
+                "none",
+            ),
+            ("concat(self: &Bytes, other: &Bytes) -> Bytes", "none"),
+            ("extend(self: &mut Bytes, other: &Bytes)", "none"),
+            (
+                "to_string_utf8(self: &Bytes) -> Result<String, String>",
+                "none",
+            ),
+            ("push_u16_be(self: &mut Bytes, value: Int)", "none"),
+            ("push_u32_be(self: &mut Bytes, value: Int)", "none"),
+            ("push_u64_be(self: &mut Bytes, value: Int)", "none"),
+            ("push_u32_le(self: &mut Bytes, value: Int)", "none"),
+            (
+                "read_u32_be(self: &Bytes, offset: Int) -> Option<Int>",
                 "none",
             ),
         ],

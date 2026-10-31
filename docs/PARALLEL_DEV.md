@@ -31,14 +31,14 @@
 
 ## 3. レーン（担当ファイル）
 
-分割後（[CHECK_SPLIT_PLAN.md](CHECK_SPLIT_PLAN.md) 完了後）の想定。**同じファイルを同時に 2 つのレーンが触らない**ことが目的。
+**同じファイルを同時に 2 つのレーンが触らない**ことが目的（`src/check/` の分割は [CHECK_SPLIT_PLAN.md](CHECK_SPLIT_PLAN.md) により完了済み）。
 
 | レーン | 主な担当ファイル | 内容 |
 |---|---|---|
 | A1 構文 | `lexer`, `parser`, `ast` の追加 | 字句・構文解析 |
 | A2 整形・仕様 | `fmt`, `spec`, `json` | `sigil fmt`・`sigil spec` |
 | B1 型・解決 | `check/{types,unify,resolve,generics}` | 型推論・名前解決 |
-| B2 トレイト | `check/{traits,register}` | トレイト・impl の検査 |
+| B2 トレイト | `check/{traits,register,items}` | トレイト・impl・アイテムの検査 |
 | B3 所有権 | `check/ownership`, `borrow` | 移動・借用 |
 | B4 式・文 | `check/{stmt,expr,pattern,closure,call}`, `exhaustive` | 式・文・パターンの検査 |
 | B5 効果・契約 | `check/{effects,fn_check}`, `effects`, `verify` | 効果・契約の検査 |
@@ -48,7 +48,7 @@
 | D2 標準ライブラリ | `stdlib`, `runtime/core`, `runtime/os` | 標準ライブラリ |
 | E 文書 | `docs/**`, `examples/**`, `tests/**`（新規ファイルのみ） | ADR・サンプル・テスト |
 
-- **目安**: 分割前は同時に 4〜5 体（A1・A2・C1・C2・D1・E）。分割後は 10 体前後まで増やせる。**増やす条件は「今のレーンで衝突が週に 1 回未満」**。
+- **目安**: 同時に 10 体前後まで並行して動かせる。**増やす条件は「今のレーンで衝突が週に 1 回未満」**。
 - **テストは原則「新規ファイルを足す」**（`tests/<機能>.rs`）。既存テストファイルへの追記は、そのレーンの担当だけが行う。
 
 ## 4. 共有ファイル（衝突しやすい）の規則
@@ -156,4 +156,3 @@ Agent-Env: cloud         # local-windows / cloud（必須）
 - 各エージェントの実行環境（ローカルの Windows か、CI やクラウドか）。ローカル並行は CPU とディスク（`target/` が大きい）で上限が決まる。
 - GitHub のマージキュー・ブランチ保護を有効にするか（`main` への直接 push の禁止を含む）。
 - Issue の運用で足りるか、`docs/TASKS.md` のような一覧が必要か。
-

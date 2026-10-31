@@ -5,7 +5,7 @@ use crate::error::{Error, ErrorKind};
 use crate::parser::parse;
 
 use super::types::{show, Prop, Sig, Ty, TypeDef};
-use super::util::{contains_ref, contains_ref_outside_fn};
+use super::util::contains_ref_outside_fn;
 use super::{Ck, Pos, RawInfo, PRELUDE_TYPES, R};
 
 impl Ck {
@@ -189,7 +189,9 @@ impl Ck {
             None => Ty::Unit,
             Some(t) => self.resolve(t, Pos::Ret)?,
         };
-        if contains_ref(&ret) {
+        // 関数の型の中の参照は「参照を返す」ことにはならない（ADR 0022 決定 3 で
+        // 関数の型が戻り値に置けるようになったため、外側だけを見る）。
+        if contains_ref_outside_fn(&ret) {
             let n = params
                 .iter()
                 .filter(|(_, t)| contains_ref_outside_fn(t))

@@ -75,7 +75,7 @@ impl Ck {
                 })
             }
             Type::Ref { mutable, inner } => {
-                if pos == Pos::Other {
+                if pos == Pos::Other || pos == Pos::Placed {
                     return self.err(
                         ErrorKind::RefTypePosition,
                         "参照 `&T`・`&mut T` を書けるのは、引数の型の一番外、関数の型の引数の一番外、戻り値の型の一番外と一番外の `Option<…>` の中だけ（構造体のフィールド・列挙子の値・型引数・`let` の注釈には書けない。ADR 0012 の決定 1）",
@@ -91,13 +91,41 @@ impl Ck {
                     .map(|t| self.resolve(t, Pos::Other))
                     .collect::<R<_>>()?,
             )),
-            Type::Fn { params, ret, .. } => {
-                if pos != Pos::Param {
-                    return self.err(
-                        ErrorKind::FnTypePosition,
-                        "関数の型 `fn(...)` は、関数・メソッドの引数の型の一番外にだけ書ける",
-                    );
-                }
+            Type::Fn {
+                params,
+                ret,
+                effects,
+            } => {
+                // 置ける位置（フィールド・列挙型の値の中身・戻り値・`let` の型注釈）では
+                // 効果節が必須で、宣言の効果を型に持つ。引数の位置では効果節は書けない。
+                // それ以外の位置（型引数・組の中・関数の型の引数など）には置けない
+                // （ADR 0022 決定 3）。
+                let slot = match pos {
+                    Pos::Param => {
+                        if effects.is_some() {
+                            return self.err(
+                                ErrorKind::FnTypePosition,
+                                "引数の位置の関数の型には効果節は書けない（渡された関数の効果は、呼び出し側の宣言の `of(...)` で表す。ADR 0022 決定 3）",
+                            );
+                        }
+                        None
+                    }
+                    Pos::Placed | Pos::Ret => {
+                        let Some(effects) = effects else {
+                            return self.err(
+                                ErrorKind::FnTypePosition,
+                                "フィールド・列挙型の値の中身・戻り値・`let` の型注釈に置く関数の型には、効果節（`effects ...`、効果なしなら `effects none`）が必須である（ADR 0022 決定 3）",
+                            );
+                        };
+                        Some(self.fn_type_terms(effects)?)
+                    }
+                    _ => {
+                        return self.err(
+                            ErrorKind::FnTypePosition,
+                            "関数の型 `fn(...)` は、関数・メソッドの引数の型の一番外と、効果節つきでフィールド・列挙型の値の中身・戻り値・`let` の型注釈にだけ書ける（型引数・組・Option・List の中や、関数の型の引数には書けない。ADR 0022 決定 3）",
+                        );
+                    }
+                };
                 let ps = params
                     .iter()
                     .map(|t| self.resolve(t, Pos::FnParam))
@@ -106,7 +134,7 @@ impl Ck {
                     None => Ty::Unit,
                     Some(r) => self.resolve(r, Pos::Other)?,
                 };
-                Ok(Ty::Fn(ps, Box::new(r)))
+                Ok(Ty::Fn(ps, Box::new(r), slot))
             }
         }
     }

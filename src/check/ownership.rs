@@ -302,7 +302,9 @@ impl Ck {
             }
         }
         let ret = self.zonk(ret);
-        if !contains_ref(&ret) {
+        // 関数の型の中の参照は、戻り値の参照の置き換えの規則の対象でない
+        // （ADR 0022 決定 3 で関数の型が戻り値に置けるようになったため）。
+        if !contains_ref_outside_fn(&ret) {
             return None;
         }
         let top_ok = match &ret {

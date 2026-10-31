@@ -51,12 +51,19 @@ impl Ck {
         matches!(t, Ty::Fn(..)) || self.nested_fn(t)
     }
 
-    /// 関数の型の式は、名前・クロージャ・値の構築子だけ。
+    /// 関数の型の式は、名前・クロージャ・値の構築子だけ。ただし、置ける位置の
+    /// 関数の型（効果節つき）の値は、戻り値で作られた値も置ける（`let` で束縛して
+    /// から呼ぶ。ADR 0022 決定 3）。
     pub(super) fn fn_value_form(&self, e: &Expr, t: &Ty) -> R<()> {
-        if matches!(self.zonk(t), Ty::Fn(..))
+        let z = self.zonk(t);
+        if matches!(z, Ty::Fn(..))
             && !matches!(
                 strip_paren(e),
                 Expr::Name(_) | Expr::Closure { .. } | Expr::Field { .. }
+            )
+            && !matches!(
+                (strip_paren(e), &z),
+                (Expr::Call { .. }, Ty::Fn(_, _, Some(_)))
             )
         {
             return self.err(
@@ -284,7 +291,7 @@ impl Ck {
         Ok(if fs.is_empty() {
             ty
         } else {
-            Ty::Fn(fs, Box::new(ty))
+            Ty::Fn(fs, Box::new(ty), None)
         })
     }
 
@@ -294,6 +301,7 @@ impl Ck {
         Ok(Ty::Fn(
             sig.params.iter().map(|(_, t)| substitute(t, &m)).collect(),
             Box::new(substitute(&sig.ret, &m)),
+            None,
         ))
     }
 
@@ -536,6 +544,7 @@ impl Ck {
                 "Option".into(),
                 vec![Ty::Named(tn.to_string(), vec![])],
             )),
+            None,
         )
     }
 
@@ -660,7 +669,18 @@ impl Ck {
             }
             let ft = substitute(ft, &m);
             let sp = self.span;
+            // フィールドに入るクロージャの効果は取り分けて、入れる検査に使う
+            let is_closure = matches!(strip_paren(e), Expr::Closure { .. });
+            if is_closure {
+                self.defer = true;
+            }
             let t = self.expr_hint(e, Some(&ft))?;
+            let ce = if is_closure {
+                self.defer = false;
+                std::mem::take(&mut self.last_closure)
+            } else {
+                vec![]
+            };
             self.consume(e, &t)?;
             self.span = sp;
             if !self.coerce(&ft, &t, e) {
@@ -673,6 +693,10 @@ impl Ck {
                         self.check_hint(&ft, &t)
                     ),
                 );
+            }
+            if let Ty::Fn(_, _, Some(d)) = self.zonk(&ft) {
+                self.fn_value_form(e, &t)?;
+                self.check_fn_insert(&d, e, &t, if is_closure { Some(&ce) } else { None })?;
             }
         }
         if let Some((m, _)) = defs.iter().find(|(n, _)| !seen.contains(n)) {

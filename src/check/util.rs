@@ -292,7 +292,11 @@ pub(super) fn strip_refs(t: &Ty) -> Ty {
         Ty::Ref(_, i) => strip_refs(i),
         Ty::Named(n, a) => Ty::Named(n.clone(), a.iter().map(strip_refs).collect()),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(strip_refs).collect()),
-        Ty::Fn(ps, r) => Ty::Fn(ps.iter().map(strip_refs).collect(), Box::new(strip_refs(r))),
+        Ty::Fn(ps, r, e) => Ty::Fn(
+            ps.iter().map(strip_refs).collect(),
+            Box::new(strip_refs(r)),
+            e.clone(),
+        ),
         t => t.clone(),
     }
 }
@@ -303,7 +307,7 @@ pub(super) fn contains_ref(t: &Ty) -> bool {
         Ty::Ref(..) => true,
         Ty::Named(_, a) => a.iter().any(contains_ref),
         Ty::Tuple(ts) => ts.iter().any(contains_ref),
-        Ty::Fn(ps, r) => ps.iter().any(contains_ref) || contains_ref(r),
+        Ty::Fn(ps, r, _) => ps.iter().any(contains_ref) || contains_ref(r),
         _ => false,
     }
 }

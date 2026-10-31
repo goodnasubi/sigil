@@ -170,7 +170,7 @@ struct TraitPending {
 
 /// シグネチャの効果の 1 項。
 #[derive(Debug, Clone, PartialEq)]
-enum EffTerm {
+pub(crate) enum EffTerm {
     /// カテゴリ名（`fs`・`console` など。下位を含む）。
     Cat(String),
     /// `of(f)`: 引数の位置（`self` を含む）。
@@ -237,7 +237,10 @@ enum Pos {
     RetOpt,
     /// 篩型の基の型。参照は書けるが、そのあと `RefinementBase` で弾く。
     Base,
-    /// それ以外（構造体のフィールド・列挙子の値・型引数・`let` の注釈など）。参照を書けない。
+    /// 関数の型を置ける位置（構造体のフィールド・列挙型の値の中身・`let` の型注釈。
+    /// ADR 0022 決定 3）。関数の型には効果節が必須。参照は書けない。
+    Placed,
+    /// それ以外（型引数など）。参照を書けない。
     Other,
 }
 

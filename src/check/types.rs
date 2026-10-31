@@ -17,7 +17,10 @@ pub(crate) enum Ty {
     Param(String),
     /// 推論中の未知の型。
     Var(u32),
-    Fn(Vec<Ty>, Box<Ty>),
+    /// 関数の型。3 つ目は、置ける位置（フィールド・列挙型の値の中身・戻り値・
+    /// `let` の型注釈、ADR 0022 決定 3）に置かれたときに宣言された効果（カテゴリのみ）。
+    /// 引数の位置など従来の位置では `None`。
+    Fn(Vec<Ty>, Box<Ty>, Option<Vec<EffTerm>>),
 }
 
 pub(super) fn show(t: &Ty) -> String {
@@ -34,11 +37,25 @@ pub(super) fn show(t: &Ty) -> String {
         Ty::Named(n, a) => format!("{n}<{}>", list(a)),
         Ty::Param(n) => n.clone(),
         Ty::Var(_) => "_".into(),
-        Ty::Fn(ps, r) => {
-            if **r == Ty::Unit {
+        Ty::Fn(ps, r, eff) => {
+            let base = if **r == Ty::Unit {
                 format!("fn({})", list(ps))
             } else {
                 format!("fn({}) -> {}", list(ps), show(r))
+            };
+            match eff {
+                None => base,
+                Some(ds) if ds.is_empty() => format!("{base} effects none"),
+                Some(ds) => {
+                    let names: Vec<String> = ds
+                        .iter()
+                        .map(|t| match t {
+                            EffTerm::Cat(c) => c.clone(),
+                            EffTerm::Of(n) => format!("of({n})"),
+                        })
+                        .collect();
+                    format!("{base} effects {}", names.join(", "))
+                }
             }
         }
     }
@@ -167,8 +184,8 @@ pub(super) fn match_pattern(ck: &Ck, pat: &Ty, z: &Ty) -> Option<HashMap<String,
                 }
                 _ => None,
             },
-            Ty::Fn(ps, r) => match &z {
-                Ty::Fn(ps2, r2) if ps.len() == ps2.len() => {
+            Ty::Fn(ps, r, _) => match &z {
+                Ty::Fn(ps2, r2, _) if ps.len() == ps2.len() => {
                     for (x, y) in ps.iter().zip(ps2.iter()) {
                         go(ck, x, y, m)?;
                     }
@@ -197,7 +214,7 @@ pub(super) fn contains_param(t: &Ty, p: &str) -> bool {
         Ty::Tuple(ts) => ts.iter().any(|t| contains_param(t, p)),
         Ty::Ref(_, i) => contains_param(i, p),
         Ty::Named(_, a) => a.iter().any(|t| contains_param(t, p)),
-        Ty::Fn(ps, r) => ps.iter().any(|t| contains_param(t, p)) || contains_param(r, p),
+        Ty::Fn(ps, r, _) => ps.iter().any(|t| contains_param(t, p)) || contains_param(r, p),
         _ => false,
     }
 }
@@ -209,7 +226,7 @@ pub(super) fn substitute(t: &Ty, m: &HashMap<String, Ty>) -> Ty {
         Ty::Tuple(ts) => Ty::Tuple(go(ts)),
         Ty::Ref(mu, i) => Ty::Ref(*mu, Box::new(substitute(i, m))),
         Ty::Named(n, a) => Ty::Named(n.clone(), go(a)),
-        Ty::Fn(ps, r) => Ty::Fn(go(ps), Box::new(substitute(r, m))),
+        Ty::Fn(ps, r, e) => Ty::Fn(go(ps), Box::new(substitute(r, m)), e.clone()),
         _ => t.clone(),
     }
 }

@@ -456,7 +456,7 @@ impl<'a> L<'a> {
                 CTy::Named(_, a) => 1 + a.iter().map(cty_depth).max().unwrap_or(0),
                 CTy::Ref(_, i) => 1 + cty_depth(i),
                 CTy::Tuple(ts) => 1 + ts.iter().map(cty_depth).max().unwrap_or(0),
-                CTy::Fn(ps, r) => {
+                CTy::Fn(ps, r, _) => {
                     1 + ps
                         .iter()
                         .map(cty_depth)

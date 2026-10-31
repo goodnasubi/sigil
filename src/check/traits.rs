@@ -601,6 +601,7 @@ impl Ck {
                 .map(|(_, t)| substitute(t, &subst))
                 .collect(),
             Box::new(substitute(&sig.ret, &subst)),
+            None,
         );
         self.set_resolved(
             ResKind::TraitTypeFn,

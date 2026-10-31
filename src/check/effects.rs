@@ -1,7 +1,7 @@
 use super::types::PROPS;
 use super::{
-    contains_ref, show, strip_paren, Atom, CapMode, Capture, Ck, ClosureInfo, EffTerm, Flow, Prop,
-    Sig, Ty, R,
+    contains_ref, effects_subset, show, strip_paren, Atom, CapMode, Capture, Ck, ClosureInfo,
+    EffTerm, Flow, Prop, Sig, Ty, R,
 };
 use crate::ast::*;
 use crate::error::{Error, ErrorKind};
@@ -108,7 +108,7 @@ impl Ck {
             Ty::Tuple(ts) => ts.iter().any(|t| self.has_var(t)),
             Ty::Ref(_, i) => self.has_var(&i),
             Ty::Named(_, a) => a.iter().any(|t| self.has_var(t)),
-            Ty::Fn(ps, r) => ps.iter().any(|t| self.has_var(t)) || self.has_var(&r),
+            Ty::Fn(ps, r, _) => ps.iter().any(|t| self.has_var(t)) || self.has_var(&r),
             _ => false,
         }
     }
@@ -200,7 +200,7 @@ impl Ck {
         }
         for raw in std::mem::take(&mut self.cur_closures) {
             let mut captures = vec![];
-            for (name, ty, mode) in raw.caps {
+            for (name, ty, mode, _) in raw.caps {
                 let z = self.zonk(&ty);
                 // 型が決まらなかったので移動とみなしたものが、決まってみると `Copyable` だった
                 let mode = if mode == CapMode::Move
@@ -292,6 +292,28 @@ impl Ck {
         Ok(())
     }
 
+    /// 局所の関数の値の効果。別名の記録がなければ、型の宣言の効果 D を使う
+    /// （置ける位置から取り出した値。ADR 0022 決定 3）。
+    pub(super) fn local_effect_atoms(&self, n: &str) -> Vec<Atom> {
+        if let Some(effs) = self.local_eff.get(n) {
+            return effs.clone();
+        }
+        match self.lookup(n).map(|l| self.zonk(&l.ty)) {
+            Some(Ty::Fn(_, _, Some(d))) => Self::slot_atoms(&d),
+            _ => vec![],
+        }
+    }
+
+    /// 置ける位置の関数の型が宣言する効果 D を、効果の原子の列にする。
+    fn slot_atoms(d: &[EffTerm]) -> Vec<Atom> {
+        d.iter()
+            .filter_map(|t| match t {
+                EffTerm::Cat(c) => Some(Atom::Cat(c.clone())),
+                EffTerm::Of(_) => None,
+            })
+            .collect()
+    }
+
     /// 引数として渡された関数の効果。
     pub(super) fn fn_effects(&self, a: &Expr) -> Vec<Atom> {
         match strip_paren(a) {
@@ -300,7 +322,7 @@ impl Ck {
                     if self.fn_params.contains(n) {
                         vec![Atom::Of(n.clone())]
                     } else {
-                        self.local_eff.get(n).cloned().unwrap_or_default()
+                        self.local_effect_atoms(n)
                     }
                 } else {
                     self.fns.get(n).map_or_else(Vec::new, |sig| {
@@ -318,5 +340,192 @@ impl Ck {
             }
             _ => vec![],
         }
+    }
+
+    /// 置ける位置の関数の型の効果節を、宣言の効果 D（カテゴリのみ）にする。
+    /// `of(...)` は書けない（効果は位置でなくカテゴリで宣言する。ADR 0022 決定 3）。
+    pub(super) fn fn_type_terms(&self, effects: &[Effect]) -> R<Vec<EffTerm>> {
+        let mut out = vec![];
+        for e in effects {
+            match e {
+                Effect::Category(path) => {
+                    let name = path.join(".");
+                    if !self.table.valid(&name) {
+                        let hint = if name == "browser" {
+                            "（`browser` は実行対象の語で、効果ではない。DOM は `dom`、保存領域は `browser.storage`）"
+                        } else {
+                            ""
+                        };
+                        return self.err(
+                            ErrorKind::UnknownEffect,
+                            format!("効果 `{name}` は、効果のカテゴリの表にない{hint}"),
+                        );
+                    }
+                    out.push(EffTerm::Cat(name));
+                }
+                Effect::Of(x) => {
+                    return self.err(
+                        ErrorKind::FnTypePosition,
+                        format!("置ける位置の関数の型の効果節に `of({x})` は書けない（カテゴリだけで宣言する。ADR 0022 決定 3）"),
+                    )
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 呼び出しの引数として渡された値の効果。引数の型が置ける位置の関数の型なら、
+    /// その宣言の効果 D が `of(f)` の代わりになる。また、置ける位置から取り出した
+    /// 値（フィールド・戻り値）は、その値の型の宣言の効果 D を持つ（ADR 0022 決定 3）。
+    pub(super) fn arg_effects(&self, a: &Expr, t: &Ty, p: &Ty) -> Vec<Atom> {
+        if let Ty::Fn(_, _, Some(d)) = self.zonk(p) {
+            return Self::slot_atoms(&d);
+        }
+        if let Ty::Fn(_, _, Some(d)) = self.zonk(t) {
+            return Self::slot_atoms(&d);
+        }
+        self.fn_effects(a)
+    }
+
+    /// 関数の値 `value`（型 `vt`）を、宣言の効果 `d` の置ける位置に入れられるか
+    /// （ADR 0022 決定 3）:
+    /// - 値の効果 E が `d` 以下（⊑）でなければならない。E に `of(...)` を含むものは入れられない。
+    /// - 入れられるのは名前の関数と `move` クロージャだけ（呼び出し側で形は確かめてある）。
+    /// - クロージャは、とらえた値を書き換えず、とらえた値がすべて `Sendable`・`Shareable`。
+    ///
+    /// `closure_effs` は、値がクロージャのときに取り分けた推論の効果。
+    pub(super) fn check_fn_insert(
+        &mut self,
+        d: &[EffTerm],
+        value: &Expr,
+        vt: &Ty,
+        closure_effs: Option<&[Atom]>,
+    ) -> R<()> {
+        let value = strip_paren(value);
+        let e: Vec<Atom> = match value {
+            Expr::Closure { .. } => {
+                self.check_stored_closure_captures()?;
+                closure_effs.unwrap_or(&[]).to_vec()
+            }
+            Expr::Name(n) => {
+                if self.lookup(n).is_some() {
+                    if self.fn_params.contains(n) {
+                        return self.err(
+                            ErrorKind::FnTypePosition,
+                            format!("引数 `{n}` の効果は `of({n})` でしか分からないので、置ける位置には入れられない（ADR 0022 決定 3）"),
+                        );
+                    }
+                    if let Some(effs) = self.local_eff.get(n) {
+                        effs.clone()
+                    } else {
+                        match self.zonk(vt) {
+                            Ty::Fn(_, _, Some(d2)) => Self::slot_atoms(&d2),
+                            _ => vec![],
+                        }
+                    }
+                } else {
+                    match self.fns.get(n) {
+                        Some(sig) => sig
+                            .effects
+                            .iter()
+                            .map(|t| match t {
+                                EffTerm::Cat(c) => Atom::Cat(c.clone()),
+                                EffTerm::Of(i) => Atom::Of(sig.params[*i].0.clone()),
+                            })
+                            .collect(),
+                        None => vec![],
+                    }
+                }
+            }
+            // フィールドから取り出した値・戻り値で作られた値は、その型の宣言の効果を持つ
+            Expr::Field { .. } | Expr::Call { .. } => match self.zonk(vt) {
+                Ty::Fn(_, _, Some(d2)) => Self::slot_atoms(&d2),
+                _ => vec![],
+            },
+            _ => vec![],
+        };
+        if let Some(Atom::Of(x)) = e.iter().find(|a| matches!(a, Atom::Of(_))) {
+            return self.err(
+                ErrorKind::FnTypePosition,
+                format!("効果が `of({x})` を含む関数の値は、置ける位置には入れられない（ADR 0022 決定 3）"),
+            );
+        }
+        let et: Vec<EffTerm> = e
+            .iter()
+            .filter_map(|a| match a {
+                Atom::Cat(c) => Some(EffTerm::Cat(c.clone())),
+                Atom::Of(_) => None,
+            })
+            .collect();
+        if !effects_subset(&self.table, &et, d) {
+            let datoms: std::collections::HashSet<String> = d
+                .iter()
+                .flat_map(|t| match t {
+                    EffTerm::Cat(c) => self.table.atoms(c),
+                    EffTerm::Of(_) => vec![],
+                })
+                .collect();
+            let over: Vec<String> = e
+                .iter()
+                .filter_map(|a| match a {
+                    Atom::Cat(c) => Some(c.clone()),
+                    Atom::Of(_) => None,
+                })
+                .filter(|c| !self.table.atoms(c).iter().all(|a| datoms.contains(a)))
+                .collect();
+            return self.err(
+                ErrorKind::FnEffectExceeds,
+                format!(
+                    "関数の値の効果 `{}` が、置く位置の宣言の効果 `{}` を超えている（効果の順序 ⊑。ADR 0022 決定 3）",
+                    over.join(", "),
+                    d.iter()
+                        .map(|t| match t {
+                            EffTerm::Cat(c) => c.clone(),
+                            EffTerm::Of(i) => format!("of(#{i})"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// 置ける位置に入れるクロージャ（直前に検査したもの）のとらえ方の検査
+    /// （ADR 0022 決定 3）: 借用ではとらえられず、とらえた値を書き換えられず、
+    /// とらえた値はすべて `Sendable`・`Shareable` でなければならない。
+    fn check_stored_closure_captures(&mut self) -> R<()> {
+        let Some(raw) = self.cur_closures.last() else {
+            return Ok(());
+        };
+        let caps: Vec<(String, Ty, CapMode, bool)> = raw.caps.clone();
+        for (name, ty, mode, write) in &caps {
+            if matches!(mode, CapMode::Ref | CapMode::RefMut) {
+                return self.err(
+                    ErrorKind::FnTypePosition,
+                    format!("借用でとらえた値 `{name}` を持つクロージャは、置ける位置には入れられない（`move` クロージャにする。ADR 0022 決定 3）"),
+                );
+            }
+            if *write {
+                return self.err(
+                    ErrorKind::FnCaptureWrite,
+                    format!("入れたクロージャは、とらえた値 `{name}` を書き換えられない（呼び出しは何度でもでき、同じとらえた値を読む。ADR 0022 決定 3）"),
+                );
+            }
+            let z = self.zonk(ty);
+            if self.holds(&z, Prop::Sendable, 0) != Some(true) {
+                return self.err(
+                    ErrorKind::FnCaptureNotSendable,
+                    format!("とらえた値 `{name}` の型 `{}` は `Sendable` でないので、置ける位置に入れるクロージャはとらえられない（ADR 0022 決定 3）", show(&z)),
+                );
+            }
+            if self.holds(&z, Prop::Shareable, 0) != Some(true) {
+                return self.err(
+                    ErrorKind::FnCaptureNotShareable,
+                    format!("とらえた値 `{name}` の型 `{}` は `Shareable` でないので、置ける位置に入れるクロージャはとらえられない（ADR 0022 決定 3）", show(&z)),
+                );
+            }
+        }
+        Ok(())
     }
 }

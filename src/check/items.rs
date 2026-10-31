@@ -123,7 +123,7 @@ impl Ck {
                                 format!("フィールド `{}` が二重にある", f.name),
                             );
                         }
-                        fields.push((f.name.clone(), self.resolve(&f.ty, Pos::Other)?));
+                        fields.push((f.name.clone(), self.resolve(&f.ty, Pos::Placed)?));
                     }
                     self.tparams.clear();
                     let params = s.generics.iter().map(|g| g.name.clone()).collect();
@@ -144,7 +144,7 @@ impl Ck {
                         }
                         let mut ts = vec![];
                         for t in &v.fields {
-                            ts.push(self.resolve(t, Pos::Other)?);
+                            ts.push(self.resolve(t, Pos::Placed)?);
                         }
                         variants.push((v.name.clone(), ts));
                     }

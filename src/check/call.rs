@@ -19,7 +19,7 @@ impl Ck {
     /// 関数の型 `ft` の値を `args` で呼ぶ。
     pub(super) fn apply(&mut self, ft: Ty, args: &[Expr], what: &str, eff: Eff) -> R<Ty> {
         match self.shallow(&ft) {
-            Ty::Fn(ps, r) => {
+            Ty::Fn(ps, r, _) => {
                 let mark = self.log.len();
                 let srcs = self.args(&ps, args, what, &eff)?;
                 self.check_overlap(mark)?;
@@ -90,7 +90,7 @@ impl Ck {
                         }
                     } else {
                         Eff {
-                            extra: self.local_eff.get(n).cloned().unwrap_or_default(),
+                            extra: self.local_effect_atoms(n),
                             ..Eff::default()
                         }
                     }
@@ -219,6 +219,35 @@ impl Ck {
                 let rt0 = self.expr(expr)?;
                 let recv_res = std::mem::take(&mut self.res);
                 let rt = self.peel(&rt0);
+                // フィールドの関数の呼び出し（ADR 0022 決定 3）: 構造体のフィールドが
+                // 関数の型なら、それを呼ぶ。呼んだ効果は、その型の宣言の効果 D。
+                // フィールドとメソッドの同名は登録時に弾かれるので曖昧さはない。
+                if let Ty::Named(tn, targs) = &rt {
+                    if let Some(TypeDef::Struct { params, fields }) = self.types.get(tn).cloned() {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            let m: HashMap<String, Ty> =
+                                params.iter().cloned().zip(targs.iter().cloned()).collect();
+                            let ft = self.zonk(&substitute(fty, &m));
+                            if matches!(ft, Ty::Fn(..)) {
+                                let eff = match &ft {
+                                    Ty::Fn(_, _, Some(d)) => Eff {
+                                        terms: d.clone(),
+                                        ..Eff::default()
+                                    },
+                                    _ => Eff::default(),
+                                };
+                                self.set_resolved(ResKind::Local, None, name, vec![]);
+                                self.rec_expr(callee, &ft);
+                                return self.apply(
+                                    ft,
+                                    args,
+                                    &format!("フィールド `{name}` の関数"),
+                                    eff,
+                                );
+                            }
+                        }
+                    }
+                }
                 let clone_sig = if name == "clone" {
                     Some(self.clone_sig(&rt)?)
                 } else {
@@ -383,7 +412,7 @@ impl Ck {
         srcs.extend(more);
         self.check_overlap(mark)?;
         let ret = substitute(&sig.ret, &m);
-        self.rec_expr(callee, &Ty::Fn(ps.clone(), Box::new(ret.clone())));
+        self.rec_expr(callee, &Ty::Fn(ps.clone(), Box::new(ret.clone()), None));
         let mut all: Vec<Ty> = vec![substitute(&sig.params[0].1, &m)];
         all.extend(ps.iter().cloned());
         self.sig_check(&all, &ret, what);
@@ -442,8 +471,11 @@ impl Ck {
         let mut srcs: Vec<Src> = vec![];
         for (i, (p, a)) in params.iter().zip(args).enumerate() {
             let closure = matches!(strip_paren(a), Expr::Closure { .. });
+            // 置ける位置の関数の型の引数（列挙型の値の構築子など）に入るクロージャは
+            // 呼び出しより長く生きるので、引数の位置のクロージャとして扱わない
+            let placed = matches!(self.zonk(p), Ty::Fn(_, _, Some(_)));
             self.defer = closure;
-            self.closure_arg = closure;
+            self.closure_arg = closure && !placed;
             self.ref_ok = matches!(
                 a,
                 Expr::Unary {
@@ -478,13 +510,14 @@ impl Ck {
                 .terms
                 .iter()
                 .any(|t| matches!(t, EffTerm::Of(j) if *j == i + eff.off));
+            let mut arg_ce: Vec<Atom> = vec![];
             if closure {
-                let ce = std::mem::take(&mut self.last_closure);
+                arg_ce = std::mem::take(&mut self.last_closure);
                 if of_this {
-                    gained.extend(ce);
+                    gained.extend(arg_ce.iter().cloned());
                 }
             } else if of_this {
-                gained.extend(self.fn_effects(a));
+                gained.extend(self.arg_effects(a, &t, p));
             }
             if !self.coerce(p, &t, a) {
                 let hint = if matches!(self.shallow(p), Ty::Ref(..))
@@ -503,6 +536,10 @@ impl Ck {
                         self.sh(&t)
                     ),
                 );
+            }
+            // 置ける位置の関数の型の引数に入れる値の検査（効果の順序・とらえ方）
+            if let Ty::Fn(_, _, Some(d)) = self.zonk(p) {
+                self.check_fn_insert(&d, a, &t, if closure { Some(&arg_ce) } else { None })?;
             }
         }
         for t in &eff.terms {

@@ -193,6 +193,14 @@ pub enum ErrorKind {
     PolymorphicRecursion,
     /// 単相化の実体の数が上限を超えた（ADR 0022 決定 2 の単相化の上限）。
     InstanceLimit,
+    /// 関数の値の効果が、置く位置の宣言の効果を超えた（ADR 0022 決定 3 の効果の順序 ⊑）。
+    FnEffectExceeds,
+    /// 入れたクロージャが、とらえた値を書き換える（ADR 0022 決定 3）。
+    FnCaptureWrite,
+    /// 入れたクロージャのとらえた値が `Sendable` でない（ADR 0022 決定 3）。
+    FnCaptureNotSendable,
+    /// 入れたクロージャのとらえた値が `Shareable` でない（ADR 0022 決定 3）。
+    FnCaptureNotShareable,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -304,7 +312,11 @@ impl ErrorKind {
             | TraitImplDuplicate
             | TraitImplMismatch
             | PolymorphicRecursion
-            | InstanceLimit => Phase::Check,
+            | InstanceLimit
+            | FnEffectExceeds
+            | FnCaptureWrite
+            | FnCaptureNotSendable
+            | FnCaptureNotShareable => Phase::Check,
             _ => Phase::Syntax,
         }
     }

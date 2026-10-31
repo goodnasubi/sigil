@@ -1,0 +1,7 @@
+# 改行を LF に統一する（複数のエージェント・OS で作業するため）。
+* text=auto eol=lf
+
+*.jpg binary
+*.png binary
+*.sh text eol=lf
+

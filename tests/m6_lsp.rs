@@ -757,6 +757,58 @@ fn w(s: S) -> Int\n  intent \"w\"\n  requires none\n  ensures none\n  effects no
     assert_eq!(c.finish().1, 0);
 }
 
+/// 型の名前の上の hover は、解決した先の同一性（修飾した名前と明示か暗黙か）を示す（ADR 0022 決定 1）。
+#[test]
+fn lsp_hover_type_identity() {
+    let root = tmpdir("hover-identity");
+    let lib = "module lib.a\n  targets server\n  trust none\n\npub struct Config {\n  v: Int,\n}\n\npub fn load() -> Config\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return Config { v: 1 };\n}\n";
+    stage(&root, lib);
+    let app = |uses: &str| {
+        format!("module app\n  targets server\n  trust none\n\n{uses}\nfn f() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let c: Config = load();\n  return c.v;\n}}\n")
+    };
+    // (ソース, 型の名前を見る行の目印, 期待する hover)
+    let cases = [
+        // 暗黙: `load` のシグネチャに現れる隠れた依存の型。
+        (
+            app("use lib.a.load;\n"),
+            "let c: Config",
+            "Config\n解決先: lib.a.Config（暗黙）\n",
+        ),
+        // 明示: `use` で取り込んだ型。`use` の行と使った箇所の両方。
+        (
+            app("use lib.a.Config;\nuse lib.a.load;\n"),
+            "let c: Config",
+            "Config\n解決先: lib.a.Config（明示）\n",
+        ),
+        (
+            app("use lib.a.Config;\nuse lib.a.load;\n"),
+            "use lib.a.Config",
+            "Config\n解決先: lib.a.Config（明示）\n",
+        ),
+    ];
+    for (n, (src, needle, want)) in cases.iter().enumerate() {
+        let p = write(&root, "app.sigil", src);
+        let mut c = Client::start(&[]);
+        c.initialize_root(&root);
+        c.open(&p, src);
+        let (_, diags) = c.publish();
+        assert!(diags.is_empty(), "{n}: {diags:?}");
+        let line = src.lines().position(|l| l.contains(needle)).unwrap();
+        let col = src.lines().nth(line).unwrap().find("Config").unwrap();
+        assert_eq!(
+            c.hover(&p, line as i64, col as i64 + 2).as_deref(),
+            Some(*want),
+            "{n}"
+        );
+        // 型の名前でない箇所（`load` の呼び出し先の名前は関数なので、型の同一性は出ない）。
+        let l = src.lines().position(|l| l.contains("load();")).unwrap();
+        let lc = src.lines().nth(l).unwrap().find("load").unwrap();
+        let got = c.hover(&p, l as i64, lc as i64 + 1);
+        assert!(!got.is_some_and(|s| s.contains("解決先")), "{n}");
+        assert_eq!(c.finish().1, 0);
+    }
+}
+
 #[test]
 fn lsp_hover_cross_file_and_utf16() {
     // 開いたのは入口だけ。呼び出し先 `with_tax` は `use` で取り込んだモジュールにある。

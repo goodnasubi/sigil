@@ -213,4 +213,3 @@ pub(super) fn substitute(t: &Ty, m: &HashMap<String, Ty>) -> Ty {
         _ => t.clone(),
     }
 }
-

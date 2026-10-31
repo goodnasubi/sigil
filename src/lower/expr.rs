@@ -649,14 +649,14 @@ impl<'a> L<'a> {
                 }
             },
             ResKind::Local => {
-                let a::Expr::Name(n) = strip(callee) else {
+                // 局所の束縛の関数と、置ける位置に格納された関数の値（構造体のフィールド・
+                // 列挙型の中身など）の呼び出し。どちらも場所を `Copy` で読む（呼んでも値は
+                // 移動しない。複数回呼べる。ADR 0022 決定 3）。
+                let Some((p, _)) = self.place_expr(callee)? else {
                     return bail("局所の関数の呼び出し");
                 };
-                let Some(b) = self.lookup(n) else {
-                    return bail(format!("束縛 {n} がない"));
-                };
                 let ops = self.args_of(args)?;
-                Ok(self.emit_call(Callee::Indirect(Operand::Copy(b.place)), ops, ret))
+                Ok(self.emit_call(Callee::Indirect(Operand::Copy(p)), ops, ret))
             }
             ResKind::Namespaced => {
                 let ops = self.args_of(args)?;

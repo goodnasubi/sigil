@@ -14,21 +14,9 @@ use super::{Slot, E, M};
 
 impl<'p> M<'p> {
     pub(super) fn call_val(&mut self, f: &Val, args: Vec<Val>, loc: StopId) -> Result<Val, E> {
-        match f {
-            Val::Closure(c) => {
-                let mut a = vec![Val::Ref(Ptr {
-                    slot: c.env.clone(),
-                    path: vec![],
-                })];
-                a.extend(args);
-                self.run_func(c.func, a, loc)
-            }
-            Val::Fn(g) => self.run_func(*g, args, loc),
-            Val::Ref(p) => {
-                let t = p.with(shadow);
-                self.call_val(&t, args, loc)
-            }
-            _ => Ok(Val::Unit),
+        match self.resolve_callee(f, args) {
+            Some((g, a)) => self.run_func(g, a, loc),
+            None => Ok(Val::Unit),
         }
     }
 

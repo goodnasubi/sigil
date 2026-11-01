@@ -9,6 +9,7 @@
 
 mod call;
 mod expr;
+mod sched;
 mod value;
 
 use crate::ast::{File, Item, Type};
@@ -20,8 +21,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use value::{
-    list_of, locate, new_slot, shadow, show_val, stack_addr, types, with_val, with_val_mut, Ptr,
-    Val, DEEP, DROP_LOG, STACK_LIMIT, TYPES,
+    list_of, locate, new_slot, show_val, stack_addr, types, with_val_mut, Ptr, Val, DEEP, DROP_LOG,
+    STACK_LIMIT, TYPES,
 };
 
 type Slot = Rc<RefCell<Val>>;
@@ -42,6 +43,9 @@ struct M<'p> {
     io: usize,
     /// 確保済みチャンクの境界情報 (番地 -> (バイトサイズ, アライメント))
     chunks: BTreeMap<usize, (usize, usize)>,
+    sch: sched::Sched,
+    /// 次に積む枠が範囲の本体なら、その範囲の番号。
+    pending_scope: Option<usize>,
 }
 
 impl<'p> M<'p> {
@@ -81,136 +85,6 @@ impl<'p> M<'p> {
                     _ => std::mem::replace(v, Val::Empty),
                 });
                 drop(old);
-            }
-        }
-    }
-
-    fn run_func(&mut self, fid: FuncId, args: Vec<Val>, loc: StopId) -> Result<Val, E> {
-        let (base, budget) = STACK_LIMIT.with(|c| c.get());
-        if base.abs_diff(stack_addr()) > budget {
-            return Err(self.stop_at(loc, Some(StopKind::StackExhausted), Some("")));
-        }
-        let p = self.p;
-        let f = &p.funcs[fid];
-        let locals: Vec<Slot> = (0..f.locals.len()).map(|_| new_slot(Val::Empty)).collect();
-        for (a, &pi) in args.into_iter().zip(&f.params) {
-            *locals[pi].borrow_mut() = a;
-        }
-        let mut bb = 0usize;
-        let mut pending: Option<E> = None;
-        loop {
-            let blk = &f.blocks[bb];
-            for s in &blk.stmts {
-                self.exec(&locals, s);
-            }
-            match &blk.term {
-                Term::Goto(b) => bb = *b,
-                Term::Branch(c, t, e) => bb = if self.read_bool(&locals, c) { *t } else { *e },
-                Term::Switch(c, arms, d) => {
-                    let n = self.read_int(&locals, c);
-                    bb = arms.iter().find(|(k, _)| *k == n).map_or(*d, |(_, b)| *b);
-                }
-                Term::Call {
-                    func,
-                    args,
-                    dest,
-                    next,
-                    cleanup,
-                    stop,
-                } => {
-                    let r = match func {
-                        Callee::Func(g) => {
-                            let argv: Vec<Val> =
-                                args.iter().map(|a| self.read(&locals, a)).collect();
-                            self.run_func(*g, argv, *stop)
-                        }
-                        Callee::Indirect(op) => {
-                            let (s, pth) = self.view(&locals, op);
-                            let fv = with_val(&s, &pth, shadow);
-                            let argv: Vec<Val> =
-                                args.iter().map(|a| self.read(&locals, a)).collect();
-                            self.call_val(&fv, argv, *stop)
-                        }
-                        Callee::Builtin(b) => self.builtin(&locals, *b, args, *stop),
-                    };
-                    match r {
-                        Ok(v) => {
-                            self.write(&locals, dest, v);
-                            bb = *next;
-                        }
-                        Err(e) => {
-                            pending = Some(e);
-                            bb = *cleanup;
-                        }
-                    }
-                }
-                Term::CheckedOp {
-                    op,
-                    a,
-                    b,
-                    dest,
-                    next,
-                    stop,
-                    cleanup,
-                } => {
-                    let x = self.read_int(&locals, a);
-                    let y = self.read_int(&locals, b);
-                    let r = match op {
-                        ArithOp::Add => x.checked_add(y),
-                        ArithOp::Sub => x.checked_sub(y),
-                        ArithOp::Mul => x.checked_mul(y),
-                        ArithOp::Div => x.checked_div(y),
-                        ArithOp::Rem => x.checked_rem(y),
-                        ArithOp::Shl => {
-                            if (0..64).contains(&y) {
-                                Some(x.wrapping_shl(y as u32))
-                            } else {
-                                None
-                            }
-                        }
-                        ArithOp::Shr => {
-                            if (0..64).contains(&y) {
-                                // 論理右シフト（ADR 0023 決定 3）
-                                Some((x as u64).wrapping_shr(y as u32) as i64)
-                            } else {
-                                None
-                            }
-                        }
-                    };
-                    match r {
-                        Some(n) => {
-                            self.write(&locals, dest, Val::Int(n));
-                            bb = *next;
-                        }
-                        None => {
-                            pending = Some(self.stop_at(*stop, None, None));
-                            bb = *cleanup;
-                        }
-                    }
-                }
-                Term::Assert {
-                    cond,
-                    stop,
-                    next,
-                    cleanup,
-                } => {
-                    if self.read_bool(&locals, cond) {
-                        bb = *next;
-                    } else {
-                        pending = Some(self.stop_at(*stop, None, None));
-                        bb = *cleanup;
-                    }
-                }
-                Term::Return => {
-                    let v = std::mem::replace(&mut *locals[0].borrow_mut(), Val::Empty);
-                    return Ok(v);
-                }
-                Term::Unreachable => unreachable!("到達しない基本ブロックに来た"),
-                Term::Resume => {
-                    return Err(pending
-                        .take()
-                        .unwrap_or_else(|| self.stop_at(loc, None, None)));
-                }
             }
         }
     }
@@ -449,8 +323,10 @@ fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Ou
         io: find("IoError"),
         canon,
         chunks: BTreeMap::new(),
+        sch: sched::Sched::new(opts.stack_bytes),
+        pending_scope: None,
     };
-    let result = m.run_func(program.entry, argv, 0);
+    let result = m.run_root(program.entry, argv);
     let output = std::mem::take(&mut m.out);
     let res = match result {
         Ok(v) => {

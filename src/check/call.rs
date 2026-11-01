@@ -441,6 +441,12 @@ impl Ck {
                     "関数の型には `clone` がない（関数の値は引数に渡しても移動しないので、別名を作らずに元の名前を使う）",
                 )
             }
+            Ty::Named(n, _) if matches!(n.as_str(), "Scope" | "TaskHandle" | "LockGuard") => {
+                return self.err(
+                    ErrorKind::NoSuchMember,
+                    format!("`{shown}` には `clone` がない（タスクの持ち手・スコープ・ロックの持ち手は複製できない。ADR 0026 決定 3）"),
+                )
+            }
             _ => {}
         }
         if self.holds(rt, Prop::Copyable, 0) == Some(true) {

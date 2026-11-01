@@ -859,7 +859,8 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
             | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
-            | SyncSharedGet | LockNew | LockAcquire | AtomicNew | AtomicLoad | AtomicStore => {
+            | SyncSharedGet | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut
+            | AtomicNew | AtomicLoad | AtomicStore => {
                 let v = self.unsupported("並行処理の操作はネイティブ出力未対応");
                 (v, u)
             }

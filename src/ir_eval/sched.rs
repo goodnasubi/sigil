@@ -337,6 +337,8 @@ fn is_task_op(b: Builtin) -> bool {
             | SyncSharedGet
             | LockNew
             | LockAcquire
+            | LockGuardGet
+            | LockGuardGetMut
             | AtomicNew
             | AtomicLoad
             | AtomicStore
@@ -1008,6 +1010,23 @@ impl<'p> M<'p> {
                     l.waiters.push_back(cur);
                     self.sch.tasks[cur].state = State::LockWait;
                     Op::Block
+                }
+            }
+            LockGuardGet | LockGuardGetMut => {
+                // 中断しない（`task.share` のみ）。参照は `Lock` の中身の `Slot` を指す。
+                // 借用の検査が、参照をガードより長く生かさないことを保証する。
+                let (s, p) = self.view(locals, &args[0]);
+                let slot = with_val(&s, &p, |v| match v {
+                    Val::Guard(g) => Some(Rc::clone(&g.slot)),
+                    _ => None,
+                });
+                match slot {
+                    Some(slot) => Op::Val(Val::Ref(Ptr { slot, path: vec![] })),
+                    None => Op::Fail(self.stop_at(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("LockGuard でない値への get / get_mut"),
+                    )),
                 }
             }
             _ => Op::Fail(self.stop_at(

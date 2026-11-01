@@ -1066,7 +1066,8 @@ impl<'p> M<'p> {
             }
             TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
             | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
-            | SyncSharedGet | LockNew | LockAcquire | AtomicNew | AtomicLoad | AtomicStore => {
+            | SyncSharedGet | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut
+            | AtomicNew | AtomicLoad | AtomicStore => {
                 unreachable!("タスク関連の組み込み操作はスケジューラ側で特別に処理される")
             }
         })

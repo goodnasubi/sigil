@@ -315,6 +315,13 @@ impl Ck {
                     "task.share, task.suspend",
                 )],
             ),
+            (
+                "<T> LockGuard<T>",
+                &[
+                    ("get(self: &LockGuard<T>) -> &T", "task.share"),
+                    ("get_mut(self: &mut LockGuard<T>) -> &mut T", "task.share"),
+                ],
+            ),
             ("<T> Atomic<T>", &[("new(value: T) -> Atomic<T>", "none")]),
             (
                 "<T: Copyable> Atomic<T>",

@@ -265,6 +265,7 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
                     ));
                 }
             }
+            Item::Global(_) => {}
         }
     }
     Ok(Spec { module, items })

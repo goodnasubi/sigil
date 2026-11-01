@@ -65,6 +65,7 @@ impl Ck {
                 // トレイトは上の 0' で止まるのでここには来ない。型の同一性としては名前を持つ（ADR 0022 の決定 1）。
                 Item::Trait(t) => (Some(&t.name), t.span, &[][..], TypeDef::Alias(Ty::Unit)),
                 Item::ImplFor(i) => (None, i.span, &i.generics[..], TypeDef::Alias(Ty::Unit)),
+                Item::Global(g) => (None, g.span, &[][..], TypeDef::Alias(Ty::Unit)),
             };
             self.span = span;
             let Some(n) = name else { continue };
@@ -191,6 +192,26 @@ impl Ck {
                     let sig = self.signature(f, None, &[], &[])?;
                     self.fns.insert(f.name.clone(), sig);
                 }
+                Item::Global(g) => {
+                    self.span = g.span;
+                    if !self.base_module {
+                        return self.err(
+                            ErrorKind::GlobalOutsideTrustBase,
+                            format!(
+                                "大域変数 `{}` が宣言されているが、このモジュールは `trust base` ではない（大域状態は `trust base` のモジュールでのみ宣言できる。ADR 0025 の決定 2）",
+                                g.name
+                            ),
+                        );
+                    }
+                    if self.globals.contains_key(&g.name) {
+                        return self.err(
+                            ErrorKind::DuplicateDefinition,
+                            format!("大域変数 `{}` が二重に宣言されている", g.name),
+                        );
+                    }
+                    let ty = self.resolve(&g.ty, Pos::Placed)?;
+                    self.globals.insert(g.name.clone(), (ty, g.is_mut));
+                }
                 Item::Impl(i) => self.register_impl(i, false)?,
                 _ => {}
             }
@@ -220,6 +241,22 @@ impl Ck {
         for item in &file.items {
             match item {
                 Item::Type(t) => self.check_refinement(t)?,
+                Item::Global(g) => {
+                    self.span = g.span;
+                    let (expected_ty, _) = self.globals[&g.name].clone();
+                    let init_ty = self.expr(&g.init)?;
+                    if !self.coerce(&expected_ty, &init_ty, &g.init) {
+                        return self.err(
+                            ErrorKind::TypeMismatch,
+                            format!(
+                                "大域変数 `{}` の初期化式の型は `{}` でなければならないが、`{}` である",
+                                g.name,
+                                self.sh(&expected_ty),
+                                self.sh(&init_ty)
+                            ),
+                        );
+                    }
+                }
                 Item::Fn(f) => {
                     let sig = self.fns[&f.name].clone();
                     self.check_fn(f, &sig)?;

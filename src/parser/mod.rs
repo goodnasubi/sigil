@@ -144,6 +144,27 @@ fn is_camel(s: &str) -> bool {
     !b.is_empty() && b[0].is_ascii_uppercase() && b.iter().all(|c| c.is_ascii_alphanumeric())
 }
 
+fn is_upper_snake(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.is_empty() || !b[0].is_ascii_uppercase() {
+        return false;
+    }
+    let mut prev_us = false;
+    for &c in b {
+        if c == b'_' {
+            if prev_us {
+                return false;
+            }
+            prev_us = true;
+        } else if c.is_ascii_uppercase() || c.is_ascii_digit() {
+            prev_us = false;
+        } else {
+            return false;
+        }
+    }
+    !prev_us
+}
+
 fn is_upper_start(s: &str) -> bool {
     s.as_bytes().first().is_some_and(|c| c.is_ascii_uppercase())
 }
@@ -359,6 +380,18 @@ impl Parser {
         }
     }
 
+    fn check_upper_snake(s: &str, span: Span, what: &str) -> R<()> {
+        if is_upper_snake(s) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::BadNameForm,
+                span,
+                format!("{what} `{s}` は大文字の `_` 区切り（例: `MAX_SIZE`）で書く"),
+            ))
+        }
+    }
+
     fn check_not_reserved(&self, s: &str, span: Span, what: &str) -> R<()> {
         if !self.allow_reserved && RESERVED_NAMES.contains(&s) {
             Err(Error::new(
@@ -394,11 +427,17 @@ impl Parser {
         Ok(s)
     }
 
-    /// 参照の位置の名前。大文字始まりなら連結形、小文字始まりなら `_` 区切り。
+    /// 参照の位置の名前。大文字始まりなら連結形または大文字スネーク（大域変数）、小文字始まりなら `_` 区切り。
     fn name_ref(&mut self, what: &str) -> R<String> {
         let (s, span) = self.ident_raw(what)?;
         if is_upper_start(&s) {
-            Self::check_camel(&s, span, what)?;
+            if !is_camel(&s) && !is_upper_snake(&s) {
+                return Err(Error::new(
+                    ErrorKind::BadNameForm,
+                    span,
+                    format!("{what} `{s}` は大文字始まりの連結形（例: `ConfigError`）または大文字の `_` 区切り（例: `MAX_SIZE`）で書く"),
+                ));
+            }
         } else {
             Self::check_snake(&s, span, what)?;
         }

@@ -58,6 +58,7 @@ impl Parser {
                         }
                         Item::Impl(i) => Item::Impl(i),
                         Item::ImplFor(i) => Item::ImplFor(i),
+                        Item::Global(g) => Item::Global(g),
                     });
                 }
                 Tok::Kw("module") => {
@@ -75,6 +76,7 @@ impl Parser {
                     let item = self.impl_decl()?;
                     items.push(item);
                 }
+                Tok::Kw("global") => items.push(Item::Global(self.global_decl()?)),
                 Tok::Kw("let") => {
                     return Err(self.err(
                         ErrorKind::GlobalValue,
@@ -302,6 +304,31 @@ impl Parser {
             name,
             base,
             cond,
+            span,
+        })
+    }
+
+    pub(super) fn global_decl(&mut self) -> R<GlobalDecl> {
+        let span = self.span();
+        self.bump(); // "global"
+        let is_mut = if self.tok() == &Tok::Kw("mut") {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let (name, nspan) = self.ident_raw("大域変数の名前")?;
+        Self::check_upper_snake(&name, nspan, "大域変数の名前")?;
+        self.check_not_reserved(&name, nspan, "大域変数の名前")?;
+        self.expect_punct(":")?;
+        let ty = self.ty()?;
+        self.expect_punct("=")?;
+        let init = self.expr()?;
+        Ok(GlobalDecl {
+            is_mut,
+            name,
+            ty,
+            init,
             span,
         })
     }

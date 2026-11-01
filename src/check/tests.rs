@@ -144,6 +144,7 @@ mod typed_tests {
                 }
                 Item::Type(d) => walk_expr(&d.cond, &t, &mut exprs),
                 Item::Struct(_) | Item::Enum(_) => {}
+                Item::Global(g) => walk_expr(&g.init, &t, &mut exprs),
                 // トレイトを含むソースは `typed` の段階で止まるので、ここには来ない。
                 Item::Trait(_) | Item::ImplFor(_) => {}
             }

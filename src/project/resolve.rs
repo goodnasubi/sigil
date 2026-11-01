@@ -226,6 +226,11 @@ impl<'a> Walk<'a> {
                     im.fns.iter_mut().for_each(|f| w.func(f, false));
                 });
             }
+            Item::Global(g) => {
+                self.span = g.span;
+                self.decl_name(&mut g.name);
+                self.ty(&mut g.ty);
+            }
         }
     }
 

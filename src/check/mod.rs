@@ -400,6 +400,8 @@ struct Ck {
     allowed_base: Vec<String>,
     /// 関数ごとの記録（`sigil spec` が使う）。鍵は `FnDecl` の番地。
     reports: HashMap<usize, FnReport>,
+    /// 大域変数（`global`・`global mut`）。名前 -> (型, 可変か)
+    globals: HashMap<String, (Ty, bool)>,
 }
 
 /// 原始操作の登録情報。
@@ -668,6 +670,7 @@ fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Opti
         base_module: file.module.trust == Trust::Base,
         allowed_base: opts.trust_base.clone(),
         reports: HashMap::new(),
+        globals: HashMap::new(),
     };
     ck.prelude();
     ck.run(file)?;

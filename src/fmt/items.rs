@@ -45,9 +45,25 @@ impl<'a> Printer<'a> {
                 Item::Impl(i) => self.impl_decl(i),
                 Item::Trait(t) => self.trait_decl(t),
                 Item::ImplFor(i) => self.impl_for_decl(i),
+                Item::Global(g) => self.global_decl(g),
             }
         }
         self.top_comments(u32::MAX, false, true);
+    }
+
+    fn global_decl(&mut self, g: &GlobalDecl) {
+        self.top_comments(g.span.line, true, false);
+        self.nl(0, g.span.line);
+        self.w("global");
+        if g.is_mut {
+            self.w(" mut");
+        }
+        self.w(" ");
+        self.w(&g.name);
+        self.w(": ");
+        self.ty(&g.ty);
+        self.w(" = ");
+        self.expr(&g.init, 0, false, 0);
     }
 
     fn generics(&mut self, gs: &[Generic]) {

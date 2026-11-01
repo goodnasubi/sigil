@@ -113,6 +113,9 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "int_rotl" | "int_rotr" => ("ppp", 'i'),
         "bytes_set" => ("pppp", 'i'),
         "bytes_slice" => ("ppppp", 'i'),
+        "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
+        "raw_alloc" => ("pp", 'p'),
+        "raw_syscall" => ("ppppppp", 'p'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
         "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
@@ -179,8 +182,8 @@ impl<'p> Cg<'p> {
             'f' => s.returns.push(AbiParam::new(types::F64)),
             _ => {}
         }
-        let sym = if name == "fmod" {
-            "fmod".to_string()
+        let sym = if name == "fmod" || name == "memmove" || name == "memset" {
+            name.to_string()
         } else {
             format!("sigil_rt_{name}")
         };
@@ -263,6 +266,7 @@ impl<'p> Cg<'p> {
             Ty::Bool => ws.push(W::I(3)),
             Ty::Str => ws.push(W::I(4)),
             Ty::Bytes => ws.push(W::I(15)),
+            Ty::Addr => ws.push(W::I(16)),
             Ty::Path => ws.push(W::I(5)),
             Ty::ParseError => ws.push(W::I(6)),
             Ty::List(e) => {
@@ -398,7 +402,7 @@ impl<'p> Cg<'p> {
 
 fn supported_param(t: &Ty) -> bool {
     match t {
-        Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Path => true,
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Addr | Ty::Str | Ty::Path => true,
         Ty::List(e) => supported_param(e),
         Ty::Ref(i) | Ty::MutRef(i) => supported_param(i),
         _ => false,

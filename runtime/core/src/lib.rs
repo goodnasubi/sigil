@@ -53,6 +53,26 @@ pub unsafe extern "C" fn sigil_rt_free(p: *mut u8, size: usize, align: usize) {
     }
 }
 
+/// # Safety
+/// `size > 0` かつ `align` は 2 の冪。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_raw_alloc(size: i64, align: i64) -> *mut u8 {
+    if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
+        std::process::abort();
+    }
+    sigil_rt_alloc(size as usize, align as usize)
+}
+
+/// # Safety
+/// `p` は `sigil_rt_raw_alloc` で割り当てられたポインタであり、`size` と `align` は一致する。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_raw_free(p: *mut u8, size: i64, align: i64) {
+    if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
+        std::process::abort();
+    }
+    sigil_rt_free(p, size as usize, align as usize);
+}
+
 // ---------------------------------------------------------------------------
 // String（UTF-8。不透明な入れ物）
 

@@ -782,6 +782,81 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let pay = self.b.ins().select(good, n, z);
                 (self.mk_enum(tag, &[pay]), u)
             }
+            RawAddrNull => (self.ic(0), u),
+            RawAddrToInt => {
+                let (a, _) = self.val(&args[0]);
+                (a, u)
+            }
+            RawIntToAddr => {
+                let (v, _) = self.val(&args[0]);
+                (v, u)
+            }
+            RawOffset => {
+                let (a, _) = self.val(&args[0]);
+                let (n, _) = self.val(&args[1]);
+                (self.b.ins().iadd(a, n), u)
+            }
+            RawLoadU8 => {
+                let (a, _) = self.val(&args[0]);
+                let b = self.b.ins().load(types::I8, MemFlagsData::trusted(), a, 0);
+                (self.b.ins().uextend(types::I64, b), u)
+            }
+            RawStoreU8 => {
+                let (a, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                let b = self.b.ins().ireduce(types::I8, v);
+                self.b.ins().store(MemFlagsData::trusted(), b, a, 0);
+                (self.ic(0), u)
+            }
+            RawLoadI64 | RawLoadAddr => {
+                let (a, _) = self.val(&args[0]);
+                (
+                    self.b.ins().load(types::I64, MemFlagsData::trusted(), a, 0),
+                    u,
+                )
+            }
+            RawStoreI64 | RawStoreAddr => {
+                let (a, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                self.b.ins().store(MemFlagsData::trusted(), v, a, 0);
+                (self.ic(0), u)
+            }
+            RawCopy => {
+                let (dst, _) = self.val(&args[0]);
+                let (src, _) = self.val(&args[1]);
+                let (n, _) = self.val(&args[2]);
+                self.rt("memmove", &[dst, src, n]);
+                (self.ic(0), u)
+            }
+            RawSet => {
+                let (dst, _) = self.val(&args[0]);
+                let (byte, _) = self.val(&args[1]);
+                let (n, _) = self.val(&args[2]);
+                self.rt("memset", &[dst, byte, n]);
+                (self.ic(0), u)
+            }
+            RawAlloc => {
+                let (size, _) = self.val(&args[0]);
+                let (align, _) = self.val(&args[1]);
+                (self.rt("raw_alloc", &[size, align]), u)
+            }
+            RawFree => {
+                let (a, _) = self.val(&args[0]);
+                let (size, _) = self.val(&args[1]);
+                let (align, _) = self.val(&args[2]);
+                self.rt("raw_free", &[a, size, align]);
+                (self.ic(0), u)
+            }
+            RawSyscall => {
+                let (n, _) = self.val(&args[0]);
+                let (a0, _) = self.val(&args[1]);
+                let (a1, _) = self.val(&args[2]);
+                let (a2, _) = self.val(&args[3]);
+                let (a3, _) = self.val(&args[4]);
+                let (a4, _) = self.val(&args[5]);
+                let (a5, _) = self.val(&args[6]);
+                (self.rt("raw_syscall", &[n, a0, a1, a2, a3, a4, a5]), u)
+            }
         }
     }
 

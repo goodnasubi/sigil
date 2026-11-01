@@ -22,6 +22,7 @@ pub(super) enum Val {
     Cell(Rc<RefCell<Val>>),
     Shared(Rc<Val>),
     Bytes(Rc<RefCell<Vec<u8>>>),
+    Addr(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -175,6 +176,7 @@ pub(super) fn shadow(v: &Val) -> Val {
         Val::Empty => Val::Empty,
         Val::Unit => Val::Unit,
         Val::Int(n) => Val::Int(*n),
+        Val::Addr(a) => Val::Addr(*a),
         Val::Float(x) => Val::Float(*x),
         Val::Bool(b) => Val::Bool(*b),
         Val::Str(s) => Val::Str(s.clone()),
@@ -333,6 +335,7 @@ pub(super) fn show_val(ts: &[TypeDef], v: &Val, quote: bool) -> String {
     match v {
         Val::Empty | Val::Unit => "()".into(),
         Val::Int(n) => n.to_string(),
+        Val::Addr(a) => format!("Addr({a})"),
         Val::Float(f) => fmt_float(*f),
         Val::Bool(b) => b.to_string(),
         Val::Str(s) | Val::Path(s) => {
@@ -361,6 +364,7 @@ fn val_eq(a: &Val, b: &Val) -> bool {
         (_, Val::Ref(q)) => q.with(|y| val_eq(a, y)),
         (Val::Unit, Val::Unit) | (Val::ParseError, Val::ParseError) => true,
         (Val::Int(x), Val::Int(y)) => x == y,
+        (Val::Addr(x), Val::Addr(y)) => x == y,
         (Val::Float(x), Val::Float(y)) => x == y,
         (Val::Bool(x), Val::Bool(y)) => x == y,
         (Val::Str(x), Val::Str(y)) | (Val::Path(x), Val::Path(y)) => x == y,
@@ -384,6 +388,7 @@ pub(super) fn cmp_val(a: &Val, b: &Val) -> Option<Ordering> {
         (Val::Ref(p), _) => p.with(|x| cmp_val(x, b)),
         (_, Val::Ref(q)) => q.with(|y| cmp_val(a, y)),
         (Val::Int(x), Val::Int(y)) => Some(x.cmp(y)),
+        (Val::Addr(x), Val::Addr(y)) => Some(x.cmp(y)),
         (Val::Float(x), Val::Float(y)) => x.partial_cmp(y),
         (Val::Bool(x), Val::Bool(y)) => Some(x.cmp(y)),
         (Val::Str(x), Val::Str(y)) => Some(x.cmp(y)),

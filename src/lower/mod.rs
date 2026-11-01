@@ -57,6 +57,7 @@ pub(crate) fn needs_drop(t: &ir::Ty) -> bool {
             | ir::Ty::Float
             | ir::Ty::Bool
             | ir::Ty::Unit
+            | ir::Ty::Addr
             | ir::Ty::ParseError
             | ir::Ty::Ref(_)
             | ir::Ty::MutRef(_)
@@ -454,8 +455,9 @@ impl<'a> L<'a> {
             "Bool" => ir::Ty::Bool,
             "String" => ir::Ty::Str,
             "Bytes" => ir::Ty::Bytes,
+            "Addr" => ir::Ty::Addr,
             "Unit" => ir::Ty::Unit,
-            "Map" | "Set" | "Addr" => return bail(format!("{n} は SIR の対象外")),
+            "Map" | "Set" => return bail(format!("{n} は SIR の対象外")),
             _ => {
                 if let Some(&td) = self.refined.get(n) {
                     return self.conv_ast(&td.base, &HashMap::new());

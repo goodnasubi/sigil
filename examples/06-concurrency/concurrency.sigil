@@ -98,3 +98,31 @@ fn publish(x: Int) -> Int
   cell.store(x);
   return cell.load();
 }
+
+// 原子的な値の共有: Atomic の clone は同じ実体を指す。待つタスクと書くタスクが 1 つの値でつながる。
+fn handoff(x: Int) -> Int
+  intent "別のタスクが x を書くまで別のタスクが待ち、読めた値を返す"
+  requires x > 0
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let flag = Atomic.new(0);
+    let writer_flag = flag.clone();
+    let reader_flag = flag.clone();
+    let waiter = s.spawn(move || {
+      while reader_flag.load() == 0 {
+        task.yield();
+      }
+      return reader_flag.load();
+    });
+    let writer = s.spawn(move || {
+      task.yield();
+      writer_flag.store(x);
+      return 0;
+    });
+    let seen = waiter.join();
+    let done = writer.join();
+    return seen + done;
+  });
+}

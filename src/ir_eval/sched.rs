@@ -15,8 +15,7 @@ use crate::exec::StopKind;
 use crate::ir::*;
 
 use super::value::{
-    list_of, new_slot, shadow, with_val, with_val_mut, Agg, GuardTok, Ptr, Tag, Val, LOCK_EVENTS,
-    UNWINDING,
+    list_of, new_slot, shadow, with_val, Agg, GuardTok, Ptr, Tag, Val, LOCK_EVENTS, UNWINDING,
 };
 use super::{Slot, E, M};
 
@@ -949,22 +948,22 @@ impl<'p> M<'p> {
                     Op::Block
                 }
             }
-            SyncSharedNew | AtomicNew => Op::Val(Val::Cell(Rc::new(RefCell::new(
-                self.owned(locals, &args[0]),
-            )))),
+            SyncSharedNew | AtomicNew => Op::Val(Val::Shared(Rc::new(Val::Cell(Rc::new(
+                RefCell::new(self.owned(locals, &args[0])),
+            ))))),
             SyncSharedGet => {
                 let (s, p) = self.view(locals, &args[0]);
-                Op::Val(with_val(&s, &p, |v| match v {
-                    Val::Cell(c) => shadow(&c.borrow()),
-                    _ => Val::Unit,
+                Op::Val(with_val(&s, &p, |v| match shared_cell(v) {
+                    Some(c) => shadow(&c.borrow()),
+                    None => Val::Unit,
                 }))
             }
             AtomicLoad => {
                 // `Atomic.load` は中断点（ADR 0007 決定 3・決定 6 条件 11）。
                 let (s, p) = self.view(locals, &args[0]);
-                let val = with_val(&s, &p, |v| match v {
-                    Val::Cell(c) => shadow(&c.borrow()),
-                    _ => Val::Unit,
+                let val = with_val(&s, &p, |v| match shared_cell(v) {
+                    Some(c) => shadow(&c.borrow()),
+                    None => Val::Unit,
                 });
                 self.sch.tasks[cur].resume = Some(val);
                 self.sch.tasks[cur].state = State::Ready;
@@ -974,11 +973,8 @@ impl<'p> M<'p> {
             AtomicStore => {
                 let (s, p) = self.view(locals, &args[0]);
                 let x = self.owned(locals, &args[1]);
-                let old = with_val_mut(&s, &p, |v| match v {
-                    Val::Cell(c) => Some(std::mem::replace(&mut *c.borrow_mut(), x)),
-                    _ => None,
-                })
-                .flatten();
+                let cell = with_val(&s, &p, |v| shared_cell(v).cloned());
+                let old = cell.map(|c| std::mem::replace(&mut *c.borrow_mut(), x));
                 drop(old);
                 Op::Val(Val::Unit)
             }
@@ -1423,5 +1419,17 @@ impl<'p> M<'p> {
                 }
             }
         }
+    }
+}
+
+/// `Atomic` / `SyncShared` の中身の入れ物。`Val::Shared` を外して見る（`SharedGet` と同じ形）。
+fn shared_cell(v: &Val) -> Option<&Rc<RefCell<Val>>> {
+    match v {
+        Val::Shared(rc) => match &**rc {
+            Val::Cell(c) => Some(c),
+            _ => None,
+        },
+        Val::Cell(c) => Some(c),
+        _ => None,
     }
 }

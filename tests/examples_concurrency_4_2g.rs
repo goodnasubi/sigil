@@ -66,6 +66,12 @@ fn atomic_roundtrip() {
 }
 
 #[test]
+fn atomic_clone_shares_between_a_waiting_and_a_writing_task() {
+    // Issue #190: 待つタスクと書くタスクが、clone した Atomic で 1 つの値を共有する。
+    assert_eq!(value("handoff", &[5]), "5");
+}
+
+#[test]
 fn results_do_not_depend_on_the_schedule_seed() {
     for seed in 1..=8 {
         let opts = Options {
@@ -76,6 +82,7 @@ fn results_do_not_depend_on_the_schedule_seed() {
             ("sum_of_doubles", vec![3, 4], "14"),
             ("relay", vec![10], "33"),
             ("first_within", vec![50, 7], "None"),
+            ("handoff", vec![5], "5"),
         ] {
             let a: Vec<Arg> = args.iter().map(|&n| Arg::Int(n)).collect();
             let o = run_with(&src(), f, &a, &opts).unwrap_or_else(|e| panic!("{:?}", e.error));

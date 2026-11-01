@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::error::ErrorKind;
 
 use super::types::{show, substitute, Prop, Sig, Ty, TypeDef};
-use super::util::{place_path, place_root, strip_paren};
+use super::util::{is_fn_or_fn_list, place_path, place_root, strip_paren};
 use super::{AccKind, Atom, Ck, Eff, EffTerm, ResKind, Src, PRELUDE_VALUES, R};
 
 impl Ck {
@@ -501,8 +501,9 @@ impl Ck {
             self.fn_value_form(a, &t)?;
             // 値で受け取る引数は移動する（参照の引数は `&x` と書くので場所ではない）
             // 関数の型の引数へ渡す関数の値は、呼び出しの間だけの共有借用（ADR 0013 の決定 3）
-            let fn_arg = matches!(self.shallow(p), Ty::Fn(..))
+            let fn_arg = (matches!(self.shallow(p), Ty::Fn(..))
                 && matches!(self.zonk(&t), Ty::Fn(..))
+                || is_fn_or_fn_list(p) && is_fn_or_fn_list(&t))
                 && matches!(strip_paren(a), Expr::Name(n) if self.lookup(n).is_some());
             if fn_arg {
                 if let Expr::Name(n) = strip_paren(a) {

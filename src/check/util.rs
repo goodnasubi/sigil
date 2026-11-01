@@ -411,3 +411,12 @@ fn if_returns(i: &IfStmt) -> bool {
             Some(Else::Block(b)) => block_returns(b),
         }
 }
+
+/// 関数の型か、関数の型を要素とする `List` かを調べる（ADR 0026 決定 3 の `of(gs)` 用）。
+pub(super) fn is_fn_or_fn_list(t: &Ty) -> bool {
+    match t {
+        Ty::Fn(..) => true,
+        Ty::Named(n, a) if n == "List" && a.len() == 1 => matches!(a[0], Ty::Fn(..)),
+        _ => false,
+    }
+}

@@ -1,7 +1,7 @@
 use super::types::PROPS;
 use super::{
-    contains_ref, effects_subset, show, strip_paren, Atom, CapMode, Capture, Ck, ClosureInfo,
-    EffTerm, Flow, Prop, Sig, Ty, R,
+    contains_ref, effects_subset, is_fn_or_fn_list, show, strip_paren, Atom, CapMode, Capture, Ck,
+    ClosureInfo, EffTerm, Flow, Prop, Sig, Ty, R,
 };
 use crate::ast::*;
 use crate::error::{Error, ErrorKind};
@@ -32,15 +32,12 @@ impl Ck {
                     out.push(EffTerm::Cat(name));
                 }
                 Effect::Of(x) => {
-                    match params
-                        .iter()
-                        .position(|(n, t)| n == x && matches!(t, Ty::Fn(..)))
-                    {
+                    match params.iter().position(|(n, t)| n == x && is_fn_or_fn_list(t)) {
                         Some(i) => out.push(EffTerm::Of(i)),
                         None => {
                             return self.err(
                                 ErrorKind::OfNotParam,
-                                format!("`of({x})` の `{x}` は、関数の型の引数でなければならない"),
+                                format!("`of({x})` の `{x}` は、関数の型（または関数の型のリスト）の引数でなければならない"),
                             )
                         }
                     }

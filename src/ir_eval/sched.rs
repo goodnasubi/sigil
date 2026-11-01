@@ -919,11 +919,19 @@ impl<'p> M<'p> {
     fn lock_broken(&self) -> Val {
         let lb = self.p.types.iter().position(|t| t.name == "LockBroken");
         let inner = Val::Agg(Box::new(Agg {
-            tag: Tag::Struct(lb.unwrap_or(0)),
+            tag: Tag::Struct(lb.expect("`Lock` を使うプログラムには `LockBroken` の型がある")),
             f: vec![],
             silent: false,
         }));
         self.err(inner)
+    }
+
+    /// プロセス全体の停止。全ルートタスクを取り消して、元の停止を返す。
+    fn stop_all(&mut self, e: E) -> Result<Vec<Result<Val, E>>, E> {
+        self.cancel_all();
+        self.settle_locks();
+        self.take_deep();
+        Err(e)
     }
 
     /// `LockGuard` の破棄の知らせを反映する。解放なら次の待機者へ渡し、異常停止の巻き戻しでの破棄なら
@@ -1058,6 +1066,13 @@ impl<'p> M<'p> {
 
     /// 残っているタスクを、新しいものから順に取り消す。枠は内側から外側へ畳み、局所は逆順に破棄する。
     fn cancel_all(&mut self) {
+        // 全体停止の後始末。破棄は異常停止の巻き戻しとして扱う（持っていた `Lock` は壊れる）。
+        UNWINDING.with(|c| c.set(true));
+        self.cancel_all_inner();
+        UNWINDING.with(|c| c.set(false));
+    }
+
+    fn cancel_all_inner(&mut self) {
         for t in (0..self.sch.tasks.len()).rev() {
             if self.sch.tasks[t].state != State::Done {
                 self.cancel_task(t);
@@ -1074,6 +1089,15 @@ impl<'p> M<'p> {
     /// ルートタスク 1 つ分の後始末。そのルートに属するタスクを新しいものから順に取り消し、
     /// 作った通信路と `Lock` の値を捨てる（異常停止の破棄の範囲。ADR 0026 決定 4）。
     fn stop_root(&mut self, root: usize) {
+        // 取り消しの間の破棄は異常停止の巻き戻しとして扱う。親や兄弟のタスクが持つ `LockGuard` の破棄でも
+        // `Lock` が壊れる（ADR 0026 決定 4）。
+        UNWINDING.with(|c| c.set(true));
+        self.stop_root_inner(root);
+        UNWINDING.with(|c| c.set(false));
+        self.settle_locks();
+    }
+
+    fn stop_root_inner(&mut self, root: usize) {
         for t in (0..self.sch.tasks.len()).rev() {
             if self.sch.tasks[t].root != root {
                 continue;
@@ -1097,7 +1121,6 @@ impl<'p> M<'p> {
             dead.push(std::mem::replace(&mut l.value, Val::Unit));
         }
         drop(dead);
-        self.settle_locks();
     }
 
     /// ルートタスクを実行する。既定は決定的な FIFO（`schedule_seed` 指定時は種による攪拌）で、中断点でだけ切り替える。
@@ -1129,6 +1152,13 @@ impl<'p> M<'p> {
             self.sch.ready.push_back(tid);
         }
         loop {
+            // どのルートタスクにも属さない `DEEP`（破棄・取り消しの途中で立ったもの）は、全体停止にする。
+            if let Some(e) = self.take_deep() {
+                self.cancel_all();
+                self.settle_locks();
+                self.take_deep();
+                return Err(e);
+            }
             if self.sch.results.iter().all(Option::is_some) {
                 return Ok(std::mem::take(&mut self.sch.results)
                     .into_iter()
@@ -1138,17 +1168,20 @@ impl<'p> M<'p> {
             self.settle_locks();
             let Some(t) = self.sch.pop_ready() else {
                 if self.sch.sleepers.is_empty() {
-                    // 進行できるタスクがない。結果の出ていないルートタスクを、デッドロックとして止める。
-                    for i in (0..self.sch.roots.len()).rev() {
-                        if self.sch.results[i].is_none() {
-                            let root = self.sch.roots[i];
-                            self.stop_root(root);
-                            self.sch.results[i] = Some(Err(self.stop_at(
-                                0,
-                                Some(StopKind::StdRequiresViolated),
-                                Some("デッドロック（進行できるタスクがない）"),
-                            )));
-                        }
+                    // 進行できるタスクがない。結果の出ていないルートタスクのうち一番新しいものを 1 つだけ
+                    // デッドロックとして止め、次の反復で進行できるかを判定し直す（止めたことで起きた
+                    // ルートタスクを、続けて潰さない）。
+                    if let Some(i) = (0..self.sch.roots.len())
+                        .rev()
+                        .find(|&i| self.sch.results[i].is_none())
+                    {
+                        let root = self.sch.roots[i];
+                        self.stop_root(root);
+                        self.sch.results[i] = Some(Err(self.stop_at(
+                            0,
+                            Some(StopKind::StdRequiresViolated),
+                            Some("デッドロック（進行できるタスクがない）"),
+                        )));
                     }
                     continue;
                 }
@@ -1211,11 +1244,13 @@ impl<'p> M<'p> {
                 }
                 Run::Fail(e) => {
                     let alloc = std::mem::take(&mut self.sch.alloc_stop);
-                    if alloc || e.kind == StopKind::StackExhausted {
-                        // プロセス全体の停止（隔離しない）。
-                        self.cancel_all();
-                        self.settle_locks();
-                        return Err(e);
+                    if e.kind == StopKind::StackExhausted {
+                        // スタックの枯渇は、どのルートタスクでも全体停止（隔離しない）。
+                        return self.stop_all(e);
+                    }
+                    if alloc {
+                        // 確保器の枠の中の異常停止は全体停止（隔離しない）。
+                        return self.stop_all(e);
                     }
                     let root = self.sch.tasks[t].root;
                     self.stop_root(root);

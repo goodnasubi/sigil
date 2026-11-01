@@ -53,7 +53,14 @@ pub(super) struct Clos {
     pub(super) env: Slot,
 }
 
-/// `LockGuard` の実体。破棄は `Lock` の解放の知らせになり、スケジューラが次の取得者へ渡す。
+/// `LockGuard` の実体。
+///
+/// 未対応: 現在の言語には `LockGuard` の中身を読み書きする操作がない（`Lock::acquire` の戻り値を
+/// 持つだけで、`LockGuard` にメソッドはない）。そのため `Lock` の中身（`LockSt.value`）へは届かない。
+/// 持ち手を `Cell` の操作（`SyncSharedGet` など）や破棄グルーに渡しても、`Val::Guard` は
+/// 「該当なし」として扱われて panic しない。中身の操作を足すときは、この実体から `LockSt.value` を引く。
+///
+/// 破棄は `Lock` の解放の知らせになり、スケジューラが次の取得者へ渡す。
 /// 異常停止の巻き戻しの途中（`UNWINDING`）での破棄は、その `Lock` を壊れた状態にする（ADR 0026 決定 4）。
 pub(super) struct GuardTok {
     pub(super) lock: usize,

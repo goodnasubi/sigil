@@ -244,3 +244,132 @@ fn no_frames_leak_on_stop_path() {
     );
     assert!(stopped.contains("live: frames=0 chunks=0"), "{stopped}");
 }
+
+const REQ_TWO_LOCKS: &str = r#"
+fn req(a: &Lock<Int>, b: &Lock<Int>, n: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  if n == 0 {
+    match a.acquire() {
+      Ok(ga) => {
+        task.yield();
+        match b.acquire() {
+          Ok(gb) => { return 1; }
+          Err(e) => { return 0 - 1; }
+        }
+      }
+      Err(e) => { return 0 - 2; }
+    }
+  } else {
+    match b.acquire() {
+      Ok(gb) => {
+        task.yield();
+        match a.acquire() {
+          Ok(ga) => { return 2; }
+          Err(e) => { return 0 - 3; }
+        }
+      }
+      Err(e) => { return 0 - 4; }
+    }
+  }
+}
+"#;
+
+#[test]
+fn deadlock_is_judged_again_after_each_stop() {
+    let src = format!("{HEAD}{REQ_TWO_LOCKS}");
+    let sets = vec![
+        vec![Arg::Int(1), Arg::Int(2), Arg::Int(0)],
+        vec![Arg::Int(1), Arg::Int(2), Arg::Int(1)],
+    ];
+    let o = roots(&src, sets);
+    // 一番新しいルート（1）だけをデッドロックとして止める。止めたことで起きた先頭のルートは潰さず、
+    // `Err(LockBroken)` を受けて自分で戻る。
+    assert!(o.roots[1].is_err(), "{:?}", o.roots);
+    assert_eq!(o.roots[0].as_ref().unwrap(), "-1", "{:?}", o.roots);
+}
+
+#[test]
+fn guard_held_by_parent_breaks_lock_when_child_stops() {
+    let src = format!(
+        "{HEAD}{}",
+        r#"
+fn boom(n: Int) -> Int
+  intent "b"
+  requires none
+  ensures none
+  effects none
+{
+  return 100 / n;
+}
+
+fn req(l: &Lock<Int>, n: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.share, task.suspend, task.spawn
+{
+  if n == 0 {
+    match l.acquire() {
+      Ok(g) => {
+        return task.scope(|s| {
+          let a = s.spawn(move || boom(0));
+          return a.join();
+        });
+      }
+      Err(e) => { return 0 - 2; }
+    }
+  } else {
+    match l.acquire() {
+      Ok(g) => { return 7; }
+      Err(e) => { return 0 - 1; }
+    }
+  }
+}
+"#
+    );
+    let o = roots(&src, lock_sets(&[0, 5]));
+    assert_eq!(kind(&o.roots[0]), StopKind::DivisionByZero);
+    // 親が持っていたガードが取り消しの中で破棄されるので、`Lock` は壊れる。
+    assert_eq!(o.roots[1].as_ref().unwrap(), "-1", "{:?}", o.roots);
+}
+
+#[test]
+fn stack_exhaustion_in_one_root_stops_the_whole_process() {
+    let src = format!(
+        "{HEAD}{}",
+        r#"
+fn rec(n: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects none
+{
+  return rec(n + 1) + 1;
+}
+
+fn req(n: Int) -> Int
+  intent "q"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  task.yield();
+  if n == 2 {
+    return rec(0);
+  }
+  return n;
+}
+"#
+    );
+    let e = run_roots_with(&[&src], "req", &ints(&[1, 2, 3]), &opts())
+        .err()
+        .expect("全体停止");
+    match e.error {
+        sigil::exec::RunError::Stop(s) => assert_eq!(s.kind, StopKind::StackExhausted),
+        o => panic!("{o}"),
+    }
+}

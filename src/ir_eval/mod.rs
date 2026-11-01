@@ -72,6 +72,17 @@ impl<'p> M<'p> {
         }
     }
 
+    /// 立っている `DEEP`（値の入れ子が深すぎた）を取り下げて、停止にする。
+    fn take_deep(&self) -> Option<E> {
+        DEEP.with(|d| d.replace(false)).then(|| {
+            self.stop_at(
+                0,
+                Some(StopKind::StackExhausted),
+                Some("値の入れ子が深すぎる"),
+            )
+        })
+    }
+
     fn exec(&mut self, locals: &[Slot], s: &Stmt) {
         match s {
             Stmt::Assign(pl, rv) => {
@@ -320,7 +331,8 @@ fn execute_roots(
             Type::Ref { inner, .. } => inner,
             t => t,
         };
-        matches!(t, Type::Path { path, .. } if path.last().is_some_and(|n| n == "Lock"))
+        // 前置きの型は利用者が同名の型で隠せないので、1 区間の `Lock` だけを見る。
+        matches!(t, Type::Path { path, .. } if path.len() == 1 && path[0] == "Lock")
     };
     // 共有の `Lock` の引数は、評価器ができてから作る（ここでは場所だけ空けておく）。
     let mut argvs: Vec<Vec<Val>> = Vec::with_capacity(arg_sets.len());
@@ -436,35 +448,34 @@ fn execute_roots(
     let res = match result {
         Ok(rs) => {
             let mut roots = Vec::with_capacity(rs.len());
+            let mut deep = None;
             for r in rs {
                 roots.push(match r {
                     Ok(v) => {
                         let ts = types();
                         let value = show_val(&ts, &v, true);
                         drop(v);
-                        if DEEP.with(|d| d.replace(false)) {
-                            Err(Box::new(Stop {
-                                kind: StopKind::StackExhausted,
-                                func: func.to_string(),
-                                line: program.exit_line,
-                                during: None,
-                                detail: "値の入れ子が深すぎる".into(),
-                            }))
-                        } else {
-                            Ok(value)
+                        // 結果の破棄で入れ子が深すぎたときは、ルートタスクの結果ではなく全体停止にする。
+                        if deep.is_none() {
+                            deep = m.take_deep();
                         }
+                        Ok(value)
                     }
                     Err(s) => Err(s),
                 });
             }
-            // 隔離した異常停止の報告は、従来どおり標準エラーに出す（複数のルートタスクのとき。
-            // 1 つのときは呼び出し側が失敗として報告する）。
-            if roots.len() > 1 && !opts.capture_console {
-                for s in roots.iter().filter_map(|r| r.as_ref().err()) {
-                    eprintln!("{s}");
+            if let Some(e) = deep {
+                Err(e)
+            } else {
+                // 隔離した異常停止の報告は、従来どおり標準エラーに出す（複数のルートタスクのとき。
+                // 1 つのときは呼び出し側が失敗として報告する）。
+                if roots.len() > 1 && !opts.capture_console {
+                    for s in roots.iter().filter_map(|r| r.as_ref().err()) {
+                        eprintln!("{s}");
+                    }
                 }
+                Ok(roots)
             }
-            Ok(roots)
         }
         Err(s) => Err(s),
     };

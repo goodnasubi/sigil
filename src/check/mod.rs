@@ -412,6 +412,8 @@ struct Ck {
     reports: HashMap<usize, FnReport>,
     /// 大域変数（`global`・`global mut`）。名前 -> (型, 可変か)
     globals: HashMap<String, (Ty, bool)>,
+    /// 性質の手付け（`properties`）。(型名, 性質)
+    manual_properties: Vec<(String, Prop)>,
 }
 
 /// 原始操作の登録情報。
@@ -681,6 +683,7 @@ fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Opti
         allowed_base: opts.trust_base.clone(),
         reports: HashMap::new(),
         globals: HashMap::new(),
+        manual_properties: vec![],
     };
     ck.prelude();
     ck.run(file)?;

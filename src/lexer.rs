@@ -82,6 +82,7 @@ pub const KEYWORDS: &[&str] = &[
     "trait",
     "for",
     "global",
+    "properties",
 ];
 
 /// 将来のために予約する語。P0 では使えば字句エラー。

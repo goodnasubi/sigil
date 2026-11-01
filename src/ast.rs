@@ -48,6 +48,16 @@ pub enum Item {
     Trait(TraitDecl),
     ImplFor(ImplForDecl),
     Global(GlobalDecl),
+    Properties(PropertiesDecl),
+}
+
+/// `properties 型名: 性質, ... "前提の文"`（ADR 0026 決定 2）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PropertiesDecl {
+    pub type_name: String,
+    pub properties: Vec<String>,
+    pub premise: String,
+    pub span: Span,
 }
 
 /// `global [mut] 名前: 型 = 式;`（ADR 0025 決定 2）。

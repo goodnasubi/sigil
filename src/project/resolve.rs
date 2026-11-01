@@ -231,6 +231,10 @@ impl<'a> Walk<'a> {
                 self.decl_name(&mut g.name);
                 self.ty(&mut g.ty);
             }
+            Item::Properties(p) => {
+                self.span = p.span;
+                self.rename(&mut p.type_name);
+            }
         }
     }
 

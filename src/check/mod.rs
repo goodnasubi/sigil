@@ -639,17 +639,28 @@ fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Opti
         ens_used: BTreeSet::new(),
         let_pending: vec![],
         raw_ops: HashMap::new(),
-        raw_defs: crate::stdlib::RAW_OPS
-            .iter()
-            .map(|r| crate::effects::RawOp {
-                layer: r.layer,
-                signature: r.signature.to_string(),
-                effects: r.effects.to_string(),
-                requires: r.requires.to_string(),
-                premise: r.premise.to_string(),
-            })
-            .chain(opts.raw_ops.iter().cloned())
-            .collect(),
+        raw_defs: {
+            let user_names: BTreeSet<String> = opts
+                .raw_ops
+                .iter()
+                .map(|r| r.signature.split(['(', '<']).next().unwrap().to_string())
+                .collect();
+            crate::stdlib::RAW_OPS
+                .iter()
+                .filter(|r| {
+                    let name = r.signature.split(['(', '<']).next().unwrap();
+                    !user_names.contains(name)
+                })
+                .map(|r| crate::effects::RawOp {
+                    layer: r.layer,
+                    signature: r.signature.to_string(),
+                    effects: r.effects.to_string(),
+                    requires: r.requires.to_string(),
+                    premise: r.premise.to_string(),
+                })
+                .chain(opts.raw_ops.iter().cloned())
+                .collect()
+        },
         raw_fn: false,
         closure_depth: 0,
         raw_used: BTreeSet::new(),

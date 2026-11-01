@@ -66,9 +66,114 @@ pub struct RawRow {
 }
 
 /// 原始操作の表。行を足す・変える・消すときは、先に ADR に記録する（ADR 0016 の決定 1）。
-/// 実際の一覧は、P1 の範囲を決める ADR が決める。それまでは空で、テストの中だけで
-/// `effects::Options::raw_ops` から差し込む（ADR 0006 の「テスト用の性質・カテゴリ・型はテストの中だけで定義する」）。
-pub const RAW_OPS: &[RawRow] = &[];
+/// 実際の一覧は ADR 0018 決定 6 および ADR 0025 決定 1 に基づく。
+pub const RAW_OPS: &[RawRow] = &[
+    RawRow {
+        layer: Layer::Core,
+        signature: "addr_null() -> Addr",
+        effects: "none",
+        requires: "none",
+        premise: "常にヌル番地（0）を返す",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "addr_to_int(a: Addr) -> Int",
+        effects: "none",
+        requires: "none",
+        premise: "番地のビットパターンを整数として読む",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "int_to_addr(v: Int) -> Addr",
+        effects: "none",
+        requires: "none",
+        premise: "非負の整数を番地として解釈する",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "offset(a: Addr, n: Int) -> Addr",
+        effects: "none",
+        requires: "none",
+        premise: "同一チャンクの境界内でのみオフセットを適用する",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "load_u8(a: Addr) -> Int",
+        effects: "none",
+        requires: "none",
+        premise: "番地が生きた確保済み領域内にあり、1 バイト読み取り可能である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "store_u8(a: Addr, v: Int)",
+        effects: "none",
+        requires: "none",
+        premise: "番地が生きた書き込み可能領域内にあり、値は 0..=255 である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "load_i64(a: Addr) -> Int",
+        effects: "none",
+        requires: "none",
+        premise: "番地が生きた確保済み領域内にあり、8 バイト境界かつ読み取り可能である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "store_i64(a: Addr, v: Int)",
+        effects: "none",
+        requires: "none",
+        premise: "番地が生きた書き込み可能領域内にあり、8 バイト境界かつ書き込み可能である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "load_addr(a: Addr) -> Addr",
+        effects: "none",
+        requires: "none",
+        premise: "番地が生きた確保済み領域内にあり、8 バイト境界かつ読み取り可能である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "store_addr(a: Addr, v: Addr)",
+        effects: "none",
+        requires: "none",
+        premise: "番地が生きた書き込み可能領域内にあり、8 バイト境界かつ書き込み可能である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "copy(dst: Addr, src: Addr, n: Int)",
+        effects: "none",
+        requires: "none",
+        premise: "転送元および転送先がそれぞれ n バイトの有効な領域である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "set(dst: Addr, byte: Int, n: Int)",
+        effects: "none",
+        requires: "none",
+        premise: "対象番地から n バイトが有効な書き込み可能領域である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "alloc(size: Int, align: Int) -> Addr",
+        effects: "none",
+        requires: "none",
+        premise: "確保器が初期化済みであり、要求サイズが有効である",
+    },
+    RawRow {
+        layer: Layer::Core,
+        signature: "free(a: Addr, size: Int, align: Int)",
+        effects: "none",
+        requires: "none",
+        premise: "番地が alloc で得られた生きた領域の先頭であり、サイズ・アライメントが一致する",
+    },
+    RawRow {
+        layer: Layer::Os,
+        signature: "syscall(n: Int, a0: Int, a1: Int, a2: Int, a3: Int, a4: Int, a5: Int) -> Int",
+        effects: DELEGATED,
+        requires: "none",
+        premise: "システムコール番号と引数がカーネル ABI に合致し、ポインタ引数は生きた領域を指す",
+    },
+];
 
 /// 名前空間のない関数。読むだけの操作はメソッドに移したので、`Copyable` な値の関数だけが残る。
 pub const FREE_FNS: &[(Layer, &str, &str)] = &[

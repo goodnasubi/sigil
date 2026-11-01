@@ -33,6 +33,20 @@ fn drain(input: &[u8], max_body: u64) {
     panic!("入力の長さの回数で終わらない");
 }
 
+/// CRLF の種。コーパスのファイルは git の改行の正規化で LF になりうるので、コードに持つ。
+fn crlf_seeds() -> Vec<Vec<u8>> {
+    [
+        &b"Content-Length: 2\r\n\r\n{}"[..],
+        b"Content-Length: 2\r\n\r\n{}Content-Length: 2\r\n\r\n[]",
+        b"content-length: 2\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\ncontent-length: 2\r\n\r\n{}",
+        b"Content-Length: 18446744073709551615\r\n\r\n{}",
+        b"Content-Length: -1\r\n\r\n",
+    ]
+    .iter()
+    .map(|s| s.to_vec())
+    .collect()
+}
+
 fn check(input: &[u8]) {
     drain(input, 16);
     drain(input, MAX_BODY);
@@ -81,11 +95,7 @@ fn grammar(rng: &mut Rng) -> Vec<u8> {
 
 #[test]
 fn fuzz_lsp_frame() {
-    fuzz::run(
-        "lsp_frame",
-        3000,
-        fuzz::corpus("lsp_frame", &[]),
-        grammar,
-        check,
-    );
+    let mut corpus = fuzz::corpus("lsp_frame", &[]);
+    corpus.extend(crlf_seeds());
+    fuzz::run("lsp_frame", 3000, corpus, grammar, check);
 }

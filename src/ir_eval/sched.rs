@@ -97,7 +97,8 @@ struct Chan {
 
 /// `Lock` の状態。値は `Lock.new` で渡されたもの（評価器では番号で指す）。
 struct LockSt {
-    value: Val,
+    /// 保護対象の置き場。`GuardTok.slot` が同じ `Slot` を共有する。
+    value: Slot,
     holder: Option<usize>,
     waiters: VecDeque<usize>,
     /// 異常停止したタスクが持っていた（壊れた）。一度壊れたら戻さない（ADR 0026 決定 4）。
@@ -265,7 +266,7 @@ impl Sched {
     /// ホストが全ルートタスクに共有する `Lock` を作る（どのルートタスクにも属さない）。
     pub(super) fn new_shared_lock(&mut self, value: Val) -> usize {
         self.locks.push(LockSt {
-            value,
+            value: new_slot(value),
             holder: None,
             waiters: VecDeque::new(),
             broken: false,
@@ -984,7 +985,7 @@ impl<'p> M<'p> {
                 let root = self.sch.tasks[cur].root;
                 let id = self.sch.locks.len();
                 self.sch.locks.push(LockSt {
-                    value,
+                    value: new_slot(value),
                     holder: None,
                     waiters: VecDeque::new(),
                     broken: false,
@@ -1001,7 +1002,8 @@ impl<'p> M<'p> {
                     Op::Val(self.lock_broken())
                 } else if l.holder.is_none() {
                     l.holder = Some(cur);
-                    Op::Val(self.ok(Val::Guard(Rc::new(GuardTok { lock: id }))))
+                    let slot = Rc::clone(&l.value);
+                    Op::Val(self.ok(Val::Guard(Rc::new(GuardTok { lock: id, slot }))))
                 } else {
                     l.waiters.push_back(cur);
                     self.sch.tasks[cur].state = State::LockWait;
@@ -1053,7 +1055,8 @@ impl<'p> M<'p> {
                 }
             } else if let Some(w) = l.waiters.pop_front() {
                 l.holder = Some(w);
-                let g = self.ok(Val::Guard(Rc::new(GuardTok { lock: id })));
+                let slot = Rc::clone(&l.value);
+                let g = self.ok(Val::Guard(Rc::new(GuardTok { lock: id, slot })));
                 self.wake(w, Some(g));
             }
         }
@@ -1244,7 +1247,7 @@ impl<'p> M<'p> {
         for l in self.sch.locks.iter_mut().filter(|l| l.root == root) {
             l.waiters.clear();
             l.broken = true;
-            dead.push(std::mem::replace(&mut l.value, Val::Unit));
+            dead.push(l.value.replace(Val::Unit));
         }
         drop(dead);
     }

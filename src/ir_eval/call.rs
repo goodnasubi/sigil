@@ -1017,6 +1017,11 @@ impl<'p> M<'p> {
                 }
                 Val::Int(ret)
             }
+            TaskScope | TaskYield | TaskSleep | TaskChannel | ScopeSpawn | TaskJoin | ChanSend
+            | ChanRecv | SyncSharedNew | SyncSharedGet | LockNew | LockAcquire | AtomicNew
+            | AtomicLoad | AtomicStore => {
+                unreachable!("タスク関連の組み込み操作はスケジューラ側で特別に処理される")
+            }
         })
     }
 

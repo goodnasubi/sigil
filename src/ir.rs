@@ -341,6 +341,22 @@ pub enum Builtin {
     RawAlloc,
     RawFree,
     RawSyscall,
+    /// 並行処理（ADR 0026 決定 3）
+    TaskScope,
+    TaskYield,
+    TaskSleep,
+    TaskChannel,
+    ScopeSpawn,
+    TaskJoin,
+    ChanSend,
+    ChanRecv,
+    SyncSharedNew,
+    SyncSharedGet,
+    LockNew,
+    LockAcquire,
+    AtomicNew,
+    AtomicLoad,
+    AtomicStore,
     /// 組・一覧・構造体・列挙型の比較（深い入れ子で止まりうるので `Call` を通す）。
     Compare(BinOp),
 }

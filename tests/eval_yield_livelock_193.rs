@@ -243,3 +243,30 @@ fn run() -> Int
 "#);
     assert!(v.starts_with('9'), "{v}");
 }
+
+#[test]
+fn yield_loop_with_large_list_over_fingerprint_budget_terminates_normally() {
+    // 局所の `List` が指紋の予算（2000 ノード）を超えても、有限回の `yield` で正常に終わる。
+    let v = ok(r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let mut xs = List.new();
+  let mut k = 0;
+  while k < 5000 {
+    xs.push(k);
+    k = k + 1;
+  }
+  let mut i = 0;
+  while i < 300 {
+    i = i + 1;
+    task.yield();
+  }
+  return xs.len() + i;
+}
+"#);
+    assert!(v.starts_with("5300"), "{v}");
+}

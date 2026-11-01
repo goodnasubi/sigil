@@ -12,6 +12,65 @@ use super::value::{
 };
 use super::{Slot, E, M};
 
+/// 実行時の `fs.read` が読むファイルの大きさの上限（バイト）。`lsp::MAX_DEP_BYTES` に揃えた暫定の定数。
+/// ADR 0020 6-3 で `src/limits.rs` ができたら、そちらへ移す。
+const MAX_FS_READ_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 実ファイルを読む `fs.read` の本体。`O_NONBLOCK` で開き（書き手のいない FIFO で `open` が止まらないように）、
+/// 開いたファイルが通常ファイルか確かめ、上限を超えるものは読まずに（または 1 バイト余分に読んで）拒否する。
+fn read_file_bounded(path: &str) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind, Read};
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "mips", target_arch = "mips64")
+        ))]
+        const O_NONBLOCK: i32 = 0x80;
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "sparc", target_arch = "sparc64")
+        ))]
+        const O_NONBLOCK: i32 = 0x4000;
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            not(any(
+                target_arch = "mips",
+                target_arch = "mips64",
+                target_arch = "sparc",
+                target_arch = "sparc64"
+            ))
+        ))]
+        const O_NONBLOCK: i32 = 0o4000;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const O_NONBLOCK: i32 = 0x4;
+        o.custom_flags(O_NONBLOCK);
+    }
+    let mut h = o.open(path)?;
+    let meta = h.metadata()?;
+    if !meta.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "通常のファイルではない（FIFO・デバイスなどは読まない）",
+        ));
+    }
+    let too_big = || Error::new(ErrorKind::InvalidData, "ファイルが大きすぎる");
+    if meta.len() > MAX_FS_READ_BYTES {
+        return Err(too_big());
+    }
+    let mut bytes = vec![];
+    (&mut h)
+        .take(MAX_FS_READ_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FS_READ_BYTES {
+        return Err(too_big());
+    }
+    String::from_utf8(bytes).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+}
+
 impl<'p> M<'p> {
     pub(super) fn call_val(&mut self, f: &Val, args: Vec<Val>, loc: StopId) -> Result<Val, E> {
         match self.resolve_callee(f, args) {
@@ -704,7 +763,7 @@ impl<'p> M<'p> {
                         Some(text) => self.ok(Val::Str(text.as_str().into())),
                         None => self.err(self.io_error(std::io::ErrorKind::NotFound, path)),
                     },
-                    None => match std::fs::read_to_string(&*path) {
+                    None => match read_file_bounded(&path) {
                         Ok(text) => self.ok(Val::Str(text.into())),
                         Err(e) => self.err(self.io_error(e.kind(), path)),
                     },

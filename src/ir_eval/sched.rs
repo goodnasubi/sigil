@@ -547,10 +547,11 @@ impl<'p> M<'p> {
                     if is_allocator_func(&self.p.funcs[fr.fid].name) {
                         self.sch.alloc_stop = true;
                     }
+                    // スコープ配下の子の取り消しも巻き戻しの一部（子が持つガードでも `Lock` が壊れる）。
+                    UNWINDING.with(|c| c.set(true));
                     if let Some(sid) = fr.scope {
                         self.cancel_scope(sid);
                     }
-                    UNWINDING.with(|c| c.set(true));
                     Self::drop_frame_locals(fr.locals);
                     UNWINDING.with(|c| c.set(false));
                     match frames.last_mut() {

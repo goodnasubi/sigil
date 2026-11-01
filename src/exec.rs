@@ -134,6 +134,9 @@ pub struct Options {
     pub capture_console: bool,
     /// `trust base` の宣言を許すモジュール名（`--trust-base`。ADR 0016）。
     pub trust_base: Vec<String>,
+    /// タスクの実行順を乱数の種で攪拌する（テスト用の実行環境。ADR 0007 決定 4、ADR 0026 決定 6）。
+    /// `None`（既定）のときは決定的な FIFO で実行する。
+    pub schedule_seed: Option<u64>,
 }
 
 impl Options {
@@ -154,6 +157,7 @@ impl Default for Options {
             fs_files: None,
             capture_console: false,
             trust_base: Vec::new(),
+            schedule_seed: None,
         }
     }
 }

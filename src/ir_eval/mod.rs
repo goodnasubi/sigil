@@ -40,6 +40,8 @@ struct M<'p> {
     opt: usize,
     res: usize,
     io: usize,
+    /// 確保済みチャンクの境界情報 (番地 -> (バイトサイズ, アライメント))
+    chunks: BTreeMap<usize, (usize, usize)>,
 }
 
 impl<'p> M<'p> {
@@ -446,6 +448,7 @@ fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Ou
         res: find("Result"),
         io: find("IoError"),
         canon,
+        chunks: BTreeMap::new(),
     };
     let result = m.run_func(program.entry, argv, 0);
     let output = std::mem::take(&mut m.out);

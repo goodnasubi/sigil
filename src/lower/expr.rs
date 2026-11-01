@@ -525,6 +525,8 @@ impl<'a> L<'a> {
             ir::Ty::Float => "Float".into(),
             ir::Ty::Bool => "Bool".into(),
             ir::Ty::Str => "String".into(),
+            ir::Ty::Bytes => "Bytes".into(),
+            ir::Ty::Addr => "Addr".into(),
             ir::Ty::List(_) => "List".into(),
             ir::Ty::Path => "Path".into(),
             ir::Ty::ParseError => "ParseError".into(),
@@ -660,11 +662,37 @@ impl<'a> L<'a> {
             }
             ResKind::Namespaced => {
                 let ops = self.args_of(args)?;
-                self.core_only = false;
                 let b = match r.name.as_str() {
-                    "console.log" => Builtin::ConsoleLog,
-                    "fs.read" => Builtin::FsRead,
-                    "fs.write" => Builtin::FsWrite,
+                    "console.log" => {
+                        self.core_only = false;
+                        Builtin::ConsoleLog
+                    }
+                    "fs.read" => {
+                        self.core_only = false;
+                        Builtin::FsRead
+                    }
+                    "fs.write" => {
+                        self.core_only = false;
+                        Builtin::FsWrite
+                    }
+                    "raw.addr_null" => Builtin::RawAddrNull,
+                    "raw.addr_to_int" => Builtin::RawAddrToInt,
+                    "raw.int_to_addr" => Builtin::RawIntToAddr,
+                    "raw.offset" => Builtin::RawOffset,
+                    "raw.load_u8" => Builtin::RawLoadU8,
+                    "raw.store_u8" => Builtin::RawStoreU8,
+                    "raw.load_i64" => Builtin::RawLoadI64,
+                    "raw.store_i64" => Builtin::RawStoreI64,
+                    "raw.load_addr" => Builtin::RawLoadAddr,
+                    "raw.store_addr" => Builtin::RawStoreAddr,
+                    "raw.copy" => Builtin::RawCopy,
+                    "raw.set" => Builtin::RawSet,
+                    "raw.alloc" => Builtin::RawAlloc,
+                    "raw.free" => Builtin::RawFree,
+                    "raw.syscall" => {
+                        self.core_only = false;
+                        Builtin::RawSyscall
+                    }
                     n => return bail(format!("名前空間の関数 {n}")),
                 };
                 Ok(self.emit_call(Callee::Builtin(b), ops, ret))

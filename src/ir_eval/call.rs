@@ -743,7 +743,306 @@ impl<'p> M<'p> {
                 self.after_deep(loc)?;
                 Val::Bool(r)
             }
+            RawAddrNull => Val::Addr(0),
+            RawAddrToInt => {
+                let v = self.scalar(locals, &args[0]);
+                match v {
+                    Val::Addr(a) => Val::Int(a as i64),
+                    _ => Val::Int(0),
+                }
+            }
+            RawIntToAddr => {
+                let v = self.read_int(locals, &args[0]);
+                if v < 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.int_to_addr: v >= 0"),
+                    ));
+                }
+                Val::Addr(v as usize)
+            }
+            RawOffset => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let n = self.read_int(locals, &args[1]);
+                let new_a = if n >= 0 {
+                    a.checked_add(n as usize).unwrap_or(a)
+                } else {
+                    a.checked_sub((-n) as usize).unwrap_or(a)
+                };
+                Val::Addr(new_a)
+            }
+            RawLoadU8 => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                self.check_raw_access(a, 1, loc)?;
+                let byte = unsafe { *(a as *const u8) };
+                Val::Int(byte as i64)
+            }
+            RawStoreU8 => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let v = self.read_int(locals, &args[1]);
+                if !(0..=255).contains(&v) {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.store_u8: 0 <= v <= 255"),
+                    ));
+                }
+                self.check_raw_access(a, 1, loc)?;
+                unsafe { *(a as *mut u8) = v as u8 };
+                Val::Unit
+            }
+            RawLoadI64 => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                if a % 8 != 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.load_i64: 8バイト境界違反"),
+                    ));
+                }
+                self.check_raw_access(a, 8, loc)?;
+                let w = unsafe { *(a as *const i64) };
+                Val::Int(w)
+            }
+            RawStoreI64 => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let v = self.read_int(locals, &args[1]);
+                if a % 8 != 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.store_i64: 8バイト境界違反"),
+                    ));
+                }
+                self.check_raw_access(a, 8, loc)?;
+                unsafe { *(a as *mut i64) = v };
+                Val::Unit
+            }
+            RawLoadAddr => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                if a % 8 != 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.load_addr: 8バイト境界違反"),
+                    ));
+                }
+                self.check_raw_access(a, 8, loc)?;
+                let w = unsafe { *(a as *const usize) };
+                Val::Addr(w)
+            }
+            RawStoreAddr => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let v = match self.scalar(locals, &args[1]) {
+                    Val::Addr(v) => v,
+                    _ => 0,
+                };
+                if a % 8 != 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.store_addr: 8バイト境界違反"),
+                    ));
+                }
+                self.check_raw_access(a, 8, loc)?;
+                unsafe { *(a as *mut usize) = v };
+                Val::Unit
+            }
+            RawCopy => {
+                let dst = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let src = match self.scalar(locals, &args[1]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let n = self.read_int(locals, &args[2]);
+                if n < 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.copy: n >= 0"),
+                    ));
+                }
+                let nu = n as usize;
+                if nu > 0 {
+                    self.check_raw_access(dst, nu, loc)?;
+                    self.check_raw_access(src, nu, loc)?;
+                    unsafe {
+                        std::ptr::copy(src as *const u8, dst as *mut u8, nu);
+                    }
+                }
+                Val::Unit
+            }
+            RawSet => {
+                let dst = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let byte = self.read_int(locals, &args[1]);
+                let n = self.read_int(locals, &args[2]);
+                if n < 0 || !(0..=255).contains(&byte) {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.set: n >= 0 && 0 <= byte <= 255"),
+                    ));
+                }
+                let nu = n as usize;
+                if nu > 0 {
+                    self.check_raw_access(dst, nu, loc)?;
+                    unsafe {
+                        std::ptr::write_bytes(dst as *mut u8, byte as u8, nu);
+                    }
+                }
+                Val::Unit
+            }
+            RawAlloc => {
+                let size = self.read_int(locals, &args[0]);
+                let align = self.read_int(locals, &args[1]);
+                if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.alloc: size > 0 && align は 2の累乗"),
+                    ));
+                }
+                let su = size as usize;
+                let au = align as usize;
+                let layout = std::alloc::Layout::from_size_align(su, au).map_err(|_| {
+                    self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.alloc: 不正なレイアウト"),
+                    )
+                })?;
+                let ptr = unsafe { std::alloc::alloc(layout) };
+                if ptr.is_null() {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::Overflow),
+                        Some("raw.alloc: メモリ枯渇"),
+                    ));
+                }
+                let addr = ptr as usize;
+                self.chunks.insert(addr, (su, au));
+                Val::Addr(addr)
+            }
+            RawFree => {
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let size = self.read_int(locals, &args[1]);
+                let align = self.read_int(locals, &args[2]);
+                if a == 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.free: ヌル番地解放"),
+                    ));
+                }
+                let Some(&(stored_sz, stored_al)) = self.chunks.get(&a) else {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.free: 二重解放または未確保の番地"),
+                    ));
+                };
+                if stored_sz != size as usize || stored_al != align as usize {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.free: 確保時と異なるサイズまたはアライメント"),
+                    ));
+                }
+                self.chunks.remove(&a);
+                let layout =
+                    unsafe { std::alloc::Layout::from_size_align_unchecked(stored_sz, stored_al) };
+                unsafe { std::alloc::dealloc(a as *mut u8, layout) };
+                Val::Unit
+            }
+            RawSyscall => {
+                let n = self.read_int(locals, &args[0]);
+                let a0 = self.read_int(locals, &args[1]);
+                let a1 = self.read_int(locals, &args[2]);
+                let a2 = self.read_int(locals, &args[3]);
+                let a3 = self.read_int(locals, &args[4]);
+                let a4 = self.read_int(locals, &args[5]);
+                let a5 = self.read_int(locals, &args[6]);
+                let ret: i64;
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+                unsafe {
+                    std::arch::asm!(
+                        "syscall",
+                        inlateout("rax") n => ret,
+                        in("rdi") a0,
+                        in("rsi") a1,
+                        in("rdx") a2,
+                        in("r10") a3,
+                        in("r8") a4,
+                        in("r9") a5,
+                        lateout("rcx") _,
+                        lateout("r11") _,
+                        options(nostack)
+                    );
+                }
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+                {
+                    let _ = (n, a0, a1, a2, a3, a4, a5);
+                    ret = -1;
+                }
+                Val::Int(ret)
+            }
         })
+    }
+
+    /// 生きた確保領域内へのアクセスであることを検証する。
+    fn check_raw_access(&self, addr: usize, len: usize, loc: StopId) -> Result<(), E> {
+        if addr == 0 {
+            return Err(self.stop_at(
+                loc,
+                Some(StopKind::StdRequiresViolated),
+                Some("ヌル番地へのアクセス"),
+            ));
+        }
+        let end = addr.checked_add(len).ok_or_else(|| {
+            self.stop_at(loc, Some(StopKind::Overflow), Some("番地オーバーフロー"))
+        })?;
+        for (&start, &(sz, _)) in &self.chunks {
+            let chunk_end = start.saturating_add(sz);
+            if addr >= start && end <= chunk_end {
+                return Ok(());
+            }
+        }
+        Err(self.stop_at(
+            loc,
+            Some(StopKind::StdRequiresViolated),
+            Some("未確保または範囲外の番地アクセス"),
+        ))
     }
 
     /// 文字列・パスの中身（参照はたどる）。

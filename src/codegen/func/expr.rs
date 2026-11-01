@@ -251,7 +251,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (v, _) = self.val(op);
                 let t = strip(&norm(ty));
                 match t {
-                    Ty::Int | Ty::Float | Ty::Bool | Ty::Unit | Ty::ParseError => v,
+                    Ty::Int | Ty::Float | Ty::Bool | Ty::Unit | Ty::Addr | Ty::ParseError => v,
                     Ty::Str | Ty::Path => self.rt("str_clone", &[v]),
                     _ => {
                         let d = self.desc_addr(&t);
@@ -344,7 +344,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 BinOp::BitXor => self.b.ins().bxor(x, y),
                 _ => unreachable!(),
             },
-            Ty::Int | Ty::Bool | Ty::Unit => {
+            Ty::Int | Ty::Bool | Ty::Addr | Ty::Unit => {
                 let cc = match op {
                     BinOp::Eq => IntCC::Equal,
                     BinOp::Ne => IntCC::NotEqual,

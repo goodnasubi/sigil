@@ -22,6 +22,9 @@ Sigil は、AI がコードを書き、人間は仕様だけをレビューす�
    - Issue を選ぶ前、および自分の PR がマージされて Issue がクローズされた直後に、バックログ同期スクリプトを実行して後続 Issue の `blocked` 解除と新規起票を行う:
      - Windows (PowerShell): `pwsh -File scripts/sync-issues.ps1`
      - Linux / Cloud (Bash): `bash scripts/sync-issues.sh`
+   - **同期の実行者は一意に決める**: その同期で解放・起票される前提 Issue を完了させた PR の作成者だけが実行する。他のエージェントは、同じタイミングでは同期を実行しない（二重起票の防止。2026-11-01 の #138 / #139 重複の再発防止）。
+   - 起票は必ずスクリプト経由で行う。スクリプトが使えない環境で手動起票する場合も、本文の末尾に `<!-- backlog-id: <spawn_rules の id> -->` を必ず含める（スクリプトの重複判定はこの目印で行われる。目印のない Issue は重複と検知できない）。
+   - それでも同じ `spawn_rules` から Issue が重複した場合は、**番号の小さい方を正**とし、大きい方を作ったエージェントが、正の Issue へのリンクをコメントして自分でクローズする。
 2. **タスクの確保（排他ロック）**:
    - 全エージェントが同じ GitHub アカウントを共有するため、**`agent:<agent>` ラベルを排他ロックとして使う**（`<agent>` は `claude` / `gemini` / `muse` / `codex`）。
    - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認する。
@@ -31,6 +34,7 @@ Sigil は、AI がコードを書き、人間は仕様だけをレビューす�
      gh issue edit <番号> --add-label "agent:<agent>"
      gh issue comment <番号> --body "着手: `<agent>/<lane>/<番号>-<slug>`"
      ```
+   - 2 体が同じ Issue にほぼ同時にラベルを付けてしまった場合は、**着手コメントの投稿時刻が早い方を正**とし、遅い方は自分のラベルを外して手を引く。
    - PR 本文には必ず `Closes #<番号>` を含め、PR マージ時に Issue が自動クローズされるようにする。
 3. 最新の `main` から、ブランチ名 `<agent>/<lane>/<issue番号>-<slug>` で作る。
 4. ローカルでは、独立した作業ツリーを作る。

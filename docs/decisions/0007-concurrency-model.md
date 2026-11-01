@@ -232,9 +232,9 @@ ADR 0004 の規則 7 の延長として、テスト用の実行環境では実�
 | 3 | `tests/task_traits_4_2a.rs`（借用・`Sendable` でない値の捕獲がエラー） | 完了 |
 | 4・5・6 | `tests/task_api_effects_4_2c.rs` | 完了 |
 | 7 | `tests/test_env_virtual_clock_4_2e.rs` | 完了 |
-| 8 | `tests/request_isolation_4_2f.rs` ほか（借用の引数を持つ中断する関数が検査を通る） | 完了 |
+| 8 | `tests/request_isolation_4_2f.rs`・`tests/examples_concurrency_4_2g.rs`（借用の引数 `&Lock<Int>` を持つ中断する関数が検査を通り、実行できる） | 完了 |
 | 9 | `tests/test_env_virtual_clock_4_2e.rs`（取り消し時の破棄の順序） | 完了 |
-| 11 | 原子的な値を待つタスクと書くタスクの組は、サンプルに書けなかった（`Atomic` の `clone` は深い複製で、タスク間で同じ値を共有できない） | 未完了。別の Issue で扱う |
+| 11 | 原子的な値を待つタスクと書くタスクの組は、サンプルに書けなかった（`Atomic` の `clone` は深い複製で、タスク間で同じ値を共有できない） | 未完了。`Atomic` の共有は [#190](https://github.com/goodnasubi/sigil/issues/190)、`task.yield` だけを繰り返す無進行の検出は [#191](https://github.com/goodnasubi/sigil/issues/191) で扱う |
 
 条件の見直し（ADR 0006 の根拠の限界で求めた確認）: 11 条件はすべて必要だった。条件 6 は「`state` の下位に加える」ではなく別のカテゴリにしたので、下位カテゴリを加えられる実装は他の用途のための余地として残る。漏れていた条件として、次の 1 つを ADR 0006 に追加する。
 

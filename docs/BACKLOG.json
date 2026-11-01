@@ -14,6 +14,36 @@
       "issue": 113,
       "depends_on": [112],
       "description": "PR 2-4d 型検査 (#112) 完了後に PR 2-4d 実行・ネイティブ (#113) の blocked を解除"
+    },
+    {
+      "issue": 161,
+      "depends_on": [160],
+      "description": "PR 4-2a (#160) 完了後に PR 4-2b (#161) の blocked を解除"
+    },
+    {
+      "issue": 162,
+      "depends_on": [160],
+      "description": "PR 4-2a (#160) 完了後に PR 4-2c (#162) の blocked を解除"
+    },
+    {
+      "issue": 163,
+      "depends_on": [162],
+      "description": "PR 4-2c (#162) 完了後に PR 4-2d (#163) の blocked を解除"
+    },
+    {
+      "issue": 164,
+      "depends_on": [163],
+      "description": "PR 4-2d (#163) 完了後に PR 4-2e (#164) の blocked を解除"
+    },
+    {
+      "issue": 165,
+      "depends_on": [163],
+      "description": "PR 4-2d (#163) 完了後に PR 4-2f (#165) の blocked を解除"
+    },
+    {
+      "issue": 166,
+      "depends_on": [164, 165],
+      "description": "PR 4-2e (#164) と PR 4-2f (#165) の完了後に PR 4-2g (#166) の blocked を解除"
     }
   ],
   "spawn_rules": [
@@ -95,6 +125,55 @@
       "title": "PR 4-1 (ADR): 並行処理 P1-a（SIR 評価器）の ADR を起草する",
       "labels": ["lane:E", "needs-human"],
       "body": "## 背景・目的\n\n[ADR 0018](docs/decisions/0018-p1-scope.md) の段階 4（並行処理 P1-a、SIR の評価器）の最初の PR として、P1-a の設計を定める ADR を起草します。前提の段階 3（PR 3-7）は完了済みです。\n\nADR 0018 の PR 分け表では、PR 4-1 の範囲は次の 3 点です。\n\n- `Sendable`・`Shareable` を手で付ける構文\n- `task` の API\n- 要求の隔離の細目（1 件の要求の失敗を隔離する。ADR 0018 決定 2）\n\n並行処理のモデル自体は [ADR 0007](docs/decisions/0007-concurrency-model.md) で決定済みであり、本 ADR はその P1-a の列（評価器での実行）を実装可能な細目に落とします。あわせて、PR 4-2（P1-a の実装）の細かい分け方を本 ADR で決めます。\n\n## 含めるべき論点\n\n- ADR 0007 の決定 1〜6 のうち、P1-a で評価器に載せる範囲と載せない範囲\n- `Sendable`・`Shareable` の手付け構文と、検査器の扱い（自動判定との関係）\n- `task` の API（生成・合流・取り消し）と効果との関係\n- 要求の隔離: 評価器での失敗（パニック・契約違反）の伝播範囲と、他タスクへの影響の遮断\n- 中断点をまたぐ借用と取り消し時の破棄（ADR 0007 決定 4）の評価器での実現方法\n- 人間の判断が要る点（ADR 0018 の決まりにより、判断が出るまで PR 4-2 を始めない）\n\n## 完了条件\n\n- [ ] `docs/decisions/0026-*.md` の起草（実装は含めない）と、`docs/decisions/README.md` への番号予約\n- [ ] BACKLOG.json への spawn ルール登録（`pr-4-1-adr-p1a-concurrency`。本 Issue はその目印つきで手動起票した）\n"
+    },
+    {
+      "id": "pr-4-2a-traits-derive-spawn-check",
+      "depends_on_ids": ["pr-4-1-adr-p1a-concurrency"],
+      "title": "PR 4-2a: 性質の導出の固定と起動の検査（ADR 0026）",
+      "labels": ["lane:B1", "lane:B2", "lane:E"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md)（PR 4-1）の PR 分割計画に基づく PR 4-2a。段階 4（並行処理 P1-a）の実装の土台として、性質の導出を固定し、`task` まわりの前置き型と `spawn` の検査を実装します。\n\n## 内容\n\n- ADR 0007 決定 2 の表の各型について、`Sendable`・`Shareable` の導出結果をテストで固定する\n- `Scope`・`TaskHandle`・`Sender`・`Receiver`・`SyncShared`・`Lock`・`LockGuard`・`LockBroken`・`Atomic` の前置き型を登録し、ADR 0026 決定 3 の性質の導出を実装する\n- `spawn` の検査を実装する（借用の捕獲の禁止、捕獲した値と戻り値の `Sendable` の検査。エラーの種類は新設し、`src/error.rs` の所定の手順で加える）\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-4-2b-properties-syntax",
+      "depends_on_ids": ["pr-4-2a-traits-derive-spawn-check"],
+      "title": "PR 4-2b: Sendable・Shareable を手で付ける構文（ADR 0026）",
+      "labels": ["lane:A1", "lane:A2", "lane:B2", "needs-human"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) 決定 2 の実装（PR 4-2b）。`Sendable`・`Shareable` を手で付ける `properties` 項目を実装します。前提は PR 4-2a。\n\n所有者の判断（2026-11-01、Issue #158 で記録済み）: 適用範囲は信頼基盤のモジュールの型だけに限ること、手付けは `sigil spec` の出力に表示すること。\n\n## 内容\n\n- `properties` 項目の構文・整形・`sigil spec` の表示\n- 検査（信頼基盤のモジュールの型だけ、前提の文の必須、書かれた性質については自動導出を置き換える）\n- 標準ライブラリの `String`・`List`・`Map` への手付けを含む\n\n仕様の変更（`sigil spec` の出力）を含むため、人間のレビュー必須です。\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-4-2c-task-api-effects",
+      "depends_on_ids": ["pr-4-2a-traits-derive-spawn-check"],
+      "title": "PR 4-2c: task の API の登録と効果の検査（ADR 0026）",
+      "labels": ["lane:B5", "lane:D2"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) 決定 3 の実装（PR 4-2c）。`task` の API を標準ライブラリに登録し、効果の検査が働くようにします。前提は PR 4-2a。\n\n## 内容\n\n- 決定 3 の部品（`task.scope`、`Scope.spawn`、`TaskHandle.join`、`all_ok`、`race`、`timeout`、`sleep`、`yield`、チャネル、`SyncShared`・`Lock`・`Atomic`）を標準ライブラリに登録する\n- 効果の推論と完全一致が働くようにする\n- 一覧への `of(gs)` の拡張と、合わせて ADR 0004 規則 4 への追記\n- ADR 0007 決定 6 の条件 4・5・6 の P1-a の確かめを含む\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-4-2d-eval-tasks",
+      "depends_on_ids": ["pr-4-2c-task-api-effects"],
+      "title": "PR 4-2d: 評価器のタスク実行（ADR 0026）",
+      "labels": ["lane:C1"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) 決定 5・6 の実装（PR 4-2d）。SIR 評価器でタスクを実行できるようにします。前提は PR 4-2c。\n\n## 内容\n\n- 評価器の呼び出しを明示的な枠の積み重ねに書き換える（意味を変えない。書き換えの前後で全テストの結果が一致することが完了基準）\n- スケジューラ（決定 6：決定的 FIFO）、範囲・起動・合流・取り消しと破棄の順序（決定 5）を実装する\n- ADR 0007 決定 6 の条件 9・11 の P1-a の確かめを含む\n- 既存のテスト全件と突き合わせの件数が変わらないこと\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-4-2e-test-env-clock",
+      "depends_on_ids": ["pr-4-2d-eval-tasks"],
+      "title": "PR 4-2e: テスト用の実行環境と仮想の時計（ADR 0026）",
+      "labels": ["lane:C1", "lane:D2"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) の PR 4-2e。テスト用の実行環境と仮想の時計を実装します。前提は PR 4-2d。\n\n所有者の判断（2026-11-01、Issue #158 で記録済み）: 評価器（`sigil run`）の時間の既定は仮想時計とする。\n\n## 内容\n\n- 実行順の攪拌（種による差し替え）\n- 仮想の時計、`sleep`・`timeout` の実装\n- ADR 0007 決定 6 の条件 7 の P1-a の確かめを含む\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-4-2f-request-isolation",
+      "depends_on_ids": ["pr-4-2d-eval-tasks"],
+      "title": "PR 4-2f: 要求の隔離（評価器）（ADR 0026）",
+      "labels": ["lane:C1", "lane:B5"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) 決定 4 の実装（PR 4-2f）。評価器で要求の隔離を実現します。前提は PR 4-2d。\n\n## 内容\n\n- ルートタスク単位の異常停止の捕捉（他タスクを止めない）\n- 壊れた `Lock` の伝播（待機者を起こして `Err(LockBroken)`）\n- 確保器の枠の中の停止は全体停止、停止の経路での漏れのテスト（`SIGIL_RT_LIVE` と破棄の記録）\n- 合わせて ADR 0013 への読み替えの注記（異常停止の破棄の範囲）\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-4-2g-examples-record",
+      "depends_on_ids": ["pr-4-2e-test-env-clock", "pr-4-2f-request-isolation"],
+      "title": "PR 4-2g: サンプルと記録（ADR 0026）",
+      "labels": ["lane:E"],
+      "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) の PR 4-2g（段階 4 の締め）。前提は PR 4-2f までの全 PR。\n\n## 内容\n\n- `examples/` に並行処理のサンプルを加える（ADR 0007 が予告した並行処理サンプル。番号は空きを使う）\n- ADR 0007 決定 6 の条件の P1-a の列の完了を記録する\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
     }
   ]
 }

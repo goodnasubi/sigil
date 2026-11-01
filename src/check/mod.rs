@@ -135,7 +135,9 @@ mod util;
 
 pub(crate) use types::Ty;
 use types::{args_named, show, substitute, Prop, Sig, TypeDef};
-use util::{contains_ref, contains_ref_outside_fn, place_path, place_root, strip_paren};
+use util::{
+    contains_ref, contains_ref_outside_fn, is_fn_or_fn_list, place_path, place_root, strip_paren,
+};
 
 /// トレイトの宣言（ADR 0022 決定 2）。関数のシグネチャは `Self` を `Param("Self")` として持つ。
 #[derive(Debug, Clone)]
@@ -245,6 +247,8 @@ enum Pos {
     Ret,
     /// 戻り値の一番外の `Option<…>` の型引数。参照を書ける。
     RetOpt,
+    /// 引数の一番外の `List<…>` の型引数（`task.all_ok`・`task.race` の `List<fn(...)>` を許可）。
+    ParamFnList,
     /// 篩型の基の型。参照は書けるが、そのあと `RefinementBase` で弾く。
     Base,
     /// 関数の型を置ける位置（構造体のフィールド・列挙型の値の中身・`let` の型注釈。

@@ -62,6 +62,8 @@ impl Ck {
                     _ => {
                         let apos = if pos == Pos::Ret && n == "Option" {
                             Pos::RetOpt
+                        } else if pos == Pos::Param && n == "List" {
+                            Pos::ParamFnList
                         } else {
                             Pos::Other
                         };
@@ -75,7 +77,7 @@ impl Ck {
                 })
             }
             Type::Ref { mutable, inner } => {
-                if pos == Pos::Other || pos == Pos::Placed {
+                if pos == Pos::Other || pos == Pos::Placed || pos == Pos::ParamFnList {
                     return self.err(
                         ErrorKind::RefTypePosition,
                         "参照 `&T`・`&mut T` を書けるのは、引数の型の一番外、関数の型の引数の一番外、戻り値の型の一番外と一番外の `Option<…>` の中だけ（構造体のフィールド・列挙子の値・型引数・`let` の注釈には書けない。ADR 0012 の決定 1）",
@@ -101,7 +103,7 @@ impl Ck {
                 // それ以外の位置（型引数・組の中・関数の型の引数など）には置けない
                 // （ADR 0022 決定 3）。
                 let slot = match pos {
-                    Pos::Param => {
+                    Pos::Param | Pos::ParamFnList => {
                         if effects.is_some() {
                             return self.err(
                                 ErrorKind::FnTypePosition,

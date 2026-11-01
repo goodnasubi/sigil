@@ -4,7 +4,7 @@ use crate::ast::*;
 use crate::error::{Error, ErrorKind};
 
 use super::types::{show, Sig, Ty, TypeDef};
-use super::util::block_returns;
+use super::util::{block_returns, is_fn_or_fn_list};
 use super::{fn_key, Atom, Ck, EffTerm, FnReport, Local, R};
 
 impl Ck {
@@ -147,7 +147,7 @@ impl Ck {
         self.fn_params = sig
             .params
             .iter()
-            .filter(|(_, t)| matches!(t, Ty::Fn(..)))
+            .filter(|(_, t)| is_fn_or_fn_list(t))
             .map(|(n, _)| n.clone())
             .collect();
         self.fn_borrowed = self.fn_params.iter().cloned().collect();

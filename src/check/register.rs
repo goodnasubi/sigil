@@ -246,21 +246,94 @@ impl Ck {
                 }
             }
         }
-        // 並行処理の最小登録（ADR 0026 の PR 4-2a）。`spawn` の検査が成立する範囲だけを
-        // 先に登録する。API の部品全体の登録は PR 4-2c の担当で、`task.scope` は含めない
-        // （検査は `&Scope` を受け手として成立する）。標準ライブラリの表には置かない:
-        // 核の行の効果は `bare` で使えるものだけという不変条件（stdlib の単体テスト）が
-        // あり、`task.*` の効果と衝突するため、検査器の側で登録する。
-        let file = self.std_parse(&crate::stdlib::impl_source(
-            crate::stdlib::Layer::Core,
-            "Scope",
-            &[(
-                "spawn<T>(self: &Scope, g: fn() -> T) -> TaskHandle<T>",
-                "task.spawn, of(g)",
-            )],
-        ))?;
-        if let Some(Item::Impl(i)) = file.items.first() {
-            self.register_impl(i, true)?;
+        // 並行処理の API 部品の登録（ADR 0026 決定 3、PR 4-2c）。
+        // 標準ライブラリの表には置かない: 核の行の効果は `bare` で使えるものだけという
+        // 不変条件（stdlib の単体テスト）があり、`task.*` の効果と衝突するため、検査器の側で登録する。
+        let task_fns: &[(&str, &str)] = &[
+            ("scope<T>(f: fn(&Scope) -> T) -> T", "task.suspend, of(f)"),
+            (
+                "all_ok<T, E>(gs: List<fn() -> Result<T, E>>) -> Result<List<T>, E>",
+                "task.spawn, task.suspend, of(gs)",
+            ),
+            (
+                "race<T>(gs: List<fn() -> T>) -> T",
+                "task.spawn, task.suspend, of(gs)",
+            ),
+            (
+                "timeout<T>(millis: Int, g: fn() -> T) -> Option<T>",
+                "clock, task.spawn, task.suspend, of(g)",
+            ),
+            ("sleep(millis: Int)", "clock, task.suspend"),
+            ("yield()", "task.suspend"),
+            ("channel<T>() -> (Sender<T>, Receiver<T>)", "none"),
+        ];
+        for (sig, effects) in task_fns {
+            let (name, s) = self.std_sig(&crate::stdlib::free_source(
+                crate::stdlib::Layer::Core,
+                sig,
+                effects,
+            ))?;
+            self.fns.insert(format!("task.{name}"), s);
+        }
+
+        let task_impls: &[(&str, &[(&str, &str)])] = &[
+            (
+                "Scope",
+                &[(
+                    "spawn<T>(self: &Scope, g: fn() -> T) -> TaskHandle<T>",
+                    "task.spawn, of(g)",
+                )],
+            ),
+            (
+                "<T> TaskHandle<T>",
+                &[("join(self: TaskHandle<T>) -> T", "task.suspend")],
+            ),
+            (
+                "<T> Sender<T>",
+                &[(
+                    "send(self: &Sender<T>, value: T)",
+                    "task.share, task.suspend",
+                )],
+            ),
+            (
+                "<T> Receiver<T>",
+                &[("recv(self: &Receiver<T>) -> T", "task.share, task.suspend")],
+            ),
+            (
+                "<T> SyncShared<T>",
+                &[("new(value: T) -> SyncShared<T>", "none")],
+            ),
+            (
+                "<T: Copyable> SyncShared<T>",
+                &[("get(self: &SyncShared<T>) -> T", "task.share")],
+            ),
+            ("<T> Lock<T>", &[("new(value: T) -> Lock<T>", "none")]),
+            (
+                "<T> Lock<T>",
+                &[(
+                    "acquire(self: &Lock<T>) -> Result<LockGuard<T>, LockBroken>",
+                    "task.share, task.suspend",
+                )],
+            ),
+            ("<T> Atomic<T>", &[("new(value: T) -> Atomic<T>", "none")]),
+            (
+                "<T: Copyable> Atomic<T>",
+                &[("load(self: &Atomic<T>) -> T", "task.share, task.suspend")],
+            ),
+            (
+                "<T> Atomic<T>",
+                &[("store(self: &Atomic<T>, value: T)", "task.share")],
+            ),
+        ];
+        for (head, fns) in task_impls {
+            let file = self.std_parse(&crate::stdlib::impl_source(
+                crate::stdlib::Layer::Core,
+                head,
+                fns,
+            ))?;
+            if let Some(Item::Impl(i)) = file.items.first() {
+                self.register_impl(i, true)?;
+            }
         }
         self.core = core;
         self.span = saved;

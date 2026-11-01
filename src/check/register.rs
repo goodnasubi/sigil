@@ -246,6 +246,22 @@ impl Ck {
                 }
             }
         }
+        // 並行処理の最小登録（ADR 0026 の PR 4-2a）。`spawn` の検査が成立する範囲だけを
+        // 先に登録する。API の部品全体の登録は PR 4-2c の担当で、`task.scope` は含めない
+        // （検査は `&Scope` を受け手として成立する）。標準ライブラリの表には置かない:
+        // 核の行の効果は `bare` で使えるものだけという不変条件（stdlib の単体テスト）が
+        // あり、`task.*` の効果と衝突するため、検査器の側で登録する。
+        let file = self.std_parse(&crate::stdlib::impl_source(
+            crate::stdlib::Layer::Core,
+            "Scope",
+            &[(
+                "spawn<T>(self: &Scope, g: fn() -> T) -> TaskHandle<T>",
+                "task.spawn, of(g)",
+            )],
+        ))?;
+        if let Some(Item::Impl(i)) = file.items.first() {
+            self.register_impl(i, true)?;
+        }
         self.core = core;
         self.span = saved;
         Ok(())

@@ -6,7 +6,9 @@
 //! 時計は仮想（実時間では待たない）。
 
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::exec::StopKind;
@@ -60,6 +62,8 @@ struct Task {
     waiting_scope: Option<usize>,
     /// このタスクが属するルートタスクの番号（ルートタスク自身は自分）。
     root: usize,
+    /// 直近の `task.yield` での（枠の指紋, 共有の状態の版, 同じ状態が 2 回続いたか）。
+    spin: Option<(u64, u64, bool)>,
 }
 
 #[derive(Default)]
@@ -120,14 +124,81 @@ mod alloc_tests {
     }
 }
 
-/// 進行なしに続けて `task.yield` が起きてよい回数の上限（暫定。ライブロックの検出用）。
+/// `Val` の内容の指紋を `h` に足す。内容を完全には辿れない値（`LockGuard` など）と深すぎる値では `false`。
 ///
-/// 全タスクが `task.yield` と読み出し（`Atomic.load`・`SyncShared.get`）だけを繰り返し、共有の値を
-/// 変える操作もタスクの完了も起きない状態は、止まらずデッドロックとしても検出されない（Issue #191）。
-/// 時計の進むのを待つタスク（`task.sleep`）がいない場合に限り、この回数を超えたらデッドロックと同じ
-/// 異常停止にする。値は、正常な協調ループ（公平のための `yield`）が超えない大きさで、かつ
-/// 検出が数秒以内に終わる大きさとして選んだ暫定値であり、仕様ではない。
-const MAX_IDLE_YIELDS: usize = 1_000_000;
+/// 参照・共有の値は、指す先の場所ではなく中身で指紋を取る（呼び出しのたびに作り直される一時の場所に
+/// 左右されないため）。
+fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32) -> bool {
+    if d > 12 {
+        return false;
+    }
+    match v {
+        Val::Empty => 0u8.hash(h),
+        Val::Unit => 1u8.hash(h),
+        Val::Int(n) => (2u8, *n).hash(h),
+        Val::Float(x) => (3u8, x.to_bits()).hash(h),
+        Val::Bool(b) => (4u8, *b).hash(h),
+        Val::Str(x) => (5u8, &**x).hash(h),
+        Val::Path(x) => (6u8, &**x).hash(h),
+        Val::ParseError => 7u8.hash(h),
+        Val::Fn(f) => (8u8, *f).hash(h),
+        Val::Addr(a) => (9u8, *a).hash(h),
+        Val::Agg(a) => {
+            match a.tag {
+                Tag::Tuple => (10u8, 0usize, 0usize).hash(h),
+                Tag::List => (11u8, 0, 0).hash(h),
+                Tag::Struct(i) => (12u8, i, 0).hash(h),
+                Tag::Variant(i, j) => (13u8, i, j).hash(h),
+            }
+            a.f.len().hash(h);
+            return a.f.iter().all(|x| fp_val(x, h, d + 1));
+        }
+        Val::Ref(p) => {
+            14u8.hash(h);
+            return p.with(|t| fp_val(t, h, d + 1));
+        }
+        Val::Closure(c) => {
+            (15u8, c.func).hash(h);
+            return with_val(&c.env, &[], |t| fp_val(t, h, d + 1));
+        }
+        Val::Cell(c) => {
+            16u8.hash(h);
+            return match c.try_borrow() {
+                Ok(b) => fp_val(&b, h, d + 1),
+                Err(_) => false,
+            };
+        }
+        Val::Shared(x) => {
+            17u8.hash(h);
+            return fp_val(x, h, d + 1);
+        }
+        Val::Bytes(b) => match b.try_borrow() {
+            Ok(b) => (18u8, &*b).hash(h),
+            Err(_) => return false,
+        },
+        Val::Guard(_) => return false,
+    }
+    true
+}
+
+/// タスクの枠の積み重ね全体の指紋。辿れない値があれば `None`（検出の対象にしない）。
+fn fp_frames(frames: &[Frame]) -> Option<u64> {
+    let mut h = DefaultHasher::new();
+    for f in frames {
+        (f.fid, f.bb, f.locals.len()).hash(&mut h);
+        for sl in &f.locals {
+            match sl.try_borrow() {
+                Ok(v) => {
+                    if !fp_val(&v, &mut h, 0) {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+    Some(h.finish())
+}
 
 #[derive(Clone, Copy)]
 enum Wake {
@@ -153,8 +224,10 @@ pub(super) struct Sched {
     live: usize,
     max_depth: usize,
     rng: Option<u64>,
-    /// 進行（`task.yield` と読み出し以外のタスク操作、タスクの完了）なしに続けて起きた `task.yield` の回数。
-    idle_yields: usize,
+    /// 共有の状態の版。`task.yield` と読み出し以外のタスク操作・起床・タスクの完了・ルートタスクの停止で進む。
+    ver: u64,
+    /// 直前の実行が `task.yield` で中断した。
+    yielded: bool,
 }
 
 impl Sched {
@@ -176,7 +249,8 @@ impl Sched {
             // 枠 1 つを約 1 KiB と見なして、深さの上限を決める（スタックの枯渇の判定）。
             max_depth: (stack_bytes / 1024).max(64),
             rng: schedule_seed,
-            idle_yields: 0,
+            ver: 0,
+            yielded: false,
         }
     }
 
@@ -659,6 +733,7 @@ impl<'p> M<'p> {
         }
         task.state = State::Ready;
         self.sch.ready.push_back(t);
+        self.sch.ver += 1;
     }
 
     fn spawn_in_scope(
@@ -682,6 +757,7 @@ impl<'p> M<'p> {
             joiner: None,
             waiting_scope: None,
             root,
+            spin: None,
         });
         self.sch.scopes[sid].live += 1;
         self.sch.scopes[sid].children.push(tid);
@@ -693,7 +769,7 @@ impl<'p> M<'p> {
         use Builtin::*;
         let cur = self.sch.cur;
         if !matches!(b, TaskYield | AtomicLoad | SyncSharedGet) {
-            self.sch.idle_yields = 0;
+            self.sch.ver += 1;
         }
         match b {
             TaskScope => {
@@ -813,15 +889,7 @@ impl<'p> M<'p> {
                 Op::Block
             }
             TaskYield => {
-                self.sch.idle_yields += 1;
-                if self.sch.idle_yields > MAX_IDLE_YIELDS && self.sch.sleepers.is_empty() {
-                    self.sch.idle_yields = 0;
-                    return Op::Fail(self.stop_at(
-                        stop,
-                        Some(StopKind::StdRequiresViolated),
-                        Some("デッドロック（task.yield だけで進行しない）"),
-                    ));
-                }
+                self.sch.yielded = true;
                 self.sch.tasks[cur].resume = Some(Val::Unit);
                 self.sch.tasks[cur].state = State::Ready;
                 self.sch.ready.push_back(cur);
@@ -1111,11 +1179,36 @@ impl<'p> M<'p> {
         }
     }
 
+    /// `task.yield` で中断したタスク `t` の後で、全タスクが `task.yield` と読み出しだけを繰り返し、
+    /// 共有の状態が変わらない状態か（ライブロック。Issue #191・#193）。
+    ///
+    /// タスクの枠の指紋（枠の積み重ね全体の局所の中身）と共有の状態の版が、連続する 2 回の `task.yield` で
+    /// 同じなら、そのタスクは同じ状態に戻っている（決定的な実行なので、次も同じになる）。実行可能な
+    /// タスクがすべてそうで、時間待ちのタスクもいなければ、誰も状態を変えられず、永久に続く。
+    /// 指紋を取れないタスク（`LockGuard` を持つなど）は対象にしない（検出の取りこぼしはあるが、誤検出はない）。
+    fn yield_livelock(&mut self, t: usize) -> bool {
+        let ver = self.sch.ver;
+        let fp = fp_frames(&self.sch.tasks[t].frames);
+        let task = &mut self.sch.tasks[t];
+        task.spin = match (fp, task.spin) {
+            (Some(f), Some((pf, pv, _))) if pf == f && pv == ver => Some((f, ver, true)),
+            (Some(f), _) => Some((f, ver, false)),
+            (None, _) => None,
+        };
+        self.sch.sleepers.is_empty()
+            && self
+                .sch
+                .ready
+                .iter()
+                .all(|&r| matches!(self.sch.tasks[r].spin, Some((_, v, true)) if v == ver))
+    }
+
     /// ルートタスク 1 つ分の後始末。そのルートに属するタスクを新しいものから順に取り消し、
     /// 作った通信路と `Lock` の値を捨てる（異常停止の破棄の範囲。ADR 0026 決定 4）。
     fn stop_root(&mut self, root: usize) {
         // 取り消しの間の破棄は異常停止の巻き戻しとして扱う。親や兄弟のタスクが持つ `LockGuard` の破棄でも
         // `Lock` が壊れる（ADR 0026 決定 4）。
+        self.sch.ver += 1;
         UNWINDING.with(|c| c.set(true));
         self.stop_root_inner(root);
         UNWINDING.with(|c| c.set(false));
@@ -1171,6 +1264,7 @@ impl<'p> M<'p> {
                 joiner: None,
                 waiting_scope: None,
                 root: tid,
+                spin: None,
             });
             self.sch.roots.push(tid);
             self.sch.results.push(None);
@@ -1257,10 +1351,23 @@ impl<'p> M<'p> {
             }
             self.sch.tasks[t].state = State::Running;
             self.sch.alloc_stop = false;
-            match self.drive(&mut frames, true) {
-                Run::Suspend => self.sch.tasks[t].frames = frames,
+            self.sch.yielded = false;
+            let mut run = self.drive(&mut frames, true);
+            if matches!(run, Run::Suspend) {
+                self.sch.tasks[t].frames = frames;
+                if std::mem::take(&mut self.sch.yielded) && self.yield_livelock(t) {
+                    run = Run::Fail(self.stop_at(
+                        0,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("デッドロック（task.yield だけで進行しない）"),
+                    ));
+                }
+                frames = vec![];
+            }
+            match run {
+                Run::Suspend => {}
                 Run::Done(v) => {
-                    self.sch.idle_yields = 0;
+                    self.sch.ver += 1;
                     if let Some(i) = self.sch.roots.iter().position(|&r| r == t) {
                         self.sch.tasks[t].state = State::Done;
                         self.sch.results[i] = Some(Ok(v));

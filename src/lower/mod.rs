@@ -402,6 +402,7 @@ impl<'a> L<'a> {
                     v("Other", vec![ir::Ty::Path]),
                 ],
             },
+            "LockBroken" => ir::TypeKind::Struct { fields: vec![] },
             _ => {
                 if let Some(&s) = self.structs.get(name) {
                     let m: Mono = s
@@ -452,6 +453,9 @@ impl<'a> L<'a> {
             "ParseError" => ir::Ty::ParseError,
             "Shared" => ir::Ty::Shared(one(&args)),
             "Cell" => ir::Ty::Cell(one(&args)),
+            // 並行処理の取っ手は評価器では番号（ADR 0026）。共有の部品は `Cell` と同じ入れ物。
+            "Scope" | "TaskHandle" | "Sender" | "Receiver" => ir::Ty::Int,
+            "SyncShared" | "Atomic" => ir::Ty::Cell(one(&args)),
             "Int" => ir::Ty::Int,
             "Float" => ir::Ty::Float,
             "Bool" => ir::Ty::Bool,

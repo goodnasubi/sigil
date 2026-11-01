@@ -693,6 +693,10 @@ impl<'a> L<'a> {
                         self.core_only = false;
                         Builtin::RawSyscall
                     }
+                    "task.scope" => Builtin::TaskScope,
+                    "task.yield" => Builtin::TaskYield,
+                    "task.sleep" => Builtin::TaskSleep,
+                    "task.channel" => Builtin::TaskChannel,
                     n => return bail(format!("名前空間の関数 {n}")),
                 };
                 Ok(self.emit_call(Callee::Builtin(b), ops, ret))
@@ -732,6 +736,9 @@ impl<'a> L<'a> {
                     ("Bytes", "new") => Builtin::BytesNew,
                     ("Bytes", "with_capacity") => Builtin::BytesWithCapacity,
                     ("Bytes", "from_list") => Builtin::BytesFromList,
+                    ("SyncShared", "new") => Builtin::SyncSharedNew,
+                    ("Lock", "new") => Builtin::LockNew,
+                    ("Atomic", "new") => Builtin::AtomicNew,
                     (o, n) => return bail(format!("型の関数 {o}.{n}")),
                 };
                 let ops = self.args_of(args)?;
@@ -924,6 +931,14 @@ impl<'a> L<'a> {
             ("Path", "parent") => (PathParent, false),
             ("Shared", "get") => (SharedGet, false),
             ("Shared", "set") => (SharedSet, false),
+            ("Scope", "spawn") => (ScopeSpawn, false),
+            ("TaskHandle", "join") => (TaskJoin, true),
+            ("Sender", "send") => (ChanSend, false),
+            ("Receiver", "recv") => (ChanRecv, false),
+            ("SyncShared", "get") => (SyncSharedGet, false),
+            ("Lock", "acquire") => (LockAcquire, false),
+            ("Atomic", "load") => (AtomicLoad, false),
+            ("Atomic", "store") => (AtomicStore, false),
             (o, n) => return bail(format!("メソッド {o}.{n}")),
         };
         if owner == "Path" {

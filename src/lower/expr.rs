@@ -940,6 +940,8 @@ impl<'a> L<'a> {
             ("Receiver", "recv") => (ChanRecv, false),
             ("SyncShared", "get") => (SyncSharedGet, false),
             ("Lock", "acquire") => (LockAcquire, false),
+            ("LockGuard", "get") => (LockGuardGet, false),
+            ("LockGuard", "get_mut") => (LockGuardGetMut, false),
             ("Atomic", "load") => (AtomicLoad, false),
             ("Atomic", "store") => (AtomicStore, false),
             (o, n) => return bail(format!("メソッド {o}.{n}")),

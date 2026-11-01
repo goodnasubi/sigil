@@ -357,6 +357,9 @@ pub enum Builtin {
     SyncSharedGet,
     LockNew,
     LockAcquire,
+    /// `LockGuard` の中身への参照（`get` / `get_mut`。ADR 0026 決定 3、Issue #188）。
+    LockGuardGet,
+    LockGuardGetMut,
     AtomicNew,
     AtomicLoad,
     AtomicStore,

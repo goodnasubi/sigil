@@ -456,3 +456,46 @@ fn unchecked_clause_round_trips() {
     let messy = src.replace("\n  unchecked", "\n      unchecked");
     expect(&messy, &src);
 }
+
+// ---- 読み書きの競合（TOCTOU）: 読んだあとに変わったファイルは書かない ----
+
+#[test]
+fn write_refuses_when_file_changed_after_read() {
+    use sigil::fmt::{write_atomic_if_unchanged, write_atomic_with_hook, Stamp};
+    let dir = std::env::temp_dir().join(format!("sigil-fmt-toctou-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("a.sigil");
+    std::fs::write(&f, "old").unwrap();
+
+    // 変わっていなければ書ける
+    let st = Stamp::take(&f).unwrap();
+    write_atomic_if_unchanged(&f, "new", &st).unwrap();
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+
+    // 読んだあと・書き戻しの間に、別のプロセスが内容を差し替えた
+    let st = Stamp::take(&f).unwrap();
+    let mut swap = || {
+        std::fs::write(&f, "someone else's longer edit").unwrap();
+    };
+    let err = write_atomic_with_hook(&f, "formatted", &st, &mut swap).unwrap_err();
+    assert!(err.to_string().contains("変わった"), "{err}");
+    // 差し替えられた内容は失われず、一時ファイルも残らない
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "someone else's longer edit"
+    );
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    // rename で別のファイルに置き換えられた場合（長さが同じでも inode が違う）
+    #[cfg(unix)]
+    {
+        let st = Stamp::take(&f).unwrap();
+        let other = dir.join("other");
+        let len = std::fs::metadata(&f).unwrap().len() as usize;
+        std::fs::write(&other, "x".repeat(len)).unwrap();
+        let mut swap = || std::fs::rename(&other, &f).unwrap();
+        assert!(write_atomic_with_hook(&f, "formatted", &st, &mut swap).is_err());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "x".repeat(len));
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

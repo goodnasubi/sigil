@@ -120,6 +120,15 @@ mod alloc_tests {
     }
 }
 
+/// 進行なしに続けて `task.yield` が起きてよい回数の上限（暫定。ライブロックの検出用）。
+///
+/// 全タスクが `task.yield` と読み出し（`Atomic.load`・`SyncShared.get`）だけを繰り返し、共有の値を
+/// 変える操作もタスクの完了も起きない状態は、止まらずデッドロックとしても検出されない（Issue #191）。
+/// 時計の進むのを待つタスク（`task.sleep`）がいない場合に限り、この回数を超えたらデッドロックと同じ
+/// 異常停止にする。値は、正常な協調ループ（公平のための `yield`）が超えない大きさで、かつ
+/// 検出が数秒以内に終わる大きさとして選んだ暫定値であり、仕様ではない。
+const MAX_IDLE_YIELDS: usize = 1_000_000;
+
 #[derive(Clone, Copy)]
 enum Wake {
     Sleep(usize),
@@ -144,6 +153,8 @@ pub(super) struct Sched {
     live: usize,
     max_depth: usize,
     rng: Option<u64>,
+    /// 進行（`task.yield` と読み出し以外のタスク操作、タスクの完了）なしに続けて起きた `task.yield` の回数。
+    idle_yields: usize,
 }
 
 impl Sched {
@@ -165,6 +176,7 @@ impl Sched {
             // 枠 1 つを約 1 KiB と見なして、深さの上限を決める（スタックの枯渇の判定）。
             max_depth: (stack_bytes / 1024).max(64),
             rng: schedule_seed,
+            idle_yields: 0,
         }
     }
 
@@ -680,6 +692,9 @@ impl<'p> M<'p> {
     fn task_op(&mut self, locals: &[Slot], b: Builtin, args: &[Operand], stop: StopId) -> Op {
         use Builtin::*;
         let cur = self.sch.cur;
+        if !matches!(b, TaskYield | AtomicLoad | SyncSharedGet) {
+            self.sch.idle_yields = 0;
+        }
         match b {
             TaskScope => {
                 let f = self.read(locals, &args[0]);
@@ -798,6 +813,15 @@ impl<'p> M<'p> {
                 Op::Block
             }
             TaskYield => {
+                self.sch.idle_yields += 1;
+                if self.sch.idle_yields > MAX_IDLE_YIELDS && self.sch.sleepers.is_empty() {
+                    self.sch.idle_yields = 0;
+                    return Op::Fail(self.stop_at(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("デッドロック（task.yield だけで進行しない）"),
+                    ));
+                }
                 self.sch.tasks[cur].resume = Some(Val::Unit);
                 self.sch.tasks[cur].state = State::Ready;
                 self.sch.ready.push_back(cur);
@@ -1236,6 +1260,7 @@ impl<'p> M<'p> {
             match self.drive(&mut frames, true) {
                 Run::Suspend => self.sch.tasks[t].frames = frames,
                 Run::Done(v) => {
+                    self.sch.idle_yields = 0;
                     if let Some(i) = self.sch.roots.iter().position(|&r| r == t) {
                         self.sch.tasks[t].state = State::Done;
                         self.sch.results[i] = Some(Ok(v));

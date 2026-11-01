@@ -12,4 +12,3 @@ fn test_core_sigil_sources_parse() {
     let m_parsed = parse_std(MAP_SIGIL).expect("parse Map sigil");
     assert_eq!(m_parsed.items.len(), 2);
 }
-

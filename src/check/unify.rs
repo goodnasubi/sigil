@@ -1,7 +1,10 @@
 use super::util::is_literal;
-use super::{show, substitute, Ck, Pending, Prop, Ty, TypeDef, R};
+use super::{
+    contains_ref_outside_fn, show, strip_paren, substitute, CapMode, Ck, Pending, Prop, Ty,
+    TypeDef, R,
+};
 use crate::ast::*;
-use crate::error::ErrorKind;
+use crate::error::{Error, ErrorKind};
 
 impl Ck {
     // ---------- 型変数と単一化 ----------
@@ -244,8 +247,43 @@ impl Ck {
                 }
                 // 番地は値の複製だけができる（演算子は持たない。ADR 0016 の決定 1）
                 Some(TypeDef::Opaque(_)) if n == "Addr" => Some(p == Prop::Copyable),
-                Some(TypeDef::Opaque(_)) => match p {
-                    Prop::Equatable | Prop::Sendable | Prop::Shareable => {
+                // 性質を持たない型（ADR 0026 決定 3）。`Scope` は借用の引数としてだけ
+                // 現れる値でなく、`TaskHandle` と `LockGuard` は作った（取得した）
+                // タスクだけが持つので、タスクの境界を越えられない。
+                Some(TypeDef::Opaque(_))
+                    if matches!(n.as_str(), "Scope" | "TaskHandle" | "LockGuard") =>
+                {
+                    Some(false)
+                }
+                Some(TypeDef::Opaque(_)) => match (n.as_str(), p) {
+                    // ADR 0007 決定 2 の表。参照カウントの増減が原子的でないので、
+                    // `Shared` は移すことも共有することもできない。
+                    ("Shared", Prop::Sendable | Prop::Shareable) => Some(false),
+                    // `Cell` は移せるが、排他の検査が原子的でないので共有できない。
+                    ("Cell", Prop::Shareable) => Some(false),
+                    ("Cell", Prop::Sendable) => {
+                        all(args.iter().map(|t| self.holds(t, Prop::Sendable, d)))
+                    }
+                    // ADR 0026 決定 3。チャネルの口は、中身が移せれば移せて、常に共有できる。
+                    ("Sender" | "Receiver", Prop::Shareable) => Some(true),
+                    ("Sender" | "Receiver", Prop::Sendable) => {
+                        all(args.iter().map(|t| self.holds(t, Prop::Sendable, d)))
+                    }
+                    // `SyncShared` と `Atomic` は、中身が移せて共有できるときだけ、
+                    // 移せて共有できる（ADR 0026 決定 3）。
+                    ("SyncShared" | "Atomic", Prop::Sendable | Prop::Shareable) => {
+                        all(args.iter().flat_map(|t| {
+                            [
+                                self.holds(t, Prop::Sendable, d),
+                                self.holds(t, Prop::Shareable, d),
+                            ]
+                        }))
+                    }
+                    // `Lock` は、中身が移せれば、移せて共有できる（ADR 0026 決定 3）。
+                    ("Lock", Prop::Sendable | Prop::Shareable) => {
+                        all(args.iter().map(|t| self.holds(t, Prop::Sendable, d)))
+                    }
+                    (_, Prop::Equatable | Prop::Sendable | Prop::Shareable) => {
                         all(args.iter().map(|t| self.holds(t, p, d)))
                     }
                     _ => Some(false),
@@ -316,5 +354,70 @@ impl Ck {
                 Ok(())
             }
         }
+    }
+
+    /// `Scope.spawn` に渡す値の検査（ADR 0026 決定 3・ADR 0007 決定 1 の規則 3）。
+    ///
+    /// タスクは生成元と切り離されて走るので、渡すクロージャは脱出するクロージャとして
+    /// 扱う。(a) 借用をとらえていたらエラー、(b) とらえた値の型が `Sendable` でなければ
+    /// エラー、(c) 戻り値の型が `Sendable` でなければエラー。`handle` は登録した
+    /// 戻り値の型（`TaskHandle<T>`）で、`T` がクロージャの戻り値の型になる。
+    /// とらえた値の記録が取れるのは、クロージャリテラルと `let` で束縛した
+    /// クロージャの名前だけ（置ける位置の検査 `check_stored_closure_captures` と同じ範囲）。
+    pub(super) fn check_spawn(&mut self, arg: Option<&Expr>, handle: &Ty) -> R<()> {
+        let caps = match arg.map(strip_paren) {
+            Some(Expr::Closure { .. }) => {
+                self.cur_closures.last().map(|r| (r.span, r.caps.clone()))
+            }
+            Some(Expr::Name(n)) => self
+                .cur_closures
+                .iter()
+                .rev()
+                .find(|r| r.bound.as_deref() == Some(n.as_str()))
+                .map(|r| (r.span, r.caps.clone())),
+            _ => None,
+        };
+        if let Some((span, caps)) = caps {
+            // (a) 借用: 借りる捕獲のほか、参照を含む値を値で持つことも借用をとらえたことになる。
+            for (name, ty, mode, _) in &caps {
+                if matches!(mode, CapMode::Ref | CapMode::RefMut)
+                    || contains_ref_outside_fn(&self.zonk(ty))
+                {
+                    return Err(Error::new(
+                        ErrorKind::SpawnCaptureBorrow,
+                        span,
+                        format!(
+                            "`spawn` に渡すクロージャは借用をとらえられない（とらえた値 `{name}`。タスクは生成元と切り離されて走る）"
+                        ),
+                    ));
+                }
+            }
+            // (b) とらえた値の型は `Sendable` でなければならない。
+            for (name, ty, _, _) in &caps {
+                self.require(
+                    ty,
+                    Prop::Sendable,
+                    ErrorKind::SpawnCaptureNotSendable,
+                    format!(
+                        "`spawn` に渡すクロージャがとらえた値 `{name}` の型 {{}} は `Sendable` でないため、タスクへ移せない"
+                    ),
+                )?;
+            }
+        }
+        // (c) 戻り値の型は `Sendable` でなければならない。
+        if let Ty::Named(n, ts) = self.zonk(handle) {
+            if n == "TaskHandle" {
+                if let Some(t) = ts.first().cloned() {
+                    self.require(
+                        &t,
+                        Prop::Sendable,
+                        ErrorKind::SpawnReturnNotSendable,
+                        "`spawn` したタスクの戻り値の型 {} は `Sendable` でないため、タスクの境界を越えられない"
+                            .to_string(),
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 }

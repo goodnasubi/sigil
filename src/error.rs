@@ -205,6 +205,12 @@ pub enum ErrorKind {
     FnCaptureNotSendable,
     /// 入れたクロージャのとらえた値が `Shareable` でない（ADR 0022 決定 3）。
     FnCaptureNotShareable,
+    /// `spawn` に渡したクロージャが借用をとらえた（ADR 0026 決定 3・ADR 0007 決定 1 の規則 3）。
+    SpawnCaptureBorrow,
+    /// `spawn` に渡したクロージャのとらえた値が `Sendable` でない（ADR 0026 決定 3）。
+    SpawnCaptureNotSendable,
+    /// `spawn` に渡したクロージャの戻り値の型が `Sendable` でない（ADR 0026 決定 3）。
+    SpawnReturnNotSendable,
     // --- 整形 ---
     /// 整形結果の検証に失敗した（整形器の不具合か、深さの上限を超える出力）。
     FmtVerify,
@@ -322,7 +328,10 @@ impl ErrorKind {
             | FnEffectExceeds
             | FnCaptureWrite
             | FnCaptureNotSendable
-            | FnCaptureNotShareable => Phase::Check,
+            | FnCaptureNotShareable
+            | SpawnCaptureBorrow
+            | SpawnCaptureNotSendable
+            | SpawnReturnNotSendable => Phase::Check,
             _ => Phase::Syntax,
         }
     }

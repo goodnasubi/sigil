@@ -410,6 +410,11 @@ impl Ck {
         };
         let more = self.args(&ps, args, what, &eff)?;
         srcs.extend(more);
+        // `Scope.spawn` は、渡すクロージャに追加の検査が要る（ADR 0026 決定 3）。
+        if owner == "Scope" && name == "spawn" {
+            let handle = substitute(&sig.ret, &m);
+            self.check_spawn(args.first(), &handle)?;
+        }
         self.check_overlap(mark)?;
         let ret = substitute(&sig.ret, &m);
         self.rec_expr(callee, &Ty::Fn(ps.clone(), Box::new(ret.clone()), None));

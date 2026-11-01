@@ -45,6 +45,17 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("Cell", 1, Layer::Core),
     // 番地（ADR 0016 の決定 1）。`Copyable` で演算子を持たない。番地の計算は原始操作で行う。
     ("Addr", 0, Layer::Core),
+    // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
+    // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
+    ("Scope", 0, Layer::Core),
+    ("TaskHandle", 1, Layer::Core),
+    ("Sender", 1, Layer::Core),
+    ("Receiver", 1, Layer::Core),
+    ("SyncShared", 1, Layer::Core),
+    ("Lock", 1, Layer::Core),
+    ("LockGuard", 1, Layer::Core),
+    ("LockBroken", 0, Layer::Core),
+    ("Atomic", 1, Layer::Core),
 ];
 
 pub mod core_sigil;

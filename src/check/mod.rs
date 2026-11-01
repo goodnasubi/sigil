@@ -216,6 +216,16 @@ const PRELUDE_TYPES: &[&str] = &[
     "Shared",
     "Cell",
     "Addr",
+    // 並行処理の前置き型（ADR 0026 の決定 3）。
+    "Scope",
+    "TaskHandle",
+    "Sender",
+    "Receiver",
+    "SyncShared",
+    "Lock",
+    "LockGuard",
+    "LockBroken",
+    "Atomic",
 ];
 /// 型名を付けずに書く値（`Option`・`Result` の値）。
 const PRELUDE_VALUES: &[(&str, &str)] = &[

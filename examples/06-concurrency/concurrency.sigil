@@ -98,29 +98,3 @@ fn publish(x: Int) -> Int
   cell.store(x);
   return cell.load();
 }
-
-// 原子的な値を待つタスクと書くタスクの組: Atomic は Sendable なので起動するクロージャがとらえられる。
-// 待つ側は task.yield で譲りながら読み直すので、単一スレッドの実行でも止まらずに終わる。
-// とらえた値は呼び出しのたびに使えなければならないので、関数に渡して移さず、メソッドで使う。
-fn flag_pair(v: Int) -> Int
-  intent "待つタスクと書くタスクを起こし、書いた値を待つタスクから受け取る"
-  requires v != 0
-  ensures none
-  effects task
-{
-  return task.scope(|s| {
-    let flag = Atomic.new(0);
-    let mine = flag.clone();
-    let waiter = s.spawn(move || {
-      while flag.load() == 0 {
-        task.yield();
-      }
-      return flag.load();
-    });
-    let writer = s.spawn(move || {
-      mine.store(v);
-      return 0;
-    });
-    return waiter.join();
-  });
-}

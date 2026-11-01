@@ -55,6 +55,12 @@ fn timeout_cancels_on_the_virtual_clock() {
 }
 
 #[test]
+fn lock_acquire_with_an_argument() {
+    // `&Lock<Int>` の引数には、評価器の入口では整数を渡す（初期値になる）。
+    assert_eq!(value("bump", &[7]), "1");
+}
+
+#[test]
 fn atomic_roundtrip() {
     assert_eq!(value("publish", &[9]), "9");
 }

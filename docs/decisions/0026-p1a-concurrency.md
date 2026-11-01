@@ -132,6 +132,8 @@ ADR 0007 決定 1〜3 で骨格が決まっている範囲・起動・合流と�
 | `SyncShared.get` | `fn get(self: &SyncShared<T>) -> T`（`T: Copyable`） | `task.share` |
 | `Lock.new` | `fn new(value: T) -> Lock<T>` | なし |
 | `Lock.acquire` | `fn acquire(self: &Lock<T>) -> Result<LockGuard<T>, LockBroken>` | `task.share, task.suspend` |
+| `LockGuard.get` | `fn get(self: &LockGuard<T>) -> &T` | `task.share` |
+| `LockGuard.get_mut` | `fn get_mut(self: &mut LockGuard<T>) -> &mut T` | `task.share` |
 | `Atomic.new` | `fn new(value: T) -> Atomic<T>` | なし |
 | `Atomic.load` | `fn load(self: &Atomic<T>) -> T`（`T: Copyable`） | `task.share, task.suspend` |
 | `Atomic.store` | `fn store(self: &Atomic<T>, value: T) -> ()` | `task.share` |
@@ -139,7 +141,7 @@ ADR 0007 決定 1〜3 で骨格が決まっている範囲・起動・合流と�
 - 型名 `Sender`・`Receiver`・`LockGuard`・`LockBroken`・`Atomic` は本 ADR で決める。`SyncShared`・`Lock`・`Channel` の考え方は ADR 0007 決定 2 のとおりで、チャネルは送り口と受け口の型に分ける。
 - **性質の導出**: `Sender<T>`・`Receiver<T>` は、`T` が `Sendable` なら `Sendable`、常に `Shareable`。`SyncShared<T>`・`Atomic<T>` は、`T` が `Sendable` かつ `Shareable` なら両方を持つ。`Lock<T>` は、`T` が `Sendable` なら両方を持つ（ADR 0007 決定 2 の表）。これらは中身を見せない標準の型の導出として登録する。
 - **チャネル**: 待ち行列は無制限とし、評価器では送信は通常は待たない。ただし効果は出力先によらず一様に `task.suspend` を含む（ADR 0007 決定 3 がチャネルの送受信を中断点と定めているため）。容量を有界にするかは P1-b で再検討する（「未決として残す点」）。送り口と受け口は複製でき、参照で共有される。
-- **`LockGuard`**: 取得したタスクだけが持つ値で、中身への読み書きは通常の借用の規則で行い、破棄で解放する。`LockBroken` は、壊れた `Lock`（決定 4）の取得の失敗を表す値とする。
+- **`LockGuard`**: 取得したタスクだけが持つ値で、中身への読み書きは通常の借用の規則で行い、破棄で解放する。`LockBroken` は、壊れた `Lock`（決定 4）の取得の失敗を表す値とする。中身への参照は `get`・`get_mut` が返す（Issue #188。`List.get_mut` と同じく参照を返し、参照はガードの借用に縛られるのでガードより長く生きられない。中断しないので効果は `task.share` のみ。中断をまたいで参照を持つ場合は決定 5 に従う）。`LockGuard`・`TaskHandle`・`Scope` は複製できない（`clone` は型検査でエラーにする）。
 
 ### 理由
 

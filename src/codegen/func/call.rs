@@ -857,6 +857,12 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (a5, _) = self.val(&args[6]);
                 (self.rt("raw_syscall", &[n, a0, a1, a2, a3, a4, a5]), u)
             }
+            TaskScope | TaskYield | TaskSleep | TaskChannel | ScopeSpawn | TaskJoin | ChanSend
+            | ChanRecv | SyncSharedNew | SyncSharedGet | LockNew | LockAcquire | AtomicNew
+            | AtomicLoad | AtomicStore => {
+                let v = self.unsupported("並行処理の操作はネイティブ出力未対応");
+                (v, u)
+            }
         }
     }
 

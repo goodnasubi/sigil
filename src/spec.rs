@@ -55,6 +55,12 @@ pub enum Body {
         /// （名前, 中身の型）
         variants: Vec<(String, Vec<String>)>,
     },
+    /// 性質の手付け（ADR 0026 決定 2）。
+    Properties {
+        type_name: String,
+        properties: Vec<String>,
+        premise: String,
+    },
     Fn {
         method: bool,
         /// `impl トレイト for 型` の関数のとき、実装するトレイトの名前（ADR 0022 の決定 2）。
@@ -266,6 +272,16 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
                 }
             }
             Item::Global(_) => {}
+            Item::Properties(p) => items.push(SpecItem {
+                name: p.type_name.clone(),
+                span: p.span,
+                public: None,
+                body: Body::Properties {
+                    type_name: p.type_name.clone(),
+                    properties: p.properties.clone(),
+                    premise: p.premise.clone(),
+                },
+            }),
         }
     }
     Ok(Spec { module, items })
@@ -380,6 +396,7 @@ impl SpecItem {
             Body::Fn { method: false, .. } => "fn",
             Body::Fn { method: true, .. } => "method",
             Body::Trait { .. } => "trait",
+            Body::Properties { .. } => "properties",
         }
     }
 
@@ -440,6 +457,25 @@ impl SpecItem {
                     self.name,
                     generics_text(generics),
                     vs.join("、")
+                )
+            }
+            Body::Properties {
+                type_name,
+                properties,
+                premise,
+            } => {
+                let mut props = Vec::new();
+                if properties.iter().any(|s| s == "Sendable") {
+                    props.push("Sendable");
+                }
+                if properties.iter().any(|s| s == "Shareable") {
+                    props.push("Shareable");
+                }
+                format!(
+                    "性質の手付け {}\n  性質: {}\n  前提: {}\n",
+                    type_name,
+                    props.join(", "),
+                    intent_text(premise)
                 )
             }
             Body::Fn {
@@ -747,6 +783,15 @@ impl SpecItem {
                             .collect(),
                     ),
                 ));
+            }
+            Body::Properties {
+                type_name,
+                properties,
+                premise,
+            } => {
+                fields.push(("type_name", type_name.clone().into()));
+                fields.push(("properties", properties.clone().into()));
+                fields.push(("premise", premise.clone().into()));
             }
             Body::Fn {
                 spec: f,

@@ -8,6 +8,8 @@ pub struct String {
   cap: Int,
 }
 
+properties String: Sendable, Shareable "Addr が指す領域はこの値が所有し、他の値と共有されない。別のタスクへ移しても、同時に複数のタスクから読んでも安全である"
+
 impl String {
   pub fn len(self: &String) -> Int
     intent "文字列の長さをバイト数で返す"
@@ -39,6 +41,8 @@ pub struct List<T> {
   cap: Int,
 }
 
+properties List: Sendable, Shareable "Addr が指す領域はこの値が所有し、他の値と共有されない。要素の型に依存する性質は導出で担保される"
+
 impl<T> List<T> {
   pub fn len(self: &List<T>) -> Int
     intent "要素数を返す"
@@ -69,6 +73,8 @@ pub struct Map<K, V> {
   len: Int,
   cap: Int,
 }
+
+properties Map: Sendable, Shareable "Addr が指す領域はこの値が所有し、他の値と共有されない。キーと値の型に依存する性質は導出で担保される"
 
 impl<K, V> Map<K, V> {
   pub fn len(self: &Map<K, V>) -> Int

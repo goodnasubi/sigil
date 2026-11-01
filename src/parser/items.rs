@@ -59,6 +59,7 @@ impl Parser {
                         Item::Impl(i) => Item::Impl(i),
                         Item::ImplFor(i) => Item::ImplFor(i),
                         Item::Global(g) => Item::Global(g),
+                        Item::Properties(p) => Item::Properties(p),
                     });
                 }
                 Tok::Kw("module") => {
@@ -77,6 +78,7 @@ impl Parser {
                     items.push(item);
                 }
                 Tok::Kw("global") => items.push(Item::Global(self.global_decl()?)),
+                Tok::Kw("properties") => items.push(Item::Properties(self.properties_decl()?)),
                 Tok::Kw("let") => {
                     return Err(self.err(
                         ErrorKind::GlobalValue,
@@ -329,6 +331,63 @@ impl Parser {
             name,
             ty,
             init,
+            span,
+        })
+    }
+
+    pub(super) fn properties_decl(&mut self) -> R<PropertiesDecl> {
+        let span = self.span();
+        self.bump(); // "properties"
+        let (type_name, nspan) = self.ident_raw("型の名前")?;
+        Self::check_camel(&type_name, nspan, "型の名前")?;
+        self.expect_punct(":")?;
+        let mut properties = Vec::new();
+        loop {
+            let (prop_name, pspan) = self.ident_raw("性質の名前")?;
+            Self::check_camel(&prop_name, pspan, "性質の名前")?;
+            if !matches!(prop_name.as_str(), "Sendable" | "Shareable") {
+                return Err(Error::new(
+                    ErrorKind::UnknownProperty,
+                    pspan,
+                    format!(
+                        "手付けできる性質は `Sendable` と `Shareable` だけである（見つかったのは `{prop_name}`。ADR 0026 の決定 2）"
+                    ),
+                ));
+            }
+            if !properties.contains(&prop_name) {
+                properties.push(prop_name);
+            }
+            if !self.eat_punct(",") {
+                break;
+            }
+        }
+        let premise_span = self.span();
+        let premise = match self.tok().clone() {
+            Tok::Str(s) => {
+                self.bump();
+                if s.is_empty() {
+                    return Err(Error::new(
+                        ErrorKind::EmptyPremise,
+                        premise_span,
+                        "性質の手付けには空でない前提の文が要る（ADR 0026 の決定 2・ADR 0016 の決定 7）",
+                    ));
+                }
+                s
+            }
+            _ => {
+                return Err(self.err(
+                    ErrorKind::MissingClause,
+                    format!(
+                        "`properties` 項目には前提の文（文字列）が要る。見つかったのは {}",
+                        describe(self.tok())
+                    ),
+                ));
+            }
+        };
+        Ok(PropertiesDecl {
+            type_name,
+            properties,
+            premise,
             span,
         })
     }

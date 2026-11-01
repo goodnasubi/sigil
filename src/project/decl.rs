@@ -13,7 +13,7 @@ pub(super) fn item_name(i: &Item) -> Option<&str> {
         Item::Fn(f) => Some(&f.name),
         Item::Trait(t) => Some(&t.name),
         Item::Global(g) => Some(&g.name),
-        Item::Impl(_) | Item::ImplFor(_) => None,
+        Item::Properties(_) | Item::Impl(_) | Item::ImplFor(_) => None,
     }
 }
 
@@ -29,7 +29,7 @@ pub(super) fn decl_is_pub(i: &Item) -> bool {
         Item::Fn(f) => f.is_pub,
         Item::Trait(t) => t.is_pub,
         Item::Global(_) => false,
-        Item::Impl(_) | Item::ImplFor(_) => false,
+        Item::Properties(_) | Item::Impl(_) | Item::ImplFor(_) => false,
     }
 }
 
@@ -98,6 +98,7 @@ pub(super) fn decl_type_heads(i: &Item, out: &mut Vec<String>) {
             }
         }
         Item::Global(g) => type_heads(&g.ty, &mut hs),
+        Item::Properties(_) => {}
     }
     out.extend(hs);
 }
@@ -287,6 +288,9 @@ pub(super) fn used_names(file: &File) -> HashSet<String> {
                 im.fns.iter().for_each(|f| func(f, &mut u));
             }
             Item::Global(g) => ty(&g.ty, &mut u),
+            Item::Properties(p) => {
+                u.insert(p.type_name.clone());
+            }
         }
     }
     u

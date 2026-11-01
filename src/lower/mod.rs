@@ -268,6 +268,7 @@ impl<'a> L<'a> {
                 }
                 a::Item::Trait(_) => {}
                 a::Item::Global(_) => {}
+                a::Item::Properties(_) => {}
             }
         }
         l

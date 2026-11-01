@@ -300,6 +300,16 @@ impl Ck {
                     Prop::Copyable | Prop::Comparable | Prop::Numeric | Prop::Displayable => {
                         Some(false)
                     }
+                    Prop::Sendable | Prop::Shareable
+                        if self
+                            .manual_properties
+                            .iter()
+                            .any(|(k, prop)| k == &n && *prop == p) =>
+                    {
+                        // 手付けされた性質は構成要素を見ずに成り立つ。
+                        // 総称型の場合、手付けは無条件に付くが、要素型に依存する性質（args の holds）は導出で扱う。
+                        all(args.iter().map(|t| self.holds(t, p, d)))
+                    }
                     _ => {
                         // 輪になった型は、輪の先でも性質が成り立つと仮定する
                         let key = (Ty::Named(n.clone(), args.clone()), p);

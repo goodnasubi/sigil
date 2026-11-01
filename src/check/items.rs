@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::error::ErrorKind;
 
-use super::types::{contains_param, show, Ty, TypeDef};
+use super::types::{contains_param, show, Prop, Ty, TypeDef};
 use super::util::collect_calls_block;
 use super::{std_heads, Ck, Pos, PRELUDE_TYPES, PRELUDE_VALUES, R};
 
@@ -66,6 +66,7 @@ impl Ck {
                 Item::Trait(t) => (Some(&t.name), t.span, &[][..], TypeDef::Alias(Ty::Unit)),
                 Item::ImplFor(i) => (None, i.span, &i.generics[..], TypeDef::Alias(Ty::Unit)),
                 Item::Global(g) => (None, g.span, &[][..], TypeDef::Alias(Ty::Unit)),
+                Item::Properties(p) => (None, p.span, &[][..], TypeDef::Alias(Ty::Unit)),
             };
             self.span = span;
             let Some(n) = name else { continue };
@@ -211,6 +212,43 @@ impl Ck {
                     }
                     let ty = self.resolve(&g.ty, Pos::Placed)?;
                     self.globals.insert(g.name.clone(), (ty, g.is_mut));
+                }
+                Item::Properties(p) => {
+                    self.span = p.span;
+                    if !self.base_module {
+                        return self.err(
+                            ErrorKind::PropertiesOutsideTrustBase,
+                            format!(
+                                "性質の手付け `properties {}` が宣言されているが、このモジュールは `trust base` ではない（性質の手付けは `trust base` のモジュールでのみ宣言できる。ADR 0026 の決定 2・ADR 0016 の決定 7）",
+                                p.type_name
+                            ),
+                        );
+                    }
+                    // 対象の型はこのモジュールで宣言された型であること
+                    if !names.contains(&p.type_name)
+                        && !PRELUDE_TYPES.contains(&p.type_name.as_str())
+                    {
+                        return self.err(
+                            ErrorKind::UnknownType,
+                            format!(
+                                "性質の手付けの対象の型 `{}` がこのモジュールで見つからない（手付けは対象の型を宣言したモジュールの中でのみ書ける。ADR 0026 の決定 2）",
+                                p.type_name
+                            ),
+                        );
+                    }
+                    for prop_name in &p.properties {
+                        let prop = match prop_name.as_str() {
+                            "Sendable" => Prop::Sendable,
+                            "Shareable" => Prop::Shareable,
+                            other => {
+                                return self.err(
+                                    ErrorKind::UnknownProperty,
+                                    format!("手付けできる性質は `Sendable` と `Shareable` だけである（見つかったのは `{other}`。ADR 0026 の決定 2）"),
+                                );
+                            }
+                        };
+                        self.manual_properties.push((p.type_name.clone(), prop));
+                    }
                 }
                 Item::Impl(i) => self.register_impl(i, false)?,
                 _ => {}

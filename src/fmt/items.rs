@@ -46,9 +46,29 @@ impl<'a> Printer<'a> {
                 Item::Trait(t) => self.trait_decl(t),
                 Item::ImplFor(i) => self.impl_for_decl(i),
                 Item::Global(g) => self.global_decl(g),
+                Item::Properties(p) => self.properties_decl(p),
             }
         }
         self.top_comments(u32::MAX, false, true);
+    }
+
+    fn properties_decl(&mut self, p: &PropertiesDecl) {
+        self.top_comments(p.span.line, true, false);
+        self.nl(0, p.span.line);
+        self.w("properties ");
+        self.w(&p.type_name);
+        self.w(": ");
+        // 性質の名前の順は、書かれた順ではなく Sendable、Shareable の固定順（ADR 0026 決定 2）
+        let mut props = Vec::new();
+        if p.properties.iter().any(|s| s == "Sendable") {
+            props.push("Sendable");
+        }
+        if p.properties.iter().any(|s| s == "Shareable") {
+            props.push("Shareable");
+        }
+        self.w(&props.join(", "));
+        self.w(" ");
+        self.w(&escape_str(&p.premise));
     }
 
     fn global_decl(&mut self, g: &GlobalDecl) {

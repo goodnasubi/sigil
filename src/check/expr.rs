@@ -339,6 +339,15 @@ impl Ck {
                 t => t.clone(),
             });
         }
+        if let Some((ty, is_mut)) = self.globals.get(n) {
+            if *is_mut && !self.raw_fn {
+                return self.err(
+                    ErrorKind::GlobalMutOutsideUnchecked,
+                    format!("可変な大域変数 `{n}` へのアクセスは `unchecked` 関数内でのみ許可される（ADR 0025 の決定 2）"),
+                );
+            }
+            return Ok(ty.clone());
+        }
         if n == "Unit" {
             return Ok(Ty::Unit);
         }

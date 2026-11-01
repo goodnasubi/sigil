@@ -99,6 +99,10 @@ pub enum ErrorKind {
     ReservedModuleName,
     /// `unchecked` の関数の本体の外（クロージャ・契約・関数の値・節のない関数）で原始操作を使った（ADR 0016 の決定 2）。
     RawOutsideUnchecked,
+    /// 信頼基盤でないモジュールで大域変数（`global`）を宣言した（ADR 0025 の決定 2）。
+    GlobalOutsideTrustBase,
+    /// `unchecked` でない関数から可変な大域変数（`global mut`）にアクセスした（ADR 0025 の決定 2）。
+    GlobalMutOutsideUnchecked,
     /// ファイルのパス（`--root` から）から決まるモジュール名と、`module` の宣言が違う。使えない文字・`..`・根の外もこれ（ADR 0021 の決定 1）。
     ModulePathMismatch,
     /// 大小だけが違う名前のファイルが並ぶ（大小を区別しないファイルシステムで指す先が環境で変わる。ADR 0021 の決定 1）。
@@ -236,6 +240,8 @@ impl ErrorKind {
             | TrustBaseNotAllowed
             | ReservedModuleName
             | RawOutsideUnchecked
+            | GlobalOutsideTrustBase
+            | GlobalMutOutsideUnchecked
             | ModulePathMismatch
             | ModulePathCase
             | UnresolvedUse

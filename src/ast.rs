@@ -47,6 +47,17 @@ pub enum Item {
     Impl(ImplDecl),
     Trait(TraitDecl),
     ImplFor(ImplForDecl),
+    Global(GlobalDecl),
+}
+
+/// `global [mut] 名前: 型 = 式;`（ADR 0025 決定 2）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalDecl {
+    pub is_mut: bool,
+    pub name: String,
+    pub ty: Type,
+    pub init: Expr,
+    pub span: Span,
 }
 
 /// `impl 型 { fn ... }`（ADR 0011 の決定 6。型に直接付けるメソッド）。

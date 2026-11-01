@@ -81,6 +81,7 @@ pub const KEYWORDS: &[&str] = &[
     // ADR 0022 の決定 2（PR 2-4b）: `trait` は宣言に、`for` は `impl トレイト for 型` の中だけに使う。
     "trait",
     "for",
+    "global",
 ];
 
 /// 将来のために予約する語。P0 では使えば字句エラー。

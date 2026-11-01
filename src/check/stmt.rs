@@ -511,14 +511,24 @@ impl Ck {
 
     /// 代入先（または `&mut` で借りる場所）の根の変数が書き換えられるか。
     pub(super) fn assignable_place(&self, root: &str, target: &Expr, assign: bool) -> R<()> {
-        let Some(v) = self.lookup(root) else {
+        let (ty, mutable, is_param) = if let Some(v) = self.lookup(root) {
+            (v.ty.clone(), v.mutable, v.param)
+        } else if let Some((gty, is_mut)) = self.globals.get(root) {
+            if *is_mut && !self.raw_fn {
+                return self.err(
+                    ErrorKind::GlobalMutOutsideUnchecked,
+                    format!("可変な大域変数 `{root}` へのアクセスは `unchecked` 関数内でのみ許可される（ADR 0025 の決定 2）"),
+                );
+            }
+            (gty.clone(), *is_mut, false)
+        } else {
             return self.err(
                 ErrorKind::UnknownName,
                 format!("名前 `{root}` が見つからない"),
             );
         };
         let direct = matches!(target, Expr::Name(_) | Expr::SelfValue);
-        match &v.ty {
+        match &ty {
             Ty::Ref(true, _) => Ok(()),
             Ty::Ref(false, _) => {
                 if assign {
@@ -526,7 +536,7 @@ impl Ck {
                         ErrorKind::AssignThroughSharedRef,
                         format!(
                             "`{root}` は `{}` なので、{}書き換えられない（`&mut` で受け取る）",
-                            show(&v.ty),
+                            show(&ty),
                             if direct { "" } else { "フィールドも" }
                         ),
                     )
@@ -535,15 +545,17 @@ impl Ck {
                         ErrorKind::BorrowMutOfImmutable,
                         format!(
                             "`{root}` は `{}` なので、`&mut` では借りられない",
-                            show(&v.ty)
+                            show(&ty)
                         ),
                     )
                 }
             }
-            _ if v.mutable => Ok(()),
+            _ if mutable => Ok(()),
             _ => {
-                let why = if v.param {
+                let why = if is_param {
                     "値で受け取った引数は書き換えられない（`&mut` で受け取る）"
+                } else if self.globals.contains_key(root) {
+                    "`mut` のない大域変数（`global`）は書き換えられない"
                 } else {
                     "`mut` のない `let` の変数は書き換えられない"
                 };

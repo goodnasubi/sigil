@@ -520,9 +520,11 @@ pub(super) fn is_place(e: &Expr) -> bool {
     let mut cur = e;
     loop {
         match cur {
-            Expr::Name(n) => return !is_upper_start(n),
+            Expr::Name(n) => return !is_upper_start(n) || super::is_upper_snake(n),
             Expr::SelfValue => return true,
-            Expr::Field { expr, name } if !is_upper_start(name) => cur = expr,
+            Expr::Field { expr, name } if !is_upper_start(name) => {
+                cur = expr;
+            }
             _ => return false,
         }
     }

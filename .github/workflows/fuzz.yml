@@ -84,15 +84,22 @@ jobs:
         timeout-minutes: 10
         run: cargo test --release --test depth_limit
 
-      # 計測は記録として出すだけで、ジョブを失敗にしない（共用の機械の雑音で偽の失敗が出るため）。
+      # 計測の結果（t 値）は記録として出すだけで、ジョブを失敗にしない（共用の機械の雑音で偽の失敗が出るため）。
+      # ただしビルドの失敗は本物の失敗なので、ビルドと実行の 2 段に分けてビルドだけを失敗として扱う（ADR 0020、Issue #178）。
       # ct_measure は ADR 6-1 で加わる。まだなければ飛ばす。
+      - name: 定数時間の計測のビルド（ct_measure）
+        run: |
+          if [ -f tests/ct_measure.rs ]; then
+            cargo test --release --test ct_measure --no-run
+          else
+            echo "tests/ct_measure.rs がまだない（ADR 6-1 で加わる）。飛ばす。"
+          fi
+
       - name: 定数時間の計測（ct_measure）
         continue-on-error: true
         run: |
           if [ -f tests/ct_measure.rs ]; then
             cargo test --release --test ct_measure -- --nocapture
-          else
-            echo "tests/ct_measure.rs がまだない（ADR 6-1 で加わる）。飛ばす。"
           fi
 
       - name: 失敗した入力を残す

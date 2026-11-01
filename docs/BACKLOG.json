@@ -88,6 +88,13 @@
       "title": "PR 3-7: 暫定 Rust ランタイム（runtime/）の削除と ADR 0016 見直し記録（ADR 0018 段階 3 完了）",
       "labels": ["lane:C2", "lane:D2", "lane:E", "needs-human"],
       "body": "## 背景・目的\n\nPR 3-6 の完了に伴い、暫定の Rust 製ランタイム（`runtime/core`, `runtime/os`）を削除し、出力に Rust や C のコードを含めない状態（段階 3 完了）にします。\n\n## 完了条件\n- [ ] `runtime/` を削除し、ネイティブ出力が Sigil のみで完結して全テストが通ること\n- [ ] ADR 0016 の決定 1・2 の見直し記録を文書に残すこと\n"
+    },
+    {
+      "id": "pr-4-1-adr-p1a-concurrency",
+      "depends_on_ids": ["pr-3-7-remove-rust-runtime"],
+      "title": "PR 4-1 (ADR): 並行処理 P1-a（SIR 評価器）の ADR を起草する",
+      "labels": ["lane:E", "needs-human"],
+      "body": "## 背景・目的\n\n[ADR 0018](docs/decisions/0018-p1-scope.md) の段階 4（並行処理 P1-a、SIR の評価器）の最初の PR として、P1-a の設計を定める ADR を起草します。前提の段階 3（PR 3-7）は完了済みです。\n\nADR 0018 の PR 分け表では、PR 4-1 の範囲は次の 3 点です。\n\n- `Sendable`・`Shareable` を手で付ける構文\n- `task` の API\n- 要求の隔離の細目（1 件の要求の失敗を隔離する。ADR 0018 決定 2）\n\n並行処理のモデル自体は [ADR 0007](docs/decisions/0007-concurrency-model.md) で決定済みであり、本 ADR はその P1-a の列（評価器での実行）を実装可能な細目に落とします。あわせて、PR 4-2（P1-a の実装）の細かい分け方を本 ADR で決めます。\n\n## 含めるべき論点\n\n- ADR 0007 の決定 1〜6 のうち、P1-a で評価器に載せる範囲と載せない範囲\n- `Sendable`・`Shareable` の手付け構文と、検査器の扱い（自動判定との関係）\n- `task` の API（生成・合流・取り消し）と効果との関係\n- 要求の隔離: 評価器での失敗（パニック・契約違反）の伝播範囲と、他タスクへの影響の遮断\n- 中断点をまたぐ借用と取り消し時の破棄（ADR 0007 決定 4）の評価器での実現方法\n- 人間の判断が要る点（ADR 0018 の決まりにより、判断が出るまで PR 4-2 を始めない）\n\n## 完了条件\n\n- [ ] `docs/decisions/0026-*.md` の起草（実装は含めない）と、`docs/decisions/README.md` への番号予約\n- [ ] BACKLOG.json への spawn ルール登録（`pr-4-1-adr-p1a-concurrency`。本 Issue はその目印つきで手動起票した）\n"
     }
   ]
 }

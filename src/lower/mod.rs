@@ -456,6 +456,9 @@ impl<'a> L<'a> {
             // 並行処理の取っ手は評価器では番号（ADR 0026）。共有の部品は `Cell` と同じ入れ物。
             "Scope" | "TaskHandle" | "Sender" | "Receiver" => ir::Ty::Int,
             "SyncShared" | "Atomic" => ir::Ty::Cell(one(&args)),
+            // `Lock` は評価器では番号。`LockGuard` は破棄で解放する持ち手なので、破棄される型にする。
+            "Lock" => ir::Ty::Int,
+            "LockGuard" => ir::Ty::Cell(one(&args)),
             "Int" => ir::Ty::Int,
             "Float" => ir::Ty::Float,
             "Bool" => ir::Ty::Bool,

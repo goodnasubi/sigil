@@ -228,11 +228,37 @@ pub fn run_project_with(
     run_input(Input::Project(root, entry), func, args, opts)
 }
 
-fn run_input(input: Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+/// 複数のルートタスクの実行の結果（ADR 0026 決定 4）。
+pub struct RootsOutcome {
+    /// ルートタスクごとの結果（引数の組の順）。異常停止したルートタスクは `Err`（他のルートタスクは止まらない）。
+    pub roots: Vec<Result<String, Box<Stop>>>,
+    pub output: String,
+    pub drops: Vec<String>,
+}
+
+/// 同じ入口の関数を、引数の組ごとのルートタスクとして 1 つの評価器で実行する（要求ごとのタスクの範囲の隔離）。
+///
+/// 1 つのルートタスクの異常停止は、そのルートタスクと子のタスクだけを止める。スタックの枯渇と確保器の枠の中の
+/// 異常停止は、プロセス全体の停止として `Err(Failure)` で返す。入口の引数の型が `Lock<T>` / `&Lock<T>` なら、
+/// 全ルートタスクで共有する 1 つの `Lock` を渡す（初期値は先頭のルートタスクの引数）。
+pub fn run_roots_with(
+    srcs: &[&str],
+    func: &str,
+    arg_sets: &[Vec<Arg>],
+    opts: &Options,
+) -> Result<RootsOutcome, Failure> {
+    let input = Input::Sources(srcs);
+    in_big_thread(opts, || execute_roots(&input, func, arg_sets, opts))
+}
+
+fn in_big_thread<T: Send>(
+    opts: &Options,
+    f: impl FnOnce() -> Result<T, Failure> + Send,
+) -> Result<T, Failure> {
     std::thread::scope(|s| {
         let spawned = std::thread::Builder::new()
             .stack_size(opts.stack_bytes)
-            .spawn_scoped(s, || execute(&input, func, args, opts));
+            .spawn_scoped(s, f);
         match spawned {
             Ok(h) => h.join().unwrap_or_else(|_| {
                 Err(crate::exec::fail(RunError::Entry(
@@ -246,7 +272,33 @@ fn run_input(input: Input, func: &str, args: &[Arg], opts: &Options) -> Result<O
     })
 }
 
+fn run_input(input: Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+    in_big_thread(opts, || execute(&input, func, args, opts))
+}
+
+/// 入口が 1 つのルートタスクの実行。その異常停止は従来どおりプログラム全体の失敗になる。
 fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Outcome, Failure> {
+    let mut o = execute_roots(input, func, std::slice::from_ref(&args.to_vec()), opts)?;
+    match o.roots.remove(0) {
+        Ok(value) => Ok(Outcome {
+            value,
+            output: o.output,
+            drops: o.drops,
+        }),
+        Err(s) => Err(Failure {
+            error: RunError::Stop(s),
+            output: o.output,
+            drops: o.drops.into_boxed_slice(),
+        }),
+    }
+}
+
+fn execute_roots(
+    input: &Input,
+    func: &str,
+    arg_sets: &[Vec<Arg>],
+    opts: &Options,
+) -> Result<RootsOutcome, Failure> {
     use crate::exec::fail;
     let copts = crate::exec::check_options(opts);
     let file: File = match input {
@@ -263,31 +315,47 @@ fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Ou
     let Some(decl) = decl else {
         return Err(fail(RunError::Entry(format!("関数 {func} がない"))));
     };
-    if decl.params.len() != args.len() {
-        return Err(fail(RunError::Entry(format!(
-            "{func} は引数を {} 個とる（{} 個渡された）",
-            decl.params.len(),
-            args.len()
-        ))));
-    }
-    let mut argv = Vec::with_capacity(args.len());
-    for (p, a) in decl.params.iter().zip(args) {
-        match coerce(a, &p.ty) {
-            Ok(v) => argv.push(if matches!(p.ty, Type::Ref { .. }) {
-                Val::Ref(Ptr {
-                    slot: new_slot(v),
-                    path: vec![],
-                })
-            } else {
-                v
-            }),
-            Err(m) => {
-                return Err(fail(RunError::Entry(format!(
-                    "引数 {} の型が合わない: {m}",
-                    p.name
-                ))))
+    let is_lock = |t: &Type| {
+        let t = match t {
+            Type::Ref { inner, .. } => inner,
+            t => t,
+        };
+        matches!(t, Type::Path { path, .. } if path.last().is_some_and(|n| n == "Lock"))
+    };
+    // 共有の `Lock` の引数は、評価器ができてから作る（ここでは場所だけ空けておく）。
+    let mut argvs: Vec<Vec<Val>> = Vec::with_capacity(arg_sets.len());
+    for args in arg_sets {
+        if decl.params.len() != args.len() {
+            return Err(fail(RunError::Entry(format!(
+                "{func} は引数を {} 個とる（{} 個渡された）",
+                decl.params.len(),
+                args.len()
+            ))));
+        }
+        let mut argv = Vec::with_capacity(args.len());
+        for (p, a) in decl.params.iter().zip(args) {
+            if is_lock(&p.ty) {
+                argv.push(Val::Empty);
+                continue;
+            }
+            match coerce(a, &p.ty) {
+                Ok(v) => argv.push(if matches!(p.ty, Type::Ref { .. }) {
+                    Val::Ref(Ptr {
+                        slot: new_slot(v),
+                        path: vec![],
+                    })
+                } else {
+                    v
+                }),
+                Err(m) => {
+                    return Err(fail(RunError::Entry(format!(
+                        "引数 {} の型が合わない: {m}",
+                        p.name
+                    ))))
+                }
             }
         }
+        argvs.push(argv);
     }
     let program = match crate::lower::lower(&typed, func) {
         Ok(p) => p,
@@ -326,40 +394,99 @@ fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Ou
         sch: sched::Sched::new(opts.stack_bytes, opts.schedule_seed),
         pending_scope: None,
     };
-    let result = m.run_root(program.entry, argv);
+    // 共有の `Lock` を作って、`Lock` の引数に入れる。
+    for (pi, p) in decl.params.iter().enumerate() {
+        if !is_lock(&p.ty) {
+            continue;
+        }
+        let inner = match &p.ty {
+            Type::Ref { inner, .. } => inner,
+            t => t,
+        };
+        let init = match (arg_sets.first(), inner) {
+            (Some(args), Type::Path { args: targs, .. }) => match targs.first() {
+                Some(t) => coerce(&args[pi], t),
+                None => Ok(to_val(&args[pi])),
+            },
+            _ => Ok(Val::Unit),
+        };
+        let init = match init {
+            Ok(v) => v,
+            Err(msg) => {
+                return Err(fail(RunError::Entry(format!(
+                    "引数 {} の型が合わない: {msg}",
+                    p.name
+                ))))
+            }
+        };
+        let id = m.sch.new_shared_lock(init);
+        for argv in &mut argvs {
+            argv[pi] = if matches!(p.ty, Type::Ref { .. }) {
+                Val::Ref(Ptr {
+                    slot: new_slot(Val::Int(id as i64)),
+                    path: vec![],
+                })
+            } else {
+                Val::Int(id as i64)
+            };
+        }
+    }
+    let result = m.run_roots(program.entry, argvs);
     let output = std::mem::take(&mut m.out);
     let res = match result {
-        Ok(v) => {
-            let ts = types();
-            let value = show_val(&ts, &v, true);
-            drop(v);
-            if DEEP.with(|d| d.replace(false)) {
-                Err((
-                    RunError::Stop(Box::new(Stop {
-                        kind: StopKind::StackExhausted,
-                        func: func.to_string(),
-                        line: program.exit_line,
-                        during: None,
-                        detail: "値の入れ子が深すぎる".into(),
-                    })),
-                    output,
-                ))
-            } else {
-                Ok((value, output))
+        Ok(rs) => {
+            let mut roots = Vec::with_capacity(rs.len());
+            for r in rs {
+                roots.push(match r {
+                    Ok(v) => {
+                        let ts = types();
+                        let value = show_val(&ts, &v, true);
+                        drop(v);
+                        if DEEP.with(|d| d.replace(false)) {
+                            Err(Box::new(Stop {
+                                kind: StopKind::StackExhausted,
+                                func: func.to_string(),
+                                line: program.exit_line,
+                                during: None,
+                                detail: "値の入れ子が深すぎる".into(),
+                            }))
+                        } else {
+                            Ok(value)
+                        }
+                    }
+                    Err(s) => Err(s),
+                });
             }
+            // 隔離した異常停止の報告は、従来どおり標準エラーに出す（複数のルートタスクのとき。
+            // 1 つのときは呼び出し側が失敗として報告する）。
+            if roots.len() > 1 && !opts.capture_console {
+                for s in roots.iter().filter_map(|r| r.as_ref().err()) {
+                    eprintln!("{s}");
+                }
+            }
+            Ok(roots)
         }
-        Err(s) => Err((RunError::Stop(s), output)),
+        Err(s) => Err(s),
     };
+    // テスト用: 環境変数 `SIGIL_RT_LIVE` があれば、終わった時点で生きている枠と確保済みの塊の数を
+    // 標準エラーに出す（ネイティブのランタイムと同じ流儀。停止の経路での漏れの確認に使う）。
+    if std::env::var_os("SIGIL_RT_LIVE").is_some() {
+        eprintln!(
+            "live: frames={} chunks={}",
+            m.sch.live_frames(),
+            m.chunks.len()
+        );
+    }
     drop(m);
     let drops = DROP_LOG.with(|l| l.borrow_mut().take()).unwrap_or_default();
     match res {
-        Ok((value, output)) => Ok(Outcome {
-            value,
+        Ok(roots) => Ok(RootsOutcome {
+            roots,
             output,
             drops,
         }),
-        Err((error, output)) => Err(Failure {
-            error,
+        Err(s) => Err(Failure {
+            error: RunError::Stop(s),
             output,
             drops: drops.into_boxed_slice(),
         }),

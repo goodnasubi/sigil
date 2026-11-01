@@ -48,6 +48,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
 ];
 
 pub mod core_sigil;
+pub mod os_sigil;
 
 /// 原始操作の表の効果の列で、起こす作用が引数で決まること（システムコール）を表す語（ADR 0016 の決定 4）。
 /// この語の操作を呼ぶ関数に限り、効果の検査は「宣言が推論を含む」になる。

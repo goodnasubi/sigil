@@ -694,6 +694,9 @@ impl<'a> L<'a> {
                         Builtin::RawSyscall
                     }
                     "task.scope" => Builtin::TaskScope,
+                    "task.all_ok" => Builtin::TaskAllOk,
+                    "task.race" => Builtin::TaskRace,
+                    "task.timeout" => Builtin::TaskTimeout,
                     "task.yield" => Builtin::TaskYield,
                     "task.sleep" => Builtin::TaskSleep,
                     "task.channel" => Builtin::TaskChannel,

@@ -2,7 +2,8 @@
 //!
 //! 呼び出しは Rust の再帰ではなく、明示的な枠の積み重ね（`Vec<Frame>`）で行う。
 //! タスクは枠の積み重ねを状態として持ち、中断点（呼び出しの終端）でだけ切り替わる。
-//! スケジューラは決定的な FIFO で、時計は仮想（実時間では待たない）。
+//! スケジューラは既定で決定的な FIFO（`Options::schedule_seed` で乱数の種による攪拌に差し替え可能）で、
+//! 時計は仮想（実時間では待たない）。
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -11,7 +12,7 @@ use std::rc::Rc;
 use crate::exec::StopKind;
 use crate::ir::*;
 
-use super::value::{new_slot, shadow, with_val, with_val_mut, Agg, Ptr, Tag, Val};
+use super::value::{list_of, new_slot, shadow, with_val, with_val_mut, Agg, Ptr, Tag, Val};
 use super::{Slot, E, M};
 
 pub(super) struct Frame {
@@ -48,7 +49,24 @@ struct Task {
     resume: Option<Val>,
     result: Option<Val>,
     scope: Option<usize>,
+    /// `AllOk` の子タスクなら、結果を入れる添字。
+    slot_idx: usize,
     joiner: Option<usize>,
+    /// このタスクが現在待機している範囲（`Scoping` のとき）。
+    waiting_scope: Option<usize>,
+}
+
+#[derive(Default)]
+enum ScopeKind {
+    #[default]
+    Normal,
+    Timeout {
+        seq: u64,
+    },
+    Race,
+    AllOk {
+        results: Vec<Option<Val>>,
+    },
 }
 
 #[derive(Default)]
@@ -56,6 +74,7 @@ struct ScopeSt {
     live: usize,
     waiter: Option<usize>,
     children: Vec<usize>,
+    kind: ScopeKind,
 }
 
 #[derive(Default)]
@@ -64,21 +83,28 @@ struct Chan {
     waiters: VecDeque<usize>,
 }
 
+#[derive(Clone, Copy)]
+enum Wake {
+    Sleep(usize),
+    Timeout(usize),
+}
+
 pub(super) struct Sched {
     tasks: Vec<Task>,
     ready: VecDeque<usize>,
     scopes: Vec<ScopeSt>,
     chans: Vec<Chan>,
-    sleepers: Vec<(i64, u64, usize)>,
+    sleepers: Vec<(i64, u64, Wake)>,
     clock: i64,
     seq: u64,
     cur: usize,
     live: usize,
     max_depth: usize,
+    rng: Option<u64>,
 }
 
 impl Sched {
-    pub(super) fn new(stack_bytes: usize) -> Sched {
+    pub(super) fn new(stack_bytes: usize, schedule_seed: Option<u64>) -> Sched {
         Sched {
             tasks: vec![],
             ready: VecDeque::new(),
@@ -91,6 +117,29 @@ impl Sched {
             live: 0,
             // 枠 1 つを約 1 KiB と見なして、深さの上限を決める（スタックの枯渇の判定）。
             max_depth: (stack_bytes / 1024).max(64),
+            rng: schedule_seed,
+        }
+    }
+
+    fn next_rand(&mut self) -> Option<u64> {
+        let st = self.rng.as_mut()?;
+        // SplitMix64（種が 0 でも偏らず進む決定的な疑似乱数）
+        *st = st.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = *st;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        Some(z ^ (z >> 31))
+    }
+
+    fn pop_ready(&mut self) -> Option<usize> {
+        if self.ready.is_empty() {
+            return None;
+        }
+        if let Some(r) = self.next_rand() {
+            let idx = (r as usize) % self.ready.len();
+            self.ready.remove(idx)
+        } else {
+            self.ready.pop_front()
         }
     }
 }
@@ -115,6 +164,9 @@ fn is_task_op(b: Builtin) -> bool {
     matches!(
         b,
         TaskScope
+            | TaskAllOk
+            | TaskRace
+            | TaskTimeout
             | TaskYield
             | TaskSleep
             | TaskChannel
@@ -153,6 +205,14 @@ impl<'p> M<'p> {
             pending: None,
             scope,
             loc,
+        }
+    }
+
+    fn drop_frame_locals(mut locals: Vec<Slot>) {
+        while let Some(s) = locals.pop() {
+            let old = std::mem::replace(&mut *s.borrow_mut(), Val::Empty);
+            drop(old);
+            drop(s);
         }
     }
 
@@ -392,7 +452,7 @@ impl<'p> M<'p> {
                     let fr = frames.pop().expect("枠がある");
                     self.sch.live -= 1;
                     let sc = fr.scope;
-                    drop(fr);
+                    Self::drop_frame_locals(fr.locals);
                     if frames.is_empty() {
                         return Run::Done(v);
                     }
@@ -401,6 +461,7 @@ impl<'p> M<'p> {
                             let cur = self.sch.cur;
                             self.sch.scopes[sid].waiter = Some(cur);
                             self.sch.tasks[cur].state = State::Scoping;
+                            self.sch.tasks[cur].waiting_scope = Some(sid);
                             self.sch.tasks[cur].resume = Some(v);
                             return Run::Suspend;
                         }
@@ -416,7 +477,10 @@ impl<'p> M<'p> {
                         .pending
                         .take()
                         .unwrap_or_else(|| self.stop_at(fr.loc, None, None));
-                    drop(fr);
+                    if let Some(sid) = fr.scope {
+                        self.cancel_scope(sid);
+                    }
+                    Self::drop_frame_locals(fr.locals);
                     match frames.last_mut() {
                         None => return Run::Fail(e),
                         Some(fr) => self.deliver_err(fr, e),
@@ -434,6 +498,72 @@ impl<'p> M<'p> {
         }
     }
 
+    fn cancel_scope(&mut self, sid: usize) {
+        self.sch.scopes[sid].waiter = None;
+        self.sch.scopes[sid].live = 0;
+        match &mut self.sch.scopes[sid].kind {
+            ScopeKind::Timeout { seq } => {
+                let sq = *seq;
+                self.sch.sleepers.retain(|s| s.1 != sq);
+            }
+            ScopeKind::AllOk { results } => {
+                for r in results.drain(..).rev() {
+                    drop(r);
+                }
+            }
+            _ => {}
+        }
+        let kids = std::mem::take(&mut self.sch.scopes[sid].children);
+        for c in kids.into_iter().rev() {
+            if self.sch.tasks[c].state != State::Done {
+                self.cancel_task(c);
+            } else {
+                let r = self.sch.tasks[c].result.take();
+                drop(r);
+            }
+        }
+    }
+
+    fn cancel_task(&mut self, t: usize) {
+        if self.sch.tasks[t].state == State::Done {
+            let r = self.sch.tasks[t].result.take();
+            drop(r);
+            return;
+        }
+        self.sch.tasks[t].state = State::Done;
+        self.sch.tasks[t].joiner = None;
+        self.sch.ready.retain(|&x| x != t);
+        self.sch
+            .sleepers
+            .retain(|s| !matches!(s.2, Wake::Sleep(x) if x == t));
+        for ch in &mut self.sch.chans {
+            ch.waiters.retain(|&x| x != t);
+        }
+        for other in &mut self.sch.tasks {
+            if other.joiner == Some(t) {
+                other.joiner = None;
+            }
+        }
+        if let Some(ws) = self.sch.tasks[t].waiting_scope.take() {
+            self.cancel_scope(ws);
+        }
+        let mut frames = std::mem::take(&mut self.sch.tasks[t].frames);
+        while let Some(fr) = frames.pop() {
+            self.sch.live -= 1;
+            if let Some(inner_sid) = fr.scope {
+                self.cancel_scope(inner_sid);
+            }
+            Self::drop_frame_locals(fr.locals);
+        }
+        let r = self.sch.tasks[t].resume.take();
+        drop(r);
+        let r = self.sch.tasks[t].result.take();
+        drop(r);
+        if let Some(sid) = self.sch.tasks[t].scope {
+            self.sch.scopes[sid].live = self.sch.scopes[sid].live.saturating_sub(1);
+        }
+    }
+
     fn wake(&mut self, t: usize, v: Option<Val>) {
         let task = &mut self.sch.tasks[t];
         if v.is_some() {
@@ -441,6 +571,32 @@ impl<'p> M<'p> {
         }
         task.state = State::Ready;
         self.sch.ready.push_back(t);
+    }
+
+    fn spawn_in_scope(
+        &mut self,
+        sid: usize,
+        slot_idx: usize,
+        fid: FuncId,
+        args: Vec<Val>,
+        stop: StopId,
+    ) -> usize {
+        let frame = self.new_frame(fid, args, stop, None);
+        let tid = self.sch.tasks.len();
+        self.sch.tasks.push(Task {
+            frames: vec![frame],
+            state: State::Ready,
+            resume: None,
+            result: None,
+            scope: Some(sid),
+            slot_idx,
+            joiner: None,
+            waiting_scope: None,
+        });
+        self.sch.scopes[sid].live += 1;
+        self.sch.scopes[sid].children.push(tid);
+        self.sch.ready.push_back(tid);
+        tid
     }
 
     fn task_op(&mut self, locals: &[Slot], b: Builtin, args: &[Operand], stop: StopId) -> Op {
@@ -466,19 +622,7 @@ impl<'p> M<'p> {
                 let Some((fid, a)) = self.resolve_callee(&g, vec![]) else {
                     return Op::Val(Val::Int(-1));
                 };
-                let frame = self.new_frame(fid, a, stop, None);
-                let tid = self.sch.tasks.len();
-                self.sch.tasks.push(Task {
-                    frames: vec![frame],
-                    state: State::Ready,
-                    resume: None,
-                    result: None,
-                    scope: Some(sid),
-                    joiner: None,
-                });
-                self.sch.scopes[sid].live += 1;
-                self.sch.scopes[sid].children.push(tid);
-                self.sch.ready.push_back(tid);
+                let tid = self.spawn_in_scope(sid, 0, fid, a, stop);
                 Op::Val(Val::Int(tid as i64))
             }
             TaskJoin => {
@@ -492,6 +636,89 @@ impl<'p> M<'p> {
                     Op::Block
                 }
             }
+            TaskTimeout => {
+                let ms = self.read_int(locals, &args[0]).max(0);
+                let g = self.read(locals, &args[1]);
+                let Some((fid, a)) = self.resolve_callee(&g, vec![]) else {
+                    return Op::Val(self.none());
+                };
+                let sid = self.sch.scopes.len();
+                self.sch.seq += 1;
+                let sq = self.sch.seq;
+                let at = self.sch.clock.saturating_add(ms);
+                self.sch.scopes.push(ScopeSt {
+                    live: 0,
+                    waiter: Some(cur),
+                    children: vec![],
+                    kind: ScopeKind::Timeout { seq: sq },
+                });
+                self.spawn_in_scope(sid, 0, fid, a, stop);
+                self.sch.sleepers.push((at, sq, Wake::Timeout(sid)));
+                self.sch.tasks[cur].state = State::Scoping;
+                self.sch.tasks[cur].waiting_scope = Some(sid);
+                Op::Block
+            }
+            TaskRace => {
+                let fns = match self.owned(locals, &args[0]) {
+                    Val::Agg(mut a) => {
+                        a.silent = true;
+                        std::mem::take(&mut a.f)
+                    }
+                    _ => vec![],
+                };
+                if fns.is_empty() {
+                    return Op::Fail(self.stop_at(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("task.race: 空の一覧"),
+                    ));
+                }
+                let sid = self.sch.scopes.len();
+                self.sch.scopes.push(ScopeSt {
+                    live: 0,
+                    waiter: Some(cur),
+                    children: vec![],
+                    kind: ScopeKind::Race,
+                });
+                for (idx, g) in fns.into_iter().enumerate() {
+                    if let Some((fid, a)) = self.resolve_callee(&g, vec![]) {
+                        self.spawn_in_scope(sid, idx, fid, a, stop);
+                    }
+                }
+                self.sch.tasks[cur].state = State::Scoping;
+                self.sch.tasks[cur].waiting_scope = Some(sid);
+                Op::Block
+            }
+            TaskAllOk => {
+                let fns = match self.owned(locals, &args[0]) {
+                    Val::Agg(mut a) => {
+                        a.silent = true;
+                        std::mem::take(&mut a.f)
+                    }
+                    _ => vec![],
+                };
+                if fns.is_empty() {
+                    return Op::Val(self.ok(list_of(vec![])));
+                }
+                let n = fns.len();
+                let sid = self.sch.scopes.len();
+                self.sch.scopes.push(ScopeSt {
+                    live: 0,
+                    waiter: Some(cur),
+                    children: vec![],
+                    kind: ScopeKind::AllOk {
+                        results: (0..n).map(|_| None).collect(),
+                    },
+                });
+                for (idx, g) in fns.into_iter().enumerate() {
+                    if let Some((fid, a)) = self.resolve_callee(&g, vec![]) {
+                        self.spawn_in_scope(sid, idx, fid, a, stop);
+                    }
+                }
+                self.sch.tasks[cur].state = State::Scoping;
+                self.sch.tasks[cur].waiting_scope = Some(sid);
+                Op::Block
+            }
             TaskYield => {
                 self.sch.tasks[cur].resume = Some(Val::Unit);
                 self.sch.tasks[cur].state = State::Ready;
@@ -503,7 +730,7 @@ impl<'p> M<'p> {
                 let at = self.sch.clock.saturating_add(ms);
                 self.sch.seq += 1;
                 let sq = self.sch.seq;
-                self.sch.sleepers.push((at, sq, cur));
+                self.sch.sleepers.push((at, sq, Wake::Sleep(cur)));
                 self.sch.tasks[cur].resume = Some(Val::Unit);
                 self.sch.tasks[cur].state = State::Sleeping;
                 Op::Block
@@ -540,12 +767,24 @@ impl<'p> M<'p> {
             SyncSharedNew | AtomicNew => Op::Val(Val::Cell(Rc::new(RefCell::new(
                 self.owned(locals, &args[0]),
             )))),
-            SyncSharedGet | AtomicLoad => {
+            SyncSharedGet => {
                 let (s, p) = self.view(locals, &args[0]);
                 Op::Val(with_val(&s, &p, |v| match v {
                     Val::Cell(c) => shadow(&c.borrow()),
                     _ => Val::Unit,
                 }))
+            }
+            AtomicLoad => {
+                // `Atomic.load` は中断点（ADR 0007 決定 3・決定 6 条件 11）。
+                let (s, p) = self.view(locals, &args[0]);
+                let val = with_val(&s, &p, |v| match v {
+                    Val::Cell(c) => shadow(&c.borrow()),
+                    _ => Val::Unit,
+                });
+                self.sch.tasks[cur].resume = Some(val);
+                self.sch.tasks[cur].state = State::Ready;
+                self.sch.ready.push_back(cur);
+                Op::Block
             }
             AtomicStore => {
                 let (s, p) = self.view(locals, &args[0]);
@@ -567,22 +806,106 @@ impl<'p> M<'p> {
     }
 
     fn complete(&mut self, t: usize, v: Val) {
-        let (joiner, scope) = {
+        let (joiner, scope, slot_idx) = {
             let task = &mut self.sch.tasks[t];
             task.state = State::Done;
-            (task.joiner.take(), task.scope)
+            (task.joiner.take(), task.scope, task.slot_idx)
         };
-        match joiner {
-            Some(j) => self.wake(j, Some(v)),
-            None => self.sch.tasks[t].result = Some(v),
-        }
-        if let Some(sid) = scope {
-            let sc = &mut self.sch.scopes[sid];
-            sc.live -= 1;
-            if sc.live == 0 {
-                if let Some(w) = sc.waiter.take() {
+        let Some(sid) = scope else {
+            if let Some(j) = joiner {
+                self.wake(j, Some(v));
+            } else {
+                self.sch.tasks[t].result = Some(v);
+            }
+            return;
+        };
+        match &mut self.sch.scopes[sid].kind {
+            ScopeKind::Normal => {
+                match joiner {
+                    Some(j) => self.wake(j, Some(v)),
+                    None => self.sch.tasks[t].result = Some(v),
+                }
+                let sc = &mut self.sch.scopes[sid];
+                sc.live = sc.live.saturating_sub(1);
+                if sc.live == 0 {
+                    if let Some(w) = sc.waiter.take() {
+                        self.sch.tasks[w].waiting_scope = None;
+                        self.finish_scope(sid);
+                        self.wake(w, None);
+                    }
+                }
+            }
+            ScopeKind::Timeout { seq } => {
+                let sq = *seq;
+                let waiter = self.sch.scopes[sid].waiter.take();
+                self.sch.scopes[sid].live = 0;
+                self.sch.sleepers.retain(|s| s.1 != sq);
+                if let Some(w) = waiter {
+                    self.sch.tasks[w].waiting_scope = None;
                     self.finish_scope(sid);
-                    self.wake(w, None);
+                    let some_v = self.some(v);
+                    self.wake(w, Some(some_v));
+                } else {
+                    drop(v);
+                }
+            }
+            ScopeKind::Race => {
+                if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                    self.cancel_scope(sid);
+                    self.sch.tasks[w].waiting_scope = None;
+                    self.wake(w, Some(v));
+                } else {
+                    drop(v);
+                }
+            }
+            ScopeKind::AllOk { .. } => {
+                let is_err =
+                    matches!(&v, Val::Agg(a) if matches!(a.tag, Tag::Variant(_, RESULT_ERR)));
+                if is_err {
+                    if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                        if let ScopeKind::AllOk { results } = &mut self.sch.scopes[sid].kind {
+                            for r in results.drain(..).rev() {
+                                drop(r);
+                            }
+                        }
+                        self.cancel_scope(sid);
+                        self.sch.tasks[w].waiting_scope = None;
+                        self.wake(w, Some(v));
+                    } else {
+                        drop(v);
+                    }
+                } else {
+                    let ok_val = match v {
+                        Val::Agg(mut a) => {
+                            a.silent = true;
+                            a.f.pop().unwrap_or(Val::Unit)
+                        }
+                        other => other,
+                    };
+                    let done = {
+                        let sc = &mut self.sch.scopes[sid];
+                        if let ScopeKind::AllOk { results } = &mut sc.kind {
+                            if slot_idx < results.len() {
+                                results[slot_idx] = Some(ok_val);
+                            }
+                        }
+                        sc.live = sc.live.saturating_sub(1);
+                        sc.live == 0
+                    };
+                    if done {
+                        if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                            let vals = match &mut self.sch.scopes[sid].kind {
+                                ScopeKind::AllOk { results } => {
+                                    results.drain(..).map(|x| x.unwrap_or(Val::Unit)).collect()
+                                }
+                                _ => vec![],
+                            };
+                            self.sch.tasks[w].waiting_scope = None;
+                            self.finish_scope(sid);
+                            let res_val = self.ok(list_of(vals));
+                            self.wake(w, Some(res_val));
+                        }
+                    }
                 }
             }
         }
@@ -591,25 +914,19 @@ impl<'p> M<'p> {
     /// 残っているタスクを、新しいものから順に取り消す。枠は内側から外側へ畳み、局所は逆順に破棄する。
     fn cancel_all(&mut self) {
         for t in (0..self.sch.tasks.len()).rev() {
-            let mut frames = std::mem::take(&mut self.sch.tasks[t].frames);
-            while let Some(fr) = frames.pop() {
-                self.sch.live -= 1;
-                let mut locals = fr.locals;
-                while let Some(s) = locals.pop() {
-                    drop(s);
-                }
+            if self.sch.tasks[t].state != State::Done {
+                self.cancel_task(t);
+            } else {
+                let r = self.sch.tasks[t].result.take();
+                drop(r);
             }
-            let r = self.sch.tasks[t].resume.take();
-            drop(r);
-            let r = self.sch.tasks[t].result.take();
-            drop(r);
         }
         for c in std::mem::take(&mut self.sch.chans) {
             drop(c);
         }
     }
 
-    /// ルートタスクを実行する。決定的な FIFO で、中断点でだけ切り替える。
+    /// ルートタスクを実行する。既定は決定的な FIFO（`schedule_seed` 指定時は種による攪拌）で、中断点でだけ切り替える。
     pub(super) fn run_root(&mut self, fid: FuncId, args: Vec<Val>) -> Result<Val, E> {
         let frame = self.new_frame(fid, args, 0, None);
         self.sch.tasks.push(Task {
@@ -618,11 +935,13 @@ impl<'p> M<'p> {
             resume: None,
             result: None,
             scope: None,
+            slot_idx: 0,
             joiner: None,
+            waiting_scope: None,
         });
         self.sch.ready.push_back(0);
         loop {
-            let Some(t) = self.sch.ready.pop_front() else {
+            let Some(t) = self.sch.pop_ready() else {
                 if self.sch.sleepers.is_empty() {
                     self.cancel_all();
                     return Err(self.stop_at(
@@ -640,18 +959,32 @@ impl<'p> M<'p> {
                     .expect("要素")
                     .0;
                 self.sch.clock = at;
-                let mut due: Vec<(u64, usize)> = vec![];
-                self.sch.sleepers.retain(|&(a, sq, t)| {
+                let mut due: Vec<(u64, Wake)> = vec![];
+                self.sch.sleepers.retain(|&(a, sq, w)| {
                     if a == at {
-                        due.push((sq, t));
+                        due.push((sq, w));
                         false
                     } else {
                         true
                     }
                 });
-                due.sort();
-                for (_, t) in due {
-                    self.wake(t, None);
+                due.sort_by_key(|&(sq, _)| sq);
+                for (_, w) in due {
+                    match w {
+                        Wake::Sleep(t) => {
+                            if self.sch.tasks[t].state == State::Sleeping {
+                                self.wake(t, None);
+                            }
+                        }
+                        Wake::Timeout(sid) => {
+                            if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                                self.cancel_scope(sid);
+                                self.sch.tasks[w].waiting_scope = None;
+                                let none = self.none();
+                                self.wake(w, Some(none));
+                            }
+                        }
+                    }
                 }
                 continue;
             };

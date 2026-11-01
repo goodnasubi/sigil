@@ -323,7 +323,7 @@ fn execute(input: &Input, func: &str, args: &[Arg], opts: &Options) -> Result<Ou
         io: find("IoError"),
         canon,
         chunks: BTreeMap::new(),
-        sch: sched::Sched::new(opts.stack_bytes),
+        sch: sched::Sched::new(opts.stack_bytes, opts.schedule_seed),
         pending_scope: None,
     };
     let result = m.run_root(program.entry, argv);

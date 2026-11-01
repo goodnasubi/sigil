@@ -28,19 +28,19 @@ impl<'p> M<'p> {
         }))
     }
 
-    fn some(&self, v: Val) -> Val {
+    pub(super) fn some(&self, v: Val) -> Val {
         self.variant(self.opt, OPTION_SOME, vec![v])
     }
 
-    fn none(&self) -> Val {
+    pub(super) fn none(&self) -> Val {
         self.variant(self.opt, OPTION_NONE, vec![])
     }
 
-    fn ok(&self, v: Val) -> Val {
+    pub(super) fn ok(&self, v: Val) -> Val {
         self.variant(self.res, RESULT_OK, vec![v])
     }
 
-    fn err(&self, v: Val) -> Val {
+    pub(super) fn err(&self, v: Val) -> Val {
         self.variant(self.res, RESULT_ERR, vec![v])
     }
 

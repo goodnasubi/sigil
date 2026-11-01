@@ -1,4 +1,4 @@
-//! Issue #191・#193: 全タスクが `task.yield` と読み出しだけを繰り返し、状態が変わらない
+//! Issue #191、修正は #193: 全タスクが `task.yield` と読み出しだけを繰り返し、状態が変わらない
 //! 状態（ライブロック）を、デッドロックと同じ異常停止で止める。正常な `yield` は止めない。
 
 use sigil::exec::{RunError, StopKind};
@@ -164,4 +164,82 @@ fn run() -> Int
 }
 "#);
     assert!(v.starts_with("11000"), "{v}");
+}
+
+#[test]
+fn single_yield_loop_beyond_old_limit_is_not_stopped() {
+    let v = ok(r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let mut i = 0;
+  while i < 1100000 {
+    i = i + 1;
+    task.yield();
+  }
+  return i;
+}
+"#);
+    assert!(v.starts_with("1100000"), "{v}");
+}
+
+#[test]
+fn spin_while_holding_lock_guard_is_not_misdetected() {
+    // `LockGuard` を持つタスクは指紋を取れず、検出の対象にならない（誤検出しない）。
+    // 中身が変わる空転でないことを、有限回で抜けるループで確かめる。
+    let v = ok(r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let l = Lock.new(0);
+  let mut i = 0;
+  match l.acquire() {
+    Ok(g) => {
+      while i < 5000 {
+        i = i + 1;
+        task.yield();
+      }
+    }
+    Err(e) => {
+      return 0 - 1;
+    }
+  }
+  return i;
+}
+"#);
+    assert!(v.starts_with("5000"), "{v}");
+}
+
+#[test]
+fn waiter_is_woken_by_another_task_updating_shared_state() {
+    let v = ok(r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend, task.share
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let w = s.spawn(move || {
+      let mut n = 0;
+      while n < 3 {
+        task.yield();
+        n = n + 1;
+      }
+      tx.send(9);
+      return 0;
+    });
+    let x = rx.recv();
+    return x + w.join();
+  });
+}
+"#);
+    assert!(v.starts_with('9'), "{v}");
 }

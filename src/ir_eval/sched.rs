@@ -124,14 +124,16 @@ mod alloc_tests {
     }
 }
 
-/// `Val` の内容の指紋を `h` に足す。内容を完全には辿れない値（`LockGuard` など）と深すぎる値では `false`。
+/// `Val` の内容の指紋を `h` に足す。内容を完全には辿れない値（`LockGuard` など）、深すぎる値、
+/// 辿るノード数が予算 `n` を超える値では `false`（局所が大きいタスクの `yield` を遅くしないため）。
 ///
 /// 参照・共有の値は、指す先の場所ではなく中身で指紋を取る（呼び出しのたびに作り直される一時の場所に
 /// 左右されないため）。
-fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32) -> bool {
-    if d > 12 {
+fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32, n: &mut usize) -> bool {
+    if d > 12 || *n == 0 {
         return false;
     }
+    *n -= 1;
     match v {
         Val::Empty => 0u8.hash(h),
         Val::Unit => 1u8.hash(h),
@@ -151,26 +153,26 @@ fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32) -> bool {
                 Tag::Variant(i, j) => (13u8, i, j).hash(h),
             }
             a.f.len().hash(h);
-            return a.f.iter().all(|x| fp_val(x, h, d + 1));
+            return a.f.iter().all(|x| fp_val(x, h, d + 1, n));
         }
         Val::Ref(p) => {
             14u8.hash(h);
-            return p.with(|t| fp_val(t, h, d + 1));
+            return p.with(|t| fp_val(t, h, d + 1, n));
         }
         Val::Closure(c) => {
             (15u8, c.func).hash(h);
-            return with_val(&c.env, &[], |t| fp_val(t, h, d + 1));
+            return with_val(&c.env, &[], |t| fp_val(t, h, d + 1, n));
         }
         Val::Cell(c) => {
             16u8.hash(h);
             return match c.try_borrow() {
-                Ok(b) => fp_val(&b, h, d + 1),
+                Ok(b) => fp_val(&b, h, d + 1, n),
                 Err(_) => false,
             };
         }
         Val::Shared(x) => {
             17u8.hash(h);
-            return fp_val(x, h, d + 1);
+            return fp_val(x, h, d + 1, n);
         }
         Val::Bytes(b) => match b.try_borrow() {
             Ok(b) => (18u8, &*b).hash(h),
@@ -181,15 +183,21 @@ fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32) -> bool {
     true
 }
 
+/// 指紋を取るときに辿る値のノード数の予算（暫定）。超えたタスクは検出の対象にしない。
+/// 局所の小さい空転ループ（フラグ待ちなど）が入り、大きな `List` を持つタスクの `yield` が
+/// 遅くならない大きさとして選んだ暫定値であり、仕様ではない。
+const FP_BUDGET: usize = 2000;
+
 /// タスクの枠の積み重ね全体の指紋。辿れない値があれば `None`（検出の対象にしない）。
 fn fp_frames(frames: &[Frame]) -> Option<u64> {
     let mut h = DefaultHasher::new();
+    let mut budget = FP_BUDGET;
     for f in frames {
         (f.fid, f.bb, f.locals.len()).hash(&mut h);
         for sl in &f.locals {
             match sl.try_borrow() {
                 Ok(v) => {
-                    if !fp_val(&v, &mut h, 0) {
+                    if !fp_val(&v, &mut h, 0, &mut budget) {
                         return None;
                     }
                 }
@@ -1180,7 +1188,7 @@ impl<'p> M<'p> {
     }
 
     /// `task.yield` で中断したタスク `t` の後で、全タスクが `task.yield` と読み出しだけを繰り返し、
-    /// 共有の状態が変わらない状態か（ライブロック。Issue #191・#193）。
+    /// 共有の状態が変わらない状態か（ライブロック。Issue #191、修正は #193）。
     ///
     /// タスクの枠の指紋（枠の積み重ね全体の局所の中身）と共有の状態の版が、連続する 2 回の `task.yield` で
     /// 同じなら、そのタスクは同じ状態に戻っている（決定的な実行なので、次も同じになる）。実行可能な

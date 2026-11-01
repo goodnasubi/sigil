@@ -21,6 +21,7 @@
 | [03-ownership](03-ownership/) | 口座の入金・照会・解約 | 所有権と借用（受け取る / 読む / 書き換える）、参照を二級に限る規則（[ADR 0003](../docs/decisions/0003-ownership-and-borrowing.md)） |
 | [04-effects](04-effects/) | 税込み価格の計算・価格ファイルの読み込み | 効果の宣言と一致検査、`of(f)` による引き継ぎ、`state` 効果（[ADR 0004](../docs/decisions/0004-effects.md)） |
 | [05-control](05-control/) | 範囲の数の合計・符号・加算する関数 | 文としての `if`・`while`、値を選ぶ `match`、`move` 付きクロージャ（[ADR 0008](../docs/decisions/0008-m0-notation.md)） |
+| [06-concurrency](06-concurrency/) | タスクの起動と合流・チャネル・時間切れによる取り消し・`Lock`・`Atomic` | `task.scope` / `spawn` / `join`、`move` クロージャのとらえ方、`task` 系の効果（[ADR 0007](../docs/decisions/0007-concurrency-model.md)・[ADR 0026](../docs/decisions/0026-p1a-concurrency.md)） |
 
 ## 実行のしかた
 

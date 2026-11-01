@@ -1,0 +1,126 @@
+// 例 06: 並行処理の書き方（ADR 0007・ADR 0026）
+// タスクは task.scope の中で起こし、スコープを出る前に必ず合流する（構造化された並行性）。
+// 起こす関数は move 付きのクロージャで、とらえる値は Sendable でなければならない。
+// 並行処理の効果は task.spawn（起こす）・task.suspend（中断しうる）・task.share（共有）・clock（時間）。
+
+module examples.concurrency
+  targets server
+  trust none
+
+fn double(x: Int) -> Int
+  intent "x の 2 倍を返す"
+  requires none
+  ensures result == x * 2
+  effects none
+{
+  return x * 2;
+}
+
+// 範囲: task.scope の中で起こしたタスクを join で合流する。
+fn sum_of_doubles(a: Int, b: Int) -> Int
+  intent "a と b をそれぞれ別のタスクで 2 倍にし、合計を返す"
+  requires none
+  ensures result == (a + b) * 2
+  effects task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let ha = s.spawn(move || double(a));
+    let hb = s.spawn(move || double(b));
+    return ha.join() + hb.join();
+  });
+}
+
+// チャネル: 送る側のタスクと受ける側（親）の間で値を渡す。task.yield で他のタスクに譲る。
+// effects の task は task.share・task.spawn・task.suspend がそろったときの畳んだ書き方。
+fn relay(n: Int) -> Int
+  intent "別のタスクが n、n + 1、n + 2 を順に送り、受けた 3 つの合計を返す"
+  requires none
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let sender = s.spawn(move || {
+      tx.send(n);
+      task.yield();
+      tx.send(n + 1);
+      tx.send(n + 2);
+      return 0;
+    });
+    let a = rx.recv();
+    let b = rx.recv();
+    let c = rx.recv();
+    return a + b + c;
+  });
+}
+
+// 取り消し: 時間切れになると、仕事のタスクは取り消され、None が返る。
+fn slow(n: Int) -> Int
+  intent "100 単位時間待ってから n を返す"
+  requires none
+  ensures none
+  effects clock, task.suspend
+{
+  task.sleep(100);
+  return n;
+}
+
+fn first_within(limit: Int, n: Int) -> Option<Int>
+  intent "slow(n) が limit 単位時間以内に終わればその値を、終わらなければ None を返す"
+  requires none
+  ensures none
+  effects clock, task.spawn, task.suspend
+{
+  return task.timeout(limit, move || slow(n));
+}
+
+// Lock: 取得の結果は Result で、壊れた Lock は Err(LockBroken) になる。Lock は引数で受け取る。
+fn bump(counter: &Lock<Int>) -> Int
+  intent "counter を取得できたら 1 を、壊れていたら 0 を返す"
+  requires none
+  ensures result == 0 || result == 1
+  effects task.share, task.suspend
+{
+  return match counter.acquire() {
+    Ok(guard) => 1,
+    Err(broken) => 0,
+  };
+}
+
+// 原子的な値: 書いた値を読む。
+fn publish(x: Int) -> Int
+  intent "原子的な値に x を書き、読み直した値を返す"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let cell = Atomic.new(0);
+  cell.store(x);
+  return cell.load();
+}
+
+// 原子的な値を待つタスクと書くタスクの組: Atomic は Sendable なので起動するクロージャがとらえられる。
+// 待つ側は task.yield で譲りながら読み直すので、単一スレッドの実行でも止まらずに終わる。
+// とらえた値は呼び出しのたびに使えなければならないので、関数に渡して移さず、メソッドで使う。
+fn flag_pair(v: Int) -> Int
+  intent "待つタスクと書くタスクを起こし、書いた値を待つタスクから受け取る"
+  requires v != 0
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let flag = Atomic.new(0);
+    let mine = flag.clone();
+    let waiter = s.spawn(move || {
+      while flag.load() == 0 {
+        task.yield();
+      }
+      return flag.load();
+    });
+    let writer = s.spawn(move || {
+      mine.store(v);
+      return 0;
+    });
+    return waiter.join();
+  });
+}

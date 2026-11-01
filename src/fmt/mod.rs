@@ -11,9 +11,13 @@
 mod expr;
 mod items;
 mod types;
+mod write;
 
 pub use types::normalize_effects;
 pub(crate) use types::{escape_str, needs_u_escape};
+#[doc(hidden)]
+pub use write::write_atomic_with_hook;
+pub use write::{write_atomic_if_unchanged, Stamp};
 
 use crate::ast::*;
 use crate::error::{Error, ErrorKind, Span};

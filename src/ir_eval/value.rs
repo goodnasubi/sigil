@@ -23,6 +23,8 @@ pub(super) enum Val {
     Shared(Rc<Val>),
     Bytes(Rc<RefCell<Vec<u8>>>),
     Addr(usize),
+    /// 取得した `Lock` の持ち手（`LockGuard`）。最後の写しの破棄で `Lock` を解放する。
+    Guard(Rc<GuardTok>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,7 +53,31 @@ pub(super) struct Clos {
     pub(super) env: Slot,
 }
 
+/// `LockGuard` の実体。
+///
+/// 未対応: 現在の言語には `LockGuard` の中身を読み書きする操作がない（`Lock::acquire` の戻り値を
+/// 持つだけで、`LockGuard` にメソッドはない）。そのため `Lock` の中身（`LockSt.value`）へは届かない。
+/// 持ち手を `Cell` の操作（`SyncSharedGet` など）や破棄グルーに渡しても、`Val::Guard` は
+/// 「該当なし」として扱われて panic しない。中身の操作を足すときは、この実体から `LockSt.value` を引く。
+///
+/// 破棄は `Lock` の解放の知らせになり、スケジューラが次の取得者へ渡す。
+/// 異常停止の巻き戻しの途中（`UNWINDING`）での破棄は、その `Lock` を壊れた状態にする（ADR 0026 決定 4）。
+pub(super) struct GuardTok {
+    pub(super) lock: usize,
+}
+
+impl Drop for GuardTok {
+    fn drop(&mut self) {
+        let unwinding = UNWINDING.try_with(|c| c.get()).unwrap_or(false);
+        let _ = LOCK_EVENTS.try_with(|e| e.borrow_mut().push((self.lock, unwinding)));
+    }
+}
+
 thread_local! {
+    /// 異常停止の巻き戻し（後始末の基本ブロック）を実行している間だけ真。
+    pub(super) static UNWINDING: StdCell<bool> = const { StdCell::new(false) };
+    /// `LockGuard` の破棄の知らせ（`Lock` の番号と、巻き戻しの最中だったか）。
+    pub(super) static LOCK_EVENTS: RefCell<Vec<(usize, bool)>> = const { RefCell::new(Vec::new()) };
 
     pub(super) static STACK_LIMIT: StdCell<(usize, usize)> = const { StdCell::new((0, usize::MAX)) };
     pub(super) static DEEP: StdCell<bool> = const { StdCell::new(false) };
@@ -193,6 +219,7 @@ pub(super) fn shadow(v: &Val) -> Val {
         Val::Cell(c) => Val::Cell(c.clone()),
         Val::Shared(s) => Val::Shared(s.clone()),
         Val::Bytes(b) => Val::Bytes(b.clone()),
+        Val::Guard(g) => Val::Guard(g.clone()),
     }
 }
 
@@ -352,6 +379,7 @@ pub(super) fn show_val(ts: &[TypeDef], v: &Val, quote: bool) -> String {
         Val::Cell(c) => format!("Cell({})", show_val(ts, &c.borrow(), true)),
         Val::Shared(s) => format!("Shared({})", show_val(ts, s, true)),
         Val::Bytes(b) => format!("Bytes({:?})", *b.borrow()),
+        Val::Guard(_) => "LockGuard".into(),
     }
 }
 

@@ -12,7 +12,10 @@ use std::rc::Rc;
 use crate::exec::StopKind;
 use crate::ir::*;
 
-use super::value::{list_of, new_slot, shadow, with_val, with_val_mut, Agg, Ptr, Tag, Val};
+use super::value::{
+    list_of, new_slot, shadow, with_val, with_val_mut, Agg, GuardTok, Ptr, Tag, Val, LOCK_EVENTS,
+    UNWINDING,
+};
 use super::{Slot, E, M};
 
 pub(super) struct Frame {
@@ -38,6 +41,7 @@ enum State {
     Ready,
     Joining,
     Recv,
+    LockWait,
     Scoping,
     Sleeping,
     Done,
@@ -54,6 +58,8 @@ struct Task {
     joiner: Option<usize>,
     /// このタスクが現在待機している範囲（`Scoping` のとき）。
     waiting_scope: Option<usize>,
+    /// このタスクが属するルートタスクの番号（ルートタスク自身は自分）。
+    root: usize,
 }
 
 #[derive(Default)]
@@ -81,6 +87,37 @@ struct ScopeSt {
 struct Chan {
     q: VecDeque<Val>,
     waiters: VecDeque<usize>,
+    /// 作ったルートタスク。
+    root: usize,
+}
+
+/// `Lock` の状態。値は `Lock.new` で渡されたもの（評価器では番号で指す）。
+struct LockSt {
+    value: Val,
+    holder: Option<usize>,
+    waiters: VecDeque<usize>,
+    /// 異常停止したタスクが持っていた（壊れた）。一度壊れたら戻さない（ADR 0026 決定 4）。
+    broken: bool,
+    /// 作ったルートタスク。ホストが共有するものは `usize::MAX`。
+    root: usize,
+}
+
+/// 確保器（ADR 0025 決定 3）の関数か。核の `std.alloc` と OS 層の `std.os.alloc` の中。
+fn is_allocator_func(name: &str) -> bool {
+    name.starts_with("std.alloc.") || name.starts_with("std.os.alloc.")
+}
+
+#[cfg(test)]
+mod alloc_tests {
+    use super::is_allocator_func;
+
+    #[test]
+    fn allocator_functions_are_recognised_by_module() {
+        assert!(is_allocator_func("std.alloc.grab"));
+        assert!(is_allocator_func("std.os.alloc.map"));
+        assert!(!is_allocator_func("lib.util.grab"));
+        assert!(!is_allocator_func("app.std.alloc.grab"));
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +131,12 @@ pub(super) struct Sched {
     ready: VecDeque<usize>,
     scopes: Vec<ScopeSt>,
     chans: Vec<Chan>,
+    locks: Vec<LockSt>,
+    /// ルートタスクの任務番号（`tasks` の添字）と結果。`results[i]` は `roots[i]` の結果。
+    roots: Vec<usize>,
+    results: Vec<Option<Result<Val, E>>>,
+    /// 異常停止の巻き戻しが確保器の関数の枠を通った（プロセス全体の停止にする）。
+    alloc_stop: bool,
     sleepers: Vec<(i64, u64, Wake)>,
     clock: i64,
     seq: u64,
@@ -110,6 +153,10 @@ impl Sched {
             ready: VecDeque::new(),
             scopes: vec![],
             chans: vec![],
+            locks: vec![],
+            roots: vec![],
+            results: vec![],
+            alloc_stop: false,
             sleepers: vec![],
             clock: 0,
             seq: 0,
@@ -119,6 +166,23 @@ impl Sched {
             max_depth: (stack_bytes / 1024).max(64),
             rng: schedule_seed,
         }
+    }
+
+    /// ホストが全ルートタスクに共有する `Lock` を作る（どのルートタスクにも属さない）。
+    pub(super) fn new_shared_lock(&mut self, value: Val) -> usize {
+        self.locks.push(LockSt {
+            value,
+            holder: None,
+            waiters: VecDeque::new(),
+            broken: false,
+            root: usize::MAX,
+        });
+        self.locks.len() - 1
+    }
+
+    /// 生きている枠の数。
+    pub(super) fn live_frames(&self) -> usize {
+        self.live
     }
 
     fn next_rand(&mut self) -> Option<u64> {
@@ -275,9 +339,12 @@ impl<'p> M<'p> {
             let act = {
                 let fr = frames.last_mut().expect("枠がある");
                 let blk = &p.funcs[fr.fid].blocks[fr.bb];
+                // 後始末の基本ブロック（異常停止の巻き戻し）での破棄は、持っていた `Lock` を壊す。
+                UNWINDING.with(|c| c.set(fr.pending.is_some()));
                 for s in &blk.stmts {
                     self.exec(&fr.locals, s);
                 }
+                UNWINDING.with(|c| c.set(false));
                 let locals = &fr.locals;
                 match &blk.term {
                     Term::Goto(b) => {
@@ -477,10 +544,16 @@ impl<'p> M<'p> {
                         .pending
                         .take()
                         .unwrap_or_else(|| self.stop_at(fr.loc, None, None));
+                    if is_allocator_func(&self.p.funcs[fr.fid].name) {
+                        self.sch.alloc_stop = true;
+                    }
+                    // スコープ配下の子の取り消しも巻き戻しの一部（子が持つガードでも `Lock` が壊れる）。
+                    UNWINDING.with(|c| c.set(true));
                     if let Some(sid) = fr.scope {
                         self.cancel_scope(sid);
                     }
                     Self::drop_frame_locals(fr.locals);
+                    UNWINDING.with(|c| c.set(false));
                     match frames.last_mut() {
                         None => return Run::Fail(e),
                         Some(fr) => self.deliver_err(fr, e),
@@ -539,6 +612,9 @@ impl<'p> M<'p> {
         for ch in &mut self.sch.chans {
             ch.waiters.retain(|&x| x != t);
         }
+        for l in &mut self.sch.locks {
+            l.waiters.retain(|&x| x != t);
+        }
         for other in &mut self.sch.tasks {
             if other.joiner == Some(t) {
                 other.joiner = None;
@@ -583,6 +659,7 @@ impl<'p> M<'p> {
     ) -> usize {
         let frame = self.new_frame(fid, args, stop, None);
         let tid = self.sch.tasks.len();
+        let root = self.sch.tasks[self.sch.cur].root;
         self.sch.tasks.push(Task {
             frames: vec![frame],
             state: State::Ready,
@@ -592,6 +669,7 @@ impl<'p> M<'p> {
             slot_idx,
             joiner: None,
             waiting_scope: None,
+            root,
         });
         self.sch.scopes[sid].live += 1;
         self.sch.scopes[sid].children.push(tid);
@@ -737,7 +815,11 @@ impl<'p> M<'p> {
             }
             TaskChannel => {
                 let id = self.sch.chans.len() as i64;
-                self.sch.chans.push(Chan::default());
+                let root = self.sch.tasks[cur].root;
+                self.sch.chans.push(Chan {
+                    root,
+                    ..Chan::default()
+                });
                 Op::Val(Val::Agg(Box::new(Agg {
                     tag: Tag::Tuple,
                     f: vec![Val::Int(id), Val::Int(id)],
@@ -797,11 +879,83 @@ impl<'p> M<'p> {
                 drop(old);
                 Op::Val(Val::Unit)
             }
+            LockNew => {
+                let value = self.owned(locals, &args[0]);
+                let root = self.sch.tasks[cur].root;
+                let id = self.sch.locks.len();
+                self.sch.locks.push(LockSt {
+                    value,
+                    holder: None,
+                    waiters: VecDeque::new(),
+                    broken: false,
+                    root,
+                });
+                Op::Val(Val::Int(id as i64))
+            }
+            LockAcquire => {
+                // 直前の破棄による解放を先に反映する。
+                self.settle_locks();
+                let id = self.read_int(locals, &args[0]) as usize;
+                let l = &mut self.sch.locks[id];
+                if l.broken {
+                    Op::Val(self.lock_broken())
+                } else if l.holder.is_none() {
+                    l.holder = Some(cur);
+                    Op::Val(self.ok(Val::Guard(Rc::new(GuardTok { lock: id }))))
+                } else {
+                    l.waiters.push_back(cur);
+                    self.sch.tasks[cur].state = State::LockWait;
+                    Op::Block
+                }
+            }
             _ => Op::Fail(self.stop_at(
                 stop,
                 Some(StopKind::StdRequiresViolated),
-                Some("Lock は評価器でまだ実行できない"),
+                Some("未対応のタスク操作"),
             )),
+        }
+    }
+
+    /// `Err(LockBroken)`。
+    fn lock_broken(&self) -> Val {
+        let lb = self.p.types.iter().position(|t| t.name == "LockBroken");
+        let inner = Val::Agg(Box::new(Agg {
+            tag: Tag::Struct(lb.expect("`Lock` を使うプログラムには `LockBroken` の型がある")),
+            f: vec![],
+            silent: false,
+        }));
+        self.err(inner)
+    }
+
+    /// プロセス全体の停止。全ルートタスクを取り消して、元の停止を返す。
+    fn stop_all(&mut self, e: E) -> Result<Vec<Result<Val, E>>, E> {
+        self.cancel_all();
+        self.settle_locks();
+        self.take_deep();
+        Err(e)
+    }
+
+    /// `LockGuard` の破棄の知らせを反映する。解放なら次の待機者へ渡し、異常停止の巻き戻しでの破棄なら
+    /// `Lock` を壊して、待機者をすべて起こして `Err(LockBroken)` を返す（ADR 0026 決定 4）。
+    fn settle_locks(&mut self) {
+        let events = LOCK_EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        for (id, unwinding) in events {
+            let l = &mut self.sch.locks[id];
+            l.holder = None;
+            if unwinding {
+                l.broken = true;
+            }
+            if l.broken {
+                let ws: Vec<usize> = l.waiters.drain(..).collect();
+                for w in ws {
+                    let e = self.lock_broken();
+                    self.wake(w, Some(e));
+                }
+            } else if let Some(w) = l.waiters.pop_front() {
+                l.holder = Some(w);
+                let g = self.ok(Val::Guard(Rc::new(GuardTok { lock: id })));
+                self.wake(w, Some(g));
+            }
         }
     }
 
@@ -913,6 +1067,13 @@ impl<'p> M<'p> {
 
     /// 残っているタスクを、新しいものから順に取り消す。枠は内側から外側へ畳み、局所は逆順に破棄する。
     fn cancel_all(&mut self) {
+        // 全体停止の後始末。破棄は異常停止の巻き戻しとして扱う（持っていた `Lock` は壊れる）。
+        UNWINDING.with(|c| c.set(true));
+        self.cancel_all_inner();
+        UNWINDING.with(|c| c.set(false));
+    }
+
+    fn cancel_all_inner(&mut self) {
         for t in (0..self.sch.tasks.len()).rev() {
             if self.sch.tasks[t].state != State::Done {
                 self.cancel_task(t);
@@ -926,29 +1087,104 @@ impl<'p> M<'p> {
         }
     }
 
+    /// ルートタスク 1 つ分の後始末。そのルートに属するタスクを新しいものから順に取り消し、
+    /// 作った通信路と `Lock` の値を捨てる（異常停止の破棄の範囲。ADR 0026 決定 4）。
+    fn stop_root(&mut self, root: usize) {
+        // 取り消しの間の破棄は異常停止の巻き戻しとして扱う。親や兄弟のタスクが持つ `LockGuard` の破棄でも
+        // `Lock` が壊れる（ADR 0026 決定 4）。
+        UNWINDING.with(|c| c.set(true));
+        self.stop_root_inner(root);
+        UNWINDING.with(|c| c.set(false));
+        self.settle_locks();
+    }
+
+    fn stop_root_inner(&mut self, root: usize) {
+        for t in (0..self.sch.tasks.len()).rev() {
+            if self.sch.tasks[t].root != root {
+                continue;
+            }
+            if self.sch.tasks[t].state != State::Done {
+                self.cancel_task(t);
+            } else {
+                let r = self.sch.tasks[t].result.take();
+                drop(r);
+            }
+        }
+        for ch in self.sch.chans.iter_mut().filter(|c| c.root == root) {
+            let q = std::mem::take(&mut ch.q);
+            drop(q);
+            ch.waiters.clear();
+        }
+        let mut dead = vec![];
+        for l in self.sch.locks.iter_mut().filter(|l| l.root == root) {
+            l.waiters.clear();
+            l.broken = true;
+            dead.push(std::mem::replace(&mut l.value, Val::Unit));
+        }
+        drop(dead);
+    }
+
     /// ルートタスクを実行する。既定は決定的な FIFO（`schedule_seed` 指定時は種による攪拌）で、中断点でだけ切り替える。
-    pub(super) fn run_root(&mut self, fid: FuncId, args: Vec<Val>) -> Result<Val, E> {
-        let frame = self.new_frame(fid, args, 0, None);
-        self.sch.tasks.push(Task {
-            frames: vec![frame],
-            state: State::Ready,
-            resume: None,
-            result: None,
-            scope: None,
-            slot_idx: 0,
-            joiner: None,
-            waiting_scope: None,
-        });
-        self.sch.ready.push_back(0);
+    ///
+    /// ルートタスクごとに結果を返す。ルートタスクの異常停止は、そのルートタスクと子のタスクだけを止める
+    /// （他のルートタスクは止めない）。スタックの枯渇と、確保器の枠の中の異常停止は、プロセス全体の停止として
+    /// 外側の `Err` で返す（ADR 0026 決定 4）。
+    pub(super) fn run_roots(
+        &mut self,
+        fid: FuncId,
+        arg_sets: Vec<Vec<Val>>,
+    ) -> Result<Vec<Result<Val, E>>, E> {
+        for args in arg_sets {
+            let frame = self.new_frame(fid, args, 0, None);
+            let tid = self.sch.tasks.len();
+            self.sch.tasks.push(Task {
+                frames: vec![frame],
+                state: State::Ready,
+                resume: None,
+                result: None,
+                scope: None,
+                slot_idx: 0,
+                joiner: None,
+                waiting_scope: None,
+                root: tid,
+            });
+            self.sch.roots.push(tid);
+            self.sch.results.push(None);
+            self.sch.ready.push_back(tid);
+        }
         loop {
+            // どのルートタスクにも属さない `DEEP`（破棄・取り消しの途中で立ったもの）は、全体停止にする。
+            if let Some(e) = self.take_deep() {
+                self.cancel_all();
+                self.settle_locks();
+                self.take_deep();
+                return Err(e);
+            }
+            if self.sch.results.iter().all(Option::is_some) {
+                return Ok(std::mem::take(&mut self.sch.results)
+                    .into_iter()
+                    .map(|r| r.expect("結果がある"))
+                    .collect());
+            }
+            self.settle_locks();
             let Some(t) = self.sch.pop_ready() else {
                 if self.sch.sleepers.is_empty() {
-                    self.cancel_all();
-                    return Err(self.stop_at(
-                        0,
-                        Some(StopKind::StdRequiresViolated),
-                        Some("デッドロック（進行できるタスクがない）"),
-                    ));
+                    // 進行できるタスクがない。結果の出ていないルートタスクのうち一番新しいものを 1 つだけ
+                    // デッドロックとして止め、次の反復で進行できるかを判定し直す（止めたことで起きた
+                    // ルートタスクを、続けて潰さない）。
+                    if let Some(i) = (0..self.sch.roots.len())
+                        .rev()
+                        .find(|&i| self.sch.results[i].is_none())
+                    {
+                        let root = self.sch.roots[i];
+                        self.stop_root(root);
+                        self.sch.results[i] = Some(Err(self.stop_at(
+                            0,
+                            Some(StopKind::StdRequiresViolated),
+                            Some("デッドロック（進行できるタスクがない）"),
+                        )));
+                    }
+                    continue;
                 }
                 let at = self
                     .sch
@@ -996,17 +1232,32 @@ impl<'p> M<'p> {
                 }
             }
             self.sch.tasks[t].state = State::Running;
+            self.sch.alloc_stop = false;
             match self.drive(&mut frames, true) {
                 Run::Suspend => self.sch.tasks[t].frames = frames,
                 Run::Done(v) => {
-                    if t == 0 {
-                        return Ok(v);
+                    if let Some(i) = self.sch.roots.iter().position(|&r| r == t) {
+                        self.sch.tasks[t].state = State::Done;
+                        self.sch.results[i] = Some(Ok(v));
+                    } else {
+                        self.complete(t, v);
                     }
-                    self.complete(t, v);
                 }
                 Run::Fail(e) => {
-                    self.cancel_all();
-                    return Err(e);
+                    let alloc = std::mem::take(&mut self.sch.alloc_stop);
+                    if e.kind == StopKind::StackExhausted {
+                        // スタックの枯渇は、どのルートタスクでも全体停止（隔離しない）。
+                        return self.stop_all(e);
+                    }
+                    if alloc {
+                        // 確保器の枠の中の異常停止は全体停止（隔離しない）。
+                        return self.stop_all(e);
+                    }
+                    let root = self.sch.tasks[t].root;
+                    self.stop_root(root);
+                    if let Some(i) = self.sch.roots.iter().position(|&r| r == root) {
+                        self.sch.results[i] = Some(Err(e));
+                    }
                 }
             }
         }

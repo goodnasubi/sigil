@@ -343,6 +343,9 @@ pub enum Builtin {
     RawSyscall,
     /// 並行処理（ADR 0026 決定 3）
     TaskScope,
+    TaskAllOk,
+    TaskRace,
+    TaskTimeout,
     TaskYield,
     TaskSleep,
     TaskChannel,

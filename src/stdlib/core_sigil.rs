@@ -1,36 +1,3 @@
-pub const STRING_SIGIL: &str = r#"module std.core
-  targets bare, browser, server
-  trust base
-
-pub struct String {
-  ptr: Addr,
-  len: Int,
-  cap: Int,
-}
-
-properties String: Sendable, Shareable "Addr が指す領域はこの値が所有し、他の値と共有されない。別のタスクへ移しても、同時に複数のタスクから読んでも安全である"
-
-impl String {
-  pub fn len(self: &String) -> Int
-    intent "文字列の長さをバイト数で返す"
-    requires none
-    ensures none
-    effects none
-  {
-    return self.len;
-  }
-
-  pub fn is_empty(self: &String) -> Bool
-    intent "文字列が空であるかを返す"
-    requires none
-    ensures none
-    effects none
-  {
-    return self.len == 0;
-  }
-}
-"#;
-
 pub const LIST_SIGIL: &str = r#"module std.core
   targets bare, browser, server
   trust base

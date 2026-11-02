@@ -690,6 +690,7 @@ fn unchecked_text(u: &Unchecked) -> String {
     let Some(raw_ops) = &u.raw_ops else {
         out.push_str(&format!("  使う原始操作: {CHECK_FAILED}\n"));
         out.push_str(&format!("  推論できない効果: {CHECK_FAILED}\n"));
+        out.push_str(&format!("  触る大域: {CHECK_FAILED}\n"));
         return out;
     };
     let ops = if raw_ops.is_empty() {

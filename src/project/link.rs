@@ -15,7 +15,7 @@ impl Proj<'_> {
     pub(super) fn link(&self, entry: &str) -> R<File> {
         for m in &self.order {
             let (_, f) = &self.mods[m];
-            if m != entry && f.module.trust == Trust::Base {
+            if m != entry && f.module.trust == Trust::Base && !self.embedded.contains(m) {
                 return Err(ProjectError::Diag {
                     file: self.mods[m].0.clone(),
                     error: Error::new(

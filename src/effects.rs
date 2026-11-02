@@ -156,6 +156,11 @@ pub struct Options {
     pub trust_base: Vec<String>,
     /// テスト用の原始操作（標準ライブラリの `RAW_OPS` に足して登録する）。
     pub raw_ops: Vec<RawOp>,
+    /// 試験用の埋め込みモジュールの追加（名前, ソース）。本番の一覧 `stdlib::embedded::EMBEDDED` に足して引く。
+    /// 名前は `std.` で始まるものだけが引ける（ADR 0025 補足 A-6）。
+    pub embedded_extra: Vec<(String, String)>,
+    /// 利用者の `use` なしに、プログラムへ暗黙に結ぶ埋め込みモジュール（ADR 0025 補足 A-6。経路は暗黙のみ）。
+    pub embedded_roots: Vec<String>,
 }
 
 impl Default for Options {
@@ -166,6 +171,8 @@ impl Default for Options {
             copy_override: vec![],
             trust_base: vec![],
             raw_ops: vec![],
+            embedded_extra: vec![],
+            embedded_roots: vec![],
         }
     }
 }

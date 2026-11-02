@@ -137,6 +137,10 @@ pub struct Options {
     /// タスクの実行順を乱数の種で攪拌する（テスト用の実行環境。ADR 0007 決定 4、ADR 0026 決定 6）。
     /// `None`（既定）のときは決定的な FIFO で実行する。
     pub schedule_seed: Option<u64>,
+    /// 試験用の埋め込みモジュールの追加（`effects::Options::embedded_extra`。ADR 0025 補足 A-6）。
+    pub embedded_extra: Vec<(String, String)>,
+    /// 暗黙に結ぶ埋め込みモジュール（`effects::Options::embedded_roots`）。
+    pub embedded_roots: Vec<String>,
 }
 
 impl Options {
@@ -158,6 +162,8 @@ impl Default for Options {
             capture_console: false,
             trust_base: Vec::new(),
             schedule_seed: None,
+            embedded_extra: Vec::new(),
+            embedded_roots: Vec::new(),
         }
     }
 }
@@ -188,6 +194,8 @@ pub(crate) fn link_error(e: crate::project::ProjectError, mem: bool) -> RunError
 pub(crate) fn check_options(opts: &Options) -> crate::effects::Options {
     crate::effects::Options {
         trust_base: opts.trust_base.clone(),
+        embedded_extra: opts.embedded_extra.clone(),
+        embedded_roots: opts.embedded_roots.clone(),
         ..Default::default()
     }
 }

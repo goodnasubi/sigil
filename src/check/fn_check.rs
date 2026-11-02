@@ -44,7 +44,7 @@ impl Ck {
     }
 
     fn check_fn_in(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
-        if f.unchecked.is_some() && !self.base_module {
+        if f.unchecked.is_some() && !self.base_module && !self.item_embedded {
             return Err(Error::new(
                 ErrorKind::UncheckedOutsideTrustBase,
                 f.span,

@@ -245,7 +245,8 @@ impl Ck {
     pub(super) fn type_path(&self, e: &Expr) -> Option<String> {
         match e {
             Expr::Name(n)
-                if self.lookup(n).is_none() && (self.types.contains_key(n) || n == "Int") =>
+                if self.lookup(n).is_none()
+                    && (self.types.contains_key(n) || n == "Int" || n == "Float") =>
             {
                 Some(n.clone())
             }

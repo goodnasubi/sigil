@@ -1,0 +1,100 @@
+module std.core.float
+  targets bare, browser, server
+  trust none
+
+// `Float` の `%`（fmod）の Sigil 版（ADR 0025 補足 C-3、PR 3-5a）。ネイティブの `Float` の `%` の実体。
+// 評価器の `%` は Rust の組み込みのまま（補足 C-3）で、ここは呼ばない。突き合わせの試験で両者を比べる。
+//
+// musl の fmod と同じ方式で、`Float.to_bits` のビット列だけを使って厳密に計算する。結果の符号は被除数と同じ。
+// - 除数が 0・NaN、被除数が ∞・NaN: (x * y) / (x * y)（NaN。ペイロードは入力を引き継ぐ）。
+// - |x| < |y|（除数が ∞ で被除数が有限の場合を含む）: x。|x| == |y|: 被除数と同じ符号の 0。
+// - それ以外: 仮数を 53 ビットの整数にそろえ、指数の差の回数だけ「引いて 1 ビット左へ」を繰り返す。
+// 整数はすべて 2^54 未満（符号付き 64 ビットのまま扱える）で、あふれる演算も範囲外のシフトもない。
+
+
+fn norm_exp(bits: Int) -> Int
+  intent "有限で 0 でない値の絶対値のビット列から、仮数をそろえたときの指数（非正規数は 0 以下）を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut e = bits >> 52;
+  if e == 0 {
+    let mut m = bits;
+    e = 1;
+    while m < 0x10000000000000 {
+      m = m << 1;
+      e = e - 1;
+    }
+  }
+  return e;
+}
+
+fn norm_mant(bits: Int) -> Int
+  intent "有限で 0 でない値の絶対値のビット列から、最上位ビットが 2^52 に立つ 53 ビットの仮数を返す"
+  requires none
+  ensures none
+  effects none
+{
+  if (bits >> 52) != 0 {
+    return (bits & 0xFFFFFFFFFFFFF) | 0x10000000000000;
+  }
+  let mut m = bits;
+  while m < 0x10000000000000 {
+    m = m << 1;
+  }
+  return m;
+}
+
+fn fmod(x: Float, y: Float) -> Float
+  intent "x を y で割った余りを返す（結果の符号は x と同じ。Rust の `%` と同じ値）"
+  requires none
+  ensures none
+  effects none
+{
+  let xb = Float.to_bits(x);
+  let yb = Float.to_bits(y);
+  let ax = xb & 0x7FFFFFFFFFFFFFFF;
+  let ay = yb & 0x7FFFFFFFFFFFFFFF;
+  let sign = xb & Int.min_value();
+  if ay == 0 || ay > 0x7FF0000000000000 || ax >= 0x7FF0000000000000 {
+    return (x * y) / (x * y);
+  }
+  if ax <= ay {
+    if ax == ay {
+      return Float.from_bits(sign);
+    }
+    return x;
+  }
+  // ax > ay > 0 なので、どちらも有限で 0 でない（ay < ax < 0x7FF0000000000000）。
+  let mut e = norm_exp(ax);
+  let ey = norm_exp(ay);
+  let mut mx = norm_mant(ax);
+  let my = norm_mant(ay);
+  while e > ey {
+    let d = mx - my;
+    if d >= 0 {
+      if d == 0 {
+        return Float.from_bits(sign);
+      }
+      mx = d;
+    }
+    mx = mx << 1;
+    e = e - 1;
+  }
+  let d = mx - my;
+  if d >= 0 {
+    if d == 0 {
+      return Float.from_bits(sign);
+    }
+    mx = d;
+  }
+  while mx < 0x10000000000000 {
+    mx = mx << 1;
+    e = e - 1;
+  }
+  if e > 0 {
+    return Float.from_bits(sign | ((mx - 0x10000000000000) | (e << 52)));
+  }
+  return Float.from_bits(sign | (mx >> (1 - e)));
+}

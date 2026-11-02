@@ -745,6 +745,8 @@ impl<'a> L<'a> {
                     ("Cell", "new") => Builtin::CellNew,
                     ("Shared", "new") => Builtin::SharedNew,
                     ("Int", "min_value") => Builtin::IntMinValue,
+                    ("Float", "to_bits") => Builtin::FloatToBits,
+                    ("Float", "from_bits") => Builtin::FloatFromBits,
                     ("Bytes", "new") => Builtin::BytesNew,
                     ("Bytes", "with_capacity") => Builtin::BytesWithCapacity,
                     ("Bytes", "from_list") => Builtin::BytesFromList,

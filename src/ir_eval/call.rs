@@ -534,9 +534,13 @@ impl<'p> M<'p> {
             }
             FloatToBits => match self.scalar(locals, &args[0]) {
                 Val::Float(x) => Val::Int(x.to_bits() as i64),
-                _ => Val::Int(f64::NAN.to_bits() as i64),
+                // 型検査と lowering が `Float` を保証する。違う値が来るのは処理系の不具合なので止める。
+                _ => unreachable!("Float.to_bits の引数が Float でない"),
             },
-            FloatFromBits => Val::Float(f64::from_bits(self.read_int(locals, &args[0]) as u64)),
+            FloatFromBits => match self.scalar(locals, &args[0]) {
+                Val::Int(n) => Val::Float(f64::from_bits(n as u64)),
+                _ => unreachable!("Float.from_bits の引数が Int でない"),
+            },
             BytesNew => Val::Bytes(Rc::new(RefCell::new(Vec::new()))),
             BytesWithCapacity => {
                 let cap = self.read_int(locals, &args[0]).max(0) as usize;

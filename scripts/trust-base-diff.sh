@@ -10,7 +10,7 @@
 #   SIGIL_TRUST_BASE_MODE  mark（既定。印のみ。失敗にしない）か fail（検出したら失敗にする）。
 #                          切替えはこの 1 つだけ（CI では ci.yml の該当ステップの env）。
 # 走査の対象: tests/ と target/ を除く .rs・.sigil（標準ライブラリの Sigil ソースは Rust の文字列にある）。
-set -euo pipefail
+set -uo pipefail
 
 base="${1:?使い方: $0 <base の版> [<head の版>]}"
 head="${2:-HEAD}"
@@ -23,12 +23,16 @@ case "$mode" in
     ;;
 esac
 
-# base の版が手元に無ければ（浅い checkout）、その 1 コミットだけ取り寄せる。
-if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-  git fetch --no-tags --depth=1 origin "$base"
-fi
-
-out="$(python3 -I - "$base" "$head" <<'PY'
+# 検出の本体。失敗は return 1 で返す（mark では警告にとどめるため、set -e には頼らない）。
+detect() {
+  # base の版が手元に無ければ（浅い checkout）、その 1 コミットだけ取り寄せる。
+  if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+    git fetch --no-tags --depth=1 origin "$base" || return 1
+  fi
+  # 比べる起点は merge-base（履歴が浅くて求まらないときは base そのもの）。
+  local mb
+  mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb="$base"
+  python3 -I - "$mb" "$head" <<'PY' || return 1
 import re
 import subprocess
 import sys
@@ -36,6 +40,25 @@ import sys
 base, head = sys.argv[1], sys.argv[2]
 RAW_OPS_FILE = "src/stdlib.rs"
 ALLOW_LIST_FILE = "trust-base.list"
+
+
+def strip_comment(line):
+    """文字列の外の `//` 以降を落とす。"""
+    in_str = False
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if in_str:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif line.startswith("//", i):
+            return line[:i]
+        i += 1
+    return line
 
 
 def git(*args):
@@ -162,18 +185,21 @@ def unchecked_fns(text, path):
         n, key = 2, name
         while key in found:
             key, n = f"{name}#{n}", n + 1
-        found[key] = (premise, norm(" ".join(header)) + " " + norm(body))
+        code = "\n".join(strip_comment(x) for x in (" ".join(header) + "\n" + body).split("\n"))
+        found[key] = (premise, norm(code))
     return found
 
 
 ROW_RE = re.compile(r"RawRow\s*\{(.*?)\n\s*\},", re.S)
-FIELD_RE = re.compile(r'(\w+):\s*(?:Layer::(\w+)|"((?:[^"\\]|\\.)*)")')
+FIELD_RE = re.compile(r'(\w+):\s*(?:Layer::(\w+)|"((?:[^"\\]|\\.)*)"|([A-Z][A-Z0-9_]*)\b(?!::))')
+CONST_RE = re.compile(r'const\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"((?:[^"\\]|\\.)*)"\s*;')
 
 
 def raw_ops(text):
     """RAW_OPS の行を {操作名: {項目: 値}} で返す。"""
     if text is None:
         return {}
+    consts = dict(CONST_RE.findall(text))
     s = text.find("pub const RAW_OPS")
     if s < 0:
         return {}
@@ -181,7 +207,8 @@ def raw_ops(text):
     block = text[s : e if e >= 0 else len(text)]
     rows = {}
     for rm in ROW_RE.finditer(block):
-        f = {k: (a or b) for k, a, b in FIELD_RE.findall(rm.group(1))}
+        # 識別子の値（例 `effects: DELEGATED`）は、同じファイルの `const` の文字列に解決する。
+        f = {k: (a or b or consts.get(c, c)) for k, a, b, c in FIELD_RE.findall(rm.group(1))}
         sig = f.get("signature", "?")
         rows[sig.split("(")[0]] = f
     return rows
@@ -198,8 +225,9 @@ out = ["## 信頼基盤の差分検出（ADR 0018 判断 1 T3・判断 2 S2）",
 
 # (1) 原始操作の表
 b, h = raw_ops(show(base, RAW_OPS_FILE)), raw_ops(show(head, RAW_OPS_FILE))
-sec = []
+sec, n_raw = [], 0
 for k in sorted(set(b) | set(h)):
+    n_raw += k not in b or k not in h or b[k] != h[k]
     if k not in b:
         sec.append(f"- 追加: `raw.{k}`（前提: {h[k].get('premise', '')}）")
     elif k not in h:
@@ -211,7 +239,7 @@ for k in sorted(set(b) | set(h)):
             sec.append(f"  - 旧の前提: {b[k].get('premise', '')}")
             sec.append(f"  - 新の前提: {h[k].get('premise', '')}")
 if sec:
-    changes += len(sec)
+    changes += n_raw
     out += ["### 原始操作の表（" + RAW_OPS_FILE + "）", *sec, ""]
 
 # (2) 許可の一覧
@@ -224,7 +252,13 @@ if bl is not None or hl is not None:
         out += ["### 許可の一覧（" + ALLOW_LIST_FILE + "）", *sec, ""]
 
 # (3) unchecked の関数
-files = [p for p in git("diff", "--name-only", "--no-renames", base, head).splitlines() if scannable(p)]
+files = [
+    p
+    for p in git(
+        "-c", "core.quotePath=false", "diff", "--name-only", "-z", "--no-renames", base, head
+    ).split("\0")
+    if p and scannable(p)
+]
 added, removed, premise, body = [], [], [], []
 for p in files:
     bf = unchecked_fns(show(base, p) or "", p)
@@ -241,7 +275,7 @@ for p in files:
             if bb != hb:
                 body.append(k)
 if added or removed or premise or body:
-    changes += len(added) + len(removed) + len(premise) + len(body)
+    changes += len({k for k, _ in added + removed} | {k for k, _, _ in premise} | set(body))
     out.append("### `unchecked` の関数")
     for k, p in added:
         out.append(f"- 追加: `{k}`\n  - 前提の文: {p}")
@@ -260,11 +294,39 @@ else:
 print(f"CHANGES={changes}")
 print("\n".join(out))
 PY
-)"
+}
+
+errf="$(mktemp)"
+rc=0
+out="$(detect 2>"$errf")" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  msg="$(tr '\n' ' ' <"$errf")"
+  rm -f "$errf"
+  echo "信頼基盤の差分の検出に失敗した（終了コード $rc）: $msg" >&2
+  if [ "$mode" = fail ]; then
+    exit 1
+  fi
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "::warning title=信頼基盤の差分の検出に失敗::検出できなかった。ジョブのログを見る。"
+  fi
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    printf '## 信頼基盤の差分検出\n\n検出に失敗した（印のみのため続行）: %s\n' "$msg" >>"$GITHUB_STEP_SUMMARY"
+  fi
+  exit 0
+fi
+rm -f "$errf"
 
 changes="$(printf '%s\n' "$out" | sed -n '1s/^CHANGES=//p')"
 report="$(printf '%s\n' "$out" | sed '1d')"
-printf '%s\n' "$report"
+# 前提の文などに `::` で始まる行があっても、ワークフローコマンドとして解釈させない。
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  token="tbd-$RANDOM$RANDOM$RANDOM"
+  echo "::stop-commands::$token"
+  printf '%s\n' "$report"
+  echo "::$token::"
+else
+  printf '%s\n' "$report"
+fi
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   printf '%s\n' "$report" >>"$GITHUB_STEP_SUMMARY"
 fi

@@ -60,10 +60,16 @@ impl Repo {
         git(&self.0, &["rev-parse", "HEAD"])
     }
     fn run(&self, base: &str, mode: &str) -> (i32, String) {
-        let o = Command::new("bash")
-            .current_dir(&self.0)
-            .arg(SCRIPT)
-            .arg(base)
+        let (rc, out, _) = self.run_full(base, None, mode);
+        (rc, out)
+    }
+    fn run_full(&self, base: &str, head: Option<&str>, mode: &str) -> (i32, String, String) {
+        let mut c = Command::new("bash");
+        c.current_dir(&self.0).arg(SCRIPT).arg(base);
+        if let Some(h) = head {
+            c.arg(h);
+        }
+        let o = c
             .env("SIGIL_TRUST_BASE_MODE", mode)
             .env_remove("GITHUB_STEP_SUMMARY")
             .env_remove("GITHUB_ACTIONS")
@@ -72,6 +78,7 @@ impl Repo {
         (
             o.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
         )
     }
 }
@@ -202,4 +209,80 @@ fn missing_planned_files_are_ignored() {
     r.commit();
     let (rc, out) = r.run(&base, "fail");
     assert_eq!(rc, 0, "{out}");
+}
+
+#[test]
+fn non_ascii_path_is_scanned() {
+    let f = "src/標準/日本語.rs";
+    let r = Repo::new("ja", &[(f, &module(&[func("log", "前提A", "raw.x();")]))]);
+    let base = r.commit();
+    r.write(&[(f, &module(&[func("log", "前提B", "raw.x();")]))]);
+    r.commit();
+    let (rc, out) = r.run(&base, "fail");
+    assert_eq!(rc, 1, "{out}");
+    assert!(out.contains("src/標準/日本語.rs"), "{out}");
+    assert!(
+        out.contains("旧: 前提A") && out.contains("新: 前提B"),
+        "{out}"
+    );
+}
+
+#[test]
+fn raw_ops_identifier_value_change_is_detected() {
+    let src = |delegated: &str| {
+        format!("pub const DELEGATED: &str = \"{delegated}\";\npub const RAW_OPS: &[RawRow] = &[\n    RawRow {{\n        layer: Layer::Os,\n        signature: \"syscall(n: Int) -> Int\",\n        effects: DELEGATED,\n        requires: \"none\",\n        premise: \"P\",\n    }},\n];\n")
+    };
+    let r = Repo::new("ident", &[("src/stdlib.rs", &src("宣言に委ねる"))]);
+    let base = r.commit();
+    r.write(&[("src/stdlib.rs", &src("何でも許す"))]);
+    r.commit();
+    let (rc, out) = r.run(&base, "fail");
+    assert_eq!(rc, 1, "{out}");
+    assert!(out.contains("変更: `raw.syscall`（effects）"), "{out}");
+}
+
+#[test]
+fn missing_base_is_warning_in_mark_and_error_in_fail() {
+    let r = Repo::new("nobase", &[("a.txt", "1")]);
+    r.commit();
+    let bogus = "0123456789abcdef0123456789abcdef01234567";
+    let (rc, _, err) = r.run_full(bogus, None, "mark");
+    assert_eq!(rc, 0, "{err}");
+    assert!(err.contains("検出に失敗した"), "{err}");
+    let (rc, _, _) = r.run_full(bogus, None, "fail");
+    assert_ne!(rc, 0);
+}
+
+#[test]
+fn compares_against_merge_base() {
+    let r = Repo::new("mb", &[(F, &module(&[func("log", "前提A", "raw.x();")]))]);
+    let a = r.commit();
+    // base 側だけが進む（head の PR とは無関係の変更）。
+    r.write(&[(F, &module(&[func("log", "基準側の前提", "raw.x();")]))]);
+    let base = r.commit();
+    git(&r.0, &["checkout", "-q", "-b", "feature", &a]);
+    r.write(&[("README.md", "pr")]);
+    let head = r.commit();
+    let (rc, out, _) = r.run_full(&base, Some(&head), "fail");
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("信頼基盤に関わる変更はない"), "{out}");
+}
+
+#[test]
+fn comment_only_change_is_ignored_and_count_is_per_function() {
+    let r = Repo::new("cmt", &[(F, &module(&[func("log", "前提A", "raw.x();")]))]);
+    let base = r.commit();
+    r.write(&[(
+        F,
+        &module(&[func("log", "前提A", "raw.x(); // 説明を足した")]),
+    )]);
+    r.commit();
+    let (rc, out) = r.run(&base, "fail");
+    assert_eq!(rc, 0, "{out}");
+    // 前提の文と本体の両方が変わった関数は 1 件と数える。
+    r.write(&[(F, &module(&[func("log", "前提B", "raw.y();")]))]);
+    r.commit();
+    let (rc, _, err) = r.run_full(&base, None, "fail");
+    assert_eq!(rc, 1);
+    assert!(err.contains("1 件検出"), "{err}");
 }

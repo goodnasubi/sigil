@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use value::{
-    list_of, locate, new_slot, show_val, stack_addr, types, with_val_mut, Ptr, Val, DEEP, DROP_LOG,
-    STACK_LIMIT, TYPES,
+    list_of, locate, new_slot, show_val, stack_addr, types, with_val_mut, Agg, Ptr, Tag, Val, DEEP,
+    DROP_LOG, STACK_LIMIT, TYPES,
 };
 
 type Slot = Rc<RefCell<Val>>;
@@ -62,6 +62,8 @@ struct M<'p> {
     sch: sched::Sched,
     /// 次に積む枠が範囲の本体なら、その範囲の番号。
     pending_scope: Option<usize>,
+    /// 大域の静的領域（`Program.globals` と同じ添字。単一スレッド前提、ADR 0025 補足 A-5）。
+    globals: Vec<Slot>,
 }
 
 impl<'p> M<'p> {
@@ -421,7 +423,13 @@ fn execute_roots(
         chunks: BTreeMap::new(),
         sch: sched::Sched::new(opts.stack_bytes, opts.schedule_seed),
         pending_scope: None,
+        globals: vec![],
     };
+    m.globals = program
+        .globals
+        .iter()
+        .map(|g| new_slot(m.global_val(&g.ty, &g.init)))
+        .collect();
     // 共有の `Lock` を作って、`Lock` の引数に入れる。
     for (pi, p) in decl.params.iter().enumerate() {
         if !is_lock(&p.ty) {
@@ -517,5 +525,52 @@ fn execute_roots(
             output,
             drops: drops.into_boxed_slice(),
         }),
+    }
+}
+
+impl M<'_> {
+    /// 大域の定数初期値を値にする（`GlobalRef` が指す静的領域の初期状態）。
+    fn global_val(&self, ty: &Ty, init: &GlobalInit) -> Val {
+        match init {
+            GlobalInit::Int(n) => Val::Int(*n),
+            GlobalInit::Bool(b) => Val::Bool(*b),
+            GlobalInit::AddrNull => Val::Addr(0),
+            GlobalInit::Tuple(xs) => {
+                let ts = match ty {
+                    Ty::Tuple(ts) => ts.clone(),
+                    _ => vec![Ty::Unit; xs.len()],
+                };
+                Val::Agg(Box::new(Agg {
+                    tag: Tag::Tuple,
+                    f: xs
+                        .iter()
+                        .zip(&ts)
+                        .map(|(x, t)| self.global_val(t, x))
+                        .collect(),
+                    silent: false,
+                }))
+            }
+            GlobalInit::Struct(xs) => {
+                let (tag, fts) = match ty {
+                    Ty::Adt(t) => match &self.p.types[*t].kind {
+                        TypeKind::Struct { fields } => (
+                            Tag::Struct(self.canon[*t]),
+                            fields.iter().map(|f| f.1.clone()).collect(),
+                        ),
+                        _ => (Tag::Struct(self.canon[*t]), vec![Ty::Unit; xs.len()]),
+                    },
+                    _ => (Tag::Tuple, vec![Ty::Unit; xs.len()]),
+                };
+                Val::Agg(Box::new(Agg {
+                    tag,
+                    f: xs
+                        .iter()
+                        .zip(&fts)
+                        .map(|(x, t)| self.global_val(t, x))
+                        .collect(),
+                    silent: false,
+                }))
+            }
+        }
     }
 }

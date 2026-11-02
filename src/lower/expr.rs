@@ -113,6 +113,10 @@ impl<'a> L<'a> {
                 if let Some(b) = self.lookup(n) {
                     return Ok(self.place_op(e, &b.place, &b.ty));
                 }
+                if let Some((p, _)) = self.global_place(n) {
+                    // 大域は `Copyable` だけなので移動の元にならない。
+                    return Ok(Operand::Copy(p));
+                }
                 if let Some(&decl) = self.fns.get(n.as_str()) {
                     if !decl.generics.is_empty() {
                         return bail(format!("総称関数 {n} を値として使うのは未対応"));
@@ -370,7 +374,12 @@ impl<'a> L<'a> {
     /// 場所として読める式の場所と型。場所でない式は `None`。
     pub(super) fn place_expr(&mut self, e: &'a a::Expr) -> R<Option<(Place, ir::Ty)>> {
         match e {
-            a::Expr::Name(n) => Ok(self.lookup(n).map(|b| (b.place, b.ty))),
+            a::Expr::Name(n) => {
+                if let Some(b) = self.lookup(n) {
+                    return Ok(Some((b.place, b.ty)));
+                }
+                Ok(self.global_place(n))
+            }
             a::Expr::SelfValue => match self.fb.self_local {
                 Some(l) => {
                     let ty = self.fb.locals[l].ty.clone();

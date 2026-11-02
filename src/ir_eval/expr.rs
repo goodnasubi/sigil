@@ -149,8 +149,11 @@ impl<'p> M<'p> {
                     _ => 0,
                 }))
             }
-            // 大域の評価は PR 3-4g。lowering が GlobalRef を出すまで来ない。
-            Rvalue::GlobalRef(_) => unreachable!("大域の参照の評価は未対応（PR 3-4g）"),
+            // 大域の静的領域の全体を指す参照（読み書きは `Deref` 経由）。
+            Rvalue::GlobalRef(g) => Val::Ref(Ptr {
+                slot: self.globals[*g].clone(),
+                path: vec![],
+            }),
             Rvalue::MakeClosure(fid, ops) => {
                 let f: Vec<Val> = ops.iter().map(|o| self.read(locals, o)).collect();
                 let env = new_slot(Val::Agg(Box::new(Agg {

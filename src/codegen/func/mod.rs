@@ -6,7 +6,7 @@ mod expr;
 mod stmt;
 
 use super::{norm, rt_spec, Cg, CgError, W};
-use crate::ir::{Func, Term, Ty};
+use crate::ir::{Func, GlobalInit, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::Block as CBlock;
 use cranelift_codegen::ir::{
@@ -335,6 +335,53 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[r32]);
     }
 
+    /// 組・構造体の大域の塊を作って、静的データの語に入れる（スカラーは静的データがすでに初期値を持つ）。
+    fn init_globals(&mut self) {
+        let p = self.cg.p;
+        for (g, gl) in p.globals.iter().enumerate() {
+            if matches!(gl.init, GlobalInit::Tuple(_) | GlobalInit::Struct(_)) {
+                let v = self.global_block(&gl.init);
+                let d = self.cg.gids[g];
+                let a = self.data_addr(d);
+                self.st(v, a, 0);
+            }
+        }
+    }
+
+    fn global_block(&mut self, init: &GlobalInit) -> Value {
+        match init {
+            GlobalInit::Int(n) => self.ic(*n),
+            GlobalInit::Bool(b) => self.ic(*b as i64),
+            GlobalInit::AddrNull => self.ic(0),
+            GlobalInit::Tuple(xs) | GlobalInit::Struct(xs) => {
+                let vals: Vec<Value> = xs.iter().map(|x| self.global_block(x)).collect();
+                let blk = self.blk(std::cmp::max(8, 8 * vals.len() as i64));
+                for (i, v) in vals.iter().enumerate() {
+                    self.st(*v, blk, 8 * i as i32);
+                }
+                blk
+            }
+        }
+    }
+
+    /// 終了時に組・構造体の大域の塊を解放する。
+    ///
+    /// 既知の差: 正常終了（`showb`）でだけ呼ぶ。異常停止（終了コード 70）ではこの解放をしない
+    /// （評価器は異常停止でも大域を破棄する）。プロセスはすぐ終わるので害はないが、
+    /// 停止時の `SIGIL_RT_LIVE` や `--trace-drops` の記録は評価器と一致しない。
+    fn drop_globals(&mut self) {
+        let p = self.cg.p;
+        for (g, gl) in p.globals.iter().enumerate() {
+            if matches!(gl.init, GlobalInit::Tuple(_) | GlobalInit::Struct(_)) {
+                let d = self.cg.gids[g];
+                let a = self.data_addr(d);
+                let w = self.ld(a, 0);
+                let t = norm(&gl.ty);
+                self.drop_val(&t, w);
+            }
+        }
+    }
+
     pub fn thunk(&mut self) {
         let p = self.cg.p;
         let f = &p.funcs[p.entry];
@@ -397,6 +444,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[one]);
         self.b.switch_to_block(ok);
 
+        self.init_globals();
         let mut vs = vec![];
         for (i, &pl) in f.params.iter().enumerate() {
             if matches!(norm(&f.locals[pl].ty), Ty::Ref(_)) {
@@ -432,6 +480,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.rt("print_result", &[s]);
         self.rt("str_free", &[s]);
         self.drop_val(&rt, r[0]);
+        self.drop_globals();
         let z = self.b.ins().iconst(types::I32, 0);
         self.b.ins().return_(&[z]);
     }

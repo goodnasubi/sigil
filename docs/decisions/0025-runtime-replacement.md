@@ -223,7 +223,7 @@ ADR 0018 で策定された分割を詳細化し、各 PR において常に「S
 - 番地を渡す引数は、実行前に生きた塊の範囲内にあることを検証し、外なら停止する。
   - `openat`/`newfstatat`/`unlinkat` のパスは NUL 終端を必須とし、終端までが範囲内であること。`statbuf` は固定サイズで範囲内であること。
   - `read`/`write` は `buf` から `count` バイトが範囲内であること。
-- `mmap` は `addr` = 0、`prot` に `PROT_EXEC` を含まない、`flags` は `MAP_PRIVATE|MAP_ANONYMOUS` のみ（`MAP_FIXED`/`MAP_FIXED_NOREPLACE` は拒否）、`fd` = −1、`offset` = 0 のみ許可する。成功値を塊の表に「`mmap` 由来」タグ付きで足す。
+- `mmap` は `addr` = 0、`prot` に `PROT_EXEC` を含まない、`flags` は `MAP_PRIVATE|MAP_ANONYMOUS` のみ（`MAP_FIXED`/`MAP_FIXED_NOREPLACE` は拒否）、`fd` = −1、`offset` = 0 のみ許可する。成功値を塊の表に「`mmap` 由来」タグ付きで足す。（補足 B で細目: `prot` は `PROT_READ|PROT_WRITE` との完全一致のみ。B-6）
 - `munmap` は、`mmap` で得た要求長を 4096 に切り上げた長さと完全一致する範囲のみ許可し、表から除く。
 - 塊は由来タグ（`raw.alloc` 由来 / `mmap` 由来）を持つ。由来違いの `munmap` / `raw.free` は停止する。
 - `close` の fd と `openat`/`unlinkat` が触るホストのパスは、評価器では縛れない。効果の委譲（ADR 0016 決定 4）で守る前提とする。
@@ -235,12 +235,12 @@ ADR 0018 で策定された分割を詳細化し、各 PR において常に「S
 - ブロックの頭は 16B で、`magic|class`（8B）と `size`（8B）。**返却アドレスは block+16** とし、16B 境界を維持する。ヘッダに `align` 欄はない。
 - `align` の上限は 4096。超過は評価器・ネイティブとも同じ停止（検査エラー相当）とする。
 - `align` ≤ 16 の要求のみスラブ（小ブロック）経路で、返却アドレスは block+16。
-- `align` > 16 は大ブロック経路（ページ境界）とする。`round_up(align + 16 + size, 4096)` を `mmap`（先頭を `base`）し、返却アドレスを `round_up(base + 16, align)` とする。頭はその直前の 16B に置き、`size` に加えて `base` を持たせて、`free` が `munmap` の範囲を復元できるようにする。`align` ≤ 16 の大ブロックは返却アドレスが `base`+16 になる。
+- `align` > 16 は大ブロック経路（ページ境界）とする。`round_up(align + 16 + size, 4096)` を `mmap`（先頭を `base`）し、返却アドレスを `round_up(base + 16, align)` とする。頭はその直前の 16B に置き、`size` に加えて `base` を持たせて、`free` が `munmap` の範囲を復元できるようにする。`align` ≤ 16 の大ブロックは返却アドレスが `base`+16 になる。（補足 B で置換: 頭は 16B のまま、`base` と `mmap` の長さは align > 16 のときだけ頭のさらに前の 16B に置く。B-1）
 - `free(a, size, align)` は頭を読み、magic と class/size が一致しなければ停止する。ヘッダに `align` 欄がないため、**解放時の `align` 検査はネイティブでは行わない**。評価器は塊の表で厳密に検査するので、評価器とネイティブの差分テストは評価器側の厳密検査を基準にする。
 - スラブの二重 `free` は解放済み印（FREED）で最善の努力として検知する。大ブロックの二重 `free` は、`mmap` 由来タグと表で検出して停止する（SIGSEGV に頼らない）。
 - 異常停止は `exit_group(70)` とする。既存の異常終了コード（`runtime/core` の `EXIT_ABNORMAL_STOP` = 70、ADR 0014）に合わせるためで、設計案の 134（SIGABRT 相当）は採らない。`size` > 2^46 も同じ停止とする。`mmap` 失敗（戻り値 −4095〜−1）も、決定 3.2 の「プロセス全体の異常停止」として同じ 70 で停止する。
 - すべての検査は状態の書き換えより前に終える。`size` の上限を最初に確かめ、切り上げの算術のあふれが確保器の途中で起きないようにする。
-- `SIGIL_RT_LIVE` には Sigil 確保器の生存数を `sigil_blocks=` として追加する（既存の `strs=` / `blocks=` の書式は変えない）。
+- `SIGIL_RT_LIVE` には Sigil 確保器の生存数を `sigil_blocks=` として追加する（既存の `strs=` / `blocks=` の書式は変えない）。（補足 B で細目: 確保器を結んだときだけ出す。B-5）
 
 ### A-5. 単一スレッド前提
 
@@ -248,7 +248,7 @@ ADR 0018 で策定された分割を詳細化し、各 PR において常に「S
 
 ### A-6. 埋め込み標準 Sigil モジュール
 
-確保器（`std.os.alloc`）は処理系に埋め込んだ Sigil ソースとし、利用者のプログラムと同じ検査・lowering にかけて合流させる。`std.*` の `trust base` は処理系内蔵として許可する（`trust-base.list` を経ない。根拠は処理系のソースに入っていること）。`sigil spec` と CI の信頼基盤差分検出の対象に加える。組み込みは独立の PR（3-4h）とする。`core`/`bare` 対象での `raw.alloc` は、ADR 0014 決定 2 に従い引き続き使える（確保器の供給元は出力先による）。
+確保器（`std.os.alloc`）は処理系に埋め込んだ Sigil ソースとし、利用者のプログラムと同じ検査・lowering にかけて合流させる。`std.*` の `trust base` は処理系内蔵として許可する（`trust-base.list` を経ない。根拠は処理系のソースに入っていること）。`sigil spec` と CI の信頼基盤差分検出の対象に加える。組み込みは独立の PR（3-4h）とする。`core`/`bare` 対象での `raw.alloc` は、ADR 0014 決定 2 に従い引き続き使える（確保器の供給元は出力先による）。（補足 B で細目: 結ぶのは `raw.alloc`/`raw.free` を使うプログラムだけで、`sigil spec` にもそのときだけ出す。入口が `server` だけでないときは PR 3-7 まで Rust の確保器。B-3・B-4）
 
 ### A-7. PR 3-4 の分割
 
@@ -265,6 +265,49 @@ ADR 0018 で策定された分割を詳細化し、各 PR において常に「S
 | 3-4i | Sigil 製確保器とネイティブ `raw.alloc`/`free` の差し替え（要承認） | 3-4b・3-4d・3-4h |
 
 3-4b と 3-4c〜3-4e は並行可。スラブのページは 4096B 単位で `mmap` する（決定 3.1 の「64KB または 4KB」のうち 4KB を採る）。
+
+### 補足 B（PR 3-4i の前）: 確保器の差し替えの細目
+
+- **日付**: 2026-11-02
+- **状態**: 所有者承認済み（「推奨で」、2026-11-02）。3-4i の着手前に見つかった補足 A の食い違いと未決の点を決める。補足 A と食い違う箇所は、本補足が置き換える。
+
+#### B-1. 大ブロックの頭と `munmap` の長さ（A-4 の食い違いの解消）
+
+A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に `base` も持たせる」を同時に求めており、8B が 3 つで 16B に収まらない。また頭に `align` 欄がないので、`free` 時に `mmap` の長さを計算し直せない。
+
+- 頭は全ブロックで 16B のまま（`ret`−16 に `magic|class`、`ret`−8 に `size`）。返却アドレス `ret` の規則（小ブロックと align ≤ 16 の大ブロックは block+16、align > 16 は `round_up(base + 16, align)`）は A-4 のまま。
+- align > 16 の大ブロックに限り、`ret`−32〜`ret`−16 の 16B に `{base, map_len}` を置く。`base` はページ境界で `align` は 4096 を割り切るので `ret` = `base` + `align` となり、`align` ≥ 32 なら `ret`−32 ≥ `base` で領域内に収まる。
+- `mmap` の長さは次のとおりとし、確保時に一度だけ計算する。
+  - align ≤ 16 の大ブロック: `map_len` = `round_up(16 + size, 4096)`、`base` = `ret`−16。
+  - align > 16: `map_len` = `round_up(align + 16 + size, 4096)`。
+- `free` は記録した `map_len` でそのまま `munmap` する（計算し直さない）。align ≤ 16 の大ブロックは `size` から上の式で求める（頭の `size` と `magic|class` の検査を先に通す）。これにより評価器の「要求長を 4096 に切り上げた長さと完全一致」（A-3）を満たす。
+
+#### B-2. ネイティブでの差し替えの仕方（A-2 の細目）
+
+- runtime/core の Rust 製 `raw.alloc`/`raw.free` は `sigil_rt_raw_alloc`/`sigil_rt_raw_free` の名前から外す（PR 3-7 まで、B-4 の場合の供給元として別名で残す）。
+- 確保器を結ぶときだけ、codegen が C 呼び出し規約のシム `sigil_rt_raw_alloc`/`sigil_rt_raw_free` を公開し、Sigil 製の関数を呼ぶ。生成した Sigil 関数の戻り値（値と状態）のうち状態は捨てる。確保器の中の停止は A-4 のとおり `exit_group(70)` で直接止めるため。
+- 生成コードの呼び出し先の名前は変えない（A-2 のとおり）。
+
+#### B-3. 結ぶ範囲と `sigil spec`（A-6 の細目）
+
+- `std.os.alloc` を暗黙に結ぶ（`embedded_roots`）のは、`raw.alloc`/`raw.free` を使うプログラムだけとする。使わないプログラムの検査・出力・`sigil spec` は変わらない。
+- 評価器で走らせるときも同じ条件で結ぶ（検査の結果を出力先で変えないため）。ただし評価器の `raw.alloc`/`raw.free` は組み込みのまま（A-2）で、確保器の関数は呼ばない。
+- `sigil spec` は、結んだときだけ `std.os.alloc` を信頼基盤のモジュールとして出す（A-1 の大域と「触る大域:」の表示を含む）。利用者に見える出力の変更なので、3-4i の PR で所有者の承認を得る。
+
+#### B-4. 出力先（targets）との整合（A-6 の細目）
+
+- 確保器は `raw.syscall`（OS 層）を使うので `targets server` とする。入口の `targets` が `server` だけのときに結ぶ。
+- 入口の `targets` に `bare` や `browser` を含むときは結ばず、ネイティブの `raw.alloc`/`raw.free` は PR 3-7 まで Rust の確保器（B-2 で別名にしたもの）を使う。これは A-6 の「確保器の供給元は出力先による」の P1-R での具体で、本文決定 3 の「Rust アロケータに依存しない」との差として PR 3-7 で見直す。
+
+#### B-5. `SIGIL_RT_LIVE` の `sigil_blocks=`（A-4 の細目）
+
+- 確保器を結ぶときだけ、生成コードは生存数を返す関数 `sigil_rt_sigil_live_blocks` を公開する。
+- Rust ランタイムは起動時にその関数ポインタの登録を受け、終了時に登録があれば既存の行の末尾に ` sigil_blocks=<数>` を足す。登録がなければ `sigil_blocks=` を出さない（既存の `strs=` / `blocks=` の書式は変えない）。
+
+#### B-6. `mmap` の `prot` とガードページ（A-3 との差の記録）
+
+- 評価器の許可表（3-4b）は `prot` を `PROT_READ|PROT_WRITE` との完全一致で許す。A-3 の「`PROT_EXEC` を含まない」より狭いが、こちらを正とする（`PROT_NONE` 等も拒否）。
+- `PROT_NONE` のガードページは採らない（決定 3.1・A-4 にもない）。必要になれば許可表の変更として ADR 0018 判断 2 のレビューを経る。
 
 ---
 

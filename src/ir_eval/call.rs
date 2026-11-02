@@ -977,6 +977,14 @@ impl<'p> M<'p> {
                         Some("raw.alloc: size > 0 && align は 2の累乗"),
                     ));
                 }
+                // 上限は Sigil 製の確保器と同じ（ADR 0025 補足 A-4: align <= 4096、size <= 2^46）。
+                if align > 4096 || size > (1i64 << 46) {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.alloc: align <= 4096 && size <= 2^46"),
+                    ));
+                }
                 let su = size as usize;
                 let au = align as usize;
                 let layout = std::alloc::Layout::from_size_align(su, au).map_err(|_| {

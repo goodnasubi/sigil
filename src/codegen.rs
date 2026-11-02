@@ -113,8 +113,9 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "int_rotl" | "int_rotr" => ("ppp", 'i'),
         "bytes_set" => ("pppp", 'i'),
         "bytes_slice" => ("ppppp", 'i'),
-        "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
-        "raw_alloc" => ("pp", 'p'),
+        "memmove" | "memset" | "raw_free" | "raw_free_rust" => ("ppp", 'v'),
+        "raw_alloc" | "raw_alloc_rust" => ("pp", 'p'),
+        "set_sigil_live" => ("p", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
@@ -150,6 +151,11 @@ pub(crate) struct Cg<'p> {
     pub msg_table: DataId,
     /// 大域ごとの静的データ（8 バイトの語。`Program.globals` と同じ添字）。
     pub gids: Vec<DataId>,
+    /// Sigil 製の確保器を結んだか（ADR 0025 補足 B-2）。真なら `raw.alloc`/`raw.free` は同じオブジェクトの
+    /// シム `sigil_rt_raw_alloc`/`sigil_rt_raw_free` を呼び、偽なら Rust 版（`..._rust`）を呼ぶ。
+    pub sigil_alloc: bool,
+    /// 生存数のシム `sigil_rt_sigil_live_blocks`（確保器を結んだときだけ。補足 B-5）。
+    pub live_shim: Option<FuncId>,
 }
 
 impl<'p> Cg<'p> {
@@ -493,13 +499,25 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fids,
         msg_table,
         gids,
+        sigil_alloc: false,
+        live_shim: None,
     };
+
+    // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
+    let shims = alloc_shims(&mut cg)?;
 
     for (i, f) in p.funcs.iter().enumerate() {
         let sig = cg.sig(f.params.len());
         let lt: Vec<Ty> = f.locals.iter().map(|l| norm(&l.ty)).collect();
         let id = cg.fids[i];
         cg.define(id, i as u32 + 1, sig, lt, |fx| fx.run(f))?;
+    }
+
+    for (k, &(id, target, np, ret)) in shims.iter().enumerate() {
+        let sig = shim_sig(cc, np, ret);
+        cg.define(id, p.funcs.len() as u32 + 3 + k as u32, sig, vec![], |fx| {
+            fx.alloc_shim(target, ret)
+        })?;
     }
 
     // 入口: スレッドの本体（引数を読み、入口の関数を呼び、値を表示する）と C の main。
@@ -552,6 +570,46 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
 
     let product = cg.m.finish();
     product.emit().map_err(internal)
+}
+
+/// シム 1 つ（公開する関数, 呼ぶ Sigil の関数の番号, 引数の数, 値を返すか）。
+type Shim = (FuncId, usize, usize, bool);
+
+fn shim_sig(cc: CallConv, np: usize, ret: bool) -> Signature {
+    let mut s = Signature::new(cc);
+    for _ in 0..np {
+        s.params.push(AbiParam::new(types::I64));
+    }
+    if ret {
+        s.returns.push(AbiParam::new(types::I64));
+    }
+    s
+}
+
+/// 確保器（`std.os.alloc`）の関数が SIR にあれば、C の呼び出し規約のシムを宣言して公開する（補足 B-2・B-5）。
+/// 生成コードの呼び出し先の名前（`sigil_rt_raw_alloc`/`sigil_rt_raw_free`）は変えない（補足 A-2）。
+fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::{ALLOC_FN, FREE_FN, LIVE_FN};
+    let pos = |n: &str| cg.p.funcs.iter().position(|f| f.name == n);
+    let (Some(a), Some(f), Some(l)) = (pos(ALLOC_FN), pos(FREE_FN), pos(LIVE_FN)) else {
+        return Ok(vec![]);
+    };
+    let mut out = vec![];
+    for (sym, target, np, ret) in [
+        ("sigil_rt_raw_alloc", a, 2, true),
+        ("sigil_rt_raw_free", f, 3, false),
+        ("sigil_rt_sigil_live_blocks", l, 0, true),
+    ] {
+        let id =
+            cg.m.declare_function(sym, Linkage::Export, &shim_sig(cg.cc, np, ret))
+                .map_err(internal)?;
+        out.push((id, target, np, ret));
+    }
+    cg.rt.insert("raw_alloc", out[0].0);
+    cg.rt.insert("raw_free", out[1].0);
+    cg.sigil_alloc = true;
+    cg.live_shim = Some(out[2].0);
+    Ok(out)
 }
 
 /// 関数のシンボル名。番号で一意になり、名前（モジュールをまたぐ関数は `<モジュール>.<関数>`）を添える

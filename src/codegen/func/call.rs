@@ -838,13 +838,24 @@ impl<'a, 'p> Fx<'a, 'p> {
             RawAlloc => {
                 let (size, _) = self.val(&args[0]);
                 let (align, _) = self.val(&args[1]);
-                (self.rt("raw_alloc", &[size, align]), u)
+                // 確保器を結んだときは Sigil 製（シム）、でなければ Rust 版（ADR 0025 補足 B-2・B-4）。
+                let f = if self.cg.sigil_alloc {
+                    "raw_alloc"
+                } else {
+                    "raw_alloc_rust"
+                };
+                (self.rt(f, &[size, align]), u)
             }
             RawFree => {
                 let (a, _) = self.val(&args[0]);
                 let (size, _) = self.val(&args[1]);
                 let (align, _) = self.val(&args[2]);
-                self.rt("raw_free", &[a, size, align]);
+                let f = if self.cg.sigil_alloc {
+                    "raw_free"
+                } else {
+                    "raw_free_rust"
+                };
+                self.rt(f, &[a, size, align]);
                 (self.ic(0), u)
             }
             RawSyscall => {

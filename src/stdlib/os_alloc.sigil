@@ -1,0 +1,404 @@
+module std.os.alloc
+  targets server
+  trust base
+
+// Sigil 製の確保器（ADR 0025 決定 3、補足 A-4・A-5・B-1）。ネイティブの `raw.alloc` / `raw.free` の実体。
+// 評価器の `raw.alloc` / `raw.free` は組み込みのまま（補足 A-2）で、ここは呼ばない。
+//
+// - 小ブロック（size <= 2048 かつ align <= 16）: サイズクラス 16〜2048（16 << k、k = 0..7）。
+//   ブロックは頭 16B + クラスの大きさで、4096B のページを mmap して切り分ける。
+// - 大ブロック（それ以外）: 直接 mmap。align <= 16 は base + 16、align > 16 は base + align を返す。
+//   align > 16 は ret-32 に base、ret-24 に map_len を置く（B-1）。
+// - 頭（ret-16）: magic|class の語と size の語。class は 0..7 が小ブロック、8 が align <= 16 の大ブロック、
+//   9 が align > 16 の大ブロック。解放済みの小ブロックは FREED|class。
+// - 状態のページ（STATE）: 0..63 に各クラスの空きリストの先頭、64 に表の番地、72 に表の長さ、80 に表の容量。
+// - 表: 1 項目 16B（鍵, 印）。印 -1 は生きた大ブロック（鍵は返却番地）、0..7 はスラブのページ（鍵はページの先頭、
+//   印はクラス）。解放時に番地を表で引いてから頭を読むので、解放済みの大ブロックや確保器の外の番地の頭を読まない
+//   （SIGSEGV に頼らない。A-4）。
+// - 異常停止はすべて exit_group(70)（A-4）。検査は状態の書き換えより前に終える。
+// - 排他を持たない。単一スレッド前提（A-5）。
+
+global MAGIC: Int = 0x5349474C414C0000
+global FREED: Int = 0x5349474C46520000
+global CLASS_LARGE: Int = 8
+global CLASS_LARGE_ALIGNED: Int = 9
+global MAX_SIZE: Int = 0x400000000000
+global mut STATE: Addr = raw.addr_null()
+global mut LIVE: Int = 0
+
+fn halt()
+  intent "異常停止する（exit_group(70)）"
+  requires none
+  ensures none
+  effects none
+  unchecked "exit_group(70) を発行し、戻らない（ADR 0025 補足 A-4）"
+{
+  raw.syscall(231, 70, 0, 0, 0, 0, 0);
+}
+
+fn round_page(n: Int) -> Int
+  intent "n を 4096 の倍数に切り上げる"
+  requires none
+  ensures none
+  effects none
+{
+  return (n + 4095) / 4096 * 4096;
+}
+
+fn valid_align(align: Int) -> Bool
+  intent "align が 2 の冪かつ 1 以上 4096 以下か"
+  requires none
+  ensures none
+  effects none
+{
+  return align >= 1 && align <= 4096 && (align & (align - 1)) == 0;
+}
+
+fn class_of(size: Int) -> Int
+  intent "size（1..=2048）が入る最小のサイズクラスの番号"
+  requires none
+  ensures none
+  effects none
+{
+  let mut k = 0;
+  while (16 << k) < size {
+    k = k + 1;
+  }
+  return k;
+}
+
+fn map(len: Int) -> Int
+  intent "len バイト（4096 の倍数）を mmap し、先頭の番地を返す。失敗は異常停止"
+  requires none
+  ensures none
+  effects none
+  unchecked "mmap を PROT_READ|PROT_WRITE、MAP_PRIVATE|MAP_ANONYMOUS で発行する（補足 A-3・B-6）"
+{
+  let r = raw.syscall(9, 0, len, 3, 34, -1, 0);
+  if r >= -4095 && r <= -1 {
+    halt();
+    return 0;
+  }
+  return r;
+}
+
+fn unmap(base: Int, len: Int)
+  intent "mmap で得た範囲を munmap する。失敗は異常停止"
+  requires none
+  ensures none
+  effects none
+  unchecked "base と len は map で得た範囲と完全に一致する（補足 A-3）"
+{
+  let r = raw.syscall(11, base, len, 0, 0, 0, 0);
+  if r != 0 {
+    halt();
+  }
+}
+
+fn state() -> Addr
+  intent "状態のページを返す（初回に mmap する）"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域 STATE を読み書きするため、同じ引数でも初回かどうかで動作が変わる"
+{
+  if raw.addr_to_int(STATE) == 0 {
+    STATE = raw.int_to_addr(map(4096));
+  }
+  return STATE;
+}
+
+fn tbl_find(key: Int, large: Bool) -> Int
+  intent "表で鍵を引き、項目の番号を返す（ないときは -1）。large なら印 -1 の項目、でなければ印 0..7 の項目だけを見る"
+  requires none
+  ensures none
+  effects none
+  unchecked "表は状態のページが指す生きた mmap の範囲で、長さまでの項目は書き込み済み（補足 A-5）"
+{
+  let st = state();
+  let t = raw.load_addr(raw.offset(st, 64));
+  let n = raw.load_i64(raw.offset(st, 72));
+  let mut i = 0;
+  while i < n {
+    let e = raw.offset(t, 16 * i);
+    if raw.load_i64(e) == key {
+      let tag = raw.load_i64(raw.offset(e, 8));
+      if (large && tag == -1) || (!large && tag >= 0) {
+        return i;
+      }
+    }
+    i = i + 1;
+  }
+  return -1;
+}
+
+fn tbl_add(key: Int, tag: Int)
+  intent "表に項目を足す（満杯なら倍の大きさに作り直す）"
+  requires none
+  ensures none
+  effects none
+  unchecked "表の作り直しは新しい mmap に写してから古い範囲を munmap する（補足 A-5）"
+{
+  let st = state();
+  let mut t = raw.load_addr(raw.offset(st, 64));
+  let n = raw.load_i64(raw.offset(st, 72));
+  let cap = raw.load_i64(raw.offset(st, 80));
+  if n == cap {
+    let mut ncap = 256;
+    if cap > 0 {
+      ncap = cap * 2;
+    }
+    let nt = raw.int_to_addr(map(ncap * 16));
+    if cap > 0 {
+      raw.copy(nt, t, n * 16);
+      unmap(raw.addr_to_int(t), cap * 16);
+    }
+    t = nt;
+    raw.store_addr(raw.offset(st, 64), t);
+    raw.store_i64(raw.offset(st, 80), ncap);
+  }
+  let e = raw.offset(t, 16 * n);
+  raw.store_i64(e, key);
+  raw.store_i64(raw.offset(e, 8), tag);
+  raw.store_i64(raw.offset(st, 72), n + 1);
+}
+
+fn tbl_remove(i: Int)
+  intent "表の i 番の項目を、最後の項目で埋めて除く"
+  requires none
+  ensures none
+  effects none
+  unchecked "i は tbl_find が返した有効な番号（補足 A-5）"
+{
+  let st = state();
+  let t = raw.load_addr(raw.offset(st, 64));
+  let n = raw.load_i64(raw.offset(st, 72));
+  let last = raw.offset(t, 16 * (n - 1));
+  let e = raw.offset(t, 16 * i);
+  raw.store_i64(e, raw.load_i64(last));
+  raw.store_i64(raw.offset(e, 8), raw.load_i64(raw.offset(last, 8)));
+  raw.store_i64(raw.offset(st, 72), n - 1);
+}
+
+fn refill(k: Int)
+  intent "クラス k のスラブのページを 1 枚 mmap し、ブロックを空きリストに積む"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。ページは表に印 k で登録し、返さない"
+{
+  let st = state();
+  let bs = (16 << k) + 16;
+  let page = map(4096);
+  tbl_add(page, k);
+  let slot = raw.offset(st, 8 * k);
+  let mut i = 4096 / bs - 1;
+  while i >= 0 {
+    let h = raw.int_to_addr(page + i * bs);
+    raw.store_i64(h, FREED + k);
+    let user = raw.offset(h, 16);
+    raw.store_addr(user, raw.load_addr(slot));
+    raw.store_addr(slot, user);
+    i = i - 1;
+  }
+}
+
+fn small_alloc(size: Int) -> Addr
+  intent "小ブロックを空きリストから取る"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域 LIVE を書き換えるため非決定的"
+{
+  let k = class_of(size);
+  let st = state();
+  let slot = raw.offset(st, 8 * k);
+  if raw.addr_to_int(raw.load_addr(slot)) == 0 {
+    refill(k);
+  }
+  let b = raw.load_addr(slot);
+  let h = raw.offset(b, -16);
+  if raw.load_i64(h) != FREED + k {
+    halt();
+    return raw.addr_null();
+  }
+  raw.store_addr(slot, raw.load_addr(b));
+  raw.store_i64(h, MAGIC + k);
+  raw.store_i64(raw.offset(h, 8), size);
+  LIVE = LIVE + 1;
+  return b;
+}
+
+fn large_alloc(size: Int, align: Int) -> Addr
+  intent "大ブロックを直接 mmap する（補足 B-1）"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域 LIVE を書き換えるため非決定的"
+{
+  let mut ret = 0;
+  if align <= 16 {
+    let len = round_page(16 + size);
+    let base = map(len);
+    ret = base + 16;
+    let h = raw.int_to_addr(base);
+    raw.store_i64(h, MAGIC + CLASS_LARGE);
+    raw.store_i64(raw.offset(h, 8), size);
+  } else {
+    let len = round_page(align + 16 + size);
+    let base = map(len);
+    ret = (base + 16 + align - 1) / align * align;
+    let m = raw.int_to_addr(ret - 32);
+    raw.store_i64(m, base);
+    raw.store_i64(raw.offset(m, 8), len);
+    raw.store_i64(raw.offset(m, 16), MAGIC + CLASS_LARGE_ALIGNED);
+    raw.store_i64(raw.offset(m, 24), size);
+  }
+  tbl_add(ret, -1);
+  LIVE = LIVE + 1;
+  return raw.int_to_addr(ret);
+}
+
+pub fn alloc(size: Int, align: Int) -> Addr
+  intent "size バイト・align 境界の領域を確保する（ネイティブの raw.alloc の実体）"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域の状態を書き換えるため、同じ引数でも返る番地は呼び出しの履歴による"
+{
+  if size <= 0 || size > MAX_SIZE {
+    halt();
+    return raw.addr_null();
+  }
+  if !valid_align(align) {
+    halt();
+    return raw.addr_null();
+  }
+  if align <= 16 && size <= 2048 {
+    return small_alloc(size);
+  }
+  return large_alloc(size, align);
+}
+
+fn large_free(a: Int, size: Int, i: Int)
+  intent "表の i 番に登録された大ブロックを返す（補足 B-1）"
+  requires none
+  ensures none
+  effects none
+  unchecked "a は表に印 -1 で登録された生きた大ブロックで、頭は読める。整列の大ブロックの {base, len} は a % 32 == 0 を確かめてから読む（補足 A-5）"
+{
+  let h = raw.int_to_addr(a - 16);
+  let w = raw.load_i64(h);
+  if raw.load_i64(raw.offset(h, 8)) != size {
+    halt();
+    return;
+  }
+  let mut base = 0;
+  let mut len = 0;
+  if w == MAGIC + CLASS_LARGE {
+    base = a - 16;
+    len = round_page(16 + size);
+  } else if w == MAGIC + CLASS_LARGE_ALIGNED {
+    // 整列の大ブロックは a が 32 の倍数で a - base >= 32。頭を読む前に確かめ、
+    // class 8 の塊（a % 4096 == 16）を 9 と偽った頭で塊の外 a - 32 を読まない。
+    if a % 32 != 0 {
+      halt();
+      return;
+    }
+    base = raw.load_i64(raw.int_to_addr(a - 32));
+    len = raw.load_i64(raw.int_to_addr(a - 24));
+    let d = a - base;
+    // 正しい塊では d == align で、map_len = round_up(align + 16 + size)（補足 B-1）。等式で確かめる。
+    if d < 32 || d > 4096 || len != round_page(d + 16 + size) {
+      halt();
+      return;
+    }
+  } else {
+    halt();
+    return;
+  }
+  if base % 4096 != 0 {
+    halt();
+    return;
+  }
+  tbl_remove(i);
+  unmap(base, len);
+  LIVE = LIVE - 1;
+}
+
+fn small_free(a: Int, size: Int)
+  intent "小ブロックを空きリストに戻す"
+  requires none
+  ensures none
+  effects none
+  unchecked "a はスラブのページの中のブロックの先頭 + 16 であることを表で確かめてから頭を読む（補足 A-5）"
+{
+  if a < 16 {
+    halt();
+    return;
+  }
+  let off = (a - 16) % 4096;
+  let page = a - 16 - off;
+  let j = tbl_find(page, false);
+  if j < 0 {
+    halt();
+    return;
+  }
+  let st = state();
+  let t = raw.load_addr(raw.offset(st, 64));
+  let k = raw.load_i64(raw.offset(raw.offset(t, 16 * j), 8));
+  let bs = (16 << k) + 16;
+  if off % bs != 0 || off / bs >= 4096 / bs {
+    halt();
+    return;
+  }
+  let h = raw.int_to_addr(a - 16);
+  let w = raw.load_i64(h);
+  if w == FREED + k {
+    halt();
+    return;
+  }
+  if w != MAGIC + k || raw.load_i64(raw.offset(h, 8)) != size {
+    halt();
+    return;
+  }
+  raw.store_i64(h, FREED + k);
+  let slot = raw.offset(st, 8 * k);
+  raw.store_addr(raw.int_to_addr(a), raw.load_addr(slot));
+  raw.store_addr(slot, raw.int_to_addr(a));
+  LIVE = LIVE - 1;
+}
+
+pub fn free(a: Addr, size: Int, align: Int)
+  intent "alloc で得た領域を返す（ネイティブの raw.free の実体）"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。align は範囲と 2 の冪だけを検査し、確保時の align とは突き合わせない（補足 A-4・B-1）"
+{
+  let ai = raw.addr_to_int(a);
+  if ai == 0 || size <= 0 || size > MAX_SIZE {
+    halt();
+    return;
+  }
+  if !valid_align(align) {
+    halt();
+    return;
+  }
+  let i = tbl_find(ai, true);
+  if i >= 0 {
+    large_free(ai, size, i);
+    return;
+  }
+  small_free(ai, size);
+}
+
+pub fn live_blocks() -> Int
+  intent "生きているブロックの数（SIGIL_RT_LIVE の sigil_blocks=）"
+  requires none
+  ensures none
+  effects none
+  unchecked "単一スレッド（補足 A-5）。大域 LIVE を読むため非決定的"
+{
+  return LIVE;
+}

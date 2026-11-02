@@ -398,6 +398,21 @@ fn main() -> Int
         // ほかの移動は `pair` の `(a, b)` の二つ(`T` は Copyable と限らない)
         assert_eq!(t.moves.len(), 3);
     }
+
+    /// 大域（構造体・そのフィールド）を値で読むのは複製で、移動の目印（`moves`）に入らない。
+    /// 局所の構造体の移動は従来どおり記録される（ADR 0025 補足 A-1、PR 3-4d）。
+    #[test]
+    fn global_reads_are_never_recorded_as_moves() {
+        let src = "module m.g\n  targets server\n  trust base\n\nstruct P {\n  a: Int,\n  b: Int,\n}\n\nstruct Q {\n  p: P,\n}\n\nglobal mut G: P = P { a: 1, b: 2 }\nglobal mut H: Q = Q { p: P { a: 1, b: 2 } }\n\nfn take(p: P) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return p.a;\n}\n\nfn f() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"x\"\n{\n  let a = G;\n  let b = take(G) + take(G) + take(H.p);\n  let c = H;\n  let d = H.p;\n  let p = P { a: 1, b: 2 };\n  let n = take(p);\n  return n + a.a + b + c.p.a + d.b;\n}\n";
+        let file = parse(src).unwrap();
+        let opts = Options {
+            trust_base: vec!["m.g".to_string()],
+            ..Default::default()
+        };
+        let t = typed_with(&file, &opts).unwrap();
+        // 移動は局所 `p` を `take` に渡す 1 か所だけ
+        assert_eq!(t.moves.len(), 1);
+    }
 }
 
 mod std_heads_tests {

@@ -381,6 +381,12 @@ impl Ck {
         }
     }
 
+    /// 名前 `root` が、局所に隠されていない大域変数か（ADR 0025 補足 A-1）。
+    /// 大域は値として読むと複製で、移動の元にならない（構造体の大域も同じ）。
+    pub(super) fn is_global_root(&self, root: &str) -> bool {
+        self.lookup(root).is_none() && self.globals.contains_key(root)
+    }
+
     /// 式 `e`（型 `t`）の値が、移動する位置に置かれた。`Copyable` でない値を持つ場所なら、移動を記録する。
     pub(super) fn consume(&mut self, e: &Expr, t: &Ty) -> R<()> {
         // 借りている関数の値（引数・その別名）は、渡しても別名にしても移動しない
@@ -407,6 +413,11 @@ impl Ck {
         let Some((root, path)) = place_path(e) else {
             return Ok(());
         };
+        // 大域（そのフィールドを含む）を値で読むのは複製。移動の記録も、`rec_moves`（lowering が
+        // `Operand::Move` にする目印）への登録もしない（ADR 0025 補足 A-1・A-7 の 3-4d）。
+        if self.is_global_root(&root) {
+            return Ok(());
+        }
         if self.lookup(&root).is_none() {
             return Ok(());
         }

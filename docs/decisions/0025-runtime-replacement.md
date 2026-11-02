@@ -1,6 +1,6 @@
 # 0025: ランタイムの置き換え（原始操作・大域状態・確保器・標準ライブラリの Sigil 実装）
 
-- **状態**: 提案（PR 3-1。所有者レビュー待ち）。補足 A は所有者承認済み（「推奨で」、2026-11-02）
+- **状態**: 提案（PR 3-1。所有者レビュー待ち）。補足 A・B・C は所有者承認済み（「推奨で」、2026-11-02）
 - **日付**: 2026-11-01
 - **対象**: 原始操作（`raw.*`）、大域状態構文、アロケータ設計、標準ライブラリ核・OS の Sigil 実装、暫定 Rust ランタイム（`runtime/`）の削除
 
@@ -184,6 +184,8 @@ ADR 0018 で策定された分割を詳細化し、各 PR において常に「S
 | **PR 3-6** | **標準ライブラリ OS 部門（`console`, `fs`, `path`, `env`）の Sigil 実装** | Lane D2, Lane C2 | `std.os` の Sigil 実装、システムコール直接呼び出し、全 OS テストの通過 |
 | **PR 3-7** | **暫定 Rust ランタイム（`runtime/`）の削除と glibc リンク解除** | Lane C2, Lane D2, Lane E | `runtime/core`, `runtime/os` ディレクトリの完全削除、`-nostdlib -static` 移行、ADR 0016 決定事項の見直し記録 |
 
+（補足 C で置換: PR 3-5・3-6 は未完了と認定し、PR 3-7 と合わせて 3-5a〜3-5g・3-6a〜3-6c・3-7a〜3-7e に分割し直す。C-7）
+
 ### 移行中の突き合わせ戦略
 
 - PR 3-5 および PR 3-6 の進行中、まだ置き換わっていない標準機能は既存の暫定ランタイム・組み込みを利用し、置き換えが完了した機能から順次 Sigil 実装へ切り替える。
@@ -311,6 +313,87 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 
 - 評価器の許可表（3-4b）は `prot` を `PROT_READ|PROT_WRITE` との完全一致で許す。A-3 の「`PROT_EXEC` を含まない」より狭いが、こちらを正とする（`PROT_NONE` 等も拒否）。
 - `PROT_NONE` のガードページは採らない（決定 3.1・A-4 にもない）。必要になれば許可表の変更として ADR 0018 判断 2 のレビューを経る。
+
+### 補足 C（PR 3-7 の前）: 3-5〜3-7 の細目と分割し直し
+
+- **日付**: 2026-11-02
+- **状態**: 所有者承認済み（「推奨で」、2026-11-02）。PR 3-7 の設計のための調査（main `cdee378`）で、PR 3-5・3-6 が未完了だと分かった。そのため、残りの置き換えの方式と分割を決める。本文・補足 A・B と食い違う箇所は、本補足が置き換える。
+
+#### C-0. 現状の認定
+
+- PR 3-5（#151）と PR 3-6（#153）が足したのは、構文として読めるだけの Sigil ソース（`src/stdlib/core_sigil.rs`・`src/stdlib/os_sigil.rs`）である。どのプログラムにも結ばれておらず、生成コードは 1 つも Sigil 版に切り替わっていない。両 PR は**未完了**と扱い、C-7 の 3-5a〜3-5g・3-6a〜3-6c で置き換える。`core_sigil.rs` の `String.len` はバイト数を返すが、言語の `String.len` は Unicode のスカラー値の数（`src/shared/text.rs` の `char_len`）で、意味が違う。置き換えでは言語の意味に合わせる。
+- PR 3-3 の完了基準のうち、`_start` の生成はまだない。ネイティブの `raw.syscall` は、Rust ランタイムの `sigil_rt_raw_syscall`（`asm!`。x86_64 以外では −1 を返す）を呼んでいる。C-4 で処理系が生成するコードに替える。
+- 生成コードは、暫定ランタイムの約 60 種の `sigil_rt_*`（`src/codegen.rs` の `rt_spec`）と、glibc の `memmove`・`memset`・`fmod`・`main` の呼び出し規約・スレッド・標準入出力に依存している。
+- ADR 0016 の「段階 3 完了時の見直し記録」（#155）は事実と合わない先取りだったので、撤回した。見直しの記録は 3-7e で書き直す。
+
+#### C-1. 型の記述子を読む汎用の処理（`val_show`・`val_eq`・`val_cmp`・`val_drop`・`val_clone`・`val_shadow`・`blk_new`・`shared_*`）
+
+- Sigil の標準ライブラリには書かない。codegen が**型ごとの関数として生成する**（ADR 0005 の「処理系が生成するコード」として信頼基盤に入る）。
+  - 理由: 記述子を実行時に読む処理を Sigil で書くと、`raw.load_*` を多く使う `unchecked` の関数が必要になり、前提の文が「記述子が正しい」という処理系側の不変条件に頼ることになる。型ごとに生成すれば、記述子を読む必要がなく、生成器の試験で確かめられる。
+- 塊の配置（頭 16B、参照数、解放済みの印 `FREED`）と `--trace-drops` の出力は、今の Rust 版と同じにする。確保と解放は、`sigil_rt_raw_alloc`/`sigil_rt_raw_free`（Sigil 製確保器のシム）を呼ぶ。
+- `String`・`List`・`Map`・`Bytes` の操作（連結・切り出し・追加など）は、本文決定 4 のとおり Sigil の標準ライブラリ（埋め込み `std.core.*`）で書く。
+
+#### C-2. B-4 の解消と `sigil spec` の表示
+
+- ネイティブ出力では、入口の `targets` によらず確保器 `std.os.alloc` を結ぶ（B-4 を置き換える）。出力先は常に Linux（ADR 0015）である。確保器の `targets server` は確保器自身のモジュールの検査に使い、入口のモジュールの層と出力先の検査（ADR 0014）には持ち込まない。
+- 3-5 以降は、`String`・`List` なども `raw.alloc` を使う。そのため、結ぶ条件（B-3）は「`raw.alloc`/`raw.free` を使うプログラム」から「すべてのプログラム」に変わる。評価器でも同じ条件で結ぶ。評価器の `raw.alloc`/`raw.free` は A-2 のとおり組み込みのままである。
+- `sigil spec` は、利用者のモジュールだけを表示する。埋め込みの `std.*`（確保器を含む）は出さない（B-3 の「結んだときだけ出す」を置き換える）。埋め込みの `std.*` の仕様は、`sigil spec --std` で別に表示する。
+  - 理由: 埋め込みの `std.*` は、処理系の版が同じならどのプログラムでも同じである。人間は、変わったときに 1 度だけ読めばよい。変化は CI の信頼基盤の差分の検出（`scripts/trust-base-diff.sh`、ADR 0018 判断 1・2）が `.sigil` の `unchecked` の単位で示す。プログラムごとに同じ行を並べると、利用者の仕様が読みにくくなる。
+  - 利用者に見える出力の変更なので、実装の PR（3-7a）で `sigil spec` の差分を貼り、所有者の承認を得る。
+
+#### C-3. `Float` のビット列と、libc の関数の置き換え
+
+- `Float` の表示（最短で往復できる表現）・入口の引数の解析・`%` を Sigil で書くために、`Float` のビット列を出し入れする関数を、**原始操作ではない通常の標準ライブラリの関数**として核の層に置く: `Float.to_bits(x: Float) -> Int`・`Float.from_bits(n: Int) -> Float`（効果 `none`、IEEE 754 binary64 のビット列を `Int` の 64 ビットとしてそのまま読み替える）。
+  - 理由: ビット列の読み替えは、どの値に対しても安全で、前提の文が要らない。`RAW_OPS` に置くと、使う関数がすべて `unchecked` になり、検査を外す範囲が無用に広がる（ADR 0016 の評価の観点 2）。
+  - 評価器は `f64::to_bits`/`f64::from_bits`、ネイティブは Cranelift の `bitcast` で実装する。標準ライブラリの表に関数を足すのは言語の仕様の変更なので、実装の PR（3-5a）は所有者の承認を要する。
+- `memmove`・`memset`（`raw.copy`/`raw.set` が呼ぶ）は、codegen が自分のオブジェクトの中に関数として生成する（バイト単位のループ。`memmove` は重なりの向きで分岐する）。
+- `fmod`（`Float` の `%`）は、埋め込みの Sigil の関数として書き、`Float.to_bits` を使って厳密に計算する（musl の `fmod` と同じ方式）。`unchecked` は要らない。評価器の Rust の `%` との突き合わせで確かめる。
+
+#### C-4. `_start`・システムコールの入口の生成方式と aarch64
+
+- Cranelift にはシステムコールの命令がない。そのため、`_start`・`sigil_syscall6`（6 引数のシステムコール）・スタックの切り替えの 3 つは、x86_64 の機械語のバイト列として `ObjectModule::define_function_bytes` で定義する（ADR 0018 決定 6 の「処理系が機械語を生成する」）。バイト列は短く保ち、残りの起動処理（`argc`・`argv`・`envp` の取り出し、スタックの確保、入口の呼び出し、`exit_group`）は Cranelift で生成する。
+- `_start` の手順は本文決定 5.1 のとおりで、手順 4 は A-1 のとおり何もしない。`envp` は大域の番地として置き、`env`（3-6c）と `SIGIL_RT_LIVE`（C-5）が読む。
+- ネイティブの `raw.syscall` と、生成コードの停止の経路（`exit_group(70)`）は `sigil_syscall6` を呼ぶ。
+- バイト列は信頼基盤の一部である。PR では逆アセンブル（`objdump -d`）の結果を貼り、試験では、出力した実行ファイルの `_start` の先頭のバイト列と、システムコールの結果（`write`・`exit_group`）を確かめる。
+- **aarch64**: ネイティブ出力は x86_64 の Linux に限る。aarch64 のホストでの `sigil build` は、未対応として `BuildError::Toolchain` で止める（今も `raw.syscall` は aarch64 では −1 を返すだけで、確保器が動かない）。aarch64 への対応は、必要になったときに別の ADR で決める。
+
+#### C-5. `SIGIL_RT_LIVE` の書式
+
+- Rust ランタイムの数（`strs=`・`blocks=`）は、ランタイムの削除で無くなる。出力は `live: sigil_blocks=<数>`（Sigil 製確保器の生存数。B-5）の 1 項目にする。
+- 3-7a で、すべてのプログラムが確保器を結ぶ（C-2）。そのため、`sigil_blocks=` は常に出る。`strs=`・`blocks=` は、Rust の確保の経路を最後に消す PR（3-5e）で外す。それまでは B-5 の書式のまま変えない。
+- 環境変数を読み、終了時に標準エラーへ出す処理は、`_start` の `envp`（C-4）を使って生成コードが行う。`tests/m5_free_strings.rs` の期待は、`sigil_blocks=` が繰り返しの回数に比例して増えないことに改める。
+
+#### C-6. 256MiB のスタック
+
+- スレッドは作らない。起動の処理（C-4）で、`mmap(0, 256MiB, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0)` で領域を取り、スタックポインタをその上端（16B 境界）に切り替えて入口を呼ぶ。
+- 生成した関数の入口が比べる下限（`stack_limit`）は、今と同じく上端から 3/4（192MiB）下に置く。値は大域の静的データに置く（単一スレッド前提。A-5）。
+- `mmap` が失敗したら、`exit_group(70)` で止める。この領域は解放しない（プロセスの終了で返る）。ガードページは置かない（下限の検査が溢れを止める。B-6）。
+- この `mmap` は生成コードが直接発行するもので、評価器の `raw.syscall` の許可表（A-3・B-6）の対象ではない。
+
+#### C-7. 分割し直し（PR 3-5 〜 3-7）
+
+各 PR の完了基準は、評価器（Rust の組み込み）とネイティブ（Sigil 版）の突き合わせが全件一致すること、`scripts/native-report.sh` を通ること（突き合わせ 400 件以上、飛ばし 10 件以下）、そして切り替えた `sigil_rt_*` が `rt_spec` から消えることとする。埋め込みの `std.*` に `unchecked` の関数を足す PR は、CI の信頼基盤の差分の検出（ADR 0018 判断 2 の S2）の対象になり、所有者のレビューを要する。
+
+| PR | 範囲 | 依存 |
+|---|---|---|
+| 3-5a | `Float.to_bits`/`from_bits`（要承認）。`memmove`・`memset` の生成、`fmod` の Sigil 版（C-3） | 補足 C |
+| 3-5b | `String`（`str_*`。`len` は Unicode のスカラー値の数） | 3-5a |
+| 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`） | 3-5b |
+| 3-5d | `Bytes`・`int_rot*` | 3-5b |
+| 3-5e | 型の記述子の処理の生成（C-1）・`Shared`/`Cell`・`--trace-drops`。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5） | 3-5c・3-5d・3-7a |
+| 3-5f | 表示（`val_show`・`print_result`・`Float` の最短表現） | 3-5e |
+| 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析）と停止の報告（`stop`/`report`） | 3-5f |
+| 3-6a | `console.log`（`write` の部分書き込みのループ・改行）。`os_buf_free` を廃止 | 3-5b |
+| 3-6b | `fs.read`/`fs.write`（`openat`・`read`/`write`・`close`、`O_CLOEXEC`、作成と切り詰めは 0o666、UTF-8 の検証、errno から `IoError`: ENOENT→NotFound、EACCES/EPERM→PermissionDenied、他→Other）と `Path` | 3-6a |
+| 3-6c | `env`（`envp` を読む） | 3-7b |
+| 3-7a | 確保器を一本化する（C-2。`raw_alloc_rust` の経路を消す。`sigil spec` の変更は要承認） | 補足 C |
+| 3-7b | `_start`・`sigil_syscall6`・`mmap` のスタックの生成（C-4・C-6）。この時点では glibc をリンクしたまま `-nostartfiles` で、`main`・`sigil_rt_enter`・`sigil_rt_raw_syscall` を使わない | 補足 C |
+| 3-7c | `cc -nostdlib -static -no-pie` に移行する（ADR 0018 判断 7 の実施。要承認）。出力に glibc のシンボルがなく、INTERP もないことを試験する | 3-5g・3-6b・3-6c・3-7b |
+| 3-7d | `runtime/`・`build.rs`・`src/runtime_lib.rs`・`tests/runtime_parity.rs` を削除する（`src/lib.rs` の行の削除は「追加のみ」の例外で、要承認）。**先に**人間が `.github/workflows/ci.yml` の `runtime/*` の手順とキャッシュを外す PR を合流させる | 3-7c・CI の PR |
+| 3-7e | ADR の記録（ADR 0016 の見直しの記録の書き直し、ADR 0006・0015 の暫定ランタイムの例外の解消、本 ADR の状態） | 3-7d |
+
+- 3-5a・3-7a・3-7b は並行してよい。3-6c は `envp` が要るので 3-7b の後にする。3-7b は glibc を残したまま入口だけを替えるので、単独で戻せる。
+- 評価器の標準ライブラリの組み込み（Rust）は、3-7 の後も残す。ADR 0018 決定 6 の「替えた後は評価器も Sigil 版を実行し、組み込みを消す」は、段階 3 の範囲の外とし、時期は 3-7e で記録する。
 
 ---
 

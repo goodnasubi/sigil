@@ -22,6 +22,7 @@
 | [04-effects](04-effects/) | 税込み価格の計算・価格ファイルの読み込み | 効果の宣言と一致検査、`of(f)` による引き継ぎ、`state` 効果（[ADR 0004](../docs/decisions/0004-effects.md)） |
 | [05-control](05-control/) | 範囲の数の合計・符号・加算する関数 | 文としての `if`・`while`、値を選ぶ `match`、`move` 付きクロージャ（[ADR 0008](../docs/decisions/0008-m0-notation.md)） |
 | [06-concurrency](06-concurrency/) | タスクの起動と合流・チャネル・時間切れによる取り消し・`Lock`・`Atomic`（`clone` で共有し、待つタスクと書くタスクを組にする） | `task.scope` / `spawn` / `join`、`move` クロージャのとらえ方、`task` 系の効果（[ADR 0007](../docs/decisions/0007-concurrency-model.md)・[ADR 0026](../docs/decisions/0026-p1a-concurrency.md)） |
+| [07-bytes](07-bytes/) | 種別＋長さ＋本体のバイナリメッセージの組み立てと読み戻し、XOR と回転のチェックサム | `Bytes` の生成・`push`・`push_u32_be`・`extend`・`get`・`read_u32_be`、ビット演算（`&` `\|` `^` `~` `>>`）と `rotr32`（[ADR 0023](../docs/decisions/0023-bytes-and-bitwise.md)） |
 
 ## 実行のしかた
 

@@ -321,7 +321,13 @@ fn edge_into_unreachable_other_than_a_branch_arm_is_caught() {
 
 fn with_globals(globals: Vec<Global>, rv: Rvalue, dst_ty: Ty) -> Program {
     let mut p = lowered("f");
-    p.globals = globals;
+    // 確保器 `std.os.alloc` の大域が先頭に入っている（補足 C-2）。試験用の大域はその後ろに足し、番号を合わせる。
+    let base = p.globals.len();
+    p.globals.extend(globals);
+    let rv = match rv {
+        Rvalue::GlobalRef(i) => Rvalue::GlobalRef(i + base),
+        other => other,
+    };
     let f = &mut p.funcs[0];
     f.locals.push(Local {
         name: "gref".into(),
@@ -388,7 +394,8 @@ fn has_err(p: &Program, msg: &str) -> bool {
 fn global_only(globals: Vec<Global>, types: Vec<TypeDef>) -> Program {
     let mut p = lowered("f");
     p.types.extend(types);
-    p.globals = globals;
+    // 確保器の大域は残し、試験用の大域を後ろに足す（補足 C-2）。
+    p.globals.extend(globals);
     p
 }
 

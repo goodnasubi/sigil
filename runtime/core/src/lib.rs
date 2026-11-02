@@ -53,30 +53,6 @@ pub unsafe extern "C" fn sigil_rt_free(p: *mut u8, size: usize, align: usize) {
     }
 }
 
-// `raw.alloc`/`raw.free` の Rust 版（ADR 0025 補足 B-2・B-4）。Sigil 製の確保器（`std.os.alloc`）を結んだ
-// プログラムでは、生成コードが同じオブジェクトの `sigil_rt_raw_alloc`/`sigil_rt_raw_free` を公開して呼ぶ。
-// 結ばないプログラム（入口の `targets` が `server` だけでない等）は PR 3-7 までこちらを呼ぶ。
-
-/// # Safety
-/// `size > 0` かつ `align` は 2 の冪。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_raw_alloc_rust(size: i64, align: i64) -> *mut u8 {
-    if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
-        std::process::abort();
-    }
-    sigil_rt_alloc(size as usize, align as usize)
-}
-
-/// # Safety
-/// `p` は `sigil_rt_raw_alloc_rust` で割り当てられたポインタであり、`size` と `align` は一致する。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_raw_free_rust(p: *mut u8, size: i64, align: i64) {
-    if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
-        std::process::abort();
-    }
-    sigil_rt_free(p, size as usize, align as usize);
-}
-
 // ---------------------------------------------------------------------------
 // String（UTF-8。不透明な入れ物）
 

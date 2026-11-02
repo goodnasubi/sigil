@@ -285,7 +285,7 @@ impl Ck {
                 Item::Fn(f) => {
                     self.item_embedded = is_embedded_name(&f.name);
                     let sig = self.fns[&f.name].clone();
-                    self.check_fn(f, &sig)?;
+                    self.check_fn_origin(f, &sig)?;
                 }
                 Item::Impl(i) => {
                     self.item_embedded = matches!(&i.ty, Type::Path { path, .. } if is_embedded_name(&path.join(".")));
@@ -295,7 +295,7 @@ impl Ck {
                     let Ok(Ty::Named(tn, _)) = r else { continue };
                     for f in &i.fns {
                         let sig = self.methods[&(tn.clone(), f.name.clone())].clone();
-                        self.check_fn(f, &sig)?;
+                        self.check_fn_origin(f, &sig)?;
                     }
                 }
                 Item::ImplFor(i) => {
@@ -313,7 +313,7 @@ impl Ck {
                             .find(|(d, _)| d.name == f.name)
                             .map(|(_, s)| s.clone())
                             .expect("登録済みの実装の関数");
-                        self.check_fn(f, &sig)?;
+                        self.check_fn_origin(f, &sig)?;
                     }
                 }
                 _ => {}
@@ -321,6 +321,20 @@ impl Ck {
         }
         self.item_embedded = false;
         Ok(())
+    }
+
+    /// `check_fn`。埋め込みモジュール由来の関数（確保器 `std.os.alloc` など。結合後の名前が `std.` 始まり）には、
+    /// 入口の `targets` に `bare` があっても「核のモジュールでの OS 層の項目の使用」の規則（`OsItemInCore`）をかけない。
+    /// 確保器は出力先のプラットフォーム層が与えるもので、利用者のモジュールの検査の対象ではない
+    /// （ADR 0025 補足 C-2）。埋め込みモジュール自身の検査は、自分の `targets`（`server`）で通常どおり行う。
+    fn check_fn_origin(&mut self, f: &FnDecl, sig: &crate::check::Sig) -> R<()> {
+        let core = self.core;
+        if self.item_embedded {
+            self.core = false;
+        }
+        let r = self.check_fn(f, sig);
+        self.core = core;
+        r
     }
 
     /// 多相再帰の拒否（ADR 0022 決定 2）: 循環する総称の関数どうしの呼び出しで、呼ぶ側の型引数を

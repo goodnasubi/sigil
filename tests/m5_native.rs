@@ -77,13 +77,14 @@ fn read_port_with_real_file() {
 }
 
 #[test]
-fn core_only_links_without_os_runtime() {
+fn core_function_links_with_allocator_os_runtime() {
     let ctl = example("05-control/control.sigil");
     let p = sigil::ir_eval::lower_sources(&[&ctl], "sum_range").unwrap();
-    assert!(p.core_only, "sum_range は OS 層を使わない");
+    // 暗黙に結ぶ確保器 `std.os.alloc` が `raw.syscall` を使うので、どのプログラムも OS 層を使う（補足 C-2）。
+    // core_only のプログラムはなくなり、os.a は常に渡す。ここでは OS 層を使わない関数でも作れて走ることを確かめる。
+    assert!(!p.core_only, "確保器が OS 層を使う");
     let dir = scratch("core");
     let exe = dir.join("prog");
-    // core_only のときは os.a を渡さない。それでもリンクできて走る。
     native::build_program(&p, &Opts::default(), &exe).unwrap();
     let got = exec(&exe, &[Arg::Int(1), Arg::Int(10)]);
     assert_eq!(got.stdout, "55\n");

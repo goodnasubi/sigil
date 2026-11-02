@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （--root の既定は現在のディレクトリ。trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        （--root の既定は現在のディレクトリ。`use` を辿る）構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--root <根>] [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] `use` で辿れるモジュールを結んで検査のあと関数を実行する（--root の既定は現在のディレクトリ。引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--root <根>] [--trace-drops] [--trust-base <モジュール>]... <ファイル> <関数> -o <出力> `use` で辿れるモジュールを結んでネイティブの実行ファイルを作る（--root の既定は現在のディレクトリ。cc と glibc の静的ライブラリが要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （--root の既定は現在のディレクトリ。trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する（利用者のモジュールだけ。埋め込みの std は出さない）\n  sigil spec [--json] --std        処理系に埋め込んだ標準モジュール（確保器 std.os.alloc など）の仕様を表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        （--root の既定は現在のディレクトリ。`use` を辿る）構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--root <根>] [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] `use` で辿れるモジュールを結んで検査のあと関数を実行する（--root の既定は現在のディレクトリ。引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--root <根>] [--trace-drops] [--trust-base <モジュール>]... <ファイル> <関数> -o <出力> `use` で辿れるモジュールを結んでネイティブの実行ファイルを作る（--root の既定は現在のディレクトリ。cc と glibc の静的ライブラリが要る）";
 
 fn read_text(path: &str) -> Result<String, String> {
     sigil::modpath::read_source(std::path::Path::new(path))
@@ -258,12 +258,17 @@ fn main() -> ExitCode {
         }
         Some("spec") if args.len() >= 2 => {
             let mut json = false;
+            let mut std_mode = false;
             let mut root: Option<&str> = None;
             let mut i = 1;
             loop {
                 match args.get(i).map(String::as_str) {
                     Some("--json") => {
                         json = true;
+                        i += 1;
+                    }
+                    Some("--std") => {
+                        std_mode = true;
                         i += 1;
                     }
                     Some("--root") => {
@@ -276,6 +281,29 @@ fn main() -> ExitCode {
                     }
                     _ => break,
                 }
+            }
+            if std_mode {
+                // `--std` は埋め込みの標準モジュールの仕様。ファイルと `--root` は取らない（補足 C-2）。
+                if args.len() != i || root.is_some() {
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
+                let opts = sigil::effects::Options::default();
+                let result = if json {
+                    sigil::spec::std_json(&opts).map(|v| format!("{v}\n"))
+                } else {
+                    sigil::spec::std_text(&opts)
+                };
+                return match result {
+                    Ok(out) => {
+                        print!("{out}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("std:{e}");
+                        ExitCode::FAILURE
+                    }
+                };
             }
             if args.len() != i + 1 {
                 eprintln!("{USAGE}");

@@ -5,7 +5,7 @@ mod drop;
 mod expr;
 mod stmt;
 
-use super::{norm, rt_spec, Cg, CgError, W};
+use super::{norm, rt_spec, shim_spec, Cg, CgError, W};
 use crate::ir::{Func, GlobalInit, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::Block as CBlock;
@@ -145,7 +145,7 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     fn rt(&mut self, name: &'static str, args: &[Value]) -> Value {
-        let Some((ps, r)) = rt_spec(name) else {
+        let Some((ps, r)) = rt_spec(name).or_else(|| shim_spec(name)) else {
             return self.fail(CgError::Internal(format!("ランタイム関数 {name}")));
         };
         let fr = if let Some(f) = self.rtref.get(name) {
@@ -411,7 +411,7 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     /// 確保器のシムの本体（ADR 0025 補足 B-2）: Sigil の関数 `target` を呼び、値を返す。
     /// 確保器の中の停止（算術のあふれなど）は、報告を出して `exit_group(70)` で止める（補足 A-4）。
-    pub fn alloc_shim(&mut self, target: usize, ret: bool) {
+    pub fn alloc_shim(&mut self, target: usize, ret: char) {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
@@ -431,17 +431,32 @@ impl<'a, 'p> Fx<'a, 'p> {
         let code = self.ic(70);
         let z = self.ic(0);
         self.rt("raw_syscall", &[n, code, z, z, z, z, z]);
-        if ret {
-            self.b.ins().return_(&[z]);
-        } else {
-            self.b.ins().return_(&[]);
+        match ret {
+            'p' => {
+                self.b.ins().return_(&[z]);
+            }
+            'i' => {
+                let z32 = self.b.ins().ireduce(types::I32, z);
+                self.b.ins().return_(&[z32]);
+            }
+            _ => {
+                self.b.ins().return_(&[]);
+            }
         }
 
         self.b.switch_to_block(okb);
-        if ret {
-            self.b.ins().return_(&[r[0]]);
-        } else {
-            self.b.ins().return_(&[]);
+        match ret {
+            'p' => {
+                self.b.ins().return_(&[r[0]]);
+            }
+            'i' => {
+                // Sigil の戻り（0/1 の Bool か Int）の下位 32 ビットを返す（補足 D-3）。
+                let v = self.b.ins().ireduce(types::I32, r[0]);
+                self.b.ins().return_(&[v]);
+            }
+            _ => {
+                self.b.ins().return_(&[]);
+            }
         }
     }
 

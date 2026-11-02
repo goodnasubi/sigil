@@ -227,3 +227,233 @@ pub fn bytes(s: Addr) -> Int
 {
   return raw.load_i64(raw.offset(s, 8));
 }
+
+// ---- PR 3-5b-ii: 操作（len・is_empty・trim・concat・parse_int・eq・cmp。補足 D-3・D-6） ----
+
+pub fn len(s: Addr) -> Int
+  intent "Unicode のスカラー値の数を返す（続きのバイト 0b10xxxxxx でないバイトの数）"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（len <= cap、len > 0 なら ptr..ptr+len は読める正しい UTF-8）。長さ 0 なら ptr は読まない（補足 D-2）"
+{
+  let p = raw.load_addr(s);
+  let n = raw.load_i64(raw.offset(s, 8));
+  let mut i = 0;
+  let mut c = 0;
+  while i < n {
+    let b = raw.load_u8(raw.offset(p, i));
+    if b < 128 || b > 191 {
+      c = c + 1;
+    }
+    i = i + 1;
+  }
+  return c;
+}
+
+pub fn is_empty(s: Addr) -> Bool
+  intent "バイト数が 0 か"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（補足 D-2）"
+{
+  return raw.load_i64(raw.offset(s, 8)) == 0;
+}
+
+fn cp_at(p: Addr, i: Int) -> Int
+  intent "p[i..) の先頭の符号点を返す（正しい UTF-8 の符号点の先頭から読む）"
+  requires none
+  ensures none
+  effects none
+  unchecked "p[i..) は正しい UTF-8 の列の先頭で、その符号点の全バイトが読める（補足 D-2 の不変条件）"
+{
+  let b0 = raw.load_u8(raw.offset(p, i));
+  if b0 < 128 {
+    return b0;
+  }
+  let b1 = raw.load_u8(raw.offset(p, i + 1)) - 128;
+  if b0 < 224 {
+    return (b0 - 192) * 64 + b1;
+  }
+  let b2 = raw.load_u8(raw.offset(p, i + 2)) - 128;
+  if b0 < 240 {
+    return (b0 - 224) * 4096 + b1 * 64 + b2;
+  }
+  let b3 = raw.load_u8(raw.offset(p, i + 3)) - 128;
+  return (b0 - 240) * 262144 + b1 * 4096 + b2 * 64 + b3;
+}
+
+fn is_space(c: Int) -> Bool
+  intent "Unicode の White_Space か（Rust の char::is_whitespace と同じ表）"
+  requires none
+  ensures none
+  effects none
+{
+  if c < 128 {
+    return c == 32 || (c >= 9 && c <= 13);
+  }
+  return c == 133 || c == 160 || c == 5760 || (c >= 8192 && c <= 8202) || c == 8232 || c == 8233 || c == 8239 || c == 8287 || c == 12288;
+}
+
+pub fn trim(s: Addr) -> Addr
+  intent "前後の White_Space を除いた新しい文字列を返す（Rust の str::trim と同じ）"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（len > 0 なら ptr..ptr+len は読める正しい UTF-8）。結果は正しい UTF-8 の符号点の境界で切るので正しい UTF-8（補足 D-2）"
+{
+  let p = raw.load_addr(s);
+  let n = raw.load_i64(raw.offset(s, 8));
+  let mut i = 0;
+  let mut going = true;
+  while going && i < n {
+    let b = raw.load_u8(raw.offset(p, i));
+    let mut k = 1;
+    if b >= 240 {
+      k = 4;
+    } else if b >= 224 {
+      k = 3;
+    } else if b >= 192 {
+      k = 2;
+    }
+    if is_space(cp_at(p, i)) {
+      i = i + k;
+    } else {
+      going = false;
+    }
+  }
+  let mut j = n;
+  going = true;
+  while going && j > i {
+    let mut k = j - 1;
+    while k > i && raw.load_u8(raw.offset(p, k)) >= 128 && raw.load_u8(raw.offset(p, k)) <= 191 {
+      k = k - 1;
+    }
+    if is_space(cp_at(p, k)) {
+      j = k;
+    } else {
+      going = false;
+    }
+  }
+  return new(raw.offset(p, i), j - i);
+}
+
+pub fn concat(a: Addr, b: Addr) -> Addr
+  intent "a の後ろに b をつないだ新しい文字列を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "a・b は std.core.string が返し、まだ解放していない頭。正しい UTF-8 どうしの連結は正しい UTF-8。長さの和は各長さが確保器の上限（2^46）未満なので Int であふれず、上限を超える確保は確保器が停止する（補足 D-3）"
+{
+  let na = raw.load_i64(raw.offset(a, 8));
+  let nb = raw.load_i64(raw.offset(b, 8));
+  let total = na + nb;
+  if total == 0 {
+    return build(raw.addr_null(), 0);
+  }
+  let body = raw.alloc(total, 1);
+  if na > 0 {
+    raw.copy(body, raw.load_addr(a), na);
+  }
+  if nb > 0 {
+    raw.copy(raw.offset(body, na), raw.load_addr(b), nb);
+  }
+  return build(body, total);
+}
+
+pub fn parse_int(s: Addr, out: Addr) -> Int
+  intent "先頭の - と数字だけを整数として読む。成功なら 1 を返して out に値を書き、失敗（空・符号だけ・数字以外・i64 の範囲外）なら 0 を返して out を変えない"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭。out は 8 バイト書ける。負の側で積むので i64 の最小値も読め、演算はあふれない（補足 D-3）"
+{
+  let p = raw.load_addr(s);
+  let n = raw.load_i64(raw.offset(s, 8));
+  let mut i = 0;
+  let mut neg = false;
+  if n > 0 {
+    if raw.load_u8(p) == 45 {
+      neg = true;
+      i = 1;
+    }
+  }
+  if i >= n {
+    return 0;
+  }
+  let lo = -9223372036854775807 - 1;
+  let q = -922337203685477580;
+  let mut acc = 0;
+  while i < n {
+    let c = raw.load_u8(raw.offset(p, i));
+    if c < 48 || c > 57 {
+      return 0;
+    }
+    let d = c - 48;
+    if acc < q {
+      return 0;
+    }
+    let m = acc * 10;
+    if m < lo + d {
+      return 0;
+    }
+    acc = m - d;
+    i = i + 1;
+  }
+  if neg {
+    raw.store_i64(out, acc);
+    return 1;
+  }
+  if acc == lo {
+    return 0;
+  }
+  raw.store_i64(out, 0 - acc);
+  return 1;
+}
+
+pub fn cmp(a: Addr, b: Addr) -> Int
+  intent "バイト列の辞書順で比べる（-1・0・1。Rust の str::cmp と同じ）"
+  requires none
+  ensures none
+  effects none
+  unchecked "a・b は std.core.string が返し、まだ解放していない頭（len > 0 なら ptr..ptr+len は読める。長さ 0 なら ptr は読まない。補足 D-2）"
+{
+  let na = raw.load_i64(raw.offset(a, 8));
+  let nb = raw.load_i64(raw.offset(b, 8));
+  let pa = raw.load_addr(a);
+  let pb = raw.load_addr(b);
+  let mut m = na;
+  if nb < na {
+    m = nb;
+  }
+  let mut i = 0;
+  while i < m {
+    let x = raw.load_u8(raw.offset(pa, i));
+    let y = raw.load_u8(raw.offset(pb, i));
+    if x < y {
+      return -1;
+    }
+    if x > y {
+      return 1;
+    }
+    i = i + 1;
+  }
+  if na < nb {
+    return -1;
+  }
+  if na > nb {
+    return 1;
+  }
+  return 0;
+}
+
+pub fn eq(a: Addr, b: Addr) -> Bool
+  intent "バイト列が等しいか"
+  requires none
+  ensures none
+  effects none
+  unchecked "cmp と同じ（補足 D-2）"
+{
+  return cmp(a, b) == 0;
+}

@@ -203,65 +203,6 @@ unsafe fn s<'a>(p: *const RtStr) -> &'a str {
     }
 }
 
-/// `String.len`: Unicode のスカラー値の数。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_len(p: *const RtStr) -> i64 {
-    text::char_len(s(p))
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_is_empty(p: *const RtStr) -> i32 {
-    s(p).is_empty() as i32
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_trim(p: *const RtStr) -> *mut RtStr {
-    new_str(text::trim(s(p)).to_string())
-}
-
-/// `a + b`（連結）。
-///
-/// # Safety
-/// `a`・`b` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_concat(a: *const RtStr, b: *const RtStr) -> *mut RtStr {
-    let mut r = String::with_capacity(s(a).len() + s(b).len());
-    r.push_str(s(a));
-    r.push_str(s(b));
-    new_str(r)
-}
-
-/// 構造的な比較（-1・0・1）。
-///
-/// # Safety
-/// `a`・`b` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_cmp(a: *const RtStr, b: *const RtStr) -> i32 {
-    s(a).cmp(s(b)) as i32
-}
-
-/// `String.parse_int`。成功なら 1 を返し `*out` に値を書く。失敗なら 0。
-///
-/// # Safety
-/// `p` は有効。`out` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_parse_int(p: *const RtStr, out: *mut i64) -> i32 {
-    match text::parse_int(s(p)) {
-        Some(n) => {
-            *out = n;
-            1
-        }
-        None => 0,
-    }
-}
-
 /// `String.lines`。要素は `*mut RtStr`（`sigil_rt_list_free_strs` で解放する）。
 ///
 /// # Safety
@@ -1104,18 +1045,8 @@ pub(crate) mod tests {
             assert_eq!(text(sigil_rt_show_float(f64::NEG_INFINITY)), "-inf");
             assert_eq!(text(sigil_rt_show_bool(1)), "true");
             assert_eq!(text(sigil_rt_show_unit()), "()");
-            let a = st("  a b\t\n");
-            assert_eq!(text(sigil_rt_str_trim(a)), "a b");
             let q = st("a\"\n");
             assert_eq!(text(sigil_rt_show_str(q)), "\"a\\\"\\n\"");
-            assert_eq!(sigil_rt_str_len(st("日本語")), 3);
-            let (x, y) = (st("ab"), st("cd"));
-            assert_eq!(text(sigil_rt_str_concat(x, y)), "abcd");
-            assert!(sigil_rt_str_cmp(x, y) < 0);
-            let mut n = 0i64;
-            assert_eq!(sigil_rt_str_parse_int(st("-42"), &mut n), 1);
-            assert_eq!(n, -42);
-            assert_eq!(sigil_rt_str_parse_int(st("+1"), &mut n), 0);
         }
     }
 

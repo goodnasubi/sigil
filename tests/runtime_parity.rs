@@ -21,9 +21,6 @@ typedef struct RtStr RtStr;
 typedef struct RtList RtList;
 void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
                           const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
-int64_t sigil_rt_str_len(const RtStr*);
-RtStr* sigil_rt_str_trim(const RtStr*);
-int32_t sigil_rt_str_parse_int(const RtStr*, int64_t*);
 RtList* sigil_rt_str_lines(const RtStr*);
 int64_t sigil_rt_list_len(const RtList*);
 uint8_t* sigil_rt_list_get(const RtList*, int64_t);
@@ -62,12 +59,6 @@ int main(int argc, char** argv) {
   RtStr* s = sigil_rt_str_new((const uint8_t*)a, (int64_t)strlen(a));
   if (!strcmp(cmd, "float")) {
     put(sigil_rt_show_float(strtod(a, NULL)));
-  } else if (!strcmp(cmd, "len")) {
-    put(sigil_rt_show_int(sigil_rt_str_len(s)));
-  } else if (!strcmp(cmd, "trim")) {
-    RtStr* t = sigil_rt_str_trim(s); put(sigil_rt_show_str(t)); sigil_rt_str_free(t);
-  } else if (!strcmp(cmd, "parse_int")) {
-    int64_t n; if (sigil_rt_str_parse_int(s, &n)) { printf("Ok("); put(sigil_rt_show_int(n)); printf(")"); } else printf("Err");
   } else if (!strcmp(cmd, "lines")) {
     RtList* l = sigil_rt_str_lines(s); printf("[");
     for (int64_t i = 0; i < sigil_rt_list_len(l); i++) {
@@ -218,44 +209,10 @@ fn check_all(exe: &PathBuf) {
     for s in strs {
         let l = lit(s);
         assert_eq!(
-            rt(exe, &["len", s]),
-            ev("Int", &format!("return {l}.len();")),
-            "len {s:?}"
-        );
-        assert_eq!(
-            rt(exe, &["trim", s]),
-            ev("String", &format!("return {l}.trim();")),
-            "trim {s:?}"
-        );
-        assert_eq!(
             rt(exe, &["lines", s]),
             ev("List<String>", &format!("return {l}.lines();")),
             "lines {s:?}"
         );
-    }
-    for s in [
-        "0",
-        "42",
-        "-7",
-        "+1",
-        " 1",
-        "1_0",
-        "",
-        "-",
-        "9223372036854775807",
-        "9223372036854775808",
-        "abc",
-    ] {
-        let want = ev(
-            "Result<Int, ParseError>",
-            &format!("return {}.parse_int();", lit(s)),
-        );
-        let want = if want.starts_with("Ok(") {
-            want
-        } else {
-            "Err".to_string()
-        };
-        assert_eq!(rt(exe, &["parse_int", s]), want, "parse_int {s:?}");
     }
     for (a, b) in [
         ("/etc/app", "conf.toml"),

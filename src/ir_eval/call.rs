@@ -10,7 +10,7 @@ use super::value::{
     cmp_val, compare, deref_val, list_of, shadow, show_val, types, with_val, with_val_mut, Agg,
     Ptr, Tag, Val,
 };
-use super::{Slot, E, M};
+use super::{Chunk, Origin, Slot, E, M};
 
 /// 実行時の `fs.read` が読むファイルの大きさの上限（バイト）。`lsp::MAX_DEP_BYTES` に揃えた暫定の定数。
 /// ADR 0020 6-3 で `src/limits.rs` ができたら、そちらへ移す。
@@ -995,7 +995,14 @@ impl<'p> M<'p> {
                     ));
                 }
                 let addr = ptr as usize;
-                self.chunks.insert(addr, (su, au));
+                self.chunks.insert(
+                    addr,
+                    Chunk {
+                        size: su,
+                        align: au,
+                        origin: Origin::Alloc,
+                    },
+                );
                 Val::Addr(addr)
             }
             RawFree => {
@@ -1012,13 +1019,21 @@ impl<'p> M<'p> {
                         Some("raw.free: ヌル番地解放"),
                     ));
                 }
-                let Some(&(stored_sz, stored_al)) = self.chunks.get(&a) else {
+                let Some(&chunk) = self.chunks.get(&a) else {
                     return Err(self.stop_at(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.free: 二重解放または未確保の番地"),
                     ));
                 };
+                if chunk.origin != Origin::Alloc {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("raw.free: raw.alloc 由来でない塊（mmap 由来）は解放できない"),
+                    ));
+                }
+                let (stored_sz, stored_al) = (chunk.size, chunk.align);
                 if stored_sz != size as usize || stored_al != align as usize {
                     return Err(self.stop_at(
                         loc,
@@ -1040,6 +1055,7 @@ impl<'p> M<'p> {
                 let a3 = self.read_int(locals, &args[4]);
                 let a4 = self.read_int(locals, &args[5]);
                 let a5 = self.read_int(locals, &args[6]);
+                self.check_syscall(n, [a0, a1, a2, a3, a4, a5], loc)?;
                 let ret: i64;
                 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                 unsafe {
@@ -1061,6 +1077,19 @@ impl<'p> M<'p> {
                 {
                     let _ = (n, a0, a1, a2, a3, a4, a5);
                     ret = -1;
+                }
+                if n == SYS_MMAP && !(-4095..0).contains(&ret) {
+                    let len = (a1 as usize).div_ceil(PAGE) * PAGE;
+                    self.chunks.insert(
+                        ret as usize,
+                        Chunk {
+                            size: len,
+                            align: PAGE,
+                            origin: Origin::Mmap,
+                        },
+                    );
+                } else if n == SYS_MUNMAP && ret == 0 {
+                    self.chunks.remove(&(a0 as usize));
                 }
                 Val::Int(ret)
             }
@@ -1085,9 +1114,8 @@ impl<'p> M<'p> {
         let end = addr.checked_add(len).ok_or_else(|| {
             self.stop_at(loc, Some(StopKind::Overflow), Some("番地オーバーフロー"))
         })?;
-        for (&start, &(sz, _)) in &self.chunks {
-            let chunk_end = start.saturating_add(sz);
-            if addr >= start && end <= chunk_end {
+        if let Some((&start, c)) = self.chunks.range(..=addr).next_back() {
+            if end <= start.saturating_add(c.size) {
                 return Ok(());
             }
         }
@@ -1095,6 +1123,111 @@ impl<'p> M<'p> {
             loc,
             Some(StopKind::StdRequiresViolated),
             Some("未確保または範囲外の番地アクセス"),
+        ))
+    }
+
+    fn syscall_stop(&self, loc: StopId, msg: &str) -> E {
+        self.stop_at(loc, Some(StopKind::StdRequiresViolated), Some(msg))
+    }
+
+    /// `raw.syscall` の許可表と引数検証（ADR 0025 補足 A-3）。状態の書き換えより前に行う。
+    fn check_syscall(&self, n: i64, a: [i64; 6], loc: StopId) -> Result<(), E> {
+        let addr_of = |v: i64, what: &str| -> Result<usize, E> {
+            usize::try_from(v)
+                .map_err(|_| self.syscall_stop(loc, &format!("raw.syscall: {what} が負の番地")))
+        };
+        match n {
+            SYS_READ | SYS_WRITE => {
+                let name = if n == SYS_READ { "read" } else { "write" };
+                if a[2] < 0 {
+                    return Err(self.syscall_stop(loc, &format!("raw.syscall {name}: count >= 0")));
+                }
+                if a[2] > 0 {
+                    let buf = addr_of(a[1], "buf")?;
+                    self.check_raw_access(buf, a[2] as usize, loc)?;
+                }
+            }
+            SYS_CLOSE => {}
+            SYS_EXIT_GROUP => {
+                return Err(self.syscall_stop(
+                    loc,
+                    &format!("raw.syscall: exit_group({}) の模擬停止", a[0]),
+                ));
+            }
+            SYS_OPENAT | SYS_UNLINKAT => {
+                self.check_path(addr_of(a[1], "path")?, loc)?;
+            }
+            SYS_NEWFSTATAT => {
+                self.check_path(addr_of(a[1], "path")?, loc)?;
+                self.check_raw_access(addr_of(a[2], "statbuf")?, STAT_SIZE, loc)?;
+            }
+            SYS_MMAP => {
+                if a[0] != 0 {
+                    return Err(self.syscall_stop(loc, "raw.syscall mmap: addr は 0 のみ許可"));
+                }
+                if a[1] <= 0 || a[1] > (1i64 << 46) {
+                    return Err(self.syscall_stop(loc, "raw.syscall mmap: 0 < len <= 2^46"));
+                }
+                if a[2] != PROT_READ | PROT_WRITE {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall mmap: prot は PROT_READ|PROT_WRITE のみ許可（PROT_EXEC 禁止）",
+                    ));
+                }
+                if a[3] != MAP_PRIVATE | MAP_ANONYMOUS {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall mmap: flags は MAP_PRIVATE|MAP_ANONYMOUS のみ許可（MAP_FIXED 等は拒否）",
+                    ));
+                }
+                if a[4] != -1 || a[5] != 0 {
+                    return Err(self.syscall_stop(loc, "raw.syscall mmap: fd = -1 かつ offset = 0"));
+                }
+            }
+            SYS_MUNMAP => {
+                let addr = addr_of(a[0], "addr")?;
+                let ok = match self.chunks.get(&addr) {
+                    Some(c) if c.origin == Origin::Mmap => {
+                        a[1] > 0 && (a[1] as usize).div_ceil(PAGE).checked_mul(PAGE) == Some(c.size)
+                    }
+                    Some(_) => {
+                        return Err(self.syscall_stop(
+                            loc,
+                            "raw.syscall munmap: mmap 由来でない塊（raw.alloc 由来）は解放できない",
+                        ));
+                    }
+                    None => false,
+                };
+                if !ok {
+                    return Err(self
+                        .syscall_stop(loc, "raw.syscall munmap: mmap で得た範囲と完全一致しない"));
+                }
+            }
+            _ => {
+                return Err(self.syscall_stop(
+                    loc,
+                    &format!("raw.syscall: 許可表にないシステムコール番号 {n}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// NUL 終端のパスで、終端までが 1 つの生きた塊の範囲内であること。
+    fn check_path(&self, addr: usize, loc: StopId) -> Result<(), E> {
+        self.check_raw_access(addr, 1, loc)?;
+        let (&start, c) = self.chunks.range(..=addr).next_back().expect("検証済み");
+        let limit = start.saturating_add(c.size);
+        let mut p = addr;
+        while p < limit {
+            if unsafe { *(p as *const u8) } == 0 {
+                return Ok(());
+            }
+            p += 1;
+        }
+        Err(self.syscall_stop(
+            loc,
+            "raw.syscall: パスが NUL 終端されていない（範囲内に終端がない）",
         ))
     }
 
@@ -1107,6 +1240,22 @@ impl<'p> M<'p> {
         })
     }
 }
+
+const PAGE: usize = 4096;
+const STAT_SIZE: usize = 144;
+const SYS_READ: i64 = 0;
+const SYS_WRITE: i64 = 1;
+const SYS_CLOSE: i64 = 3;
+const SYS_MMAP: i64 = 9;
+const SYS_MUNMAP: i64 = 11;
+const SYS_EXIT_GROUP: i64 = 231;
+const SYS_OPENAT: i64 = 257;
+const SYS_NEWFSTATAT: i64 = 262;
+const SYS_UNLINKAT: i64 = 263;
+const PROT_READ: i64 = 1;
+const PROT_WRITE: i64 = 2;
+const MAP_PRIVATE: i64 = 0x2;
+const MAP_ANONYMOUS: i64 = 0x20;
 
 fn int_of(v: &Val) -> i64 {
     match v {

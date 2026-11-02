@@ -31,6 +31,22 @@ type E = Box<Stop>;
 // ---------------------------------------------------------------------------
 // 評価器
 
+/// 塊の由来。由来違いの `munmap` / `raw.free` は停止する。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// `raw.alloc` 由来。
+    Alloc,
+    /// `raw.syscall` の `mmap` 由来。
+    Mmap,
+}
+
+#[derive(Clone, Copy)]
+struct Chunk {
+    size: usize,
+    align: usize,
+    origin: Origin,
+}
+
 struct M<'p> {
     p: &'p Program,
     strs: Vec<Rc<str>>,
@@ -41,8 +57,8 @@ struct M<'p> {
     opt: usize,
     res: usize,
     io: usize,
-    /// 確保済みチャンクの境界情報 (番地 -> (バイトサイズ, アライメント))
-    chunks: BTreeMap<usize, (usize, usize)>,
+    /// 確保済みチャンクの境界情報（番地 -> 塊。由来タグ付き。ADR 0025 補足 A-3）
+    chunks: BTreeMap<usize, Chunk>,
     sch: sched::Sched,
     /// 次に積む枠が範囲の本体なら、その範囲の番号。
     pending_scope: Option<usize>,

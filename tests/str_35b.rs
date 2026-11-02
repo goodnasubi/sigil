@@ -275,3 +275,35 @@ fn native_double_free_and_negative_length_stop_with_70() {
         assert_eq!(r.code, Some(70), "{}", r.stderr);
     }
 }
+
+/// `raw.alloc`/`raw.free` を差し替えると確保器も文字列も結ばれないので、ネイティブの生成は内部エラーで止まる。
+#[test]
+fn replaced_raw_ops_make_codegen_stop_with_internal_error() {
+    use sigil::effects::RawOp;
+    use sigil::stdlib::Layer;
+    let op = |sig: &str| RawOp {
+        layer: Layer::Core,
+        signature: sig.to_string(),
+        effects: "state".to_string(),
+        requires: "none".to_string(),
+        premise: "試験用".to_string(),
+    };
+    let c = COpts {
+        raw_ops: vec![
+            op("alloc(size: Int, align: Int) -> Addr"),
+            op("free(a: Addr, size: Int, align: Int)"),
+        ],
+        ..Default::default()
+    };
+    let p = sigil::ir_eval::lower_sources_opts(&[&user_entry()], "main", &c)
+        .unwrap_or_else(|e| panic!("lowering に失敗: {e}"));
+    let dir = scratch("str35b-raw");
+    let exe = dir.join("a.out");
+    let r = sigil::native::build_program(&p, &sigil::codegen::Opts::default(), &exe);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = r.expect_err("結ばれていないのに生成できた");
+    assert!(
+        e.to_string().contains("std.core.string が結ばれていない"),
+        "{e}"
+    );
+}

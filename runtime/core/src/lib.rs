@@ -95,8 +95,11 @@ pub extern "C" fn sigil_rt_set_str_ops(
 
 /// 関数表の `i` 番目。未登録なら異常停止（exit_group(70) と同じ終了コード）。
 fn str_op(i: usize) -> usize {
+    // 試験では自動で登録する。ただし未登録の試験（子プロセス）では登録しない。
     #[cfg(test)]
-    tests::table::init();
+    if std::env::var("SIGIL_TEST_STR_MODE").as_deref() != Ok("unregistered") {
+        tests::table::init();
+    }
     let p = STR_OPS[i].load(Ordering::Relaxed);
     if p == 0 {
         eprintln!("sigil: 文字列の関数表が未登録のまま文字列を使った");
@@ -1028,7 +1031,7 @@ pub(crate) mod tests {
             cap: i64,
         }
 
-        extern "C" fn new(p: *const u8, n: i64) -> *mut RtStr {
+        pub(crate) extern "C" fn new(p: *const u8, n: i64) -> *mut RtStr {
             let v: Vec<u8> = if n == 0 {
                 Vec::new()
             } else {
@@ -1183,6 +1186,41 @@ pub(crate) mod tests {
 
             sigil_rt_bytes_free(b);
             sigil_rt_bytes_free(b2);
+        }
+    }
+
+    /// 子プロセスで同じテストを走らせ、環境変数の指示のときだけ異常な使い方をして、終了コード 70 を確かめる。
+    fn exits_70_when(mode: &str, name: &str) {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env("SIGIL_TEST_STR_MODE", mode)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(70), "{:?}", out.status);
+    }
+
+    /// 関数表が未登録のまま文字列を作ると、終了コード 70 で止まる。
+    #[test]
+    fn unregistered_table_exits_70() {
+        match std::env::var("SIGIL_TEST_STR_MODE").as_deref() {
+            Ok("unregistered") => {
+                let _ = str_new_raw(b"a".as_ptr(), 1);
+            }
+            _ => exits_70_when("unregistered", "tests::unregistered_table_exits_70"),
+        }
+    }
+
+    /// 中身が不正な UTF-8 の文字列を `s` が見ると、終了コード 70 で止まる。
+    #[test]
+    fn invalid_utf8_exits_70() {
+        match std::env::var("SIGIL_TEST_STR_MODE").as_deref() {
+            Ok("invalid") => unsafe {
+                table::init();
+                let p = table::new(b"\xFF\xFE".as_ptr(), 2);
+                let _ = s(p);
+            },
+            _ => exits_70_when("invalid", "tests::invalid_utf8_exits_70"),
         }
     }
 }

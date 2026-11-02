@@ -622,6 +622,8 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (n, _) = self.val(&args[1]);
                 (self.b.ins().sshr(x, n), u)
             }
+            // 浮動小数は i64 のビット列で持つので、読み替えは恒等（ADR 0025 補足 C-3）。
+            FloatToBits | FloatFromBits => (self.val(&args[0]).0, u),
             BytesNew => (self.rt("bytes_new", &[]), u),
             BytesWithCapacity => {
                 let (c, _) = self.val(&args[0]);

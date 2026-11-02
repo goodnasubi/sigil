@@ -434,6 +434,104 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
     }
 
+    /// `memmove(dst, src, n)` の本体（ADR 0025 補足 C-3）: バイト単位のループ。`dst` が `src` より小さい
+    /// （符号なし）なら前から、でなければ後ろから写すので、重なりがあっても正しい。`n` は符号なしとして読む。
+    pub fn mem_move(&mut self) {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        let ps = self.b.block_params(entry).to_vec();
+        let (dst, src, n) = (ps[0], ps[1], ps[2]);
+        let (fh, fb, bh, bb, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        for blk in [fh, fb, bh, bb] {
+            self.b.append_block_param(blk, types::I64);
+        }
+        let zero = self.ic(0);
+        let fwd = self.b.ins().icmp(IntCC::UnsignedLessThan, dst, src);
+        self.b
+            .ins()
+            .brif(fwd, fh, &[BlockArg::Value(zero)], bh, &[BlockArg::Value(n)]);
+
+        // 前から: i = 0; while i < n { dst[i] = src[i]; i += 1 }
+        self.b.switch_to_block(fh);
+        let i = self.b.block_params(fh)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
+        self.b
+            .ins()
+            .brif(more, fb, &[BlockArg::Value(i)], done, NOARGS);
+        self.b.switch_to_block(fb);
+        let i = self.b.block_params(fb)[0];
+        self.copy_byte(dst, src, i);
+        let next = self.b.ins().iadd_imm_s(i, 1);
+        self.b.ins().jump(fh, &[BlockArg::Value(next)]);
+
+        // 後ろから: i = n; while i != 0 { i -= 1; dst[i] = src[i] }
+        self.b.switch_to_block(bh);
+        let i = self.b.block_params(bh)[0];
+        let more = self.b.ins().icmp_imm_s(IntCC::NotEqual, i, 0);
+        self.b
+            .ins()
+            .brif(more, bb, &[BlockArg::Value(i)], done, NOARGS);
+        self.b.switch_to_block(bb);
+        let i = self.b.block_params(bb)[0];
+        let j = self.b.ins().iadd_imm_s(i, -1);
+        self.copy_byte(dst, src, j);
+        self.b.ins().jump(bh, &[BlockArg::Value(j)]);
+
+        self.b.switch_to_block(done);
+        self.b.ins().return_(&[]);
+    }
+
+    fn copy_byte(&mut self, dst: Value, src: Value, i: Value) {
+        let s = self.b.ins().iadd(src, i);
+        let d = self.b.ins().iadd(dst, i);
+        let v = self
+            .b
+            .ins()
+            .uload8(types::I64, MemFlagsData::trusted(), s, 0);
+        self.b.ins().istore8(MemFlagsData::trusted(), v, d, 0);
+    }
+
+    /// `memset(dst, byte, n)` の本体（ADR 0025 補足 C-3）: `byte` の下位 8 ビットで `n` バイトを埋める。
+    pub fn mem_set(&mut self) {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        let ps = self.b.block_params(entry).to_vec();
+        let (dst, byte, n) = (ps[0], ps[1], ps[2]);
+        let (head, body, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.append_block_param(head, types::I64);
+        self.b.append_block_param(body, types::I64);
+        let zero = self.ic(0);
+        self.b.ins().jump(head, &[BlockArg::Value(zero)]);
+
+        self.b.switch_to_block(head);
+        let i = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
+        self.b
+            .ins()
+            .brif(more, body, &[BlockArg::Value(i)], done, NOARGS);
+        self.b.switch_to_block(body);
+        let i = self.b.block_params(body)[0];
+        let d = self.b.ins().iadd(dst, i);
+        self.b.ins().istore8(MemFlagsData::trusted(), byte, d, 0);
+        let next = self.b.ins().iadd_imm_s(i, 1);
+        self.b.ins().jump(head, &[BlockArg::Value(next)]);
+
+        self.b.switch_to_block(done);
+        self.b.ins().return_(&[]);
+    }
+
     pub fn thunk(&mut self) {
         let p = self.cg.p;
         let f = &p.funcs[p.entry];

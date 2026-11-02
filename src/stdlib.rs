@@ -281,6 +281,15 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
     ),
     (
         Layer::Core,
+        "Float",
+        &[
+            // IEEE 754 binary64 のビット列を `Int` の 64 ビットとして読み替える（ADR 0025 補足 C-3）。
+            ("to_bits(x: Float) -> Int", "none"),
+            ("from_bits(n: Int) -> Float", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
         "<T> Option<T>",
         &[
             ("is_some(self: &Option<T>) -> Bool", "none"),

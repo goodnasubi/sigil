@@ -20,8 +20,17 @@ pub const ALLOC_FN: &str = "std.os.alloc.alloc";
 pub const FREE_FN: &str = "std.os.alloc.free";
 pub const LIVE_FN: &str = "std.os.alloc.live_blocks";
 
+/// `Float` の余り（fmod）の Sigil 版のモジュール名と関数名（結合後の名前。ADR 0025 補足 C-3）。
+/// 言語に `Float` の `%` はない（ADR 0011 の決定。検査器が拒否する）ので、プログラムには暗黙に結ばない。
+/// 後続の PR で Sigil 製の標準ライブラリ（`Float` の表示・解析）が `use` して使う。
+pub const FLOAT_MODULE: &str = "std.core.float";
+pub const FMOD_FN: &str = "std.core.float.fmod";
+
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
-pub const EMBEDDED: &[(&str, &str)] = &[(ALLOC_MODULE, include_str!("os_alloc.sigil"))];
+pub const EMBEDDED: &[(&str, &str)] = &[
+    (ALLOC_MODULE, include_str!("os_alloc.sigil")),
+    (FLOAT_MODULE, include_str!("core_float.sigil")),
+];
 
 /// 入口のファイルが暗黙に結ぶ埋め込みモジュール（補足 B-3・B-4）。
 ///

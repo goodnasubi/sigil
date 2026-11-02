@@ -190,7 +190,8 @@ impl<'p> Cg<'p> {
             'f' => s.returns.push(AbiParam::new(types::F64)),
             _ => {}
         }
-        let sym = if name == "fmod" || name == "memmove" || name == "memset" {
+        // `memmove`・`memset` は生成コードの中で定義する（`mem_fns`。補足 C-3）ので、ここには来ない。
+        let sym = if name == "fmod" {
             name.to_string()
         } else {
             format!("sigil_rt_{name}")
@@ -505,6 +506,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
     let shims = alloc_shims(&mut cg)?;
+    // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
+    let mem = mem_fns(&mut cg)?;
 
     for (i, f) in p.funcs.iter().enumerate() {
         let sig = cg.sig(f.params.len());
@@ -517,6 +520,18 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         let sig = shim_sig(cc, np, ret);
         cg.define(id, p.funcs.len() as u32 + 3 + k as u32, sig, vec![], |fx| {
             fx.alloc_shim(target, ret)
+        })?;
+    }
+
+    for (k, &(id, kind)) in mem.iter().enumerate() {
+        let mut sig = Signature::new(cc);
+        for _ in 0..3 {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        let idx = p.funcs.len() as u32 + 3 + shims.len() as u32 + k as u32;
+        cg.define(id, idx, sig, vec![], |fx| match kind {
+            MemFn::Move => fx.mem_move(),
+            MemFn::Set => fx.mem_set(),
         })?;
     }
 
@@ -609,6 +624,34 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     cg.rt.insert("raw_free", out[1].0);
     cg.sigil_alloc = true;
     cg.live_shim = Some(out[2].0);
+    Ok(out)
+}
+
+/// 生成コードの中で定義する関数（`memmove`・`memset`）。
+#[derive(Clone, Copy)]
+enum MemFn {
+    Move,
+    Set,
+}
+
+/// `memmove`・`memset` を宣言して `rt` に登録する（呼び出しは `rt("memmove"|"memset", ..)` のまま）。
+/// 本体は `Fx::mem_move`・`Fx::mem_set`。シンボルは公開しない（libc のものと衝突しない）。
+fn mem_fns(cg: &mut Cg<'_>) -> Result<Vec<(FuncId, MemFn)>, CgError> {
+    let mut out = vec![];
+    for (name, sym, kind) in [
+        ("memmove", "sigil_memmove", MemFn::Move),
+        ("memset", "sigil_memset", MemFn::Set),
+    ] {
+        let mut s = Signature::new(cg.cc);
+        for _ in 0..3 {
+            s.params.push(AbiParam::new(types::I64));
+        }
+        let id =
+            cg.m.declare_function(sym, Linkage::Local, &s)
+                .map_err(internal)?;
+        cg.rt.insert(name, id);
+        out.push((id, kind));
+    }
     Ok(out)
 }
 

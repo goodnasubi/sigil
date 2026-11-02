@@ -69,6 +69,7 @@ impl Ck {
             Ty::Named(tn, _) => tn,
             Ty::Str if std => "String".to_string(),
             Ty::Int if std => "Int".to_string(),
+            Ty::Float if std => "Float".to_string(),
             _ => {
                 return self.err(
                     ErrorKind::TypeMismatch,

@@ -2,8 +2,9 @@ module std.core.float
   targets bare, browser, server
   trust none
 
-// `Float` の `%`（fmod）の Sigil 版（ADR 0025 補足 C-3、PR 3-5a）。ネイティブの `Float` の `%` の実体。
-// 評価器の `%` は Rust の組み込みのまま（補足 C-3）で、ここは呼ばない。突き合わせの試験で両者を比べる。
+// `Float` の `%`（fmod）の Sigil 版（ADR 0025 補足 C-3、PR 3-5a）。言語に `Float` の `%` はない（ADR 0011 の決定。検査器が拒否する）
+// ので、どのプログラムにも暗黙には結ばず、登録のみとする。後続の PR で Sigil 製の標準ライブラリが `use` して使う。
+// 評価器の Rust の `%`（f64）は呼ばず、突き合わせの試験で両者の値を比べる。
 //
 // musl の fmod と同じ方式で、`Float.to_bits` のビット列だけを使って厳密に計算する。結果の符号は被除数と同じ。
 // - 除数が 0・NaN、被除数が ∞・NaN: (x * y) / (x * y)（NaN。ペイロードは入力を引き継ぐ）。

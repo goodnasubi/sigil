@@ -5,6 +5,8 @@
 //!   同じ駆動をネイティブでも走らせる（確保器の本物の経路）。
 //! - 塊の表の試験（D-5 の代わりの手当て）: 評価器の塊の表で、頭と中身の解放・二重解放・解放後の読みが止まる。
 //!   ネイティブは `sigil_blocks=` の厳密一致で、作って捨てる繰り返しが増えず、残した分だけ数えられる。
+//! - 3-5b-ii: `len`・`is_empty`・`trim`・`concat`・`parse_int`・`eq`・`cmp` を、`sigil::shared_text`（評価器の `String` の
+//!   実体）と Rust の標準ライブラリに突き合わせる（評価器の上とネイティブの両方）。塊の表と `sigil_blocks=` の完全一致も見る。
 //! - 異常: `n < 0` はどちらも止まる（ネイティブは終了コード 70）。
 mod common;
 
@@ -305,5 +307,342 @@ fn replaced_raw_ops_make_codegen_stop_with_internal_error() {
     assert!(
         e.to_string().contains("std.core.string が結ばれていない"),
         "{e}"
+    );
+}
+
+// ---- 3-5b-ii: len・is_empty・trim・concat・parse_int・eq・cmp ----
+
+const OPS: &[&str] = &[
+    "new",
+    "free",
+    "data",
+    "bytes",
+    "len",
+    "is_empty",
+    "trim",
+    "concat",
+    "parse_int",
+    "eq",
+    "cmp",
+];
+
+/// `s`（正しい UTF-8）から `new` で文字列 `var` を作る断片。
+fn mk(var: &str, s: &str) -> String {
+    let n = s.len();
+    if n == 0 {
+        return format!("  let {var} = new(raw.addr_null(), 0);\n");
+    }
+    let mut c = format!("  let {var}b = raw.alloc({n}, 1);\n");
+    for (i, b) in s.bytes().enumerate() {
+        c += &format!("  raw.store_u8(raw.offset({var}b, {i}), {b});\n");
+    }
+    c += &format!("  let {var} = new({var}b, {n});\n  raw.free({var}b, {n}, 1);\n");
+    c
+}
+
+/// 文字列 `var` の中身を畳み込んだ値を `hv` に入れる断片（`k` で名前を分ける）。
+fn fold(var: &str, hv: &str) -> String {
+    format!("  let {hv}n = bytes({var});\n  let {hv}d = data({var});\n  let mut {hv} = 0;\n  let mut {hv}i = 0;\n  while {hv}i < {hv}n {{\n    {hv} = ({hv} * 131 + raw.load_u8(raw.offset({hv}d, {hv}i))) % {MODP};\n    {hv}i = {hv}i + 1;\n  }}\n")
+}
+
+/// 組 `(x, y)` について 7 つの操作の結果を 1 つの整数にする断片。結果は `r{k}`。
+fn ops_block(x: &str, y: &str, k: usize) -> String {
+    let mut s = mk(&format!("x{k}"), x);
+    s += &mk(&format!("y{k}"), y);
+    s += &format!("  let lx{k} = len(x{k});\n  let mut ex{k} = 0;\n  if is_empty(x{k}) {{\n    ex{k} = 1;\n  }}\n");
+    s += &format!("  let t{k} = trim(x{k});\n");
+    s += &fold(&format!("t{k}"), &format!("ht{k}"));
+    s += &format!("  let tn{k} = bytes(t{k});\n  free(t{k});\n");
+    s += &format!("  let c{k} = concat(x{k}, y{k});\n");
+    s += &fold(&format!("c{k}"), &format!("hc{k}"));
+    s += &format!("  let cn{k} = bytes(c{k});\n  free(c{k});\n");
+    s += &format!("  let cm{k} = cmp(x{k}, y{k}) + 2;\n  let mut q{k} = 0;\n  if eq(x{k}, y{k}) {{\n    q{k} = 1;\n  }}\n");
+    s += &format!("  let o{k} = raw.alloc(8, 8);\n  raw.store_i64(o{k}, 12345);\n  let ok{k} = parse_int(x{k}, o{k});\n  let pv{k} = ((raw.load_i64(o{k}) % {MODP}) + {MODP}) % {MODP};\n  raw.free(o{k}, 8, 8);\n");
+    s += &format!("  free(x{k});\n  free(y{k});\n");
+    s += &format!("  let mut r{k} = 0;\n");
+    for comp in [
+        format!("lx{k}"),
+        format!("ex{k}"),
+        format!("ht{k}"),
+        format!("tn{k}"),
+        format!("hc{k}"),
+        format!("cn{k}"),
+        format!("cm{k}"),
+        format!("q{k}"),
+        format!("ok{k}"),
+        format!("pv{k}"),
+    ] {
+        s += &format!("  r{k} = (r{k} * 1000003 + {comp}) % {MODP};\n");
+    }
+    s
+}
+
+fn fold_rust(b: &[u8]) -> i64 {
+    b.iter().fold(0i64, |h, &c| (h * 131 + c as i64) % MODP)
+}
+
+/// `ops_block` と同じ計算を Rust の標準ライブラリと `shared_text` で行う。
+fn ops_expect(x: &str, y: &str) -> i64 {
+    let t = x.trim();
+    let c = format!("{x}{y}");
+    let parsed = sigil::shared_text::parse_int(x);
+    let ok = parsed.is_some() as i64;
+    let pv = (parsed.unwrap_or(12345) % MODP + MODP) % MODP;
+    let comps = [
+        sigil::shared_text::char_len(x),
+        x.is_empty() as i64,
+        fold_rust(t.as_bytes()),
+        t.len() as i64,
+        fold_rust(c.as_bytes()),
+        c.len() as i64,
+        x.as_bytes().cmp(y.as_bytes()) as i64 + 2,
+        (x == y) as i64,
+        ok,
+        pv,
+    ];
+    comps.iter().fold(0i64, |r, &v| (r * 1000003 + v) % MODP)
+}
+
+/// 空白の符号点と、その前後の符号点を含む文字列の組。
+fn op_strings() -> Vec<String> {
+    let mut v: Vec<String> = [
+        "",
+        " ",
+        "abc",
+        "  a b\t\n",
+        "héllo",
+        "日本語",
+        "🎉x🎉",
+        "a\0b",
+        "\u{0}",
+        "ab",
+        "abc ",
+        "abd",
+        "b",
+        "Z",
+        "é",
+        "e",
+        "\u{10FFFF}",
+        "\u{FFFD}",
+        "\u{7F}",
+        "\u{80}",
+        "\u{7FF}",
+        "\u{800}",
+        "\u{FFFF}",
+        "\u{10000}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // White_Space の各符号点（Rust の char::is_whitespace と同じ表）と、その前後の符号点。
+    let mut cps: Vec<u32> = vec![];
+    for c in [
+        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x1F, 0x20, 0x21, 0x84, 0x85, 0x86, 0x9F, 0xA0,
+        0xA1, 0x167F, 0x1680, 0x1681, 0x180E, 0x1FFF, 0x2000, 0x2005, 0x200A, 0x200B, 0x2027,
+        0x2028, 0x2029, 0x202A, 0x202E, 0x202F, 0x2030, 0x205E, 0x205F, 0x2060, 0x2FFF, 0x3000,
+        0x3001, 0xFEFF,
+    ] {
+        cps.push(c);
+    }
+    for c in cps {
+        let ch = char::from_u32(c).unwrap();
+        v.push(format!("{ch}"));
+        v.push(format!("{ch}x{ch}"));
+    }
+    v.push("  \u{3000}\u{2028} ".to_string());
+    v.push("\u{85}\u{a0}".to_string());
+    v
+}
+
+fn parse_strings() -> Vec<String> {
+    let mut v: Vec<String> = [
+        "0",
+        "42",
+        "-7",
+        "+1",
+        " 1",
+        "1 ",
+        "1_0",
+        "",
+        "-",
+        "--1",
+        "-0",
+        "007",
+        "-007",
+        "1.5",
+        "0x10",
+        "1e3",
+        "9223372036854775806",
+        "9223372036854775807",
+        "9223372036854775808",
+        "9223372036854775810",
+        "-9223372036854775807",
+        "-9223372036854775808",
+        "-9223372036854775809",
+        "-9223372036854775810",
+        "922337203685477580",
+        "92233720368547758",
+        "-922337203685477580",
+        "18446744073709551616",
+        "99999999999999999999",
+        "00000000000000000000000000000000000000001",
+        "abc",
+        "1a",
+        "a1",
+        "１２",
+        "-９",
+        "\u{0}",
+        "-\u{0}",
+        "٣",
+        "1\n",
+        "\n1",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let mut x: u64 = 0xD1B5_4A32_D192_ED03;
+    for _ in 0..24 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let len = 1 + (x % 20) as usize;
+        let mut s = String::new();
+        if x >> 40 & 3 == 0 {
+            s.push('-');
+        }
+        let mut y = x;
+        for _ in 0..len {
+            y = y
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            s.push(char::from(b'0' + ((y >> 33) % 10) as u8));
+        }
+        v.push(s);
+    }
+    v
+}
+
+fn pairs() -> Vec<(String, String)> {
+    let a = op_strings();
+    let b = parse_strings();
+    let mut all: Vec<String> = a.into_iter().chain(b).collect();
+    all.dedup();
+    let n = all.len();
+    (0..n)
+        .map(|i| (all[i].clone(), all[(i * 7 + 3) % n].clone()))
+        .chain((0..n).step_by(5).map(|i| (all[i].clone(), all[i].clone())))
+        .collect()
+}
+
+#[test]
+fn string_ops_match_rust_in_the_evaluator() {
+    // 評価器は 1 件ずつ走らせるので、間引いた件数にする（全件はネイティブで走らせる）。
+    for (k, (x, y)) in pairs().iter().enumerate().filter(|(k, _)| k % 2 == 0) {
+        let body = format!("{}  return r{k};", ops_block(x, y, k));
+        let got =
+            eval_driver(OPS, &body).unwrap_or_else(|e| panic!("{x:?} {y:?}: 評価器が失敗: {e}"));
+        assert_eq!(got, ops_expect(x, y).to_string(), "{x:?} {y:?}");
+    }
+}
+
+#[test]
+fn string_ops_match_rust_natively() {
+    let ps = pairs();
+    for (ci, chunk) in ps.chunks(5).enumerate() {
+        let mut body = String::new();
+        let mut acc = String::from("  let mut acc = 0;\n");
+        let mut want = 0i64;
+        for (j, (x, y)) in chunk.iter().enumerate() {
+            let k = ci * 1000 + j;
+            body += &ops_block(x, y, k);
+            acc += &format!("  acc = (acc * 1000003 + r{k}) % {MODP};\n");
+            want = (want * 1000003 + ops_expect(x, y)) % MODP;
+        }
+        body += &acc;
+        body += "  return acc;";
+        let got = native_driver(OPS, &body);
+        assert_eq!(got.code, Some(0), "{}", got.stderr);
+        assert_eq!(
+            got.stdout.trim_end().rsplit('\n').next().unwrap(),
+            want.to_string(),
+            "chunk {ci}"
+        );
+        // 作った文字列はすべて解放した（頭と中身。trim・concat の結果を含む）。
+        assert_eq!(
+            live_line(&got),
+            "strs=0 blocks=0 sigil_blocks=0",
+            "chunk {ci}"
+        );
+    }
+}
+
+/// 評価器の塊の表: `trim`・`concat` の結果は解放でき、二重解放と解放後の読みは止まる。
+#[test]
+fn evaluator_block_table_covers_trim_and_concat() {
+    let mk2 = format!("{}{}", mk("a", " ab "), mk("b", "c"));
+    let ok = format!("{mk2}  let t = trim(a);\n  let c = concat(t, b);\n  let r = bytes(c) * 10 + len(t);\n  free(c);\n  free(t);\n  free(a);\n  free(b);\n  return r;");
+    assert_eq!(eval_driver(OPS, &ok).unwrap(), "32");
+    let dbl_t = format!("{mk2}  let t = trim(a);\n  free(t);\n  free(t);\n  return 0;");
+    assert!(
+        eval_driver(OPS, &dbl_t).is_err(),
+        "trim の結果の二重解放が止まらない"
+    );
+    let dbl_c = format!("{mk2}  let c = concat(a, b);\n  free(c);\n  free(c);\n  return 0;");
+    assert!(
+        eval_driver(OPS, &dbl_c).is_err(),
+        "concat の結果の二重解放が止まらない"
+    );
+    let uaf = format!(
+        "{mk2}  let c = concat(a, b);\n  let d = data(c);\n  free(c);\n  return raw.load_u8(d);"
+    );
+    assert!(
+        eval_driver(OPS, &uaf).is_err(),
+        "concat の結果の解放後の読みが止まらない"
+    );
+    // 入力は変えない（trim・concat は新しい文字列を返す）。
+    let keep = format!("{mk2}  let t = trim(a);\n  let c = concat(a, b);\n  let r = bytes(a) * 100 + bytes(t) * 10 + bytes(c);\n  free(t);\n  free(c);\n  free(a);\n  free(b);\n  return r;");
+    assert_eq!(eval_driver(OPS, &keep).unwrap(), "425");
+    // 空の文字列どうしの連結・空白だけの trim は、頭だけの文字列を返す。
+    let empty = "  let a = new(raw.addr_null(), 0);\n  let c = concat(a, a);\n  let t = trim(c);\n  let r = bytes(c) + bytes(t);\n  free(t);\n  free(c);\n  free(a);\n  return r;";
+    assert_eq!(eval_driver(OPS, empty).unwrap(), "0");
+}
+
+/// ネイティブの `sigil_blocks=` の完全一致: trim・concat を繰り返しても増えず、残した分だけ数える。
+#[test]
+fn native_blocks_are_exact_for_trim_and_concat() {
+    let lp = |n: i64| {
+        format!("{}{}  let mut i = 0;\n  let mut t = 0;\n  while i < {n} {{\n    let u = trim(a);\n    let c = concat(u, b);\n    t = t + len(c);\n    free(c);\n    free(u);\n    i = i + 1;\n  }}\n  free(a);\n  free(b);\n  return t;", mk("a", " ab "), mk("b", "é"))
+    };
+    let a = native_driver(OPS, &lp(1000));
+    let b = native_driver(OPS, &lp(50_000));
+    assert_eq!(a.code, Some(0), "{}", a.stderr);
+    assert_eq!(b.code, Some(0), "{}", b.stderr);
+    assert_eq!(live_line(&a), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&a), live_line(&b));
+    // 残した trim の結果は 2 つ、concat の結果は 2 つの塊（頭と中身）。空になる結果は頭だけ。
+    let leak_t = format!(
+        "{}  let t = trim(a);\n  free(a);\n  return bytes(t);",
+        mk("a", " ab ")
+    );
+    assert_eq!(
+        live_line(&native_driver(OPS, &leak_t)),
+        "strs=0 blocks=0 sigil_blocks=2"
+    );
+    let leak_c = format!(
+        "{}{}  let c = concat(a, b);\n  free(a);\n  free(b);\n  return bytes(c);",
+        mk("a", "x"),
+        mk("b", "y")
+    );
+    assert_eq!(
+        live_line(&native_driver(OPS, &leak_c)),
+        "strs=0 blocks=0 sigil_blocks=2"
+    );
+    let leak_e = format!(
+        "{}  let t = trim(a);\n  free(a);\n  return bytes(t);",
+        mk("a", " \u{3000} ")
+    );
+    assert_eq!(
+        live_line(&native_driver(OPS, &leak_e)),
+        "strs=0 blocks=0 sigil_blocks=1"
     );
 }

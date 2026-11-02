@@ -93,12 +93,24 @@ pub(crate) fn norm(ty: &Ty) -> Ty {
     norm_with(ty, false)
 }
 
+/// 生成コードの中で定義する文字列の関数（`std.core.string` を呼ぶシム。補足 D-3）の、呼び出し側から見た引数と戻りの形。
+/// Rust ランタイムの関数ではないので `rt_spec` には置かない。形は `rt_spec` と同じ（`i` の戻りは 32 ビット）。
+pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
+    Some(match name {
+        "str_new" | "str_concat" => ("pp", 'p'),
+        "str_clone" | "str_data" | "str_bytes" | "str_len" | "str_trim" => ("p", 'p'),
+        "str_free" => ("p", 'v'),
+        "str_is_empty" => ("p", 'i'),
+        "str_parse_int" => ("pp", 'i'),
+        _ => return None,
+    })
+}
+
 /// ランタイム関数の引数と戻りの形（`p` 語・`i` 32 ビット整数・`f` 倍精度・`v` なし）。
 pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
-        "alloc" | "str_new" | "str_concat" | "list_get" | "val_shadow" | "val_clone" => ("pp", 'p'),
-        "str_clone" | "blk_new" | "str_data" | "str_bytes" | "str_len" | "str_trim"
-        | "str_lines" | "list_len" | "list_new" => ("p", 'p'),
+        "alloc" | "list_get" | "val_shadow" | "val_clone" => ("pp", 'p'),
+        "blk_new" | "str_lines" | "list_len" | "list_new" => ("p", 'p'),
         "bytes_new" => ("", 'p'),
         "bytes_with_capacity" | "bytes_clone" | "bytes_len" | "str_as_bytes" => ("p", 'p'),
         "bytes_concat" => ("pp", 'p'),
@@ -118,11 +130,10 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "set_sigil_live" => ("p", 'v'),
         "set_str_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
-        "str_is_empty" => ("p", 'i'),
-        "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
+        "list_sum_int" | "enter" => ("pp", 'i'),
         "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
         "trace_on" => ("", 'v'),
-        "print_result" | "str_free" => ("p", 'v'),
+        "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" | "list_best" => ("ppi", 'p'),
         "val_eq" | "val_cmp" => ("ppp", 'i'),
@@ -173,7 +184,7 @@ impl<'p> Cg<'p> {
         if let Some(id) = self.rt.get(name) {
             return Ok(*id);
         }
-        let Some((ps, r)) = rt_spec(name) else {
+        let Some((ps, r)) = rt_spec(name).or_else(|| shim_spec(name)) else {
             return Err(internal(format!("ランタイム関数 {name} の形がない")));
         };
         let mut s = Signature::new(self.cc);
@@ -589,16 +600,21 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     product.emit().map_err(internal)
 }
 
-/// シム 1 つ（公開する関数, 呼ぶ Sigil の関数の番号, 引数の数, 値を返すか）。
-type Shim = (FuncId, usize, usize, bool);
+/// シムの戻り（`p` 語・`i` 32 ビット整数・`v` なし）。`rt_spec` の戻りの印と同じ。
+type ShimRet = char;
 
-fn shim_sig(cc: CallConv, np: usize, ret: bool) -> Signature {
+/// シム 1 つ（公開する関数, 呼ぶ Sigil の関数の番号, 引数の数, 戻り）。
+type Shim = (FuncId, usize, usize, ShimRet);
+
+fn shim_sig(cc: CallConv, np: usize, ret: ShimRet) -> Signature {
     let mut s = Signature::new(cc);
     for _ in 0..np {
         s.params.push(AbiParam::new(types::I64));
     }
-    if ret {
-        s.returns.push(AbiParam::new(types::I64));
+    match ret {
+        'p' => s.returns.push(AbiParam::new(types::I64)),
+        'i' => s.returns.push(AbiParam::new(types::I32)),
+        _ => {}
     }
     s
 }
@@ -613,9 +629,9 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     };
     let mut out = vec![];
     for (sym, target, np, ret) in [
-        ("sigil_rt_raw_alloc", a, 2, true),
-        ("sigil_rt_raw_free", f, 3, false),
-        ("sigil_rt_sigil_live_blocks", l, 0, true),
+        ("sigil_rt_raw_alloc", a, 2, 'p'),
+        ("sigil_rt_raw_free", f, 3, 'v'),
+        ("sigil_rt_sigil_live_blocks", l, 0, 'p'),
     ] {
         let id =
             cg.m.declare_function(sym, Linkage::Export, &shim_sig(cg.cc, np, ret))
@@ -632,16 +648,22 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
 /// 生成コードの呼び出し先の名前と形は変えない。シムは公開せず（`Linkage::Local`）、番地を関数表で Rust ランタイムに渡す。
 fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
-        STR_BYTES_FN, STR_CLONE_FN, STR_DATA_FN, STR_FREE_FN, STR_NEW_LOSSY_FN,
+        STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN, STR_FREE_FN, STR_IS_EMPTY_FN,
+        STR_LEN_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
     };
     let mut out = vec![];
     let mut ids = vec![];
     for (name, target_fn, np, ret) in [
-        ("str_new", STR_NEW_LOSSY_FN, 2, true),
-        ("str_free", STR_FREE_FN, 1, false),
-        ("str_clone", STR_CLONE_FN, 1, true),
-        ("str_data", STR_DATA_FN, 1, true),
-        ("str_bytes", STR_BYTES_FN, 1, true),
+        ("str_new", STR_NEW_LOSSY_FN, 2, 'p'),
+        ("str_free", STR_FREE_FN, 1, 'v'),
+        ("str_clone", STR_CLONE_FN, 1, 'p'),
+        ("str_data", STR_DATA_FN, 1, 'p'),
+        ("str_bytes", STR_BYTES_FN, 1, 'p'),
+        ("str_len", STR_LEN_FN, 1, 'p'),
+        ("str_is_empty", STR_IS_EMPTY_FN, 1, 'i'),
+        ("str_trim", STR_TRIM_FN, 1, 'p'),
+        ("str_concat", STR_CONCAT_FN, 2, 'p'),
+        ("str_parse_int", STR_PARSE_INT_FN, 2, 'i'),
     ] {
         let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
             return Err(internal("std.core.string が結ばれていない".to_string()));

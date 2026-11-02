@@ -34,6 +34,14 @@ pub const STR_FREE_FN: &str = "std.core.string.free";
 pub const STR_CLONE_FN: &str = "std.core.string.clone";
 pub const STR_DATA_FN: &str = "std.core.string.data";
 pub const STR_BYTES_FN: &str = "std.core.string.bytes";
+/// 3-5b-ii で移した操作。`eq`・`cmp` はシムを持たず、SIR にも入れない（3-5e が生成する `val_eq`・`val_cmp` が呼ぶ）。
+pub const STR_LEN_FN: &str = "std.core.string.len";
+pub const STR_IS_EMPTY_FN: &str = "std.core.string.is_empty";
+pub const STR_TRIM_FN: &str = "std.core.string.trim";
+pub const STR_CONCAT_FN: &str = "std.core.string.concat";
+pub const STR_PARSE_INT_FN: &str = "std.core.string.parse_int";
+pub const STR_EQ_FN: &str = "std.core.string.eq";
+pub const STR_CMP_FN: &str = "std.core.string.cmp";
 
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[

@@ -19,11 +19,13 @@ pub fn fmt_float(f: f64) -> String {
 }
 
 /// `String.len`: Unicode のスカラー値の数。
+#[allow(dead_code)] // 3-5b-ii から、ネイティブの runtime/core は Sigil 版（std.core.string）を使う。評価器だけが使う
 pub fn char_len(s: &str) -> i64 {
     s.chars().count() as i64
 }
 
 /// `String.trim`。
+#[allow(dead_code)] // 3-5b-ii から、ネイティブの runtime/core は Sigil 版（std.core.string）を使う。評価器だけが使う
 pub fn trim(s: &str) -> &str {
     s.trim()
 }
@@ -41,6 +43,7 @@ pub fn lines(s: &str) -> Vec<&str> {
 }
 
 /// `String.parse_int`: 先頭の `-` と数字だけ。`+`・空白・桁区切りは受けない。範囲外は `None`。
+#[allow(dead_code)] // 3-5b-ii から、ネイティブの runtime/core は Sigil 版（std.core.string）を使う。評価器だけが使う
 pub fn parse_int(s: &str) -> Option<i64> {
     let digits = s.strip_prefix('-').unwrap_or(s);
     let valid = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());

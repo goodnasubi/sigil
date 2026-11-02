@@ -51,10 +51,17 @@ impl Proj<'_> {
         self.visit_as(path, file, true)
     }
 
-    /// 暗黙に結ぶ埋め込みモジュールを、入口より先に読む。入口の `targets` の全てで使えなければならない
+    /// 暗黙に結ぶ埋め込みモジュール（名指しされたものと `implicit_roots`）を、入口より先に読む。入口の `targets` の全てで使えなければならない
     /// （`use` と同じ規則。取り込む側の出力先のすべてで、取り込まれる側が使える）。
     pub(super) fn visit_embedded_roots(&mut self, entry: &File) -> R<()> {
-        let roots = self.opts.embedded_roots.clone();
+        // 名指しされたものに、入口が暗黙に結ぶもの（`raw.alloc`/`raw.free` を使う `server` だけの入口に確保器。
+        // 補足 B-3・B-4）を足す。
+        let mut roots = self.opts.embedded_roots.clone();
+        for r in embedded::implicit_roots(entry, self.opts) {
+            if !roots.iter().any(|x| x == r) {
+                roots.push(r.to_string());
+            }
+        }
         for r in &roots {
             self.visit_embedded(r)?;
             let (path, target) = &self.mods[r];

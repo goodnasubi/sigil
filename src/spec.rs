@@ -15,6 +15,9 @@ use crate::parser::parse;
 pub struct Spec {
     pub module: SpecItem,
     pub items: Vec<SpecItem>,
+    /// 入口として結ぶと暗黙に結ばれる埋め込みモジュールの仕様（ADR 0025 補足 B-3。`raw.alloc`/`raw.free` を使う
+    /// `server` だけのモジュールなら確保器 `std.os.alloc`）。ないときは空で、出力も変わらない。
+    pub embedded: Vec<Spec>,
 }
 
 /// 仕様の 1 項目（モジュール・型・構造体・列挙型・関数・メソッド）。
@@ -145,19 +148,30 @@ impl Spec {
     pub fn text(&self) -> String {
         let mut blocks = vec![self.module.text()];
         blocks.extend(self.items.iter().map(SpecItem::text));
+        for e in &self.embedded {
+            blocks.push(format!("暗黙に結ぶモジュール: {}\n", e.module.name));
+            blocks.push(e.text());
+        }
         blocks.join("\n")
     }
 
     /// `sigil spec --json` の値。
     pub fn to_json(&self) -> Value {
-        obj(vec![
+        let mut fields = vec![
             ("format", 1i64.into()),
             ("module", self.module.to_json()),
             (
                 "items",
                 Value::Arr(self.items.iter().map(SpecItem::to_json).collect()),
             ),
-        ])
+        ];
+        if !self.embedded.is_empty() {
+            fields.push((
+                "embedded",
+                Value::Arr(self.embedded.iter().map(Spec::to_json).collect()),
+            ));
+        }
+        obj(fields)
     }
 }
 
@@ -179,13 +193,32 @@ pub fn extract(src: &str) -> Result<Spec, Error> {
 /// 検査器の設定（テスト用の原始操作）を指定して仕様の構造を作る。
 pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, Error> {
     let file = parse(src)?;
+    let mut spec = extract_file(&file, opts, false);
+    for name in crate::stdlib::embedded::implicit_roots(&file, opts) {
+        let Some(esrc) = crate::stdlib::embedded::lookup(name, &opts.embedded_extra) else {
+            continue;
+        };
+        // 埋め込みモジュールは標準の名前を定義するので、予約名の検査をしない構文解析を使う。
+        let ef = crate::parser::parse_std(esrc)?;
+        spec.embedded.push(extract_file(&ef, opts, true));
+    }
+    Ok(spec)
+}
+
+/// `embedded` は埋め込みモジュール（予約名と許可一覧の確認を飛ばす検査で記録を作る。ADR 0025 補足 A-6）。
+fn extract_file(file: &File, opts: &crate::effects::Options, embedded: bool) -> Spec {
     // `使う原始操作:`・`推論できない効果:` は検査器の解決結果から作る。`unchecked` の関数があるときだけ検査器を呼ぶ。
     // `sigil spec` は許可を検査しないので、このモジュール自身を `trust_base` に挙げて呼ぶ（ADR 0016 の決定 6）。
     let unchecked = unchecked_count(&file.items);
     let reports = if unchecked > 0 {
         let mut o = opts.clone();
         o.trust_base.push(file.module.name.join("."));
-        Some(crate::check::fn_reports(&file, &o).ok())
+        let r = if embedded {
+            crate::check::fn_reports_embedded(file, &o)
+        } else {
+            crate::check::fn_reports(file, &o)
+        };
+        Some(r.ok())
     } else {
         None
     };
@@ -311,7 +344,11 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
             }),
         }
     }
-    Ok(Spec { module, items })
+    Spec {
+        module,
+        items,
+        embedded: vec![],
+    }
 }
 
 /// `unchecked` の節を持つ関数（`impl` のメソッドを含む）の数。

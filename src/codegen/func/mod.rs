@@ -330,6 +330,12 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.st(ps[1], a, 8);
         let fr = self.cg.m.declare_func_in_func(thunk, self.b.func);
         let fa = self.b.ins().func_addr(types::I64, fr);
+        // 確保器を結んだときは、生存数のシムをランタイムに登録する（`SIGIL_RT_LIVE` の `sigil_blocks=`。補足 B-5）。
+        if let Some(l) = self.cg.live_shim {
+            let lr = self.cg.m.declare_func_in_func(l, self.b.func);
+            let la = self.b.ins().func_addr(types::I64, lr);
+            self.rt("set_sigil_live", &[la]);
+        }
         let r = self.rt("enter", &[fa, a]);
         let r32 = self.b.ins().ireduce(types::I32, r);
         self.b.ins().return_(&[r32]);
@@ -379,6 +385,52 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let t = norm(&gl.ty);
                 self.drop_val(&t, w);
             }
+        }
+    }
+
+    /// 停止の状態（1 始まりの番号）に対応する停止の報告を出す。
+    fn report_stop(&mut self, st: Value) {
+        let base = self.data_addr(self.cg.msg_table);
+        let idx = self.b.ins().iadd_imm_s(st, -1);
+        let off = self.b.ins().imul_imm_s(idx, 16);
+        let ent = self.b.ins().iadd(base, off);
+        let (mp, ml) = (self.ld(ent, 0), self.ld(ent, 8));
+        self.rt("stop", &[mp, ml]);
+    }
+
+    /// 確保器のシムの本体（ADR 0025 補足 B-2）: Sigil の関数 `target` を呼び、値を返す。
+    /// 確保器の中の停止（算術のあふれなど）は、報告を出して `exit_group(70)` で止める（補足 A-4）。
+    pub fn alloc_shim(&mut self, target: usize, ret: bool) {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        let ps = self.b.block_params(entry).to_vec();
+        let fr = self
+            .cg
+            .m
+            .declare_func_in_func(self.cg.fids[target], self.b.func);
+        let inst = self.b.ins().call(fr, &ps);
+        let r = self.b.inst_results(inst).to_vec();
+        let (stopb, okb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(r[1], stopb, NOARGS, okb, NOARGS);
+
+        self.b.switch_to_block(stopb);
+        self.report_stop(r[1]);
+        let n = self.ic(231);
+        let code = self.ic(70);
+        let z = self.ic(0);
+        self.rt("raw_syscall", &[n, code, z, z, z, z, z]);
+        if ret {
+            self.b.ins().return_(&[z]);
+        } else {
+            self.b.ins().return_(&[]);
+        }
+
+        self.b.switch_to_block(okb);
+        if ret {
+            self.b.ins().return_(&[r[0]]);
+        } else {
+            self.b.ins().return_(&[]);
         }
     }
 
@@ -463,12 +515,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().brif(r[1], stopb, NOARGS, showb, NOARGS);
 
         self.b.switch_to_block(stopb);
-        let base = self.data_addr(self.cg.msg_table);
-        let idx = self.b.ins().iadd_imm_s(r[1], -1);
-        let off = self.b.ins().imul_imm_s(idx, 16);
-        let ent = self.b.ins().iadd(base, off);
-        let (mp, ml) = (self.ld(ent, 0), self.ld(ent, 8));
-        self.rt("stop", &[mp, ml]);
+        self.report_stop(r[1]);
         let c70 = self.b.ins().iconst(types::I32, 70);
         self.b.ins().return_(&[c70]);
 

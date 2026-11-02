@@ -300,6 +300,16 @@ impl<'a> L<'a> {
         let s0 = self.stop(StopKind::StackExhausted, entry, decl.span.line, None, "");
         debug_assert_eq!(s0, 0);
         let fid = self.instance(decl, HashMap::new(), vec![]);
+        // 確保器を結んだプログラムでは、入口から辿れなくてもその入口の関数を SIR に入れる。ネイティブはシムから
+        // 呼び、評価器は呼ばない（ADR 0025 補足 A-2・B-2・B-3）。
+        use crate::stdlib::embedded::{ALLOC_FN, FREE_FN, LIVE_FN};
+        for n in [ALLOC_FN, FREE_FN, LIVE_FN] {
+            if n != entry {
+                if let Some(&d) = self.fns.get(n) {
+                    self.instance(d, HashMap::new(), vec![]);
+                }
+            }
+        }
         while let Some(job) = self.queue.pop() {
             let fid = job.fid;
             let f = self.lower_fn(job)?;

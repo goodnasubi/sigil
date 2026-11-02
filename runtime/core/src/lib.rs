@@ -53,10 +53,14 @@ pub unsafe extern "C" fn sigil_rt_free(p: *mut u8, size: usize, align: usize) {
     }
 }
 
+// `raw.alloc`/`raw.free` の Rust 版（ADR 0025 補足 B-2・B-4）。Sigil 製の確保器（`std.os.alloc`）を結んだ
+// プログラムでは、生成コードが同じオブジェクトの `sigil_rt_raw_alloc`/`sigil_rt_raw_free` を公開して呼ぶ。
+// 結ばないプログラム（入口の `targets` が `server` だけでない等）は PR 3-7 までこちらを呼ぶ。
+
 /// # Safety
 /// `size > 0` かつ `align` は 2 の冪。
 #[no_mangle]
-pub unsafe extern "C" fn sigil_rt_raw_alloc(size: i64, align: i64) -> *mut u8 {
+pub unsafe extern "C" fn sigil_rt_raw_alloc_rust(size: i64, align: i64) -> *mut u8 {
     if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
         std::process::abort();
     }
@@ -64,9 +68,9 @@ pub unsafe extern "C" fn sigil_rt_raw_alloc(size: i64, align: i64) -> *mut u8 {
 }
 
 /// # Safety
-/// `p` は `sigil_rt_raw_alloc` で割り当てられたポインタであり、`size` と `align` は一致する。
+/// `p` は `sigil_rt_raw_alloc_rust` で割り当てられたポインタであり、`size` と `align` は一致する。
 #[no_mangle]
-pub unsafe extern "C" fn sigil_rt_raw_free(p: *mut u8, size: i64, align: i64) {
+pub unsafe extern "C" fn sigil_rt_raw_free_rust(p: *mut u8, size: i64, align: i64) {
     if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
         std::process::abort();
     }
@@ -96,6 +100,26 @@ pub(crate) fn live_blocks(d: isize) {
     if LIVE_BLOCKS.fetch_add(d, Ordering::Relaxed) + d < 0 {
         std::process::abort();
     }
+}
+
+/// Sigil 製の確保器の生存数を返す関数（生成コードの `sigil_rt_sigil_live_blocks`。0 は未登録。補足 B-5）。
+static SIGIL_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// 確保器を結んだプログラムの `main` が、入口を呼ぶ前に生存数の関数を登録する。
+#[no_mangle]
+pub extern "C" fn sigil_rt_set_sigil_live(f: extern "C" fn() -> i64) {
+    SIGIL_LIVE.store(f as usize, Ordering::Relaxed);
+}
+
+/// 登録された確保器の生存数（未登録なら `None`）。
+fn sigil_live_blocks() -> Option<i64> {
+    let p = SIGIL_LIVE.load(Ordering::Relaxed);
+    if p == 0 {
+        return None;
+    }
+    // SAFETY: 0 でない値は `sigil_rt_set_sigil_live` が受け取った関数ポインタだけ。
+    let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(p) };
+    Some(f())
 }
 
 /// 生きている文字列・パスの数。
@@ -830,9 +854,14 @@ pub unsafe extern "C" fn sigil_rt_enter_with(
     };
     // テスト用: 環境変数 `SIGIL_RT_LIVE` があれば、終わった時点で生きている塊の数を標準エラーに出す。
     if std::env::var_os("SIGIL_RT_LIVE").is_some() {
+        // 確保器を結んだときだけ、既存の書式の末尾に ` sigil_blocks=` を足す（補足 B-5）。
+        let extra = match sigil_live_blocks() {
+            Some(n) => format!(" sigil_blocks={n}"),
+            None => String::new(),
+        };
         let _ = writeln!(
             std::io::stderr().lock(),
-            "live: strs={} blocks={}",
+            "live: strs={} blocks={}{extra}",
             sigil_rt_live_strs(),
             sigil_rt_live_blocks()
         );

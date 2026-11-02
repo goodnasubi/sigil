@@ -316,3 +316,181 @@ fn edge_into_unreachable_other_than_a_branch_arm_is_caught() {
         false
     });
 }
+
+// ---- 大域（ADR 0025 補足 A-1・A-7、PR 3-4f） ----
+
+fn with_globals(globals: Vec<Global>, rv: Rvalue, dst_ty: Ty) -> Program {
+    let mut p = lowered("f");
+    p.globals = globals;
+    let f = &mut p.funcs[0];
+    f.locals.push(Local {
+        name: "gref".into(),
+        ty: dst_ty,
+    });
+    let l = f.locals.len() - 1;
+    f.blocks[0]
+        .stmts
+        .insert(0, Stmt::Assign(Place::local(l), rv));
+    p
+}
+
+fn g(name: &str, ty: Ty, mutable: bool, init: GlobalInit) -> Global {
+    Global {
+        name: name.into(),
+        ty,
+        mutable,
+        init,
+    }
+}
+
+#[test]
+fn well_formed_globals_pass() {
+    let gs = vec![
+        g("N", Ty::Int, false, GlobalInit::Int(3)),
+        g("HEAP", Ty::Addr, true, GlobalInit::AddrNull),
+        g(
+            "T",
+            Ty::Tuple(vec![Ty::Int, Ty::Bool]),
+            true,
+            GlobalInit::Tuple(vec![GlobalInit::Int(1), GlobalInit::Bool(true)]),
+        ),
+    ];
+    let p = with_globals(gs.clone(), Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Int)));
+    assert_eq!(errs(&p), Vec::<String>::new());
+    let p = with_globals(gs, Rvalue::GlobalRef(1), Ty::MutRef(Box::new(Ty::Addr)));
+    assert_eq!(errs(&p), Vec::<String>::new());
+}
+
+#[test]
+fn bad_globals_are_caught() {
+    let n = || g("N", Ty::Int, false, GlobalInit::Int(3));
+    // 範囲外の番号
+    let p = with_globals(vec![n()], Rvalue::GlobalRef(5), Ty::Ref(Box::new(Ty::Int)));
+    assert!(!errs(&p).is_empty());
+    // 型の取り違え（Int の大域を Bool への参照で受ける）
+    let p = with_globals(vec![n()], Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Bool)));
+    assert!(!errs(&p).is_empty());
+    // Copyable でない型
+    let bad = g("S", Ty::Str, false, GlobalInit::Int(0));
+    let p = with_globals(vec![bad], Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Str)));
+    assert!(!errs(&p).is_empty());
+    // 初期値が型に合わない
+    let bad = g("B", Ty::Bool, false, GlobalInit::Int(1));
+    let p = with_globals(vec![bad], Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Bool)));
+    assert!(!errs(&p).is_empty());
+}
+
+/// 大域の検証だけのエラー一覧（`msg` を含むものがあるか）。
+fn has_err(p: &Program, msg: &str) -> bool {
+    errs(p).iter().any(|e| e.contains(msg))
+}
+
+fn global_only(globals: Vec<Global>, types: Vec<TypeDef>) -> Program {
+    let mut p = lowered("f");
+    p.types.extend(types);
+    p.globals = globals;
+    p
+}
+
+fn pt_type() -> TypeDef {
+    TypeDef {
+        name: "Pt".into(),
+        kind: TypeKind::Struct {
+            fields: vec![("x".into(), Ty::Int), ("ok".into(), Ty::Bool)],
+        },
+    }
+}
+
+#[test]
+fn global_init_shape_mismatches_are_caught() {
+    const BAD_INIT: &str = "に合わない";
+    const BAD_TY: &str = "Copyable でない";
+    let pt = lowered("f").types.len();
+    let pt_ty = Ty::Adt(pt);
+    let st = |init| g("P", pt_ty.clone(), false, init);
+    let ok = global_only(
+        vec![st(GlobalInit::Struct(vec![
+            GlobalInit::Int(1),
+            GlobalInit::Bool(true),
+        ]))],
+        vec![pt_type()],
+    );
+    assert_eq!(errs(&ok), Vec::<String>::new());
+
+    // (a) 組の初期値の長さ違い
+    let p = global_only(
+        vec![g(
+            "T",
+            Ty::Tuple(vec![Ty::Int, Ty::Bool]),
+            false,
+            GlobalInit::Tuple(vec![GlobalInit::Int(1)]),
+        )],
+        vec![],
+    );
+    assert!(has_err(&p, BAD_INIT), "{:?}", errs(&p));
+    // (b) 構造体の初期値の長さ違い
+    let p = global_only(
+        vec![st(GlobalInit::Struct(vec![GlobalInit::Int(1)]))],
+        vec![pt_type()],
+    );
+    assert!(has_err(&p, BAD_INIT), "{:?}", errs(&p));
+    // (c) 組の要素の型違い
+    let p = global_only(
+        vec![g(
+            "T",
+            Ty::Tuple(vec![Ty::Int, Ty::Bool]),
+            false,
+            GlobalInit::Tuple(vec![GlobalInit::Int(1), GlobalInit::Int(2)]),
+        )],
+        vec![],
+    );
+    assert!(has_err(&p, BAD_INIT), "{:?}", errs(&p));
+    // (d) 構造体のフィールドの型違い
+    let p = global_only(
+        vec![st(GlobalInit::Struct(vec![
+            GlobalInit::Bool(true),
+            GlobalInit::Bool(true),
+        ]))],
+        vec![pt_type()],
+    );
+    assert!(has_err(&p, BAD_INIT), "{:?}", errs(&p));
+    // (e) 列挙型は大域の型にできない
+    let tag = lowered("f").types.len();
+    let en = TypeDef {
+        name: "En".into(),
+        kind: TypeKind::Enum {
+            variants: vec![VariantDef {
+                name: "A".into(),
+                fields: vec![],
+                indirect: false,
+            }],
+        },
+    };
+    let p = global_only(
+        vec![g("E", Ty::Adt(tag), false, GlobalInit::Int(0))],
+        vec![en],
+    );
+    assert!(has_err(&p, BAD_TY), "{:?}", errs(&p));
+    // (f) 入れ子: Str を含む組・構造体は再帰的に拒否する
+    let p = global_only(
+        vec![g(
+            "T",
+            Ty::Tuple(vec![Ty::Int, Ty::Tuple(vec![Ty::Str])]),
+            false,
+            GlobalInit::Int(0),
+        )],
+        vec![],
+    );
+    assert!(has_err(&p, BAD_TY), "{:?}", errs(&p));
+    let bad_struct = TypeDef {
+        name: "Bad".into(),
+        kind: TypeKind::Struct {
+            fields: vec![("x".into(), Ty::Int), ("s".into(), Ty::Str)],
+        },
+    };
+    let p = global_only(
+        vec![g("B", Ty::Adt(pt), false, GlobalInit::Int(0))],
+        vec![bad_struct],
+    );
+    assert!(has_err(&p, BAD_TY), "{:?}", errs(&p));
+}

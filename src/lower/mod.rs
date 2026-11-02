@@ -302,6 +302,7 @@ impl<'a> L<'a> {
             types: std::mem::take(&mut self.types),
             strings: std::mem::take(&mut self.strings),
             stop_sites: std::mem::take(&mut self.stops),
+            globals: vec![],
             entry: fid,
             core_only: self.core_only,
             exit_line: decl.span.line,

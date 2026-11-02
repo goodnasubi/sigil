@@ -14,7 +14,7 @@
 mod func;
 
 use crate::exec::StopKind;
-use crate::ir::{Func, Program, Ty, TypeKind};
+use crate::ir::{Func, GlobalInit, Program, Ty, TypeKind};
 use cranelift_codegen::ir::{types, AbiParam, Function, Signature, UserFuncName};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -148,6 +148,8 @@ pub(crate) struct Cg<'p> {
     pub trace: bool,
     pub fids: Vec<FuncId>,
     pub msg_table: DataId,
+    /// 大域ごとの静的データ（8 バイトの語。`Program.globals` と同じ添字）。
+    pub gids: Vec<DataId>,
 }
 
 impl<'p> Cg<'p> {
@@ -457,6 +459,25 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         );
     }
     let msg_table = m.declare_anonymous_data(false, false).map_err(internal)?;
+    // 大域: 語 1 つの静的データ。スカラーは初期値をそのまま置き、組・構造体は起動時に作る塊への番地を
+    // 入れる場所（0 で始める。入口の thunk が初期化する）。単一スレッド前提（ADR 0025 補足 A-5）。
+    let mut gids = Vec::with_capacity(p.globals.len());
+    for g in &p.globals {
+        let agg = matches!(g.init, GlobalInit::Tuple(_) | GlobalInit::Struct(_));
+        let id = m
+            .declare_anonymous_data(g.mutable || agg, false)
+            .map_err(internal)?;
+        let word: i64 = match &g.init {
+            GlobalInit::Int(n) => *n,
+            GlobalInit::Bool(b) => *b as i64,
+            GlobalInit::AddrNull | GlobalInit::Tuple(_) | GlobalInit::Struct(_) => 0,
+        };
+        let mut dd = DataDescription::new();
+        dd.define(word.to_le_bytes().to_vec().into_boxed_slice());
+        dd.set_align(8);
+        m.define_data(id, &dd).map_err(internal)?;
+        gids.push(id);
+    }
     let mut cg = Cg {
         p,
         m,
@@ -471,6 +492,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         trace: opts.trace_drops,
         fids,
         msg_table,
+        gids,
     };
 
     for (i, f) in p.funcs.iter().enumerate() {

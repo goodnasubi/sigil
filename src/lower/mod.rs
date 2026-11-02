@@ -167,6 +167,11 @@ struct L<'a> {
     queue: Vec<Job<'a>>,
     checks: HashMap<String, usize>,
     core_only: bool,
+    /// 大域の宣言（`GlobalId` の順。宣言の順）と名前 -> `GlobalId`。
+    global_decls: Vec<&'a a::GlobalDecl>,
+    global_ids: HashMap<&'a str, usize>,
+    /// 型変換済みの大域の表（`run` で作る）。
+    globals: Vec<ir::Global>,
     fb: Fb,
 }
 
@@ -224,6 +229,9 @@ impl<'a> L<'a> {
             queue: vec![],
             checks: HashMap::new(),
             core_only: true,
+            global_decls: vec![],
+            global_ids: HashMap::new(),
+            globals: vec![],
             fb: Fb::new("", ir::Ty::Unit, HashMap::new(), 0),
         };
         for it in &t.file.items {
@@ -267,7 +275,10 @@ impl<'a> L<'a> {
                     }
                 }
                 a::Item::Trait(_) => {}
-                a::Item::Global(_) => {}
+                a::Item::Global(g) => {
+                    l.global_ids.insert(g.name.as_str(), l.global_decls.len());
+                    l.global_decls.push(g);
+                }
                 a::Item::Properties(_) => {}
             }
         }
@@ -285,6 +296,7 @@ impl<'a> L<'a> {
         self.adt("Option", vec![ir::Ty::Unit])?;
         self.adt("Result", vec![ir::Ty::Unit, ir::Ty::Unit])?;
         self.adt("IoError", vec![])?;
+        self.lower_globals()?;
         let s0 = self.stop(StopKind::StackExhausted, entry, decl.span.line, None, "");
         debug_assert_eq!(s0, 0);
         let fid = self.instance(decl, HashMap::new(), vec![]);
@@ -302,11 +314,89 @@ impl<'a> L<'a> {
             types: std::mem::take(&mut self.types),
             strings: std::mem::take(&mut self.strings),
             stop_sites: std::mem::take(&mut self.stops),
-            globals: vec![],
+            globals: std::mem::take(&mut self.globals),
             entry: fid,
             core_only: self.core_only,
             exit_line: decl.span.line,
         })
+    }
+
+    // --- 大域（ADR 0025 補足 A-1） ---
+
+    /// 大域の宣言を `Program.globals` の表にする。型は `Copyable` で初期値は定数（検査が保証する）。
+    fn lower_globals(&mut self) -> R<()> {
+        let decls = self.global_decls.clone();
+        for d in decls {
+            let ty = self.conv_ast(&d.ty, &HashMap::new())?;
+            let init = self.global_init(&d.init, &ty)?;
+            self.globals.push(ir::Global {
+                name: d.name.clone(),
+                ty,
+                mutable: d.is_mut,
+                init,
+            });
+        }
+        Ok(())
+    }
+
+    fn global_init(&self, e: &a::Expr, ty: &ir::Ty) -> R<ir::GlobalInit> {
+        match e {
+            a::Expr::Paren(x) => self.global_init(x, ty),
+            a::Expr::Int(s) => Ok(ir::GlobalInit::Int(int_lit(s)?)),
+            a::Expr::Unary {
+                op: a::UnOp::Neg,
+                expr,
+            } => match &**expr {
+                a::Expr::Int(s) => Ok(ir::GlobalInit::Int(int_lit(&format!("-{s}"))?)),
+                _ => bail("大域の初期値が定数でない"),
+            },
+            a::Expr::Bool(b) => Ok(ir::GlobalInit::Bool(*b)),
+            a::Expr::Call { .. } => Ok(ir::GlobalInit::AddrNull),
+            a::Expr::Tuple(xs) => {
+                let ir::Ty::Tuple(ts) = ty else {
+                    return bail("大域の組の型が合わない");
+                };
+                Ok(ir::GlobalInit::Tuple(
+                    xs.iter()
+                        .zip(ts)
+                        .map(|(x, t)| self.global_init(x, t))
+                        .collect::<R<Vec<_>>>()?,
+                ))
+            }
+            a::Expr::StructLit { fields, .. } => {
+                let ir::Ty::Adt(tid) = ty else {
+                    return bail("大域の構造体の型が合わない");
+                };
+                let ir::TypeKind::Struct { fields: defs } = &self.types[*tid].kind else {
+                    return bail("大域の構造体の型が合わない");
+                };
+                let mut out = vec![];
+                for (n, t) in defs {
+                    let Some((_, x)) = fields.iter().find(|(fnm, _)| fnm == n) else {
+                        return bail(format!("大域の初期値にフィールド {n} がない"));
+                    };
+                    out.push(self.global_init(x, t)?);
+                }
+                Ok(ir::GlobalInit::Struct(out))
+            }
+            _ => bail("大域の初期値が定数でない"),
+        }
+    }
+
+    /// 名前が大域なら、`GlobalRef` を一時に入れて、その指す先（`Deref`）の場所と型を返す。
+    /// 参照の型は不変の大域なら `Ref<T>`、`global mut` なら `MutRef<T>`。
+    fn global_place(&mut self, n: &str) -> Option<(Place, ir::Ty)> {
+        let &g = self.global_ids.get(n)?;
+        let gl = &self.globals[g];
+        let ty = gl.ty.clone();
+        let rty = if gl.mutable {
+            ir::Ty::MutRef(Box::new(ty.clone()))
+        } else {
+            ir::Ty::Ref(Box::new(ty.clone()))
+        };
+        let t = self.tmp(rty);
+        self.assign(Place::local(t), Rvalue::GlobalRef(g));
+        Some((Place::local(t).deref(), ty))
     }
 
     // --- 表 ---

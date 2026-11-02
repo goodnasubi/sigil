@@ -263,8 +263,11 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (v, _) = self.val(op);
                 self.ld(v, 0)
             }
-            // 大域の出力は PR 3-4g（lowering が GlobalRef を出すまで来ない）。
-            Rvalue::GlobalRef(_) => self.unsupported("大域の参照はまだ対応していない（PR 3-4g）"),
+            // 大域の静的データの番地（参照は指す先の語の番地）。
+            Rvalue::GlobalRef(g) => {
+                let d = self.cg.gids[*g];
+                self.data_addr(d)
+            }
             Rvalue::MakeClosure(f, ops) => {
                 let p = self.cg.p;
                 let func = &p.funcs[*f];

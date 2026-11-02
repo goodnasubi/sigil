@@ -271,3 +271,69 @@ fn closure_reads_global_without_capturing_it() {
     ));
     assert_eq!(both(&src, "main"), "1122");
 }
+
+// ---- 終了時の解放 ----
+
+/// `trust base` を許可してネイティブの実行ファイルを作って走らせる。
+fn run_native(src: &str, trace_drops: bool, env: &[(&str, &str)]) -> common::native::Ran {
+    let dir = common::native::scratch("gexit");
+    let exe = dir.join("prog");
+    let o = sigil::codegen::Opts {
+        trace_drops,
+        trust_base: MODS.iter().map(|s| s.to_string()).collect(),
+    };
+    sigil::native::build(&[src], "main", &o, &exe).unwrap_or_else(|e| panic!("{e}"));
+    let got = common::native::exec_env(&exe, &[], env);
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+/// 構造体・組の大域を上書きして終わるプログラム。上書きで古い値が、終了時に最後の値が解放される。
+fn overwrite_src() -> String {
+    module(&format!(
+        "struct Pt {{\n  x: Int,\n  y: Int,\n}}\n\nglobal mut P: Pt = Pt {{ x: 1, y: 2 }}\nglobal mut T: (Int, Pt) = (3, Pt {{ x: 4, y: 5 }})\n\n{}",
+        fn_def(
+            "main",
+            "Int",
+            "  P = Pt { x: 10, y: 20 };\n  T = (6, Pt { x: 7, y: 8 });\n  P = Pt { x: 30, y: 40 };\n  return 0;"
+        )
+    ))
+}
+
+#[test]
+fn overwritten_globals_drop_order_matches_evaluator() {
+    let src = overwrite_src();
+    lower(&src, "main");
+    let opts = Options {
+        trust_base: MODS.iter().map(|s| s.to_string()).collect(),
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let r = sigil::ir_eval::run_sources_with(&[&src], "main", &[], &opts);
+    common::native::check(&[&src], "main", &[], &opts, &r);
+    let ran = run_native(&src, true, &[]);
+    let drops: Vec<&str> = ran
+        .stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("drop: "))
+        .collect();
+    assert_eq!(ran.code, Some(0), "{}", ran.stderr);
+    // 上書きの 2 回に加えて、終了時に P の最後の値が落ちる（T の組の中の Pt も）。
+    assert!(drops.len() >= 3, "終了時の解放が記録されない: {drops:?}");
+}
+
+#[test]
+fn globals_leave_no_live_blocks_at_exit() {
+    let src = overwrite_src();
+    let got = run_native(&src, false, &[("SIGIL_RT_LIVE", "1")]);
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+    let line = got
+        .stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("live: "))
+        .unwrap_or_else(|| panic!("live の行がない: {}", got.stderr));
+    assert!(
+        line.contains("strs=0") && line.contains("blocks=0"),
+        "大域の塊が残っている: {line}"
+    );
+}

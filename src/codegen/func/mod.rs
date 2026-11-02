@@ -365,6 +365,10 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     /// 終了時に組・構造体の大域の塊を解放する。
+    ///
+    /// 既知の差: 正常終了（`showb`）でだけ呼ぶ。異常停止（終了コード 70）ではこの解放をしない
+    /// （評価器は異常停止でも大域を破棄する）。プロセスはすぐ終わるので害はないが、
+    /// 停止時の `SIGIL_RT_LIVE` や `--trace-drops` の記録は評価器と一致しない。
     fn drop_globals(&mut self) {
         let p = self.cg.p;
         for (g, gl) in p.globals.iter().enumerate() {

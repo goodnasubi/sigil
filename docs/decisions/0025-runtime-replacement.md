@@ -408,7 +408,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 |---|---|---|
 | 3-5a | `Float.to_bits`/`from_bits`（要承認）。`memmove`・`memset` の生成、`fmod` の Sigil 版（C-3） | 補足 C |
 | 3-5b | `String`（`str_*`。`len` は Unicode のスカラー値の数）（補足 D で置換: 3-5b-i・3-5b-ii に分割。D-6） | 3-5a・3-7a |
-| 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`） | 3-5b・3-7a（D-6 で置換） |
+| 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`）（補足 E で置換: 3-5c-i・3-5c-ii・3-5c-iii に分割。`list_best` は Sigil へ移さず codegen のループにする。E-3・E-6） | 3-5b・3-7a（D-6 で置換） |
 | 3-5d | `Bytes`・`int_rot*` | 3-5b・3-7a（D-6 で置換） |
 | 3-5e | 型の記述子の処理の生成（C-1）・`Shared`/`Cell`・`--trace-drops`。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5） | 3-5c・3-5d・3-7a・3-7b（D-6 で置換） |
 | 3-5f | 表示（`val_show`・`print_result`・`Float` の最短表現）（D-6 で置換: `show_*` を加える） | 3-5e |
@@ -522,9 +522,9 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 | 補足 D | 本補足（docs のみ） | 補足 C |
 | 3-5b-i | 表現の切り替え: `std.core.string` の `new`・`new_lossy`・`valid_utf8`・`free`・`clone`・`data`・`bytes`、codegen のシムと `sigil_rt_set_str_ops` の登録、Rust ランタイムの `RtStr` の不透明化と消費者の関数表への付け替え（`s(p)` の UTF-8 検査）、`LIVE_STRS` の停止と `m5_free_strings` などの期待の前倒し（D-5）、試験用の関数表（D-7）。言語の振る舞いは変えない。完了基準に D-5 の 2 つの手当て（`sigil_blocks=` の完全一致の比較が働くことの確認、評価器の塊の表による試験）を含める（**要承認**: 埋め込みの `std.*` に `unchecked` の関数を足す（S2）、`sigil spec --std` の出力が増える、`SIGIL_RT_LIVE` の `strs=` の意味が変わる） | 補足 D・3-5a・3-7a |
 | 3-5b-ii | 操作の移し替え: `len`（スカラー値の数）・`is_empty`・`trim`・`concat`（`+`）・`parse_int` を Sigil へ。`eq`・`cmp` を足す（使うのは 3-5e）。`rt_spec` から `str_len`・`str_is_empty`・`str_trim`・`str_concat`・`str_parse_int` を消す。下書きの `core_sigil.rs` の `String` の部分とその構文試験を消す（C-1）（**要承認**: S2） | 3-5b-i |
-| 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`）に加えて `str_lines`（`List<String>` を返すので `List` と一緒に移す。**仮置き: D-8 の 6**） | 3-5b-i・3-7a |
-| 3-5d | `Bytes`・`int_rot*`。`str_as_bytes`・`bytes_to_string_utf8`（`valid_utf8` を使う）も移す | 3-5b-i・3-7a |
-| 3-5e | 型の記述子の処理の生成（C-1。`val_eq`・`val_cmp`・`val_clone`・`val_drop` の文字列の腕は `std.core.string` の `eq`・`cmp`・`clone`・`free` を呼ぶ）・`Shared`/`Cell`・`--trace-drops`（`trace_drop` を含む）。Rust の `sigil_rt_str_cmp` を消す。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5。試験の期待の改めは 3-5b-i に前倒し済み） | 3-5b-ii・3-5c・3-5d・3-7a・3-7b |
+| 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`）に加えて `str_lines`（`List<String>` を返すので `List` と一緒に移す。D-8 の 6 は補足 E で案 A に確定）（補足 E で置換: 3-5c-i・3-5c-ii・3-5c-iii に分割。E-6） | 3-5b-i・3-7a |
+| 3-5d | `Bytes`・`int_rot*`。`str_as_bytes`・`bytes_to_string_utf8`（`valid_utf8` を使う）も移す | 3-5b-i・3-7a・3-5c-ii（補足 E-6 で追加: `bytes_from_list` が `std.core.list` を読む） |
+| 3-5e | 型の記述子の処理の生成（C-1。`val_eq`・`val_cmp`・`val_clone`・`val_drop` の文字列の腕は `std.core.string` の `eq`・`cmp`・`clone`・`free` を呼ぶ）・`Shared`/`Cell`・`--trace-drops`（`trace_drop` を含む）。Rust の `sigil_rt_str_cmp` を消す。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5。試験の期待の改めは 3-5b-i に前倒し済み） | 3-5b-ii・3-5c（補足 E-6 で置換: 3-5c-iii）・3-5d・3-7a・3-7b |
 | 3-5f | 表示（`val_show`・`show_*`・`print_result`・`Float` の最短表現） | 3-5e |
 | 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析。不正な UTF-8 は `new_lossy`）と停止の報告（`stop`/`report`） | 3-5f |
 | 3-6a | `console.log`（C-7 のとおり） | 3-5b-i・3-7a |
@@ -554,7 +554,117 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 3. **`strs=` の扱い**（D-5）: 3-5b-i で数えるのをやめて常に 0 とし、書式は 3-5e まで変えない（**推奨**。C-5 の時期を守る）／3-5b-i で `strs=` を外す（C-5 の一部を前倒し。完全一致の期待を持つ試験を 2 度直すことになる）。
 4. **頭と中身の持ち方**（D-2）: 頭（24B）と中身の 2 つの塊（**推奨**。本文の決定 4 の `{ptr, len, cap}` のまま）／`{len, cap, バイト列…}` の 1 つの塊（確保は 1 回で済むが、決定 4 の改訂が要る）。
 5. **不正な UTF-8 の扱い**（D-2）: シムと関数表の `new` は `new_lossy`（今の `from_utf8_lossy` と同じ）とし、検証なしの `new` は `std.core.string` の内部と正しさを確かめた `std.*` だけが `unchecked` で呼ぶ（**推奨**。どの経路から作っても不変条件が成り立つ）／シムも検証なしの `new` とし、呼び出し元が正しい UTF-8 だけを渡すことを一覧で確かめる（検証の手間は省けるが、外から来たバイト列の経路を 1 つ見落とすと不変条件が崩れ、Rust の `s(p)` の検査で止まる）。
-6. **`str_lines` の時期**（D-6）: `List` と一緒に 3-5c で移す（**推奨**）／3-5b-ii で移す。後者では `List` がまだ Rust の `RtList` なので、Sigil の `lines` が結果の一覧を作るために、`list_new`・`list_push` を呼ぶ 2 つ目の関数表（Rust の一覧を Sigil から作るためだけの一時的な橋）が要り、3-5c でその橋を捨てることになる。
+6. **`str_lines` の時期**（D-6）（**確定: 案 A**。所有者の判断で、`List` ごと Sigil へ移す案に決めた。分割と細目は補足 E。`str_lines` は 3-5c-iii で移す）: `List` と一緒に 3-5c で移す（**推奨**。案 A）／3-5b-ii で移す。後者では `List` がまだ Rust の `RtList` なので、Sigil の `lines` が結果の一覧を作るために、`list_new`・`list_push` を呼ぶ 2 つ目の関数表（Rust の一覧を Sigil から作るためだけの一時的な橋）が要り、3-5c でその橋を捨てることになる。
+
+### 補足 E（PR 3-5c の前）: `List` の Sigil 側への橋渡しと 3-5c の分割
+
+- **日付**: 2026-11-02
+- **状態**: 提案。D-8 の 6（`str_lines` の時期）は、所有者の判断で案 A（`List` ごと Sigil へ移し、`str_lines` はその後に移す。2 つ目の一時的な橋を作らない）に確定した。本補足の中の選択は E-9 に推奨案つきで並べ、本文はその推奨案で書いた。本文・補足 A〜D と食い違う箇所は、本補足が置き換える。
+- 3-5c の実装の着手時（main `96687f5`。3-5a・3-7a・3-5b-i（#240）・3-5b-ii（#242）は合流済み、3-7b は未合流）に、`List` が Rust の `RtList` のままで、作る側（codegen）と読む側（Rust の消費者）を同時に替える量が 1 つの PR としては大きく、設計の判断も要るので止まった。D の (b2)（Sigil が頭を持ち、codegen は語の読み替えとシム、Rust は関数表）を `List` に当てはめ、分割を決める。
+
+#### E-0. 現状の確認（main `96687f5`）
+
+- **Rust の表現**（`runtime/core/src/lib.rs`）: `RtList { elem, len, cap, buf }` を `Box` で持ち、`buf` は `sigil_rt_alloc(cap * elem, 16)`（Rust の確保器）で取る。増やし方は 0→4→2 倍。`sigil_rt_list_new(elem_size)`・`_push(l, elem)`（`elem` の指す `elem_size` バイトを末尾へ複写）・`_get(l, i)`（範囲外は null、`elem == 0` なら 16 を返す）・`_len`・`_free`（入れ物だけ。null は何もしない）・`_free_strs`（要素を文字列の関数表の `free` で捨ててから `_free`）。
+- **要素の大きさは常に 8B**: codegen が `list_new` に渡すのは `ListNew`・`ListMap` の 2 か所とも定数 8（`src/codegen/func/call.rs`）。`ListPush` も 8B の一時領域に語を置いて番地を渡す。Rust の消費者（`runtime/core/src/val.rs` の `list_items`・`dup`・`coerce`）も、要素を語（`i64`）として読む・`list_new(8)` で作る。`elem == 0` の経路は使われていない。
+- **Rust の消費者**（`RtList` を作る・読む・捨てる）: `val_show`・`eq`・`cmp`・`dup`（`val_shadow`・`val_clone`）・`val_drop`（要素を記述子で積んでから `sigil_rt_list_free`）・入口の引数の `coerce`（`List` の引数）・`list_sum_int`・`list_sum_float`・`list_best`（`val.rs`）・`str_lines`・`bytes_from_list`（`(*l).len`・`(*l).buf` を直接読む）（`lib.rs`）。`runtime/os` は `RtList` を使わない。
+- **生成コードの呼び出し**（`rt_spec` の `list_new`・`list_push`・`list_get`・`list_len`・`list_sum_int`・`list_sum_float`（戻り `f`）・`list_best`（引数 `ppi`）・`str_lines`）。`list_free`・`list_free_strs` は生成コードから呼ばれない（`List` の破棄は `val_drop` が記述子で行う）。`list_free_strs` を呼ぶのは Rust の単体試験（`lines_list_and_shared`）だけである。
+- **生存数**: `RtList` の頭と `buf` は、`blocks=`（`LIVE_BLOCKS`。`blk_new`・`Bytes` だけを数える）にも `sigil_blocks=` にも数えられていない。**今の `List` の漏れは、どの試験でも見つからない**。
+- **評価器**: `List` は `Val::Agg`（`Tag::List`）で、`src/ir_eval/call.rs` の組み込みが扱う。`std.*` の関数は呼ばない（C-7 の最後の項）。
+- **埋め込みの `std.*` どうしの `use`**: `use` に別名はない（`src/ast.rs` の `UseDecl` は `path` だけ）。同じ名前の関数を 2 つのモジュールから取り込むと衝突する（`std.core.string.new` と、`List` の側に `new` を置いた場合）。
+- 下書き `src/stdlib/core_sigil.rs` には `LIST_SIGIL`（構造体 `List<T>`）と `MAP_SIGIL` が残り、`tests/core_sigil_test.rs` が構文だけを試験している。
+
+#### E-1. 表現（D-2 に対応）
+
+- `List<T>` の語は、24B の頭の塊の番地とする。頭は `buf: Addr`（+0）・`len: Int`（+8、要素の数）・`cap: Int`（+16、`buf` の塊に入る要素の数）。頭は `raw.alloc(24, 8)`、要素の領域は `raw.alloc(cap * 8, 8)` で確保する（`String` の頭と同じ 3 欄の配置。D-2）。
+- **要素は 8B の語に固定する**（**E-9 の 1**）。E-0 のとおり、要素の大きさは今も常に 8 である。頭に `elem` を持たない。作る関数は引数 `elem` を受け取り（呼び出しの形を変えないため）、8 でなければ停止する（終了コード 70）。
+- 要素の領域の境界は 8 とする（**E-9 の 2**）。今の 16 は要素の大きさに由来しない（要素は語）。確保器の小さい塊は 16 の倍数の大きさのクラスから取るので、実際の番地は今と同じく 16 の境界になることが多いが、それには頼らない。
+- 空の一覧は `buf` = 空番地・`len` = `cap` = 0 とし、要素の領域を確保しない（`raw.alloc` は `size > 0` を要する）。最初の追加で `cap` = 4、満ちたら 2 倍にする（今と同じ）。新しい領域へ `len * 8` バイトを `raw.copy` で写し、古い領域を `raw.free(buf, cap * 8, 8)` で返す。`cap` は確保器の上限（2^46。A-4）の 1/8 未満なので、`cap * 2 * 8` は `Int` であふれず、上限を超える確保は確保器が停止する。
+- 不変条件: `0 <= len <= cap`、`cap > 0` なら `buf` は `raw.alloc(cap * 8, 8)` の塊の先頭、`cap == 0` なら `buf` は空番地。
+- `get(l, i)` は、`0 <= i < len` なら `buf + 8 * i`、それ以外は空番地を返す（今と同じ。生成コードは空番地で `None` を作る）。返した番地が次の `push`（領域の取り直し）で無効になりうるのは今の Rust 版と同じで、表現の変更で新しい危険は増えない。
+- **破棄**: `free(l)` は入れ物だけを捨てる（空番地は何もしない。`cap > 0` なら `raw.free(buf, cap * 8, 8)`、続いて `raw.free(l, 24, 8)`）。要素は呼び出し側が先に捨てる（今の `sigil_rt_list_free` と同じ取り決め）。
+- **要素が `String` のときの解放（`list_free_strs` 相当）**: `std.core.list` は要素の型を知らないので、`free_strs` のような型別の関数は置かない。要素の破棄は型ごとに次の主体が行う。
+  - 3-5e より前: Rust の `val_drop` が、記述子の `K_LIST` の腕で、関数表の `len`・`get` で要素を読み、要素の記述子で積んでから（`String` なら文字列の関数表の `free`）、関数表の `free` で入れ物を捨てる（今の手順のまま、呼ぶ先だけを替える）。
+  - 3-5e から: codegen が型ごとに生成する破棄の関数（C-1）が、要素の型の破棄（`List<String>` なら `std.core.string.free`）を各要素に呼んでから `std.core.list.free` を呼ぶ。
+  - `sigil_rt_list_free_strs` は Rust の単体試験からしか呼ばれないので、3-5c-ii で消す（試験は要素を 1 つずつ捨ててから `free` を呼ぶ形に直す）。
+
+#### E-2. Sigil 側のモジュール
+
+- 埋め込みのモジュール `std.core.list`（`src/stdlib/core_list.sigil`、`targets bare, browser, server`、`trust base`）に、`Addr`・`Int` だけを受け渡す関数を置く。頭や要素の領域を読み書きする関数は `unchecked` で、前提の文に「`l` は `std.core.list` が返し、まだ解放していない頭（したがって E-1 の不変条件）」「`e` は 8 バイト読める」などを書く。
+  - 3-5c-ii: `create(elem: Int) -> Addr`・`free(l: Addr)`・`push(l: Addr, e: Addr)`（`e` の指す語を末尾へ写す）・`get(l: Addr, i: Int) -> Addr`・`len(l: Addr) -> Int`。
+  - 3-5c-iii: `sum_int(l: Addr, out: Addr) -> Int`・`sum_float(l: Addr) -> Float`。
+- **関数の名前**: 作る関数は `new` ではなく `create` とする（**E-9 の 5**）。`lines` が `std.core.string.new` と一覧の作る関数を同じモジュールへ取り込むので、`use` に別名がない今の言語では名前が衝突する（E-0）。ほかの名前（`free`・`len`）は `lines` が取り込まないので衝突しない。
+- `lines` は `std.core.string` に置き、`use std.core.list.create;`・`use std.core.list.push;` で一覧を作る（文字列の配置を知るのは `std.core.string` だけ、一覧の配置を知るのは `std.core.list` だけ、を保つ）。`std.core.list` は `std.core.string` を使わないので、取り込みは一方向で循環しない。
+- 結び方は D-3 と同じ: すべてのプログラムに暗黙に結ぶ（`implicit_roots` に `std.core.list` を足す）。lowering は入口から辿れなくても SIR に入れる。評価器でも結ぶが、評価器の `List` の組み込みは Rust のまま（C-7 の最後の項）で、これらの関数は呼ばない。試験用の差し込み（`Options::raw_ops`）で `raw.alloc`/`raw.free` を置き換えたときは結ばず、ネイティブ出力を求めたら codegen は `CgError::Internal` で止める（D-3 と同じ）。
+- 利用者からは呼べない（D-2 の最後の項と同じ。`use std.*` は拒否される）。
+
+#### E-3. codegen と評価器の付け替え（D-3 に対応）
+
+- **シム**: `sigil_rt_list_new`（`create` を呼ぶ）・`_free`・`_push`・`_get`・`_len` を、Sigil の関数を呼ぶ C の呼び出し規約のシムとして生成コードの中で定義し（`Linkage::Local`。D-3 と同じ）、`rt` に登録する。名前を `rt_spec` から `shim_spec` へ移す。形は変えない（`list_new`・`list_len` は `("p", 'p')`、`list_get` は `("pp", 'p')`、`list_push` は `("pp", 'v')`、`list_free` は `("p", 'v')`）。生成コードの呼び出し箇所（`self.rt("list_new", ..)` など）は変えない。
+  - シムは、Sigil の関数の戻りの状態が 0 でなければ異常停止する（D-3 と同じ。`create` の `elem != 8` もここで止まる）。
+- **関数表**: Rust ランタイムは `sigil_rt_set_list_ops(new, free, push, get, len)`（`rt_spec` は `("ppppp", 'v')`）で番地を受け取る。生成コードの `main` は、`sigil_rt_set_str_ops` の直後、入口を呼ぶ前に登録する（入口の引数の `List` を `coerce` が作るので、`enter` より前でなければならない）。未登録で一覧に触れたら Rust ランタイムは異常停止する（D-3 と同じ。Rust の `Vec` に黙って戻らない）。3-7b（未合流）は、文字列の表と同じく起動の処理で登録する（D-3 の最後の項。後から合流する方が持っていく）。
+- **Rust ランタイム**: `RtList` を中身の分からない型（`#[repr(C)] struct RtList { _p: [u8; 0] }`）にし、`sigil_rt_list_new`・`_free`・`_free_strs`・`_push`・`_get`・`_len` の Rust の定義を消す。E-0 の消費者は、関数表の `len`・`get`（読む）・`create`・`push`（作る）・`free`（捨てる）を呼ぶ形に機械的に替える。`bytes_from_list` の `(*l).buf` の直接の読みは、3-5c-i で `len`・`get` を使う形に先に替える（E-6）。
+  - Rust の側の `str_lines`（3-5c-iii で消すまで）は、関数表で一覧を作り、文字列の関数表で要素を作る（2 つの表を通すだけで、一時的な橋は要らない。D-8 の 6 の案 A）。
+- **`list_sum_int`**（3-5c-iii）: シム `("pp", 'i')` で `std.core.list.sum_int` を呼ぶ。あふれは Sigil の `+` の停止（シムの異常停止になり、停止の報告の位置と種類が変わる）にせず、足す前に `x > 0 && acc > MAX - x`・`x < 0 && acc < MIN - x` を比べて 1 を返す。生成コードは今のとおり戻りが 0 でなければ呼び出し元の位置の `Overflow` の停止にする（`call.rs` の `ListSumInt` は変えない）。
+- **`list_sum_float`**（3-5c-iii）: 先頭の要素から順に足す（空は 0.0。最初の要素を初期値にするので、`[-0.0]` の和は `-0.0` のまま。評価器の `ListSumFloat` と同じ）。要素の語は `raw.load_i64` で読み `Float.from_bits`（3-5a）で読み替える。シムの戻りは `Float` のビット列の語とし、`shim_spec` の形を `("p", 'p')` にする（**E-9 の 6**。`rt` は `f` の戻りを語に読み替えているだけなので、呼び出し側の値は同じ。`shim_sig` に浮動小数の戻りを足さない）。
+- **`list_best`**（3-5c-i）: Sigil へは移さない。要素の比較は記述子が要り（C-1 の `val_cmp` は 3-5e まで Rust）、`std.core.list` は記述子を読めないため。codegen が `ListMin`/`ListMax` の腕で、`list_len`・`list_get` と `rt("val_cmp", ..)` を使うループを生成する（今の `ListMaxBy`/`ListMinBy` と同じ形。**E-9 の 3**）。規則は今と同じ: 最初の要素を仮の最良とし、`val_cmp` が `Less`（`min`）/`Greater`（`max`）を返したときだけ取り替える（同順位は先のもの、比べられない相手（戻り 2）は取らない）。`rt_spec` から `list_best` を消し、Rust の `sigil_rt_list_best` を消す。3-5e で `val_cmp` が型ごとの生成になれば、このループもそれを呼ぶ。
+- **`str_lines`**（3-5c-iii）: `std.core.string.lines(s: Addr) -> Addr` を足し、シム `("p", 'p')` を `shim_spec` へ。規則は `src/shared/text.rs` の `lines` と同じ（`\n` で分け、最後の空の行を落とし、行末の `\r` を 1 つ外す）。各行は `new`（検証なし。正しい UTF-8 を ASCII の `\n`・`\r` の位置で切った部分は正しい UTF-8。D-2 の検証なしの `new` を呼ぶ条件に当たる）で作り、`create(8)`・`push` で積む。Rust の `sigil_rt_str_lines` を消す。
+- **評価器**: 組み込み（`src/ir_eval/call.rs` の `List*`・`StrLines`）は変えない（C-7 の最後の項）。評価器で変えるのは `implicit_roots` で `std.core.list` を結ぶことだけで、`std.core.list` の関数は試験（E-5）が評価器の上で直接呼ぶ。
+
+#### E-4. 契約変更の有無
+
+- `src/ir.rs`（`Builtin`・`Ty`）・`src/ast.rs`・`RAW_OPS` は変えない。`List` を Sigil の構造体（`Ty::Adt`）にする置き換えは、`String` と同じく P1-R の範囲の外とする（D-1 の最後の項）。順序は「本補足 E（ADR）→ 3-5c-i → 3-5c-ii → 3-5c-iii」。
+- 新しい `use` の別名の構文（E-2 の衝突を避ける別案）は、`src/ast.rs` の契約変更になるので採らない。
+
+#### E-5. 漏れと二重解放の補完策（D-5 に対応）
+
+- 3-5c-ii から、`List` の頭と要素の領域は Sigil 製確保器から確保するので、`sigil_blocks=` が数える（空の一覧は頭の 1 塊、要素を持つ一覧は 2 塊）。E-0 のとおり今は `List` がどの数にも入っていないので、切り替えで初めて `List` の漏れが見えるようになる。切り替えと既存の漏れの発見を混ぜないため、3-5c-i で、Rust の `RtList` の頭を `blocks=`（`LIVE_BLOCKS`）に数える（`sigil_rt_list_new` で 1 増やし、`sigil_rt_list_free` で 1 減らす。**E-9 の 4**）。3-5c-ii では、その数は `sigil_blocks=` へ移る（`blocks=` から `List` の分が消える）。
+  - 3-5c-i で既存の漏れが見つかったら、その PR で原因を直す（codegen・`val_*` の漏れなら同じ PR、レーンが違うなら Issue を立てて 3-5c-i を止める）。見つからなければ PR にその旨を書く。
+- **数の完全一致**（3-5c-i・3-5c-ii・3-5c-iii の完了基準）: 新しい試験ファイル（`tests/list_35c.rs`）に、次の繰り返しを 1000 回と 100000 回で走らせ、`blocks=`（3-5c-i）・`sigil_blocks=`（3-5c-ii 以降）が完全一致することを置く: `List<Int>` の追加（`cap` が 4→8→16 と伸びる数を含む）・`map`・`find`・`min`/`max`・`max_by`・`get`/`get_mut`、`List<String>`・`List<List<String>>`・組の一覧の作成と破棄、`clone`（`val_clone`）、`sum`、`lines`、`Bytes.from_list`。わざと解放を 1 つ抜いた版と 2 回にした版で失敗することを手元で確かめ、PR に結果を書く（D-5 の 1 と同じ）。
+- **評価器の塊の表の試験**（3-5c-ii・3-5c-iii）: `std.core.list` の各関数（と 3-5c-iii の `lines`）を評価器の上で直接呼び（`tests/str_35b.rs` の駆動モジュールと同じ形）、塊の表で次を確かめる: `create` の後は頭だけ、追加で領域が 4・8・16 要素の大きさで取り直され古い領域が返ること、`free` の後に表が空に戻ること、二重の `free`・`free` の後の `get`/`push`・大きさ違いの解放（`cap` を書き換えた頭）で評価器が止まること、`create(0)`・`create(16)` で止まること、`get` の範囲外（−1・`len`）が空番地を返すこと。`lines` は、各行の文字列（頭と中身）と一覧の頭・領域が、要素ごとの `std.core.string.free` と `std.core.list.free` で全部返ることを確かめる。
+- 終了時の数の完全一致を持つ既存の試験（`tests/sigil_alloc_34i.rs` の `strs=0 blocks=0 sigil_blocks=<数>` など）は、終了時に一覧が残らない限り変わらない見込みである。変わる場合（例: 入口が `List` を返し、表示の後に捨てていない）は、実装の PR に理由を書き、`String` を返すときと同じ扱いにそろえる。
+- **見逃すもの**は D-5 と同じ（スラブの塊が再利用されてからの二重解放、`mmap` の塊への誤った書き込み）。頭（24B）は文字列の頭と同じ大きさのクラスから取るので、一覧の頭と文字列の頭を取り違えた解放は、大きさの検査では見つからない。取り違えは型の検査と codegen の生成で防ぎ、上の完全一致の試験で `List<String>` を多く作って確かめる。
+
+#### E-6. 分割（3-5c を 3 つに分ける）
+
+| PR | 範囲 | 依存 | 要承認 |
+|---|---|---|---|
+| 補足 E | 本補足（docs のみ）。C-7・D-6 の 3-5c の行と D-8 の 6 を直す | 補足 D | 不要（ADR） |
+| 3-5c-i | 下準備（表現は変えない）: (1) Rust の `RtList` の頭を `blocks=` に数える（E-5）。(2) `ListMin`/`ListMax` を codegen のループにし、`rt_spec` の `list_best` と Rust の `sigil_rt_list_best` を消す（E-3）。(3) `bytes_from_list` の `(*l).len`・`(*l).buf` の直接の読みを `sigil_rt_list_len`・`_get` に替える。`tests/list_35c.rs` を足す | 補足 E | 不要（`unchecked` を足さず、言語の振る舞いを変えない） |
+| 3-5c-ii | 表現の切り替え: `std.core.list` の `create`・`free`・`push`・`get`・`len`（E-1・E-2）、`implicit_roots` への追加、codegen のシムと `sigil_rt_set_list_ops` の登録、Rust の `RtList` の不透明化と消費者の関数表への付け替え（`str_lines` は Rust のまま関数表で作る）、`sigil_rt_list_*`（`_free_strs` を含む）の Rust の定義の削除、`runtime/core` の試験用の関数表（`#[cfg(test)]`。同じ 24B の頭を Rust の確保で持つ小さな実装）と `tests/runtime_parity.rs` の C のドライバの関数表（E-7）、`blocks=` から `List` の分が `sigil_blocks=` へ移ることに合わせた試験の期待の更新。言語の振る舞いは変えない | 3-5c-i | **要**: 埋め込みの `std.*` に `unchecked` の関数を足す（S2）、`sigil spec --std` の出力が増える |
+| 3-5c-iii | 操作の移し替え: `std.core.list` の `sum_int`・`sum_float`、`std.core.string` の `lines`（E-3）。`rt_spec` から `list_sum_int`・`list_sum_float`・`str_lines` を消し、Rust の `sigil_rt_list_sum_int`・`_sum_float`・`sigil_rt_str_lines` を消す。`tests/runtime_parity.rs` の `lines` の項を外し、`tests/list_35c.rs` の評価器・ネイティブの突き合わせへ移す。下書きの `core_sigil.rs` の `LIST_SIGIL` と `tests/core_sigil_test.rs` のその行を消す（C-1。`MAP_SIGIL` は残す） | 3-5c-ii | **要**: S2 |
+
+- **各 PR の完了条件**（C-7 の共通の基準に加えて）:
+  - 3-5c-i: 既存の全件の突き合わせと `scripts/native-report.sh` が通る。`tests/list_35c.rs` の `blocks=` の完全一致が通り、わざと解放を抜いた版で失敗することを確かめた結果が PR にある。`min`/`max` について、同順位・比べられない値（`Float` の NaN）・1 要素の一覧で評価器とネイティブが一致する試験がある。`rt_spec` から `list_best` が消えている。
+  - 3-5c-ii: 上に加えて、`tests/list_35c.rs` の `sigil_blocks=` の完全一致と、評価器の塊の表の試験（E-5）が通る。`rt_spec` から `list_new`・`list_push`・`list_get`・`list_len` が消え、`runtime/core` に `RtList` の中身を知る Rust のコードが残っていない（`grep` で `(*l).buf` などがない）。`runtime/core` の単体の `cargo test` と `tests/runtime_parity.rs` が、未定義のシンボルなしにリンクして通る。
+  - 3-5c-iii: 上に加えて、`sum_int`（空・1 要素・`i64` の最大と最小のちょうど・1 つ外のあふれ・途中であふれて後で戻る列）・`sum_float`（空・`-0.0`・`inf`・NaN・足す順で結果が変わる列。ビット列で比べる）・`lines`（空・`\n` だけ・末尾の改行あり/なし・`\r\n`・`\r` だけ・連続した空の行・多バイトの文字）を、評価器の上の直接の呼び出しとネイティブで `src/shared/text.rs` の `lines`・評価器の組み込みと突き合わせる。`rt_spec` から 3 つの名前が消えている。
+- **並行と順序**: 3-5c-i・ii・iii は直列にする（ii は i の数え方と `bytes_from_list` の読み替えに、iii は ii の表現に依存する）。3-5c-i は 3-5b-ii・3-5d・3-6a と並行してよい。3-5d は `bytes_from_list` を Sigil へ移すときに `std.core.list` の `len`・`get` を使うので、3-5c-ii の後にする（D-6 の 3-5d の依存を改める）。3-5e は 3-5c-iii の後にする（`val_*` の生成が `std.core.list` を呼ぶ。D-6 の 3-5e の依存の「3-5c」は「3-5c-iii」と読む）。3-7b とはどちらが先に合流してもよい（関数表の登録を後から合流する方が起動の経路へ持っていく。E-3）。
+- 3-5c-ii は、作る側と読む側を一度に替える必要があるので、それ以上には分けない。3-5c-iii は、`sum_*` と `lines` の 2 つに分けてもよい。
+
+#### E-7. 試験の戦略（D-7 に対応）
+
+- **`tests/list_35c.rs`**（新しいファイル）: E-5 の完全一致と塊の表の試験、E-6 の完了条件の突き合わせを置く。駆動は `tests/str_35b.rs` と同じく、埋め込みの追加（`Options::embedded_extra`）で `std.core.t` を足し、評価器（`ir_eval::run_sources_with`）とネイティブ（`native::build_program`）の両方で走らせる。
+- **`runtime/core` の単体の `cargo test`**: 3-5c-ii で、文字列と同じく試験用の一覧の関数表を、試験の始めに一度だけ登録する。`lines_list_and_shared` は、3-5c-ii では関数表の `len`・`get` と要素ごとの `str_free`・表の `free` で書き直し、3-5c-iii で `sigil_rt_str_lines` とともに消す。`val.rs` の `list_sum_int`・`list_best` の試験は、それぞれ消す PR（iii・i）で消す。
+- **`tests/runtime_parity.rs`**: 3-5c-ii で、C のドライバに同じ 24B の頭を `malloc` で持つ一覧の関数表（`create` は `elem != 8` で `abort`）を定義し、`main` の冒頭で `sigil_rt_set_list_ops` に登録する（`lines` の項が Rust の `str_lines` を通るため）。`core_alone_links_without_os` の `d.c` は一覧を使わないので登録しない見込みで、リンクに失敗するなら同じ表を足す。3-5c-iii で `lines` の項を外す（E-6）。
+- 既存の試験ファイルの変更（`runtime_parity.rs`・`core_sigil_test.rs`、期待が変わる場合の `sigil_alloc_34i.rs` など）は、本補足を根拠として該当の PR で行う（AGENTS.md の「既存のテストファイルへの追記」の例外。D-7 の最後の項と同じ）。
+
+#### E-8. 既存の記述との整合
+
+- **C-7 の表の 3-5c の行**: 「3-5c-i・3-5c-ii・3-5c-iii に分割（E-6）」の注を付ける。範囲（`list_*`・`list_sum_*`・`list_best`）は変えないが、`list_best` は Sigil へ移さず codegen のループにする（E-3）。
+- **D-6 の表**: 3-5c の行を E-6 の 3 行で置き換える（注を付ける）。3-5d の依存に 3-5c-ii を足す。3-5e の依存の 3-5c は 3-5c-iii と読む。
+- **D-8 の 6**: 案 A（`List` と一緒に 3-5c で移す）に確定した。D-6 の 3-5c の行の「仮置き: D-8 の 6」の印を外す。`str_lines` は 3-5c-iii で移し、3-5b-ii の案（2 つ目の関数表）は採らない。
+- **D-2 の「検証なしの `new` を呼ぶのは … 3-5c の `lines`」**: E-3 の `lines` がそれに当たる（変更なし）。
+- **D-3 の「試験用の差し込みでは `std.core.string` も結ばない」**: `std.core.list` も同じ扱いにする（E-2）。
+
+#### E-9. 選択肢と推奨（本文はすべて推奨案で書いた）
+
+所有者に確認が要るのは、3-5c-ii・3-5c-iii の S2 のレビュー（`unchecked` の追加）と、`sigil spec --std` の出力の増加の承認だけである。次の 6 つは起草者の推奨案で進め、異論があれば本補足の修正 PR で直す。
+
+1. **要素の大きさ**（E-1）: 8B の語に固定し、`create(elem)` は 8 以外で停止する（**推奨**。今の生成コードと Rust の消費者は 8 しか使わない。呼び出しの形を変えない）／頭に `elem` を持って任意の大きさを許す（使われない一般性のために `unchecked` の前提が増える）／引数 `elem` を消す（codegen の 2 か所と関数表の形を変える。3-5e で整理するときに改めて決める）。
+2. **要素の領域の境界**（E-1）: 8（**推奨**。要素は語）／今の 16 のまま。
+3. **`list_best`**（E-3）: codegen が `val_cmp` を呼ぶループを生成する（**推奨**。`ListMaxBy` と同じ形で、記述子を読むのは Rust の `val_cmp` だけのまま）／Rust のまま関数表で読む（3-5e まで Rust の関数が 1 つ残る）／Sigil へ移す（記述子を読む `unchecked` が要り、C-1 の方針に反する。不採用）。
+4. **3-5c-i の下準備**（E-5）: Rust の `RtList` を先に `blocks=` へ数え、既存の漏れを表現の切り替えと別の PR で見つける（**推奨**）／置かずに 3-5c-ii で初めて数える（切り替えの不具合と既存の漏れの区別が付かない）。
+5. **作る関数の名前と `lines` の置き場所**（E-2）: `std.core.list.create` とし、`lines` は `std.core.string` に置く（**推奨**）／`use` に別名を足す（`src/ast.rs` の契約変更。不採用）／`lines` を `std.core.list` に置く（`std.core.list` が文字列の配置を知る関数を呼び、取り込みも同じ衝突が起きる）。
+6. **`sum_float` のシムの戻り**（E-3）: ビット列の語（`("p", 'p')`。**推奨**）／`shim_sig` と `alloc_shim` に浮動小数の戻りを足す（シムの生成器が増える）。
 
 ---
 

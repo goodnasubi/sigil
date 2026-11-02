@@ -15,9 +15,6 @@ use crate::parser::parse;
 pub struct Spec {
     pub module: SpecItem,
     pub items: Vec<SpecItem>,
-    /// 入口として結ぶと暗黙に結ばれる埋め込みモジュールの仕様（ADR 0025 補足 B-3。`raw.alloc`/`raw.free` を使う
-    /// `server` だけのモジュールなら確保器 `std.os.alloc`）。ないときは空で、出力も変わらない。
-    pub embedded: Vec<Spec>,
 }
 
 /// 仕様の 1 項目（モジュール・型・構造体・列挙型・関数・メソッド）。
@@ -148,30 +145,19 @@ impl Spec {
     pub fn text(&self) -> String {
         let mut blocks = vec![self.module.text()];
         blocks.extend(self.items.iter().map(SpecItem::text));
-        for e in &self.embedded {
-            blocks.push(format!("暗黙に結ぶモジュール: {}\n", e.module.name));
-            blocks.push(e.text());
-        }
         blocks.join("\n")
     }
 
     /// `sigil spec --json` の値。
     pub fn to_json(&self) -> Value {
-        let mut fields = vec![
+        obj(vec![
             ("format", 1i64.into()),
             ("module", self.module.to_json()),
             (
                 "items",
                 Value::Arr(self.items.iter().map(SpecItem::to_json).collect()),
             ),
-        ];
-        if !self.embedded.is_empty() {
-            fields.push((
-                "embedded",
-                Value::Arr(self.embedded.iter().map(Spec::to_json).collect()),
-            ));
-        }
-        obj(fields)
+        ])
     }
 }
 
@@ -193,16 +179,41 @@ pub fn extract(src: &str) -> Result<Spec, Error> {
 /// 検査器の設定（テスト用の原始操作）を指定して仕様の構造を作る。
 pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, Error> {
     let file = parse(src)?;
-    let mut spec = extract_file(&file, opts, false);
-    for name in crate::stdlib::embedded::implicit_roots(&file, opts) {
-        let Some(esrc) = crate::stdlib::embedded::lookup(name, &opts.embedded_extra) else {
-            continue;
-        };
+    Ok(extract_file(&file, opts, false))
+}
+
+/// 埋め込みの `std.*` すべての仕様（`sigil spec --std`。ADR 0025 補足 C-2）。`sigil spec` は利用者のモジュールだけを
+/// 表示し、埋め込みのモジュール（確保器 `std.os.alloc` など）はここで別に表示する。処理系の版が同じなら、どのプログラムでも
+/// 同じ出力になる。登録順（`EMBEDDED`）。
+pub fn std_specs(opts: &crate::effects::Options) -> Result<Vec<Spec>, Error> {
+    let mut out = vec![];
+    for (_, src) in crate::stdlib::embedded::EMBEDDED {
         // 埋め込みモジュールは標準の名前を定義するので、予約名の検査をしない構文解析を使う。
-        let ef = crate::parser::parse_std(esrc)?;
-        spec.embedded.push(extract_file(&ef, opts, true));
+        let file = crate::parser::parse_std(src)?;
+        out.push(extract_file(&file, opts, true));
     }
-    Ok(spec)
+    Ok(out)
+}
+
+/// `sigil spec --std` のテキスト。モジュールごとに `標準モジュール: <名前>` の見出しを付けて並べる。
+pub fn std_text(opts: &crate::effects::Options) -> Result<String, Error> {
+    let mut blocks = vec![];
+    for s in std_specs(opts)? {
+        blocks.push(format!("標準モジュール: {}\n", s.module.name));
+        blocks.push(s.text());
+    }
+    Ok(blocks.join("\n"))
+}
+
+/// `sigil spec --std --json` の値。
+pub fn std_json(opts: &crate::effects::Options) -> Result<Value, Error> {
+    Ok(obj(vec![
+        ("format", 1i64.into()),
+        (
+            "std",
+            Value::Arr(std_specs(opts)?.iter().map(Spec::to_json).collect()),
+        ),
+    ]))
 }
 
 /// `embedded` は埋め込みモジュール（予約名と許可一覧の確認を飛ばす検査で記録を作る。ADR 0025 補足 A-6）。
@@ -344,11 +355,7 @@ fn extract_file(file: &File, opts: &crate::effects::Options, embedded: bool) -> 
             }),
         }
     }
-    Spec {
-        module,
-        items,
-        embedded: vec![],
-    }
+    Spec { module, items }
 }
 
 /// `unchecked` の節を持つ関数（`impl` のメソッドを含む）の数。

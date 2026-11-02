@@ -168,12 +168,13 @@ fn embedded_module_uses_embedded_module_only_via_registry() {
 }
 
 #[test]
-fn no_roots_means_no_embedded_modules() {
+fn no_roots_means_no_extra_embedded_modules() {
+    // 確保器 `std.os.alloc` は常に結ぶ（補足 C-2）ので、試験用の `std.os.a` が入らないことを見る。
     let f = link_sources(&[&user_entry()], &copts(&[])).unwrap();
     assert!(f
         .items
         .iter()
-        .all(|i| !format!("{i:?}").contains("std.os.a")));
+        .all(|i| !format!("{i:?}").contains("std.os.a.")));
 }
 
 // ---- 否定の試験: 利用者の std.* は従来どおり拒否 ----

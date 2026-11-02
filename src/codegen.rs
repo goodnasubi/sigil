@@ -113,8 +113,8 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "int_rotl" | "int_rotr" => ("ppp", 'i'),
         "bytes_set" => ("pppp", 'i'),
         "bytes_slice" => ("ppppp", 'i'),
-        "memmove" | "memset" | "raw_free" | "raw_free_rust" => ("ppp", 'v'),
-        "raw_alloc" | "raw_alloc_rust" => ("pp", 'p'),
+        "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
+        "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "str_is_empty" => ("p", 'i'),
@@ -151,9 +151,6 @@ pub(crate) struct Cg<'p> {
     pub msg_table: DataId,
     /// 大域ごとの静的データ（8 バイトの語。`Program.globals` と同じ添字）。
     pub gids: Vec<DataId>,
-    /// Sigil 製の確保器を結んだか（ADR 0025 補足 B-2）。真なら `raw.alloc`/`raw.free` は同じオブジェクトの
-    /// シム `sigil_rt_raw_alloc`/`sigil_rt_raw_free` を呼び、偽なら Rust 版（`..._rust`）を呼ぶ。
-    pub sigil_alloc: bool,
     /// 生存数のシム `sigil_rt_sigil_live_blocks`（確保器を結んだときだけ。補足 B-5）。
     pub live_shim: Option<FuncId>,
 }
@@ -500,7 +497,6 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fids,
         msg_table,
         gids,
-        sigil_alloc: false,
         live_shim: None,
     };
 
@@ -622,7 +618,6 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     }
     cg.rt.insert("raw_alloc", out[0].0);
     cg.rt.insert("raw_free", out[1].0);
-    cg.sigil_alloc = true;
     cg.live_shim = Some(out[2].0);
     Ok(out)
 }

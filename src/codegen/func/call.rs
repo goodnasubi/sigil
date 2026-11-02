@@ -840,24 +840,20 @@ impl<'a, 'p> Fx<'a, 'p> {
             RawAlloc => {
                 let (size, _) = self.val(&args[0]);
                 let (align, _) = self.val(&args[1]);
-                // 確保器を結んだときは Sigil 製（シム）、でなければ Rust 版（ADR 0025 補足 B-2・B-4）。
-                let f = if self.cg.sigil_alloc {
-                    "raw_alloc"
-                } else {
-                    "raw_alloc_rust"
-                };
-                (self.rt(f, &[size, align]), u)
+                // 常に Sigil 製の確保器のシム（ADR 0025 補足 C-2。Rust の確保器とは混在させない）。
+                if !self.cg.rt.contains_key("raw_alloc") {
+                    return (self.unsupported("確保器 std.os.alloc が結ばれていない"), u);
+                }
+                (self.rt("raw_alloc", &[size, align]), u)
             }
             RawFree => {
                 let (a, _) = self.val(&args[0]);
                 let (size, _) = self.val(&args[1]);
                 let (align, _) = self.val(&args[2]);
-                let f = if self.cg.sigil_alloc {
-                    "raw_free"
-                } else {
-                    "raw_free_rust"
-                };
-                self.rt(f, &[a, size, align]);
+                if !self.cg.rt.contains_key("raw_free") {
+                    return (self.unsupported("確保器 std.os.alloc が結ばれていない"), u);
+                }
+                self.rt("raw_free", &[a, size, align]);
                 (self.ic(0), u)
             }
             RawSyscall => {

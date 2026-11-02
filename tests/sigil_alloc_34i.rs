@@ -7,7 +7,7 @@
 //!   模様で、整列は番地の剰余で確かめる。同じ駆動をネイティブでも走らせて突き合わせる。
 //! - 否定の試験: align の不正・二重解放・不正な class・`munmap` の前の検査（補足 B-1）は `exit_group(70)`。
 //! - 変異の試験: 確保器のソースの検査を 1 つずつ外すと、対応する否定の試験が止まらなくなることを確かめる。
-//! - 結ぶ範囲（補足 B-3・B-4）と `sigil spec` の出力、`SIGIL_RT_LIVE`（補足 B-5）。
+//! - 結ぶ範囲（補足 C-2。常に結ぶ）と `sigil spec`／`sigil spec --std` の出力、`SIGIL_RT_LIVE`（補足 B-5・C-5）。
 mod common;
 
 use common::native::{exec_env, scratch, Ran};
@@ -569,12 +569,14 @@ const USES_ALLOC: &str = "  let p = raw.alloc(8, 8);\n  raw.free(p, 8, 8);\n  re
 const NO_ALLOC: &str = "  return raw.addr_to_int(raw.addr_null()) + 1;";
 
 #[test]
-fn linked_only_for_server_only_entries_using_raw_alloc() {
+fn allocator_is_linked_for_every_entry() {
+    // 補足 C-2: 入口の `targets` や `raw.alloc`/`raw.free` の使用の有無によらず、常に結ぶ。
     assert!(has_alloc_fns(&user_prog("server", USES_ALLOC)));
-    // 入口から辿れない（main は呼ばない）が SIR に入る。
-    assert!(!has_alloc_fns(&user_prog("server", NO_ALLOC)));
-    assert!(!has_alloc_fns(&user_prog("browser, server", USES_ALLOC)));
-    // raw.free だけでも結ぶ。
+    assert!(has_alloc_fns(&user_prog("server", NO_ALLOC)));
+    assert!(has_alloc_fns(&user_prog("browser, server", USES_ALLOC)));
+    assert!(has_alloc_fns(&user_prog("browser", NO_ALLOC)));
+    assert!(has_alloc_fns(&user_prog("bare", USES_ALLOC)));
+    assert!(has_alloc_fns(&user_prog("bare, server", NO_ALLOC)));
     assert!(has_alloc_fns(&user_prog(
         "server",
         "  raw.free(raw.addr_null(), 8, 8);\n  return 1;"
@@ -582,17 +584,21 @@ fn linked_only_for_server_only_entries_using_raw_alloc() {
 }
 
 #[test]
-fn native_live_line_has_sigil_blocks_only_when_linked() {
-    let linked = native_user(&user_prog("server", USES_ALLOC));
-    assert_eq!(linked.code, Some(0), "{}", linked.stderr);
-    assert_eq!(live_line(&linked), "strs=0 blocks=0 sigil_blocks=0");
-    let none = native_user(&user_prog("server", NO_ALLOC));
-    assert_eq!(live_line(&none), "strs=0 blocks=0");
-    // 入口が server だけでなければ Rust の確保器（補足 B-4）。値は同じで、sigil_blocks= は出ない。
-    let rust = native_user(&user_prog("browser, server", USES_ALLOC));
-    assert_eq!(rust.code, Some(0), "{}", rust.stderr);
-    assert_eq!(live_line(&rust), "strs=0 blocks=0");
-    assert_eq!(rust.stdout.trim_end(), "1");
+fn native_live_line_always_has_sigil_blocks() {
+    // 補足 C-2・C-5: すべてのプログラムが確保器を結ぶので、`sigil_blocks=` は常に出る。
+    for (targets, body) in [
+        ("server", USES_ALLOC),
+        ("server", NO_ALLOC),
+        ("browser, server", USES_ALLOC),
+        ("bare", NO_ALLOC),
+    ] {
+        let r = native_user(&user_prog(targets, body));
+        assert_eq!(r.code, Some(0), "{targets}: {}", r.stderr);
+        assert_eq!(live_line(&r), "strs=0 blocks=0 sigil_blocks=0", "{targets}");
+    }
+    // 値は Rust の確保器のときと同じ。
+    let r = native_user(&user_prog("browser, server", USES_ALLOC));
+    assert_eq!(r.stdout.trim_end(), "1");
 }
 
 #[test]
@@ -608,37 +614,68 @@ fn evaluator_keeps_builtin_allocator_with_strict_align_check() {
 }
 
 #[test]
-fn spec_shows_embedded_allocator_only_when_linked() {
-    let out = sigil::spec::spec(&user_prog("server", USES_ALLOC)).unwrap();
+fn spec_hides_embedded_std_and_spec_std_shows_it() {
+    // 補足 C-2: `sigil spec` は利用者のモジュールだけ。埋め込みの `std.*` は `sigil spec --std`。
+    for src in [
+        user_prog("server", USES_ALLOC),
+        user_prog("server", NO_ALLOC),
+        user_prog("browser, server", USES_ALLOC),
+    ] {
+        let out = sigil::spec::spec(&src).unwrap();
+        assert!(!out.contains("暗黙に結ぶ"), "{out}");
+        assert!(!out.contains("std.os.alloc"), "{out}");
+        let j = sigil::spec::extract(&src).unwrap().to_json().to_string();
+        assert!(!j.contains("\"embedded\""), "{j}");
+        assert!(!j.contains("std.os.alloc"), "{j}");
+    }
+    let out = sigil::spec::std_text(&COpts::default()).unwrap();
     assert!(
-        out.contains("\n暗黙に結ぶモジュール: std.os.alloc\n\nモジュール std.os.alloc\n  出力先: サーバー\n  信頼基盤: はい"),
+        out.contains("標準モジュール: std.os.alloc\n\nモジュール std.os.alloc\n  出力先: サーバー\n  信頼基盤: はい"),
         "{out}"
     );
+    assert!(out.contains("標準モジュール: std.core.float\n"), "{out}");
     assert!(out.contains("  大域: mut LIVE: Int = 0\n"), "{out}");
     assert!(
         out.contains("  触る大域: FREED（読む）, LIVE（読み書き）, MAGIC（読む）\n"),
         "{out}"
     );
     assert!(!out.contains("表示できない"), "{out}");
-    for src in [
-        user_prog("server", NO_ALLOC),
-        user_prog("browser, server", USES_ALLOC),
-    ] {
-        let out = sigil::spec::spec(&src).unwrap();
-        assert!(!out.contains("暗黙に結ぶ"), "{out}");
-        let j = sigil::spec::extract(&src).unwrap().to_json().to_string();
-        assert!(!j.contains("\"embedded\""), "{j}");
-    }
-    let j = sigil::spec::extract(&user_prog("server", USES_ALLOC))
+    let j = sigil::spec::std_json(&COpts::default())
         .unwrap()
-        .to_json()
         .to_string();
     assert!(
-        j.contains(
-            "\"embedded\":[{\"format\":1,\"module\":{\"kind\":\"module\",\"name\":\"std.os.alloc\""
-        ),
+        j.starts_with("{\"format\":1,\"std\":[{\"format\":1,\"module\":{\"kind\":\"module\",\"name\":\"std.os.alloc\""),
         "{j}"
     );
+}
+
+#[test]
+fn cli_spec_std_needs_no_file() {
+    let bin = env!("CARGO_BIN_EXE_sigil");
+    let o = std::process::Command::new(bin)
+        .args(["spec", "--std"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = String::from_utf8(o.stdout).unwrap();
+    assert!(out.contains("標準モジュール: std.os.alloc"), "{out}");
+    let o = std::process::Command::new(bin)
+        .args(["spec", "--std", "--json"])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    assert!(String::from_utf8(o.stdout).unwrap().contains("\"std\":["));
+    // ファイルや --root を添えるのは使い方の誤り（終了コード 2）。
+    for extra in [
+        vec!["spec", "--std", "x.sigil"],
+        vec!["spec", "--std", "--root", "."],
+    ] {
+        let o = std::process::Command::new(bin)
+            .args(&extra)
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{extra:?}");
+    }
 }
 
 #[test]

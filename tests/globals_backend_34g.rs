@@ -108,28 +108,36 @@ fn lowering_emits_globals_table() {
         fn_def("main", "Int", "  return A;")
     ));
     let p = lower(&src, "main");
-    let names: Vec<&str> = p.globals.iter().map(|g| g.name.as_str()).collect();
+    // 暗黙に結ぶ確保器 `std.os.alloc` の大域（結合後の名前が `std.` 始まり）が先頭に並ぶ（補足 C-2）。
+    let base = p
+        .globals
+        .iter()
+        .take_while(|g| g.name.starts_with("std."))
+        .count();
+    assert!(base > 0, "確保器の大域がある");
+    let user = &p.globals[base..];
+    let names: Vec<&str> = user.iter().map(|g| g.name.as_str()).collect();
     assert_eq!(names, ["A", "B", "P", "T", "N"]);
-    let muts: Vec<bool> = p.globals.iter().map(|g| g.mutable).collect();
+    let muts: Vec<bool> = user.iter().map(|g| g.mutable).collect();
     assert_eq!(muts, [false, true, true, true, true]);
-    assert_eq!(p.globals[0].ty, Ty::Int);
-    assert_eq!(p.globals[0].init, GlobalInit::Int(-5));
-    assert_eq!(p.globals[1].init, GlobalInit::Bool(true));
+    assert_eq!(user[0].ty, Ty::Int);
+    assert_eq!(user[0].init, GlobalInit::Int(-5));
+    assert_eq!(user[1].init, GlobalInit::Bool(true));
     // 構造体の初期値は宣言の順（書いた順 y, x ではなく x, y）。
     assert_eq!(
-        p.globals[2].init,
+        user[2].init,
         GlobalInit::Struct(vec![GlobalInit::Int(1), GlobalInit::Int(2)])
     );
-    assert!(matches!(p.globals[2].ty, Ty::Adt(_)));
+    assert!(matches!(user[2].ty, Ty::Adt(_)));
     assert_eq!(
-        p.globals[3].init,
+        user[3].init,
         GlobalInit::Tuple(vec![
             GlobalInit::Int(3),
             GlobalInit::Struct(vec![GlobalInit::Int(4), GlobalInit::Int(5)])
         ])
     );
-    assert_eq!(p.globals[4].ty, Ty::Addr);
-    assert_eq!(p.globals[4].init, GlobalInit::AddrNull);
+    assert_eq!(user[4].ty, Ty::Addr);
+    assert_eq!(user[4].init, GlobalInit::AddrNull);
 }
 
 #[test]
@@ -145,6 +153,19 @@ fn lowering_global_ref_mutability_is_fixed() {
         )
     ));
     let p = lower(&src, "main");
+    // 確保器 `std.os.alloc` の大域が先頭に並ぶ（補足 C-2）。利用者の大域の番号はその分ずれる。
+    let base = p
+        .globals
+        .iter()
+        .take_while(|g| g.name.starts_with("std."))
+        .count();
+    let global_refs = |p: &Program, name: &str| -> Vec<(Ty, usize)> {
+        global_refs(p, name)
+            .into_iter()
+            .filter(|(_, g)| *g >= base)
+            .map(|(t, g)| (t, g - base))
+            .collect()
+    };
     // 不変の大域は Ref<T>、global mut は MutRef<T>（mutable なのに Ref になっていないこと）。
     assert_eq!(
         global_refs(&p, "read_imm"),

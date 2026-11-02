@@ -53,6 +53,8 @@ pub enum ErrorKind {
     UseUnsorted,
     /// `pub` を付けられない宣言に付けた。
     PubTarget,
+    /// `pub global` と書いた。大域はモジュール内に閉じる（ADR 0025 補足 A-1）。
+    PubGlobal,
     ModuleClauseMissing,
     ModuleClauseOrder,
     UnknownTarget,
@@ -104,6 +106,12 @@ pub enum ErrorKind {
     GlobalOutsideTrustBase,
     /// `unchecked` でない関数から可変な大域変数（`global mut`）にアクセスした（ADR 0025 の決定 2）。
     GlobalMutOutsideUnchecked,
+    /// 大域変数の型が `Copyable` でない（破棄の要る型・参照など。ADR 0025 補足 A-1）。
+    GlobalNotCopyable,
+    /// 大域変数の初期化式が定数式でない（整数・真偽値の字句、それだけからなる構造体・組、`raw.addr_null()` のみ。ADR 0025 補足 A-1）。
+    GlobalInitNotConst,
+    /// `global mut` に触る関数が、中断しうる効果（`task.suspend`・`task.spawn`）を宣言している（ADR 0025 補足 A-1）。
+    GlobalMutSuspend,
     /// 信頼基盤でないモジュールで性質の手付け（`properties`）を書いた（ADR 0026 の決定 2）。
     PropertiesOutsideTrustBase,
     /// ファイルのパス（`--root` から）から決まるモジュール名と、`module` の宣言が違う。使えない文字・`..`・根の外もこれ（ADR 0021 の決定 1）。
@@ -251,6 +259,9 @@ impl ErrorKind {
             | RawOutsideUnchecked
             | GlobalOutsideTrustBase
             | GlobalMutOutsideUnchecked
+            | GlobalNotCopyable
+            | GlobalInitNotConst
+            | GlobalMutSuspend
             | PropertiesOutsideTrustBase
             | ModulePathMismatch
             | ModulePathCase

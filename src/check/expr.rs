@@ -340,6 +340,9 @@ impl Ck {
             });
         }
         if let Some((ty, is_mut)) = self.globals.get(n) {
+            if *is_mut {
+                self.touched_global_mut.set(true);
+            }
             if *is_mut && !self.raw_fn {
                 return self.err(
                     ErrorKind::GlobalMutOutsideUnchecked,

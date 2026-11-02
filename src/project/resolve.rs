@@ -230,6 +230,9 @@ impl<'a> Walk<'a> {
                 self.span = g.span;
                 self.decl_name(&mut g.name);
                 self.ty(&mut g.ty);
+                self.scopes.push(vec![]);
+                self.expr(&mut g.init);
+                self.scopes.pop();
             }
             Item::Properties(p) => {
                 self.span = p.span;

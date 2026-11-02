@@ -279,22 +279,7 @@ impl Ck {
         for item in &file.items {
             match item {
                 Item::Type(t) => self.check_refinement(t)?,
-                Item::Global(g) => {
-                    self.span = g.span;
-                    let (expected_ty, _) = self.globals[&g.name].clone();
-                    let init_ty = self.expr(&g.init)?;
-                    if !self.coerce(&expected_ty, &init_ty, &g.init) {
-                        return self.err(
-                            ErrorKind::TypeMismatch,
-                            format!(
-                                "大域変数 `{}` の初期化式の型は `{}` でなければならないが、`{}` である",
-                                g.name,
-                                self.sh(&expected_ty),
-                                self.sh(&init_ty)
-                            ),
-                        );
-                    }
-                }
+                Item::Global(g) => self.check_global(g)?,
                 Item::Fn(f) => {
                     let sig = self.fns[&f.name].clone();
                     self.check_fn(f, &sig)?;
@@ -445,5 +430,110 @@ impl Ck {
             next += 1;
         }
         self.scc = comp;
+    }
+}
+
+/// 大域変数の初期化式が定数式か（ADR 0025 補足 A-1）。
+/// 整数・真偽値の字句（整数は負号つきも可）、それだけからなる構造体・組、`raw.addr_null()` だけ。
+/// 違えば、理由（不適格な式の種類）を返す。
+fn global_const_violation(e: &Expr) -> Option<&'static str> {
+    match e {
+        Expr::Int(_) | Expr::Bool(_) => None,
+        Expr::Paren(x) => global_const_violation(x),
+        Expr::Unary {
+            op: UnOp::Neg,
+            expr,
+        } if matches!(**expr, Expr::Int(_)) => None,
+        Expr::Tuple(xs) => xs.iter().find_map(global_const_violation),
+        Expr::StructLit { fields, .. } => {
+            fields.iter().find_map(|(_, x)| global_const_violation(x))
+        }
+        Expr::Call { callee, args } if args.is_empty() => match &**callee {
+            Expr::Field { expr, name }
+                if name == "addr_null" && matches!(&**expr, Expr::Name(ns) if ns == "raw") =>
+            {
+                None
+            }
+            _ => Some("関数の呼び出し"),
+        },
+        Expr::Call { .. } => Some("関数の呼び出し"),
+        Expr::Float(_) => Some("浮動小数点数の字句"),
+        Expr::Str(_) => Some("文字列の字句"),
+        Expr::Name(_) => Some("名前の参照"),
+        Expr::Unary { .. } | Expr::Binary { .. } => Some("演算"),
+        Expr::Field { .. } => Some("フィールドの参照"),
+        Expr::Match { .. } => Some("`match`"),
+        Expr::Closure { .. } => Some("クロージャ"),
+        Expr::Try(_) => Some("`?`"),
+        Expr::Old(_) | Expr::Result | Expr::SelfValue => Some("契約の式にだけ書ける形"),
+    }
+}
+
+impl Ck {
+    /// 大域に置ける型か。`Copyable` な葉（`Int`・`Bool`・`Addr` など）と、それだけからなる組・構造体
+    /// （構造体は一般には `Copyable` でないが、欄がすべて大域に置ける型なら置ける。ADR 0025 補足 A-1）。
+    fn global_type_ok(&self, t: &Ty, depth: u32) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        match self.shallow(t) {
+            Ty::Tuple(ts) => ts.iter().all(|x| self.global_type_ok(x, depth + 1)),
+            Ty::Named(n, args) if matches!(self.types.get(&n), Some(TypeDef::Struct { .. })) => {
+                self.component_types(&n, &args)
+                    .iter()
+                    .all(|x| self.global_type_ok(x, depth + 1))
+            }
+            other => self.holds(&other, Prop::Copyable, 0) == Some(true),
+        }
+    }
+
+    /// 大域変数の型と初期化式の検査（ADR 0025 補足 A-1）。直前の関数の検査の状態は引き継がない。
+    fn check_global(&mut self, g: &GlobalDecl) -> R<()> {
+        self.span = g.span;
+        let (expected_ty, _) = self.globals[&g.name].clone();
+        if !self.global_type_ok(&expected_ty, 0) {
+            return self.err(
+                ErrorKind::GlobalNotCopyable,
+                format!(
+                    "大域変数 `{}` の型 `{}` は `Copyable` でない（大域に置けるのは `Int`・`Bool`・`Addr` と、それだけからなる構造体・組。ADR 0025 補足 A-1）",
+                    g.name,
+                    self.sh(&expected_ty)
+                ),
+            );
+        }
+        if let Some(what) = global_const_violation(&g.init) {
+            return self.err(
+                ErrorKind::GlobalInitNotConst,
+                format!(
+                    "大域変数 `{}` の初期化式に定数式でない{what}がある（初期化式は整数・真偽値の字句、それだけからなる構造体・組、`raw.addr_null()` に限る。ADR 0025 補足 A-1）",
+                    g.name
+                ),
+            );
+        }
+        // 関数の検査の状態を持ち越さない。`raw.addr_null()` だけは `unchecked` の外でも書ける特例。
+        self.begin();
+        self.scopes = vec![HashMap::new()];
+        self.env.clear();
+        self.tparams.clear();
+        self.cur_fn.clear();
+        self.raw_used.clear();
+        self.raw_delegated = false;
+        self.raw_fn = true;
+        let init_ty = self.expr(&g.init);
+        self.raw_fn = false;
+        self.raw_used.clear();
+        let init_ty = init_ty?;
+        if !self.coerce(&expected_ty, &init_ty, &g.init) {
+            return self.err(
+                ErrorKind::TypeMismatch,
+                format!(
+                    "大域変数 `{}` の初期化式の型は `{}` でなければならないが、`{}` である",
+                    g.name,
+                    self.sh(&expected_ty),
+                    self.sh(&init_ty)
+                ),
+            );
+        }
+        self.finish()
     }
 }

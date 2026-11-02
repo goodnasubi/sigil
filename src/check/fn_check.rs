@@ -57,9 +57,37 @@ impl Ck {
         self.raw_fn = f.unchecked.is_some();
         self.raw_used.clear();
         self.raw_delegated = false;
+        self.touched_global_mut.set(false);
         let r = self.check_fn_body(f, sig);
         self.raw_fn = false;
         r
+    }
+
+    /// `global mut` に触る関数は、中断しうる効果（`task.suspend`・`task.spawn`）を宣言できない
+    /// （ADR 0025 補足 A-1。ADR 0018 決定 7「確保器の中に中断点を置かない」の機械的な担保）。
+    fn check_global_mut_effects(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
+        if !self.touched_global_mut.get() {
+            return Ok(());
+        }
+        for t in &sig.effects {
+            let EffTerm::Cat(n) = t else { continue };
+            if let Some(e) = self
+                .table
+                .atoms(n)
+                .into_iter()
+                .find(|a| a == "task.suspend" || a == "task.spawn")
+            {
+                self.span = f.span;
+                return self.err(
+                    ErrorKind::GlobalMutSuspend,
+                    format!(
+                        "関数 `{}` は可変な大域変数（`global mut`）に触るので、中断しうる効果 `{e}` を宣言できない（ADR 0025 補足 A-1）",
+                        f.name
+                    ),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn check_fn_body(&mut self, f: &FnDecl, sig: &Sig) -> R<()> {
@@ -72,6 +100,7 @@ impl Ck {
         self.closures.append(&mut fin);
         self.span = f.span;
         self.record_report(f, sig);
+        self.check_global_mut_effects(f, sig)?;
         self.match_effects(f, sig)?;
         // 型注釈の要否: 注釈を 1 つ外して検査し直し、同じ型に決まれば冗長
         let annots = self.annots.clone();

@@ -403,6 +403,8 @@ struct Ck {
     raw_defs: Vec<crate::effects::RawOp>,
     /// 検査中の関数が `unchecked` の節を持つ（原始操作を直接呼べる）。
     raw_fn: bool,
+    /// 検査中の関数が `global mut` に触った（ADR 0025 補足 A-1。中断しうる効果の宣言を拒む）。
+    touched_global_mut: std::cell::Cell<bool>,
     /// クロージャの本体を検査している入れ子の深さ。
     closure_depth: u32,
     /// 検査中の関数が呼んだ原始操作（`raw.名前`）と、宣言に委ねる原始操作を呼んだか。
@@ -680,6 +682,7 @@ fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Opti
                 .collect()
         },
         raw_fn: false,
+        touched_global_mut: std::cell::Cell::new(false),
         closure_depth: 0,
         raw_used: BTreeSet::new(),
         raw_delegated: false,

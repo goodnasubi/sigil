@@ -247,3 +247,12 @@ fn main() -> Int
 ";
     link_sources(&[app, lib], &opts(&["app.main"])).expect("結合できる");
 }
+
+#[test]
+fn global_mut_write_only_fn_cannot_declare_suspending_effects() {
+    // 書き込みだけ(読まない)でも `global mut` に触る
+    let k = kind(
+        "global mut COUNTER: Int = 0\n\nfn reset()\n  intent \"reset\"\n  requires none\n  ensures none\n  effects task.suspend\n  unchecked \"x\"\n{\n  COUNTER = 1;\n  return;\n}\n",
+    );
+    assert_eq!(k, ErrorKind::GlobalMutSuspend);
+}

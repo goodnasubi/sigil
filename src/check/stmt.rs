@@ -517,6 +517,10 @@ impl Ck {
             if *is_mut {
                 self.touched_global_mut.set(true);
             }
+            // 書き換える場所（代入先・`&mut` の借用・`&mut self` のメソッド）として触る。
+            self.touched_globals
+                .borrow_mut()
+                .insert(root.to_string(), true);
             if *is_mut && !self.raw_fn {
                 return self.err(
                     ErrorKind::GlobalMutOutsideUnchecked,

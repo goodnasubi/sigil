@@ -27,6 +27,13 @@ impl Parser {
                         Tok::Kw("enum") => Item::Enum(self.enum_decl()?),
                         Tok::Kw("fn") => Item::Fn(self.fn_decl(FnKind::Free)?),
                         Tok::Kw("trait") => Item::Trait(self.trait_decl()?),
+                        Tok::Kw("global") => {
+                            return Err(Error::new(
+                                ErrorKind::PubGlobal,
+                                pub_span,
+                                "`pub global` は書けない（大域はモジュール内に閉じ、他のモジュールからは `unchecked` の関数を経由してだけ触る。ADR 0025 補足 A-1）",
+                            ))
+                        }
                         _ => {
                             return Err(Error::new(
                                 ErrorKind::PubTarget,

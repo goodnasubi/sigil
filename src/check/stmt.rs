@@ -514,6 +514,9 @@ impl Ck {
         let (ty, mutable, is_param) = if let Some(v) = self.lookup(root) {
             (v.ty.clone(), v.mutable, v.param)
         } else if let Some((gty, is_mut)) = self.globals.get(root) {
+            if *is_mut {
+                self.touched_global_mut.set(true);
+            }
             if *is_mut && !self.raw_fn {
                 return self.err(
                     ErrorKind::GlobalMutOutsideUnchecked,

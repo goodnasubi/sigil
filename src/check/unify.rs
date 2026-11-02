@@ -331,7 +331,7 @@ impl Ck {
     }
 
     /// 構造体のフィールド・列挙型の値の中身の型を、型引数を入れて返す。
-    fn component_types(&self, n: &str, args: &[Ty]) -> Vec<Ty> {
+    pub(super) fn component_types(&self, n: &str, args: &[Ty]) -> Vec<Ty> {
         match self.types.get(n) {
             Some(TypeDef::Struct { params, fields }) => {
                 let m = params.iter().cloned().zip(args.iter().cloned()).collect();

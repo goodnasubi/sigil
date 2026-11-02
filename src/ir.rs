@@ -4,7 +4,7 @@
 //! 後続のネイティブ出力が同じ形で読めるよう、明示的に持つ。
 //!
 //! 形（ADR 0015 の決定 2 が定めるもの）:
-//! - `Program{funcs, types, strings, stop_sites, entry, core_only}`、`Func`、`Block{stmts, term}`、`Ty`、`Stmt`、`Term`。
+//! - `Program{funcs, types, strings, stop_sites, entry, core_only}`（のちに `globals` を足した。ADR 0025 補足 A-1・A-7）、`Func`、`Block{stmts, term}`、`Ty`、`Stmt`、`Term`。
 //! - 停止しうる操作（`CheckedOp`・`Assert`・`Call`）は `cleanup` の基本ブロックを持つ。`cleanup` は、その時点で生きている
 //!   値を内側のスコープから外側へ（スコープの中は宣言の逆順に）破棄して `Resume` で呼び出し元の `cleanup` へ戻る。
 //!   停止も `?` の早期の return も、同じ破棄の並びを通る（決定 5）。
@@ -23,6 +23,7 @@ pub type FuncId = usize;
 pub type TypeId = usize;
 pub type StrId = usize;
 pub type StopId = usize;
+pub type GlobalId = usize;
 
 /// 標準の列挙型の腕の番号（宣言の順）。評価器と lowering が同じ番号を使う。
 pub const OPTION_SOME: usize = 0;
@@ -39,11 +40,37 @@ pub struct Program {
     pub types: Vec<TypeDef>,
     pub strings: Vec<String>,
     pub stop_sites: Vec<StopSite>,
+    /// 大域（`global`・`global mut`）の定義。`GlobalId` はこの表の添字。
+    pub globals: Vec<Global>,
     pub entry: FuncId,
     /// OS 層（`console`・`fs`・`Path`）を使わない（`bare` の対象にできる）。
     pub core_only: bool,
     /// 入口の関数が戻ったあとの値の表示で停止したときの行（入口の関数の宣言の行）。
     pub exit_line: u32,
+}
+
+/// 大域の定義（ADR 0025 補足 A-1）。型は `Copyable`（`Int`・`Bool`・`Addr`、およびそれだけからなる
+/// 構造体・組）に限り、初期値は定数なので、起動時の初期化関数も初期化順序も要らない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Global {
+    pub name: String,
+    pub ty: Ty,
+    /// `global mut` なら true。
+    pub mutable: bool,
+    pub init: GlobalInit,
+}
+
+/// 大域の定数初期値。`ty` の形に一致していなければならない（`verify` が検査する）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum GlobalInit {
+    Int(i64),
+    Bool(bool),
+    /// `raw.addr_null()`（`Addr` 型の大域の初期値は空番地のみ）。
+    AddrNull,
+    /// 組の各要素（`Ty::Tuple` の大域）。
+    Tuple(Vec<GlobalInit>),
+    /// 構造体のフィールドを宣言の順に（`Ty::Adt` の構造体の大域）。
+    Struct(Vec<GlobalInit>),
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +279,9 @@ pub enum Rvalue {
     Discriminant(Operand),
     /// 環境つきの関数の値。環境は組（捕捉した値の並び）で、関数の第 1 引数（環境への参照）に渡る。
     MakeClosure(FuncId, Vec<Operand>),
+    /// 大域への参照。型は不変の大域なら `Ref<T>`、`global mut` なら `MutRef<T>`（`T` は大域の型）。
+    /// 読み書きは参照の `Deref` を通す。
+    GlobalRef(GlobalId),
 }
 
 /// 標準ライブラリの本体を持つ操作。`Call` の `Callee::Builtin` は関数の値を呼びうるもの（`map` など）。

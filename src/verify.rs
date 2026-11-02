@@ -57,6 +57,19 @@ pub fn verify(prog: &Program) -> Result<(), Vec<String>> {
     if prog.entry >= prog.funcs.len() {
         errs.push(format!("入口の関数の番号 {} が範囲外", prog.entry));
     }
+    for (gi, g) in prog.globals.iter().enumerate() {
+        if !global_ty_ok(prog, &g.ty) {
+            errs.push(format!(
+                "global #{gi} {}: 型 {:?} は Copyable でない（Int・Bool・Addr とそれだけからなる構造体・組に限る）",
+                g.name, g.ty
+            ));
+        } else if !global_init_ok(prog, &g.ty, &g.init) {
+            errs.push(format!(
+                "global #{gi} {}: 初期値 {:?} が型 {:?} に合わない",
+                g.name, g.init, g.ty
+            ));
+        }
+    }
     for (fi, f) in prog.funcs.iter().enumerate() {
         let mut v = Fn {
             prog,
@@ -71,6 +84,41 @@ pub fn verify(prog: &Program) -> Result<(), Vec<String>> {
         Ok(())
     } else {
         Err(errs)
+    }
+}
+
+/// 大域の型として許される型か（ADR 0025 補足 A-1: `Copyable` のみ）。
+fn global_ty_ok(prog: &Program, t: &Ty) -> bool {
+    match t {
+        Ty::Int | Ty::Bool | Ty::Addr => true,
+        Ty::Tuple(ts) => ts.iter().all(|t| global_ty_ok(prog, t)),
+        Ty::Adt(id) => match prog.types.get(*id).map(|d| &d.kind) {
+            Some(TypeKind::Struct { fields }) => fields.iter().all(|(_, t)| global_ty_ok(prog, t)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// 定数の初期値が型の形に一致するか。
+fn global_init_ok(prog: &Program, t: &Ty, i: &GlobalInit) -> bool {
+    match (t, i) {
+        (Ty::Int, GlobalInit::Int(_)) | (Ty::Bool, GlobalInit::Bool(_)) => true,
+        (Ty::Addr, GlobalInit::AddrNull) => true,
+        (Ty::Tuple(ts), GlobalInit::Tuple(is)) => {
+            ts.len() == is.len() && ts.iter().zip(is).all(|(t, i)| global_init_ok(prog, t, i))
+        }
+        (Ty::Adt(id), GlobalInit::Struct(is)) => match prog.types.get(*id).map(|d| &d.kind) {
+            Some(TypeKind::Struct { fields }) => {
+                fields.len() == is.len()
+                    && fields
+                        .iter()
+                        .zip(is)
+                        .all(|((_, t), i)| global_init_ok(prog, t, i))
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -177,6 +225,14 @@ impl<'a> Fn<'a> {
             Rvalue::Clone(_, t) => t.clone(),
             Rvalue::Discriminant(_) => Ty::Int,
             Rvalue::MakeClosure(..) => return None,
+            Rvalue::GlobalRef(g) => {
+                let g = self.prog.globals.get(*g)?;
+                if g.mutable {
+                    Ty::MutRef(Box::new(g.ty.clone()))
+                } else {
+                    Ty::Ref(Box::new(g.ty.clone()))
+                }
+            }
         })
     }
 
@@ -227,6 +283,11 @@ impl<'a> Fn<'a> {
                     self.check_agg(bb, r);
                     if let Rvalue::Clone(o, ty) = r {
                         self.expect(bb, "複製の元", Some(ty.clone()), self.op_ty(o));
+                    }
+                    if let Rvalue::GlobalRef(g) = r {
+                        if *g >= self.prog.globals.len() {
+                            self.err(bb, format!("大域の番号 {g} が範囲外"));
+                        }
                     }
                     if let Rvalue::MakeClosure(fid, _) = r {
                         if *fid >= self.prog.funcs.len() {
@@ -657,6 +718,6 @@ fn rv_ops(r: &Rvalue) -> Vec<&Operand> {
         }
         Rvalue::Binary(_, a, b) => vec![a, b],
         Rvalue::Aggregate(_, ops) | Rvalue::MakeClosure(_, ops) => ops.iter().collect(),
-        Rvalue::Ref(_) | Rvalue::RefMut(_) => vec![],
+        Rvalue::Ref(_) | Rvalue::RefMut(_) | Rvalue::GlobalRef(_) => vec![],
     }
 }

@@ -316,3 +316,66 @@ fn edge_into_unreachable_other_than_a_branch_arm_is_caught() {
         false
     });
 }
+
+// ---- 大域（ADR 0025 補足 A-1・A-7、PR 3-4f） ----
+
+fn with_globals(globals: Vec<Global>, rv: Rvalue, dst_ty: Ty) -> Program {
+    let mut p = lowered("f");
+    p.globals = globals;
+    let f = &mut p.funcs[0];
+    f.locals.push(Local {
+        name: "gref".into(),
+        ty: dst_ty,
+    });
+    let l = f.locals.len() - 1;
+    f.blocks[0]
+        .stmts
+        .insert(0, Stmt::Assign(Place::local(l), rv));
+    p
+}
+
+fn g(name: &str, ty: Ty, mutable: bool, init: GlobalInit) -> Global {
+    Global {
+        name: name.into(),
+        ty,
+        mutable,
+        init,
+    }
+}
+
+#[test]
+fn well_formed_globals_pass() {
+    let gs = vec![
+        g("N", Ty::Int, false, GlobalInit::Int(3)),
+        g("HEAP", Ty::Addr, true, GlobalInit::AddrNull),
+        g(
+            "T",
+            Ty::Tuple(vec![Ty::Int, Ty::Bool]),
+            true,
+            GlobalInit::Tuple(vec![GlobalInit::Int(1), GlobalInit::Bool(true)]),
+        ),
+    ];
+    let p = with_globals(gs.clone(), Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Int)));
+    assert_eq!(errs(&p), Vec::<String>::new());
+    let p = with_globals(gs, Rvalue::GlobalRef(1), Ty::MutRef(Box::new(Ty::Addr)));
+    assert_eq!(errs(&p), Vec::<String>::new());
+}
+
+#[test]
+fn bad_globals_are_caught() {
+    let n = || g("N", Ty::Int, false, GlobalInit::Int(3));
+    // 範囲外の番号
+    let p = with_globals(vec![n()], Rvalue::GlobalRef(5), Ty::Ref(Box::new(Ty::Int)));
+    assert!(!errs(&p).is_empty());
+    // 型の取り違え（Int の大域を Bool への参照で受ける）
+    let p = with_globals(vec![n()], Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Bool)));
+    assert!(!errs(&p).is_empty());
+    // Copyable でない型
+    let bad = g("S", Ty::Str, false, GlobalInit::Int(0));
+    let p = with_globals(vec![bad], Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Str)));
+    assert!(!errs(&p).is_empty());
+    // 初期値が型に合わない
+    let bad = g("B", Ty::Bool, false, GlobalInit::Int(1));
+    let p = with_globals(vec![bad], Rvalue::GlobalRef(0), Ty::Ref(Box::new(Ty::Bool)));
+    assert!(!errs(&p).is_empty());
+}

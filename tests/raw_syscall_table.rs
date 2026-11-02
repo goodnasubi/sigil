@@ -132,3 +132,81 @@ fn statbuf_must_be_in_range() {
         "範囲外",
     );
 }
+
+fn stat(path_alloc: usize, buf_alloc: usize, buf_off: usize) -> String {
+    format!(
+        "  let q = raw.alloc({path_alloc}, 16);\n  raw.set(q, 0, {path_alloc});\n  let s = raw.alloc({buf_alloc}, 16);\n  raw.set(s, 0, {buf_alloc});\n  return raw.syscall(262, -100, raw.addr_to_int(q), raw.addr_to_int(s) + {buf_off}, 0, 0, 0);"
+    )
+}
+
+#[test]
+fn munmap_larger_than_mmap_stops() {
+    stops(
+        &format!("  let a = {MMAP};\n  return raw.syscall(11, a, 8192, 0, 0, 0, 0);"),
+        "完全一致",
+    );
+    stops(
+        &format!("  let a = {MMAP};\n  return raw.syscall(11, a, 0, 0, 0, 0, 0);"),
+        "完全一致",
+    );
+}
+
+#[test]
+fn statbuf_size_boundaries() {
+    stops(&stat(16, 143, 0), "範囲外");
+    assert!(run(&stat(16, 144, 0)).is_ok());
+    // 末尾に 144B ちょうど / 1B はみ出し
+    assert!(run(&stat(16, 160, 16)).is_ok());
+    stops(&stat(16, 160, 17), "範囲外");
+}
+
+#[test]
+fn newfstatat_path_checks() {
+    stops(
+        "  let s = raw.alloc(144, 16);\n  return raw.syscall(262, -100, 4096, raw.addr_to_int(s), 0, 0, 0);",
+        "範囲外",
+    );
+    stops(
+        "  let q = raw.alloc(4, 1);\n  raw.set(q, 65, 4);\n  let s = raw.alloc(144, 16);\n  return raw.syscall(262, -100, raw.addr_to_int(q), raw.addr_to_int(s), 0, 0, 0);",
+        "NUL 終端",
+    );
+}
+
+#[test]
+fn mmap_len_bounds() {
+    stops("  return raw.syscall(9, 0, 0, 3, 34, -1, 0);", "0 < len");
+    stops("  return raw.syscall(9, 0, -1, 3, 34, -1, 0);", "0 < len");
+    stops(
+        "  return raw.syscall(9, 0, 70368744177665, 3, 34, -1, 0);",
+        "0 < len",
+    );
+    // 2^46 ちょうどは検証を通る（実際の mmap は失敗してもよい）
+    let r = run("  let a = raw.syscall(9, 0, 70368744177664, 3, 34, -1, 0);\n  if a >= 0 { raw.syscall(11, a, 70368744177664, 0, 0, 0, 0); }\n  return 0;");
+    assert!(r.is_ok(), "{r:?}");
+}
+
+#[test]
+fn read_write_negative_count_stops() {
+    for n in [0, 1] {
+        stops(
+            &format!(
+                "  let p = raw.alloc(8, 8);\n  return raw.syscall({n}, 1, raw.addr_to_int(p), -1, 0, 0, 0);"
+            ),
+            "count >= 0",
+        );
+    }
+}
+
+#[test]
+fn mmap_prot_combinations_stop() {
+    for prot in [0, 1, 2, 4, 5, 6, 7, 3 | 8, 3 | 0x1000000] {
+        stops(
+            &format!("  return raw.syscall(9, 0, 4096, {prot}, 34, -1, 0);"),
+            "prot",
+        );
+    }
+    stops(
+        "  return raw.syscall(9, 0, 4096, 5, 34, -1, 0);",
+        "PROT_EXEC",
+    );
+}

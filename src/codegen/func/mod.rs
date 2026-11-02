@@ -336,6 +336,17 @@ impl<'a, 'p> Fx<'a, 'p> {
             let la = self.b.ins().func_addr(types::I64, lr);
             self.rt("set_sigil_live", &[la]);
         }
+        // 文字列の関数表を Rust ランタイムに登録する（補足 D-3。入口を呼ぶ前に文字列を作らせない）。
+        if let Some(ids) = self.cg.str_ops {
+            let addrs: Vec<Value> = ids
+                .iter()
+                .map(|&id| {
+                    let r = self.cg.m.declare_func_in_func(id, self.b.func);
+                    self.b.ins().func_addr(types::I64, r)
+                })
+                .collect();
+            self.rt("set_str_ops", &addrs);
+        }
         let r = self.rt("enter", &[fa, a]);
         let r32 = self.b.ins().ireduce(types::I32, r);
         self.b.ins().return_(&[r32]);

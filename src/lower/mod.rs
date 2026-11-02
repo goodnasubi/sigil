@@ -302,8 +302,21 @@ impl<'a> L<'a> {
         let fid = self.instance(decl, HashMap::new(), vec![]);
         // 確保器を結んだプログラムでは、入口から辿れなくてもその入口の関数を SIR に入れる。ネイティブはシムから
         // 呼び、評価器は呼ばない（ADR 0025 補足 A-2・B-2・B-3）。
-        use crate::stdlib::embedded::{ALLOC_FN, FREE_FN, LIVE_FN};
-        for n in [ALLOC_FN, FREE_FN, LIVE_FN] {
+        // 文字列の表現（`std.core.string`。補足 D-3）の入口も同じ。
+        use crate::stdlib::embedded::{
+            ALLOC_FN, FREE_FN, LIVE_FN, STR_BYTES_FN, STR_CLONE_FN, STR_DATA_FN, STR_FREE_FN,
+            STR_NEW_LOSSY_FN,
+        };
+        for n in [
+            ALLOC_FN,
+            FREE_FN,
+            LIVE_FN,
+            STR_NEW_LOSSY_FN,
+            STR_FREE_FN,
+            STR_CLONE_FN,
+            STR_DATA_FN,
+            STR_BYTES_FN,
+        ] {
             if n != entry {
                 if let Some(&d) = self.fns.get(n) {
                     self.instance(d, HashMap::new(), vec![]);

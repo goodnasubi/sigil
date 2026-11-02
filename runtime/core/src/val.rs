@@ -23,7 +23,7 @@
 use super::{
     bytes_slice, new_str, s, sigil_rt_alloc, sigil_rt_bytes_clone, sigil_rt_bytes_free,
     sigil_rt_free, sigil_rt_list_free, sigil_rt_list_get, sigil_rt_list_len, sigil_rt_list_new,
-    sigil_rt_list_push, sigil_rt_str_clone, sigil_rt_str_free, text, RtBytes, RtList, RtStr,
+    sigil_rt_list_push, str_clone, str_free, text, RtBytes, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::cmp::Ordering;
@@ -187,7 +187,7 @@ unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
     }
 }
 
-/// 値の表示（`quote` が真なら文字列に引用符を付ける）。戻り値は `sigil_rt_str_free` で解放する。
+/// 値の表示（`quote` が真なら文字列に引用符を付ける）。戻り値は `str_free` で解放する。
 ///
 /// # Safety
 /// `d` は記述子、`w` はその型の値。
@@ -419,7 +419,7 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             }
             w
         }
-        K_STR | K_PATH if w != 0 => sigil_rt_str_clone(w as *const RtStr) as i64,
+        K_STR | K_PATH if w != 0 => str_clone(w as *const RtStr) as i64,
         K_BYTES if w != 0 => sigil_rt_bytes_clone(w as *const RtBytes) as i64,
         _ => w,
     }
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                     blk_free(b);
                 }
             }
-            K_STR | K_PATH => sigil_rt_str_free(w as *mut RtStr),
+            K_STR | K_PATH => str_free(w as *mut RtStr),
             K_BYTES => sigil_rt_bytes_free(w as *mut RtBytes),
             _ => {}
         }

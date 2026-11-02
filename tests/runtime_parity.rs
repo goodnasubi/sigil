@@ -19,10 +19,8 @@ const DRIVER: &str = r#"
 
 typedef struct RtStr RtStr;
 typedef struct RtList RtList;
-RtStr* sigil_rt_str_new(const uint8_t*, size_t);
-void sigil_rt_str_free(RtStr*);
-const uint8_t* sigil_rt_str_data(const RtStr*);
-size_t sigil_rt_str_bytes(const RtStr*);
+void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
+                          const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
 int64_t sigil_rt_str_len(const RtStr*);
 RtStr* sigil_rt_str_trim(const RtStr*);
 int32_t sigil_rt_str_parse_int(const RtStr*, int64_t*);
@@ -40,13 +38,28 @@ void sigil_rt_os_buf_free(uint8_t*, size_t);
 void sigil_rt_console_log(const uint8_t*, size_t);
 void sigil_rt_stop(const uint8_t*, size_t);
 
+/* 文字列の関数表（補足 D-3）。本物は Sigil 製（std.core.string）で、ここでは同じ配置の 24B の頭を malloc で作る。 */
+typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } Head;
+static RtStr* sigil_rt_str_new(const uint8_t* p, int64_t n) {
+  Head* h = malloc(sizeof(Head));
+  h->ptr = n > 0 ? malloc((size_t)n) : NULL;
+  if (n > 0) memcpy(h->ptr, p, (size_t)n);
+  h->len = n; h->cap = n;
+  return (RtStr*)h;
+}
+static void sigil_rt_str_free(RtStr* s) { Head* h = (Head*)s; if (!h) return; free(h->ptr); free(h); }
+static RtStr* sigil_rt_str_clone(const RtStr* s) { const Head* h = (const Head*)s; return sigil_rt_str_new(h->ptr, h->len); }
+static const uint8_t* sigil_rt_str_data(const RtStr* s) { return ((const Head*)s)->ptr; }
+static int64_t sigil_rt_str_bytes(const RtStr* s) { return ((const Head*)s)->len; }
+
 static void put(RtStr* s) { fwrite(sigil_rt_str_data(s), 1, sigil_rt_str_bytes(s), stdout); sigil_rt_str_free(s); }
 
 int main(int argc, char** argv) {
   const char* cmd = argv[1];
   const char* a = argc > 2 ? argv[2] : "";
   const char* b = argc > 3 ? argv[3] : "";
-  RtStr* s = sigil_rt_str_new((const uint8_t*)a, strlen(a));
+  sigil_rt_set_str_ops(sigil_rt_str_new, sigil_rt_str_free, sigil_rt_str_clone, sigil_rt_str_data, sigil_rt_str_bytes);
+  RtStr* s = sigil_rt_str_new((const uint8_t*)a, (int64_t)strlen(a));
   if (!strcmp(cmd, "float")) {
     put(sigil_rt_show_float(strtod(a, NULL)));
   } else if (!strcmp(cmd, "len")) {
@@ -64,12 +77,12 @@ int main(int argc, char** argv) {
     printf("]");
   } else if (!strcmp(cmd, "join")) {
     uint8_t* p; size_t n; sigil_rt_path_join((const uint8_t*)a, strlen(a), (const uint8_t*)b, strlen(b), &p, &n);
-    RtStr* t = sigil_rt_str_new(p, n); sigil_rt_os_buf_free(p, n); put(sigil_rt_show_str(t));
+    RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); put(sigil_rt_show_str(t));
   } else if (!strcmp(cmd, "file_name") || !strcmp(cmd, "parent")) {
     uint8_t* p; size_t n;
     int32_t some = cmd[0] == 'f' ? sigil_rt_path_file_name((const uint8_t*)a, strlen(a), &p, &n)
                                  : sigil_rt_path_parent((const uint8_t*)a, strlen(a), &p, &n);
-    if (some) { RtStr* t = sigil_rt_str_new(p, n); sigil_rt_os_buf_free(p, n); printf("Some("); put(sigil_rt_show_str(t)); printf(")"); }
+    if (some) { RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); printf("Some("); put(sigil_rt_show_str(t)); printf(")"); }
     else printf("None");
   } else if (!strcmp(cmd, "log")) {
     sigil_rt_console_log((const uint8_t*)a, strlen(a)); return 0;
@@ -330,7 +343,30 @@ fn core_alone_links_without_os() {
     }
     let dir = work_dir("core");
     std::fs::write(dir.join("core.a"), runtime_lib::core_a()).unwrap();
-    let src = "#include <stdint.h>\n#include <stddef.h>\ntypedef struct RtStr RtStr;\nRtStr* sigil_rt_show_int(int64_t);\nvoid sigil_rt_print_result(const RtStr*);\nint main(void){ sigil_rt_print_result(sigil_rt_show_int(42)); return 0; }\n";
+    // 文字列の関数表（補足 D-3）が要る。ここでは最小の表（24B の頭を malloc で作る）を登録する。
+    let src = r#"#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+typedef struct RtStr RtStr;
+RtStr* sigil_rt_show_int(int64_t);
+void sigil_rt_print_result(const RtStr*);
+void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
+                          const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
+typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } Head;
+static RtStr* s_new(const uint8_t* p, int64_t n) {
+  Head* h = malloc(sizeof(Head));
+  h->ptr = n > 0 ? malloc((size_t)n) : NULL;
+  if (n > 0) memcpy(h->ptr, p, (size_t)n);
+  h->len = n; h->cap = n;
+  return (RtStr*)h;
+}
+static void s_free(RtStr* s) { Head* h = (Head*)s; if (!h) return; free(h->ptr); free(h); }
+static RtStr* s_clone(const RtStr* s) { const Head* h = (const Head*)s; return s_new(h->ptr, h->len); }
+static const uint8_t* s_data(const RtStr* s) { return ((const Head*)s)->ptr; }
+static int64_t s_bytes(const RtStr* s) { return ((const Head*)s)->len; }
+int main(void){ sigil_rt_set_str_ops(s_new, s_free, s_clone, s_data, s_bytes); sigil_rt_print_result(sigil_rt_show_int(42)); return 0; }
+"#;
     std::fs::write(dir.join("d.c"), src).unwrap();
     let o = Command::new("cc")
         .args(["-static", "-no-pie", "d.c", "core.a"])

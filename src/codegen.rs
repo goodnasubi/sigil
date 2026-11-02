@@ -116,6 +116,7 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
+        "set_str_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" | "list_sum_int" | "enter" => ("pp", 'i'),
@@ -153,6 +154,8 @@ pub(crate) struct Cg<'p> {
     pub gids: Vec<DataId>,
     /// 生存数のシム `sigil_rt_sigil_live_blocks`（確保器を結んだときだけ。補足 B-5）。
     pub live_shim: Option<FuncId>,
+    /// 文字列の関数表に登録するシム（new・free・clone・data・bytes。補足 D-3）。
+    pub str_ops: Option<[FuncId; 5]>,
 }
 
 impl<'p> Cg<'p> {
@@ -498,10 +501,13 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         msg_table,
         gids,
         live_shim: None,
+        str_ops: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
-    let shims = alloc_shims(&mut cg)?;
+    let mut shims = alloc_shims(&mut cg)?;
+    // 文字列の表現（`std.core.string`）のシム（補足 D-3）。常に必要で、結ばれていなければ内部エラーで止める。
+    shims.extend(str_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
 
@@ -619,6 +625,39 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     cg.rt.insert("raw_alloc", out[0].0);
     cg.rt.insert("raw_free", out[1].0);
     cg.live_shim = Some(out[2].0);
+    Ok(out)
+}
+
+/// 文字列の表現（`std.core.string`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する（補足 D-3）。
+/// 生成コードの呼び出し先の名前と形は変えない。シムは公開せず（`Linkage::Local`）、番地を関数表で Rust ランタイムに渡す。
+fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::{
+        STR_BYTES_FN, STR_CLONE_FN, STR_DATA_FN, STR_FREE_FN, STR_NEW_LOSSY_FN,
+    };
+    let mut out = vec![];
+    let mut ids = vec![];
+    for (name, target_fn, np, ret) in [
+        ("str_new", STR_NEW_LOSSY_FN, 2, true),
+        ("str_free", STR_FREE_FN, 1, false),
+        ("str_clone", STR_CLONE_FN, 1, true),
+        ("str_data", STR_DATA_FN, 1, true),
+        ("str_bytes", STR_BYTES_FN, 1, true),
+    ] {
+        let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
+            return Err(internal("std.core.string が結ばれていない".to_string()));
+        };
+        let id =
+            cg.m.declare_function(
+                &format!("sigil_rt_{name}"),
+                Linkage::Local,
+                &shim_sig(cg.cc, np, ret),
+            )
+            .map_err(internal)?;
+        cg.rt.insert(name, id);
+        ids.push(id);
+        out.push((id, target, np, ret));
+    }
+    cg.str_ops = Some([ids[0], ids[1], ids[2], ids[3], ids[4]]);
     Ok(out)
 }
 

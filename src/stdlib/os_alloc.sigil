@@ -285,7 +285,7 @@ fn large_free(a: Int, size: Int, i: Int)
   requires none
   ensures none
   effects none
-  unchecked "a は表に印 -1 で登録された生きた大ブロックで、頭は読める（補足 A-5）"
+  unchecked "a は表に印 -1 で登録された生きた大ブロックで、頭は読める。整列の大ブロックの {base, len} は a % 32 == 0 を確かめてから読む（補足 A-5）"
 {
   let h = raw.int_to_addr(a - 16);
   let w = raw.load_i64(h);
@@ -299,6 +299,12 @@ fn large_free(a: Int, size: Int, i: Int)
     base = a - 16;
     len = round_page(16 + size);
   } else if w == MAGIC + CLASS_LARGE_ALIGNED {
+    // 整列の大ブロックは a が 32 の倍数で a - base >= 32。頭を読む前に確かめ、
+    // class 8 の塊（a % 4096 == 16）を 9 と偽った頭で塊の外 a - 32 を読まない。
+    if a % 32 != 0 {
+      halt();
+      return;
+    }
     base = raw.load_i64(raw.int_to_addr(a - 32));
     len = raw.load_i64(raw.int_to_addr(a - 24));
     let d = a - base;

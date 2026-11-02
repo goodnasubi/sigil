@@ -309,6 +309,8 @@ fn bad_class_in_header_stops() {
     // 頭の magic|class を壊す（小・大・整列の大）。
     driver_halts("  let p = alloc(64, 8);\n  raw.store_i64(raw.offset(p, -16), 12345);\n  free(p, 64, 8);\n  return 0;");
     driver_halts("  let p = alloc(64, 8);\n  let h = raw.offset(p, -16);\n  raw.store_i64(h, raw.load_i64(h) + 1);\n  free(p, 64, 8);\n  return 0;");
+    // class 8 の塊を 9 と偽る: 塊の外 a - 32 を読む前に a % 32 で止まる。読む位置が隣の写像に
+    // 当たるかはホスト次第なので、この検査を外す変異は決定的に検出できず、変異試験は置かない。
     driver_halts("  let p = alloc(5000, 8);\n  let h = raw.offset(p, -16);\n  raw.store_i64(h, raw.load_i64(h) + 1);\n  free(p, 5000, 8);\n  return 0;");
     driver_halts("  let p = alloc(100, 64);\n  let h = raw.offset(p, -16);\n  raw.store_i64(h, raw.load_i64(h) - 1);\n  free(p, 100, 64);\n  return 0;");
 }

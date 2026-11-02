@@ -17,6 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # 信頼基盤の差分の検出（ADR 0018 判断 1 の T3・判断 2 の S2。検出は scripts/trust-base-diff.sh）。
+      # 既定は印のみ（失敗にしない）。失敗にするときは SIGIL_TRUST_BASE_MODE を fail にする（切替えはここだけ）。
+      - name: 信頼基盤の差分
+        if: github.event_name == 'pull_request'
+        run: scripts/trust-base-diff.sh "$BASE_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SIGIL_TRUST_BASE_MODE: mark
+
       - name: Rust stable
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy

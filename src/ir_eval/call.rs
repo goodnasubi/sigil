@@ -532,6 +532,11 @@ impl<'p> M<'p> {
                 let n = self.read_int(locals, &args[1]);
                 Val::Int(val >> n)
             }
+            FloatToBits => match self.scalar(locals, &args[0]) {
+                Val::Float(x) => Val::Int(x.to_bits() as i64),
+                _ => Val::Int(f64::NAN.to_bits() as i64),
+            },
+            FloatFromBits => Val::Float(f64::from_bits(self.read_int(locals, &args[0]) as u64)),
             BytesNew => Val::Bytes(Rc::new(RefCell::new(Vec::new()))),
             BytesWithCapacity => {
                 let cap = self.read_int(locals, &args[0]).max(0) as usize;

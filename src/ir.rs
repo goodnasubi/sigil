@@ -336,6 +336,9 @@ pub enum Builtin {
     IntRotr,
     IntRotr32,
     IntAshr,
+    /// `Float.to_bits`・`Float.from_bits`（ADR 0025 補足 C-3）。IEEE 754 binary64 のビット列を `Int` と読み替える。
+    FloatToBits,
+    FloatFromBits,
     BytesNew,
     BytesWithCapacity,
     BytesFromList,

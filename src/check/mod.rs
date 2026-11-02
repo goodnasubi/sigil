@@ -102,7 +102,7 @@ pub fn typed(file: &File) -> R<Typed<'_>> {
 }
 
 pub fn typed_with<'a>(file: &'a File, opts: &Options) -> R<Typed<'a>> {
-    let ck = analyze(file, &[], &[], opts)?;
+    let ck = analyze(file, &[], &[], opts, false)?;
     let t = ck.typed;
     Ok(Typed {
         file,
@@ -414,6 +414,11 @@ struct Ck {
     raw_delegated: bool,
     /// このモジュールが `trust base` を宣言している。
     base_module: bool,
+    /// 埋め込み標準モジュールの検査（予約名と許可一覧の確認を飛ばす。ADR 0025 補足 A-6）。
+    embedded: bool,
+    /// 検査中の項目が埋め込みモジュール由来（結合後の名前が `std.` 始まり）。結合後のプログラムの再検査で、
+    /// 入口が `trust base` でなくても、その項目の `unchecked`・大域・性質の手付けを許す（出所の印は名前）。
+    item_embedded: bool,
     /// `trust base` の宣言を許すモジュール名。
     allowed_base: Vec<String>,
     /// 関数ごとの記録（`sigil spec` が使う）。鍵は `FnDecl` の番地。
@@ -450,7 +455,7 @@ pub fn fn_key(f: &FnDecl) -> usize {
 
 /// 検査して、関数ごとの記録を返す。`check_file_with` と同じ検査をする。
 pub fn fn_reports(file: &File, opts: &Options) -> R<HashMap<usize, FnReport>> {
-    analyze(file, &[], &[], opts).map(|ck| ck.reports)
+    analyze(file, &[], &[], opts, false).map(|ck| ck.reports)
 }
 
 /// 移動の状態。移動した場所（`a`・`a.owner`）とその位置、そして経路が早期の戻りで終わったか。
@@ -521,7 +526,7 @@ pub fn check_file_with(file: &File, opts: &Options) -> R<()> {
                 .to_string(),
         ));
     }
-    analyze(file, &[], &[], opts).map(|_| ())
+    analyze(file, &[], &[], opts, false).map(|_| ())
 }
 
 /// 他のモジュールから取り込んだ宣言（`externs`。シグネチャだけを使い、本体は検査しない）を
@@ -532,7 +537,19 @@ pub fn check_module(
     visible_traits: &[String],
     opts: &Options,
 ) -> R<()> {
-    analyze(file, externs, visible_traits, opts).map(|_| ())
+    analyze(file, externs, visible_traits, opts, false).map(|_| ())
+}
+
+/// 埋め込み標準モジュール（ADR 0025 補足 A-6）の検査。`std.*` の名前の予約と `trust base` の許可一覧の確認を
+/// 飛ばす（処理系のソースに入っていることが根拠）。呼べるのは、レジストリから引いたモジュールを検査する
+/// プロジェクトの結合だけ（利用者のファイルは `check_module` を通り、予約名を拒否される）。
+pub(crate) fn check_module_embedded(
+    file: &File,
+    externs: &[Item],
+    visible_traits: &[String],
+    opts: &Options,
+) -> R<()> {
+    analyze(file, externs, visible_traits, opts, true).map(|_| ())
 }
 
 /// 標準の名前空間の頭（`fs`・`console`・`raw`）と `std`。モジュール名の最初の部分には使えない（ADR 0021 の 2-2b の決め）。
@@ -549,7 +566,13 @@ pub fn is_std_name(n: &str) -> bool {
         || std_heads().contains(&n)
 }
 
-fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Options) -> R<Ck> {
+fn analyze(
+    file: &File,
+    externs: &[Item],
+    visible_traits: &[String],
+    opts: &Options,
+    embedded: bool,
+) -> R<Ck> {
     let mut ck = Ck {
         externs: externs.to_vec(),
         extern_types: externs
@@ -692,6 +715,8 @@ fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Opti
         raw_used: BTreeSet::new(),
         raw_delegated: false,
         base_module: file.module.trust == Trust::Base,
+        embedded,
+        item_embedded: false,
         allowed_base: opts.trust_base.clone(),
         reports: HashMap::new(),
         globals: HashMap::new(),

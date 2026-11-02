@@ -12,6 +12,7 @@ use crate::effects::Options;
 use crate::error::{Error, ErrorKind};
 
 mod decl;
+mod embedded;
 mod link;
 mod load;
 mod resolve;
@@ -128,8 +129,10 @@ fn run_fs_with<'a>(
         order: vec![],
         stack: vec![],
         cands: HashMap::new(),
+        embedded: Default::default(),
     };
     let (path, file) = p.load(entry, None)?;
+    p.visit_embedded_roots(&file)?;
     let name = file.module.name.join(".");
     p.visit(path, file)?;
     Ok((p, name))
@@ -185,7 +188,9 @@ pub fn link_sources(srcs: &[&str], opts: &Options) -> R<File> {
         order: vec![],
         stack: vec![],
         cands: HashMap::new(),
+        embedded: Default::default(),
     };
+    p.visit_embedded_roots(&file)?;
     p.visit(path, file)?;
     if let Src::Mem(rest) = &p.src {
         if let Some((name, (path, f))) = rest.iter().min_by_key(|(n, _)| n.to_string()) {
@@ -229,4 +234,6 @@ struct Proj<'a> {
     stack: Vec<String>,
     /// 検査し終えたモジュールごとの、名前の候補（ADR 0022 決定 1。リンクが同じ解決を再び使う）。
     cands: HashMap<String, resolve::Cands>,
+    /// レジストリから読んだ埋め込みモジュール（出所の印。利用者のモジュールは入らない。ADR 0025 補足 A-6）。
+    embedded: std::collections::HashSet<String>,
 }

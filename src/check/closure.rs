@@ -78,7 +78,7 @@ impl ClosureInfo {
 
 /// ソースを検査して、クロージャごとのとらえた値の一覧を返す。
 pub fn closure_captures(src: &str) -> R<Vec<ClosureInfo>> {
-    analyze(&parse(src)?, &[], &[], &Options::default()).map(|ck| ck.closures)
+    analyze(&parse(src)?, &[], &[], &Options::default(), false).map(|ck| ck.closures)
 }
 
 /// 関数の本体の検査中の、クロージャの枠。

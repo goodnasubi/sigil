@@ -75,11 +75,20 @@ impl Proj<'_> {
     }
 
     pub(super) fn visit(&mut self, path: PathBuf, file: File) -> R<()> {
+        self.visit_as(path, file, false)
+    }
+
+    /// `embedded` はレジストリから読んだモジュールのときだけ真（出所は名前でなく、呼び出し元が決める。
+    /// 利用者のファイルが同じ名前を宣言しても、埋め込みとして扱われない）。
+    pub(super) fn visit_as(&mut self, path: PathBuf, file: File, embedded: bool) -> R<()> {
         let name = file.module.name.join(".");
         self.stack.push(name.clone());
-        let r = self.visit_in(&path, &file, &name);
+        let r = self.visit_in(&path, &file, &name, embedded);
         self.stack.pop();
         r?;
+        if embedded {
+            self.embedded.insert(name.clone());
+        }
         self.order.push(name.clone());
         self.mods.insert(name, (path, file));
         Ok(())
@@ -110,7 +119,7 @@ impl Proj<'_> {
         }
     }
 
-    fn visit_in(&mut self, path: &Path, file: &File, name: &str) -> R<()> {
+    fn visit_in(&mut self, path: &Path, file: &File, name: &str, embedded: bool) -> R<()> {
         let diag = |span: Span, kind: ErrorKind, msg: String| ProjectError::Diag {
             file: path.to_path_buf(),
             error: Error::new(kind, span, msg),
@@ -128,7 +137,10 @@ impl Proj<'_> {
         for u in &file.uses {
             let (item, mpath) = u.path.split_last().expect("use の path は 2 つ以上");
             let mname = mpath.join(".");
-            if modpath::is_reserved_head(&mpath[0]) {
+            // 埋め込みモジュールから埋め込みモジュールへの `use` だけは、予約名でも許す（利用者のファイルは拒否のまま）。
+            let embedded_use = embedded
+                && crate::stdlib::embedded::lookup(&mname, &self.opts.embedded_extra).is_some();
+            if modpath::is_reserved_head(&mpath[0]) && !embedded_use {
                 return Err(diag(
                     u.span,
                     ErrorKind::ReservedModuleName,
@@ -166,8 +178,12 @@ impl Proj<'_> {
                         format!("辿るファイルが多すぎる（上限 {MAX_FILES}）"),
                     ));
                 }
-                let (tp, tf) = self.load_dep(mpath, (path, u))?;
-                self.visit(tp, tf)?;
+                if embedded_use {
+                    self.visit_embedded(&mname)?;
+                } else {
+                    let (tp, tf) = self.load_dep(mpath, (path, u))?;
+                    self.visit(tp, tf)?;
+                }
             }
             let (_, target) = &self.mods[&mname];
             let Some(decl) = find_decl(target, item) else {
@@ -270,12 +286,17 @@ impl Proj<'_> {
                 }
             }
         }
-        crate::check::check_module(&checked, &externs, &visible_traits, self.opts).map_err(
-            |error| ProjectError::Diag {
+        let check = if embedded {
+            crate::check::check_module_embedded
+        } else {
+            crate::check::check_module
+        };
+        check(&checked, &externs, &visible_traits, self.opts).map_err(|error| {
+            ProjectError::Diag {
                 file: path.to_path_buf(),
                 error,
-            },
-        )?;
+            }
+        })?;
         self.cands.insert(name.to_string(), cands);
         let mut used = used_names(file);
         if !trait_uses.is_empty() {

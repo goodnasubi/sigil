@@ -59,6 +59,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
 ];
 
 pub mod core_sigil;
+pub mod embedded;
 pub mod os_sigil;
 
 /// 原始操作の表の効果の列で、起こす作用が引数で決まること（システムコール）を表す語（ADR 0016 の決定 4）。

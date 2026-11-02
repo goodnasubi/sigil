@@ -6,17 +6,19 @@ use crate::error::ErrorKind;
 use super::types::{contains_param, show, Prop, Ty, TypeDef};
 use super::util::collect_calls_block;
 use super::{std_heads, Ck, Pos, PRELUDE_TYPES, PRELUDE_VALUES, R};
+use crate::stdlib::embedded::is_embedded_name;
 
 impl Ck {
     pub(super) fn run(&mut self, file: &File) -> R<()> {
         // 0. モジュールの宣言（ADR 0016 の決定 3・6 の補足。名前の予約が許可より先）
         self.span = file.module.span;
         let mname = file.module.name.join(".");
-        if file
-            .module
-            .name
-            .first()
-            .is_some_and(|h| std_heads().contains(&h.as_str()))
+        if !self.embedded
+            && file
+                .module
+                .name
+                .first()
+                .is_some_and(|h| std_heads().contains(&h.as_str()))
         {
             return self.err(
                 ErrorKind::ReservedModuleName,
@@ -30,7 +32,7 @@ impl Ck {
         }
         let externs = self.externs.clone();
         let all: Vec<&Item> = externs.iter().chain(file.items.iter()).collect();
-        if self.base_module && !self.allowed_base.contains(&mname) {
+        if self.base_module && !self.embedded && !self.allowed_base.contains(&mname) {
             return self.err(
                 ErrorKind::TrustBaseNotAllowed,
                 format!("モジュール `{mname}` は `trust base` を宣言しているが、許可がない（検査・実行・組み立ての呼び出しに `--trust-base {mname}` を付ける。許可は人間が決める）"),
@@ -195,7 +197,7 @@ impl Ck {
                 }
                 Item::Global(g) => {
                     self.span = g.span;
-                    if !self.base_module {
+                    if !self.base_module && !is_embedded_name(&g.name) {
                         return self.err(
                             ErrorKind::GlobalOutsideTrustBase,
                             format!(
@@ -215,7 +217,7 @@ impl Ck {
                 }
                 Item::Properties(p) => {
                     self.span = p.span;
-                    if !self.base_module {
+                    if !self.base_module && !is_embedded_name(&p.type_name) {
                         return self.err(
                             ErrorKind::PropertiesOutsideTrustBase,
                             format!(
@@ -281,10 +283,12 @@ impl Ck {
                 Item::Type(t) => self.check_refinement(t)?,
                 Item::Global(g) => self.check_global(g)?,
                 Item::Fn(f) => {
+                    self.item_embedded = is_embedded_name(&f.name);
                     let sig = self.fns[&f.name].clone();
                     self.check_fn(f, &sig)?;
                 }
                 Item::Impl(i) => {
+                    self.item_embedded = matches!(&i.ty, Type::Path { path, .. } if is_embedded_name(&path.join(".")));
                     self.tparams = i.generics.iter().map(|g| g.name.clone()).collect();
                     let r = self.resolve(&i.ty, Pos::Other);
                     self.tparams.clear();
@@ -300,6 +304,8 @@ impl Ck {
                         continue;
                     };
                     let imp = self.trait_impls[idx].clone();
+                    self.item_embedded = is_embedded_name(&i.trait_name)
+                        || matches!(&i.ty, Type::Path { path, .. } if is_embedded_name(&path.join(".")));
                     for f in &i.fns {
                         let sig = imp
                             .fns
@@ -313,6 +319,7 @@ impl Ck {
                 _ => {}
             }
         }
+        self.item_embedded = false;
         Ok(())
     }
 

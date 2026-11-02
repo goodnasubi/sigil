@@ -187,6 +187,17 @@ pub fn lower_sources_with(
     lower_file(&file, func, &opts)
 }
 
+/// `lower_sources` に検査の設定をそのまま渡す版（埋め込みモジュールの暗黙の結合など。ADR 0025 補足 A-6）。
+pub fn lower_sources_opts(
+    srcs: &[&str],
+    func: &str,
+    opts: &crate::effects::Options,
+) -> Result<Program, RunError> {
+    let file =
+        crate::project::link_sources(srcs, opts).map_err(|e| crate::exec::link_error(e, true))?;
+    lower_file(&file, func, opts)
+}
+
 /// ファイルの `use` を `root` から辿って結び、入口の関数から SIR にする（`sigil build`）。
 pub fn lower_project(
     root: &std::path::Path,

@@ -18,6 +18,8 @@ fn std_options() -> Options {
         copy_override: vec![],
         trust_base: vec![],
         raw_ops: vec![],
+        embedded_extra: vec![],
+        embedded_roots: vec![],
         table: EffectTable::standard(),
         primitives: vec![
             prim("emit(n: Int) -> Int", &["console"]),
@@ -410,6 +412,8 @@ fn gpu_options(targets: Targets) -> Options {
         copy_override: vec![],
         trust_base: vec![],
         raw_ops: vec![],
+        embedded_extra: vec![],
+        embedded_roots: vec![],
         table: EffectTable::standard().with("gpu.draw", targets),
         primitives: vec![prim("draw(n: Int) -> Int", &["gpu.draw"])],
     }
@@ -461,6 +465,8 @@ fn state_subcategory_is_included_in_state() {
         copy_override: vec![],
         trust_base: vec![],
         raw_ops: vec![],
+        embedded_extra: vec![],
+        embedded_roots: vec![],
         table: EffectTable::standard().with("state.cell", Targets::HOSTED),
         primitives: vec![
             prim("tick() -> Int", &["state"]),
@@ -503,6 +509,8 @@ fn primitive_names_must_be_unique_and_valid() {
         copy_override: vec![],
         trust_base: vec![],
         raw_ops: vec![],
+        embedded_extra: vec![],
+        embedded_roots: vec![],
         table: EffectTable::standard(),
         primitives: vec![prim("emit(n: Int) -> Int", &["console"]); 2],
     };
@@ -514,6 +522,8 @@ fn primitive_names_must_be_unique_and_valid() {
         copy_override: vec![],
         trust_base: vec![],
         raw_ops: vec![],
+        embedded_extra: vec![],
+        embedded_roots: vec![],
         table: EffectTable::standard(),
         primitives: vec![prim("emit(n: Int) -> Int", &["nope"])],
     };

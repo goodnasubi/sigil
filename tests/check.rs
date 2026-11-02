@@ -53,6 +53,8 @@ fn emit_options() -> Options {
         copy_override: vec![],
         trust_base: vec![],
         raw_ops: vec![],
+        embedded_extra: vec![],
+        embedded_roots: vec![],
         table: EffectTable::standard(),
         primitives: vec![
             prim("emit(n: Int) -> Bool", &["console"]),

@@ -343,6 +343,10 @@ impl Ck {
             if *is_mut {
                 self.touched_global_mut.set(true);
             }
+            self.touched_globals
+                .borrow_mut()
+                .entry(n.to_string())
+                .or_insert(false);
             if *is_mut && !self.raw_fn {
                 return self.err(
                     ErrorKind::GlobalMutOutsideUnchecked,

@@ -405,6 +405,8 @@ struct Ck {
     raw_fn: bool,
     /// 検査中の関数が `global mut` に触った（ADR 0025 補足 A-1。中断しうる効果の宣言を拒む）。
     touched_global_mut: std::cell::Cell<bool>,
+    /// 検査中の関数が直接触った大域（名前 -> 書き込み・`&mut` での借用をしたか）。`sigil spec` の `触る大域:` 用。
+    touched_globals: std::cell::RefCell<BTreeMap<String, bool>>,
     /// クロージャの本体を検査している入れ子の深さ。
     closure_depth: u32,
     /// 検査中の関数が呼んだ原始操作（`raw.名前`）と、宣言に委ねる原始操作を呼んだか。
@@ -437,6 +439,8 @@ pub struct FnReport {
     pub delegated: bool,
     /// 宣言した効果のうち、本体から推論されなかったもの（葉のカテゴリか `of(x)`）。
     pub not_inferred: Vec<String>,
+    /// 本体から直接触る大域（名前の順で重複がない。書き込み・`&mut` での借用があれば真）。
+    pub globals: Vec<(String, bool)>,
 }
 
 /// `FnReport` の表の鍵。
@@ -683,6 +687,7 @@ fn analyze(file: &File, externs: &[Item], visible_traits: &[String], opts: &Opti
         },
         raw_fn: false,
         touched_global_mut: std::cell::Cell::new(false),
+        touched_globals: std::cell::RefCell::new(BTreeMap::new()),
         closure_depth: 0,
         raw_used: BTreeSet::new(),
         raw_delegated: false,

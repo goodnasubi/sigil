@@ -58,6 +58,7 @@ impl Ck {
         self.raw_used.clear();
         self.raw_delegated = false;
         self.touched_global_mut.set(false);
+        self.touched_globals.borrow_mut().clear();
         let r = self.check_fn_body(f, sig);
         self.raw_fn = false;
         r
@@ -154,6 +155,12 @@ impl Ck {
                 raw_ops,
                 delegated: self.raw_delegated,
                 not_inferred,
+                globals: self
+                    .touched_globals
+                    .borrow()
+                    .iter()
+                    .map(|(n, w)| (n.clone(), *w))
+                    .collect(),
             },
         );
     }

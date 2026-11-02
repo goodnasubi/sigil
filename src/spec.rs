@@ -39,6 +39,8 @@ pub enum Body {
         unchecked_fns: usize,
         /// `use` した名前（`モジュール名.名前`。ファイルに書かれた順で、文字の順）。
         uses: Vec<String>,
+        /// 大域の宣言（ファイルに書かれた順。ADR 0025 補足 A-1）。
+        globals: Vec<GlobalSpec>,
     },
     Type {
         base: String,
@@ -73,6 +75,16 @@ pub enum Body {
         /// （関数の名前, 仕様）
         fns: Vec<(String, FnSpec)>,
     },
+}
+
+/// 大域（`global`・`global mut`）の宣言。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalSpec {
+    pub name: String,
+    pub ty: String,
+    pub mutable: bool,
+    /// 定数の初期化式の正規形の行。
+    pub init: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +136,8 @@ pub struct Unchecked {
     pub raw_ops: Option<Vec<(String, String)>>,
     /// 推論できない効果。宣言に委ねる原始操作がない（行を出さない）か、検査が失敗したときは `None`。
     pub uninferred: Option<Vec<String>>,
+    /// 本体から直接触る大域（名前, 書き込みか）。名前の順で重複がない。検査が失敗して分からないときは `None`。
+    pub globals: Option<Vec<(String, bool)>>,
 }
 
 impl Spec {
@@ -186,6 +200,19 @@ pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, E
             targets: m.targets.clone(),
             trust_base: m.trust == Trust::Base,
             unchecked_fns: unchecked,
+            globals: file
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Global(g) => Some(GlobalSpec {
+                        name: g.name.clone(),
+                        ty: type_text(&g.ty),
+                        mutable: g.is_mut,
+                        init: expr_lines(&g.init),
+                    }),
+                    _ => None,
+                })
+                .collect(),
         },
     };
     let mut items = vec![];
@@ -369,6 +396,7 @@ fn make_fn_spec(f: &FnDecl, gs: &[Generic], reports: &Reports) -> FnSpec {
             premise: u.clone(),
             raw_ops: rep.map(|r| r.raw_ops.clone()),
             uninferred: rep.filter(|r| r.delegated).map(|r| r.not_inferred.clone()),
+            globals: rep.map(|r| r.globals.clone()),
         }
     });
     FnSpec {
@@ -425,7 +453,15 @@ impl SpecItem {
                 trust_base,
                 unchecked_fns,
                 uses,
-            } => module_text(&self.name, targets, *trust_base, *unchecked_fns, uses),
+                globals,
+            } => module_text(
+                &self.name,
+                targets,
+                *trust_base,
+                *unchecked_fns,
+                uses,
+                globals,
+            ),
             Body::Type { base, cond } => format!(
                 "型 {}\n  基にする型: {}\n  条件: {}\n",
                 self.name,
@@ -519,6 +555,7 @@ fn module_text(
     trust_base: bool,
     unchecked: usize,
     uses: &[String],
+    globals: &[GlobalSpec],
 ) -> String {
     let targets: Vec<&str> = targets
         .iter()
@@ -542,6 +579,16 @@ fn module_text(
     // `use` がないモジュールには行を足さない。
     if !uses.is_empty() {
         s.push_str(&format!("  使う名前: {}\n", uses.join("、")));
+    }
+    // 大域がないモジュールには行を足さない（ADR 0025 補足 A-1）。
+    for g in globals {
+        s.push_str(&format!(
+            "  大域: {}{}: {} = {}\n",
+            if g.mutable { "mut " } else { "" },
+            g.name,
+            g.ty,
+            g.init.join("\n    ")
+        ));
     }
     s
 }
@@ -663,6 +710,14 @@ fn unchecked_text(u: &Unchecked) -> String {
         };
         out.push_str(&format!("  推論できない効果: {ne}\n"));
     }
+    // 触らない関数には行を足さない（ADR 0025 補足 A-1）。
+    if let Some(gs) = u.globals.as_ref().filter(|g| !g.is_empty()) {
+        let gs: Vec<String> = gs
+            .iter()
+            .map(|(n, w)| format!("{n}（{}）", if *w { "読み書き" } else { "読む" }))
+            .collect();
+        out.push_str(&format!("  触る大域: {}\n", gs.join(", ")));
+    }
     out
 }
 
@@ -738,9 +793,29 @@ impl SpecItem {
                 trust_base,
                 unchecked_fns,
                 uses,
+                globals,
             } => {
                 fields.push(("uses", uses.clone().into()));
                 fields.push(("targets", targets.clone().into()));
+                // 既存の出力を変えないよう、大域があるときだけ欄を足す。
+                if !globals.is_empty() {
+                    fields.push((
+                        "globals",
+                        Value::Arr(
+                            globals
+                                .iter()
+                                .map(|g| {
+                                    obj(vec![
+                                        ("name", g.name.clone().into()),
+                                        ("type", g.ty.clone().into()),
+                                        ("mutable", g.mutable.into()),
+                                        ("init", g.init.join("\n").into()),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ));
+                }
                 fields.push(("trust_base", (*trust_base).into()));
                 fields.push((
                     "unchecked_fns",
@@ -865,6 +940,15 @@ fn fn_spec_json(f: &FnSpec) -> Vec<(&'static str, Value)> {
     fields.push(("raw_ops", Value::Arr(raw_ops)));
     let unin = u.and_then(|u| u.uninferred.clone()).unwrap_or_default();
     fields.push(("uninferred_effects", unin.into()));
+    let touched = u.and_then(|u| u.globals.as_ref()).map_or(vec![], |gs| {
+        gs.iter()
+            .map(|(n, w)| obj(vec![("name", n.clone().into()), ("write", (*w).into())]))
+            .collect()
+    });
+    // 既存の出力を変えないよう、触る大域があるときだけ欄を足す。
+    if !touched.is_empty() {
+        fields.push(("touched_globals", Value::Arr(touched)));
+    }
     // 検査が失敗して `raw_ops`・`uninferred_effects` が分からないとき真（空の配列と区別する）
     fields.push((
         "unchecked_unresolved",

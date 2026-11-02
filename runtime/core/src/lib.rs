@@ -54,22 +54,95 @@ pub unsafe extern "C" fn sigil_rt_free(p: *mut u8, size: usize, align: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// String（UTF-8。不透明な入れ物）
+// String（UTF-8。不透明な入れ物。表現は Sigil 製の `std.core.string` が持つ。補足 D）
 
-pub struct RtStr(String);
+/// 24B の頭（ptr・len・cap）の塊。Rust 側は中身を知らず、登録された関数表を通してだけ触る。
+#[repr(C)]
+pub struct RtStr {
+    _p: [u8; 0],
+}
+
+type StrNew = extern "C" fn(*const u8, i64) -> *mut RtStr;
+type StrFree = extern "C" fn(*mut RtStr);
+type StrClone = extern "C" fn(*const RtStr) -> *mut RtStr;
+type StrData = extern "C" fn(*const RtStr) -> *const u8;
+type StrBytes = extern "C" fn(*const RtStr) -> i64;
+
+/// 文字列の関数表（new・free・clone・data・bytes の関数ポインタ。0 は未登録）。
+static STR_OPS: [AtomicUsize; 5] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+
+/// 生成コードの `main` が、入口を呼ぶ前に文字列の関数表を登録する（補足 D-3）。
+#[no_mangle]
+pub extern "C" fn sigil_rt_set_str_ops(
+    new: StrNew,
+    free: StrFree,
+    clone: StrClone,
+    data: StrData,
+    bytes: StrBytes,
+) {
+    STR_OPS[0].store(new as usize, Ordering::Relaxed);
+    STR_OPS[1].store(free as usize, Ordering::Relaxed);
+    STR_OPS[2].store(clone as usize, Ordering::Relaxed);
+    STR_OPS[3].store(data as usize, Ordering::Relaxed);
+    STR_OPS[4].store(bytes as usize, Ordering::Relaxed);
+}
+
+/// 関数表の `i` 番目。未登録なら異常停止（exit_group(70) と同じ終了コード）。
+fn str_op(i: usize) -> usize {
+    // 試験では自動で登録する。ただし未登録の試験（子プロセス）では登録しない。
+    #[cfg(test)]
+    if std::env::var("SIGIL_TEST_STR_MODE").as_deref() != Ok("unregistered") {
+        tests::table::init();
+    }
+    let p = STR_OPS[i].load(Ordering::Relaxed);
+    if p == 0 {
+        eprintln!("sigil: 文字列の関数表が未登録のまま文字列を使った");
+        std::process::exit(70);
+    }
+    p
+}
+
+// SAFETY（以下の 5 つ）: `str_op` が返す値は `sigil_rt_set_str_ops` が受け取った、対応する型の関数ポインタだけ。
+fn str_new_raw(ptr: *const u8, len: usize) -> *mut RtStr {
+    let f: StrNew = unsafe { std::mem::transmute(str_op(0)) };
+    f(ptr, len as i64)
+}
+
+pub(crate) fn str_free(p: *mut RtStr) {
+    if !p.is_null() {
+        let f: StrFree = unsafe { std::mem::transmute(str_op(1)) };
+        f(p)
+    }
+}
+
+pub(crate) fn str_clone(p: *const RtStr) -> *mut RtStr {
+    let f: StrClone = unsafe { std::mem::transmute(str_op(2)) };
+    f(p)
+}
+
+fn str_data(p: *const RtStr) -> *const u8 {
+    let f: StrData = unsafe { std::mem::transmute(str_op(3)) };
+    f(p)
+}
+
+fn str_bytes(p: *const RtStr) -> usize {
+    let f: StrBytes = unsafe { std::mem::transmute(str_op(4)) };
+    f(p) as usize
+}
 
 // ---------------------------------------------------------------------------
 // 生きている塊の数（ADR 0018 の決定 5。テストが解放の漏れと二重解放を見つけるための数え）
+//
+// 文字列の数 `strs=` は、文字列を Sigil 製の確保器が持つようになったので 0 に固定する（補足 D-5。書式は 3-5e まで保つ）。
+// 文字列の漏れ・二重解放は `sigil_blocks=` の厳密一致で見る。
 
-static LIVE_STRS: AtomicIsize = AtomicIsize::new(0);
 static LIVE_BLOCKS: AtomicIsize = AtomicIsize::new(0);
-
-/// 文字列・パスの数を `d` だけ増やす。0 を下回ったら（作っていない物を解放した）二重解放として止める。
-pub(crate) fn live_strs(d: isize) {
-    if LIVE_STRS.fetch_add(d, Ordering::Relaxed) + d < 0 {
-        std::process::abort();
-    }
-}
 
 /// 見出しつきの塊の数を `d` だけ増やす。0 を下回ったら二重解放として止める。
 pub(crate) fn live_blocks(d: isize) {
@@ -98,10 +171,10 @@ fn sigil_live_blocks() -> Option<i64> {
     Some(f())
 }
 
-/// 生きている文字列・パスの数。
+/// 生きている文字列・パスの数。文字列の表現を Sigil が持つので常に 0（補足 D-5）。
 #[no_mangle]
 pub extern "C" fn sigil_rt_live_strs() -> isize {
-    LIVE_STRS.load(Ordering::Relaxed)
+    0
 }
 
 /// 生きている見出しつきの塊の数。
@@ -110,62 +183,24 @@ pub extern "C" fn sigil_rt_live_blocks() -> isize {
     LIVE_BLOCKS.load(Ordering::Relaxed)
 }
 
+/// Rust の文字列から作る（正しい UTF-8 なので `new_lossy` は複写と同じ）。
 fn new_str(s: String) -> *mut RtStr {
-    live_strs(1);
-    Box::into_raw(Box::new(RtStr(s)))
+    str_new_raw(s.as_ptr(), s.len())
 }
 
+/// 中身を読む。正しい UTF-8 でなければ（表現が壊れている）異常停止する。
 unsafe fn s<'a>(p: *const RtStr) -> &'a str {
-    &(*p).0
-}
-
-/// バイト列（UTF-8）から作る。不正な列は置換文字になる。
-///
-/// # Safety
-/// `ptr` は `len` バイト読める。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_new(ptr: *const u8, len: usize) -> *mut RtStr {
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ptr, len)
-    };
-    new_str(String::from_utf8_lossy(bytes).into_owned())
-}
-
-/// # Safety
-/// `p` は `sigil_rt_str_*` が返したもの（または null）。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_free(p: *mut RtStr) {
-    if !p.is_null() {
-        live_strs(-1);
-        drop(Box::from_raw(p));
+    let n = str_bytes(p);
+    if n == 0 {
+        return "";
     }
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_clone(p: *const RtStr) -> *mut RtStr {
-    new_str(s(p).to_string())
-}
-
-/// バイト列の先頭（長さは `sigil_rt_str_bytes`）。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_data(p: *const RtStr) -> *const u8 {
-    s(p).as_ptr()
-}
-
-/// バイト数。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_bytes(p: *const RtStr) -> usize {
-    s(p).len()
+    match std::str::from_utf8(std::slice::from_raw_parts(str_data(p), n)) {
+        Ok(t) => t,
+        Err(_) => {
+            eprintln!("sigil: 文字列の中身が正しい UTF-8 でない");
+            std::process::exit(70);
+        }
+    }
 }
 
 /// `String.len`: Unicode のスカラー値の数。
@@ -570,7 +605,7 @@ pub unsafe extern "C" fn sigil_rt_list_free_strs(l: *mut RtList) {
     }
     for i in 0..(*l).len {
         let e = *((*l).buf as *mut *mut RtStr).add(i);
-        sigil_rt_str_free(e);
+        str_free(e);
     }
     sigil_rt_list_free(l);
 }
@@ -860,7 +895,7 @@ pub unsafe extern "C" fn sigil_rt_enter(entry: extern "C" fn(*mut u8) -> i32, ar
 #[repr(transparent)]
 pub struct RtArg(args::Arg);
 
-/// 引数 1 つを読む。誤りなら null を返し、`*err` に説明（`sigil_rt_str_free` で解放）を書く。
+/// 引数 1 つを読む。誤りなら null を返し、`*err` に説明（`str_free` で解放）を書く。
 ///
 /// # Safety
 /// `ptr` は `len` バイト読める。`err` は書ける。
@@ -870,9 +905,9 @@ pub unsafe extern "C" fn sigil_rt_arg_parse(
     len: usize,
     err: *mut *mut RtStr,
 ) -> *mut RtArg {
-    let src = sigil_rt_str_new(ptr, len);
+    let src = str_new_raw(ptr, len);
     let r = args::parse_arg(s(src));
-    sigil_rt_str_free(src);
+    str_free(src);
     match r {
         Ok(a) => Box::into_raw(Box::new(RtArg(a))),
         Err(m) => {
@@ -981,48 +1016,81 @@ pub unsafe extern "C" fn sigil_rt_arg_name(a: *const RtArg) -> *mut RtStr {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    /// 同じ文字列を 2 回解放すると、数が負になってランタイムが異常終了する（直接の検査）。
-    /// 子プロセスで同じテストを走らせ、環境変数が付いているときだけ二重解放をする。
-    #[test]
-    fn double_free_of_a_string_aborts() {
-        unsafe {
-            if std::env::var_os("SIGIL_TEST_DOUBLE_FREE").is_some() {
-                let p = st("a");
-                sigil_rt_str_free(p);
-                sigil_rt_str_free(p);
-                return;
+    /// テスト用の関数表。頭は Rust の確保（ptr・len・cap の 24B）で、本物（Sigil 製）と同じ配置にする。
+    pub(crate) mod table {
+        use super::super::*;
+        use std::sync::Once;
+
+        #[repr(C)]
+        struct Head {
+            ptr: *mut u8,
+            len: i64,
+            cap: i64,
+        }
+
+        pub(crate) extern "C" fn new(p: *const u8, n: i64) -> *mut RtStr {
+            let v: Vec<u8> = if n == 0 {
+                Vec::new()
+            } else {
+                unsafe { std::slice::from_raw_parts(p, n as usize) }.to_vec()
+            };
+            let mut b = v.into_boxed_slice();
+            let ptr = if n == 0 {
+                std::ptr::null_mut()
+            } else {
+                b.as_mut_ptr()
+            };
+            std::mem::forget(b);
+            Box::into_raw(Box::new(Head {
+                ptr,
+                len: n,
+                cap: n,
+            })) as *mut RtStr
+        }
+
+        extern "C" fn free(p: *mut RtStr) {
+            unsafe {
+                let h = Box::from_raw(p as *mut Head);
+                if h.cap > 0 {
+                    drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                        h.ptr,
+                        h.cap as usize,
+                    )));
+                }
             }
-            let exe = std::env::current_exe().unwrap();
-            let out = std::process::Command::new(exe)
-                .args([
-                    "--exact",
-                    "tests::double_free_of_a_string_aborts",
-                    "--test-threads=1",
-                ])
-                .env("SIGIL_TEST_DOUBLE_FREE", "1")
-                .output()
-                .unwrap();
-            assert!(!out.status.success(), "二重解放で止まらなかった");
-            // `code()` が `None` になるのは Unix でシグナルで終わった場合（Unix のシグナルが前提）。
-            assert_eq!(
-                out.status.code(),
-                None,
-                "異常終了（シグナル）ではない: {:?}",
-                out.status
-            );
+        }
+
+        extern "C" fn clone(p: *const RtStr) -> *mut RtStr {
+            unsafe {
+                let h = &*(p as *const Head);
+                new(h.ptr, h.len)
+            }
+        }
+
+        extern "C" fn data(p: *const RtStr) -> *const u8 {
+            unsafe { (*(p as *const Head)).ptr }
+        }
+
+        extern "C" fn bytes(p: *const RtStr) -> i64 {
+            unsafe { (*(p as *const Head)).len }
+        }
+
+        pub fn init() {
+            static ONCE: Once = Once::new();
+            ONCE.call_once(|| sigil_rt_set_str_ops(new, free, clone, data, bytes));
         }
     }
 
     unsafe fn st(s: &str) -> *mut RtStr {
-        sigil_rt_str_new(s.as_ptr(), s.len())
+        str_new_raw(s.as_ptr(), s.len())
     }
 
     unsafe fn text(p: *mut RtStr) -> String {
         let t = s(p).to_string();
-        sigil_rt_str_free(p);
+        str_free(p);
         t
     }
 
@@ -1118,6 +1186,41 @@ mod tests {
 
             sigil_rt_bytes_free(b);
             sigil_rt_bytes_free(b2);
+        }
+    }
+
+    /// 子プロセスで同じテストを走らせ、環境変数の指示のときだけ異常な使い方をして、終了コード 70 を確かめる。
+    fn exits_70_when(mode: &str, name: &str) {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args(["--exact", name, "--test-threads=1", "--nocapture"])
+            .env("SIGIL_TEST_STR_MODE", mode)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(70), "{:?}", out.status);
+    }
+
+    /// 関数表が未登録のまま文字列を作ると、終了コード 70 で止まる。
+    #[test]
+    fn unregistered_table_exits_70() {
+        match std::env::var("SIGIL_TEST_STR_MODE").as_deref() {
+            Ok("unregistered") => {
+                let _ = str_new_raw(b"a".as_ptr(), 1);
+            }
+            _ => exits_70_when("unregistered", "tests::unregistered_table_exits_70"),
+        }
+    }
+
+    /// 中身が不正な UTF-8 の文字列を `s` が見ると、終了コード 70 で止まる。
+    #[test]
+    fn invalid_utf8_exits_70() {
+        match std::env::var("SIGIL_TEST_STR_MODE").as_deref() {
+            Ok("invalid") => unsafe {
+                table::init();
+                let p = table::new(b"\xFF\xFE".as_ptr(), 2);
+                let _ = s(p);
+            },
+            _ => exits_70_when("invalid", "tests::invalid_utf8_exits_70"),
         }
     }
 }

@@ -1,0 +1,229 @@
+module std.core.string
+  targets bare, browser, server
+  trust base
+
+// `String` の表現の Sigil 実装（ADR 0025 補足 D、PR 3-5b-i）。`Addr`・`Int` だけを受け渡す。
+// 言語の `String`（と `Path`）の語は、24B の頭の塊の番地とする（D-2）。
+//   頭: ptr（+0, Addr）・len（+8, バイト数）・cap（+16, ptr の塊の大きさ）。頭は raw.alloc(24, 8)、中身は raw.alloc(cap, 1)。
+//   空の文字列は ptr = 空番地・len = cap = 0 で、中身の塊を確保しない。
+//   不変条件: 0 <= len <= cap、len > 0 なら ptr..ptr+len は読める、ptr..ptr+len は正しい UTF-8。作るときは cap = len。
+// 評価器の `String` は Rust の組み込みのまま（補足 C-7）で、この関数は呼ばない。ネイティブはシムから new_lossy・free・
+// clone・data・bytes を呼ぶ（D-3）。利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）ので、不変条件を破る経路はない。
+// 異常停止は確保器の異常停止（exit_group(70)）に頼る（確保器と同じ終了コード）。排他を持たない単一スレッド前提（A-5）。
+
+fn halt()
+  intent "異常停止する（exit_group(70)）"
+  requires none
+  ensures none
+  effects none
+  unchecked "raw.alloc は size <= 0 を異常停止（exit_group(70)）にするので戻らない。このモジュールは bare でも使うため raw.syscall を直接は使わない（補足 A-4・D-2）"
+{
+  raw.free(raw.alloc(-1, 1), 1, 1);
+}
+
+fn build(body: Addr, len: Int) -> Addr
+  intent "中身の塊 body（空なら空番地）と長さ len から頭を作る（cap = len）"
+  requires none
+  ensures none
+  effects none
+  unchecked "len > 0 なら body は raw.alloc(len, 1) で得た塊の先頭、len == 0 なら body は空番地。頭は raw.alloc(24, 8) で得て 3 つの欄を書く（補足 D-2）"
+{
+  let head = raw.alloc(24, 8);
+  raw.store_addr(head, body);
+  raw.store_i64(raw.offset(head, 8), len);
+  raw.store_i64(raw.offset(head, 16), len);
+  return head;
+}
+
+pub fn new(p: Addr, n: Int) -> Addr
+  intent "p から n バイトを複写して文字列を作る（UTF-8 の検証をしない。n < 0 は異常停止）"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める正しい UTF-8（n == 0 なら p は読まない）。呼ぶのは出力が構成上正しい UTF-8 になる std.core.string 自身と、正しさを確かめた埋め込みの std.* に限る（補足 D-2）"
+{
+  if n < 0 {
+    halt();
+    return raw.addr_null();
+  }
+  if n == 0 {
+    return build(raw.addr_null(), 0);
+  }
+  let body = raw.alloc(n, 1);
+  raw.copy(body, p, n);
+  return build(body, n);
+}
+
+fn seq(p: Addr, n: Int, i: Int) -> Int
+  intent "p[i..n) の先頭の UTF-8 の列を調べる。正しければその長さ（1..=4）、不正なら -(最大の不正な部分列の長さ)（-1..=-3）"
+  requires none
+  ensures none
+  effects none
+  unchecked "0 <= i < n で、p..p+n は読める（補足 D-2）。不正な部分列の区切りは Rust の from_utf8_lossy と同じ"
+{
+  let b0 = raw.load_u8(raw.offset(p, i));
+  if b0 < 128 {
+    return 1;
+  }
+  if b0 < 194 || b0 > 244 {
+    return -1;
+  }
+  let mut lo = 128;
+  let mut hi = 191;
+  let mut need = 1;
+  if b0 >= 240 {
+    need = 3;
+  } else if b0 >= 224 {
+    need = 2;
+  }
+  if b0 == 224 {
+    lo = 160;
+  } else if b0 == 237 {
+    hi = 159;
+  } else if b0 == 240 {
+    lo = 144;
+  } else if b0 == 244 {
+    hi = 143;
+  }
+  if i + 1 >= n {
+    return -1;
+  }
+  let b1 = raw.load_u8(raw.offset(p, i + 1));
+  if b1 < lo || b1 > hi {
+    return -1;
+  }
+  if need == 1 {
+    return 2;
+  }
+  if i + 2 >= n {
+    return -2;
+  }
+  let b2 = raw.load_u8(raw.offset(p, i + 2));
+  if b2 < 128 || b2 > 191 {
+    return -2;
+  }
+  if need == 2 {
+    return 3;
+  }
+  if i + 3 >= n {
+    return -3;
+  }
+  let b3 = raw.load_u8(raw.offset(p, i + 3));
+  if b3 < 128 || b3 > 191 {
+    return -3;
+  }
+  return 4;
+}
+
+pub fn valid_utf8(p: Addr, n: Int) -> Bool
+  intent "p から n バイトが正しい UTF-8（過長・サロゲート・U+10FFFF 超を含まない）か"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める（n <= 0 なら p は読まない。補足 D-2）"
+{
+  let mut i = 0;
+  while i < n {
+    let k = seq(p, n, i);
+    if k < 0 {
+      return false;
+    }
+    i = i + k;
+  }
+  return true;
+}
+
+pub fn new_lossy(p: Addr, n: Int) -> Addr
+  intent "p から n バイトで文字列を作る。不正な列は置換文字 U+FFFD にする（Rust の from_utf8_lossy と同じ）。n < 0 は異常停止"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める（n == 0 なら p は読まない）。出力は常に正しい UTF-8（補足 D-2）"
+{
+  if n < 0 {
+    halt();
+    return raw.addr_null();
+  }
+  let mut i = 0;
+  let mut out = 0;
+  let mut bad = false;
+  while i < n {
+    let k = seq(p, n, i);
+    if k > 0 {
+      i = i + k;
+      out = out + k;
+    } else {
+      i = i - k;
+      out = out + 3;
+      bad = true;
+    }
+  }
+  if !bad {
+    return new(p, n);
+  }
+  let body = raw.alloc(out, 1);
+  let mut o = 0;
+  i = 0;
+  while i < n {
+    let k = seq(p, n, i);
+    if k > 0 {
+      raw.copy(raw.offset(body, o), raw.offset(p, i), k);
+      i = i + k;
+      o = o + k;
+    } else {
+      raw.store_u8(raw.offset(body, o), 239);
+      raw.store_u8(raw.offset(body, o + 1), 191);
+      raw.store_u8(raw.offset(body, o + 2), 189);
+      i = i - k;
+      o = o + 3;
+    }
+  }
+  return build(body, out);
+}
+
+pub fn free(s: Addr)
+  intent "文字列の中身（cap > 0 のとき）と頭を解放する。空番地は何もしない"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は空番地か、このモジュールが返し、まだ解放していない頭（したがって cap > 0 なら ptr は raw.alloc(cap, 1) の塊の先頭）（補足 D-2）"
+{
+  if raw.addr_to_int(s) == 0 {
+    return;
+  }
+  let cap = raw.load_i64(raw.offset(s, 16));
+  if cap > 0 {
+    raw.free(raw.load_addr(s), cap, 1);
+  }
+  raw.free(s, 24, 8);
+}
+
+pub fn clone(s: Addr) -> Addr
+  intent "文字列の複製を返す（cap = len の新しい 2 つの塊）"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（len <= cap、len > 0 なら ptr..ptr+len は読める正しい UTF-8）。複写の結果も正しい UTF-8（補足 D-2）"
+{
+  return new(raw.load_addr(s), raw.load_i64(raw.offset(s, 8)));
+}
+
+pub fn data(s: Addr) -> Addr
+  intent "中身の先頭の番地を返す（長さ 0 のときは空番地でありうる。読む側は長さ 0 なら使わない）"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（補足 D-2）"
+{
+  return raw.load_addr(s);
+}
+
+pub fn bytes(s: Addr) -> Int
+  intent "バイト数を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（補足 D-2）"
+{
+  return raw.load_i64(raw.offset(s, 8));
+}

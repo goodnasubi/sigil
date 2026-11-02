@@ -9,6 +9,8 @@
 //!   （利用者のモジュールは `std` で始まれず、`.` を含む名前は結合でしか生まれない）。
 //! - 本番のレジストリ `EMBEDDED` には確保器 `std.os.alloc` がある（3-4i）。`raw.alloc`/`raw.free` を使い、
 //!   すべてのプログラムに暗黙に結ぶ（補足 C-2。`implicit_roots`）。
+//! - `std.core.string`（3-5b-i）は `String` の表現（24B の頭と中身の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 D）。
+//!   `raw_ops` で確保器を差し替えたときは、確保器も文字列も結ばない。
 
 /// Sigil 製の確保器のモジュール名（ADR 0025 決定 3、補足 A-2・B-1）。
 pub const ALLOC_MODULE: &str = "std.os.alloc";
@@ -24,9 +26,19 @@ pub const LIVE_FN: &str = "std.os.alloc.live_blocks";
 pub const FLOAT_MODULE: &str = "std.core.float";
 pub const FMOD_FN: &str = "std.core.float.fmod";
 
+/// `String` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 D-3、PR 3-5b-i）。
+/// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_str_*` のシムから呼ぶ。
+pub const STRING_MODULE: &str = "std.core.string";
+pub const STR_NEW_LOSSY_FN: &str = "std.core.string.new_lossy";
+pub const STR_FREE_FN: &str = "std.core.string.free";
+pub const STR_CLONE_FN: &str = "std.core.string.clone";
+pub const STR_DATA_FN: &str = "std.core.string.data";
+pub const STR_BYTES_FN: &str = "std.core.string.bytes";
+
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[
     (ALLOC_MODULE, include_str!("os_alloc.sigil")),
+    (STRING_MODULE, include_str!("core_string.sigil")),
     (FLOAT_MODULE, include_str!("core_float.sigil")),
 ];
 
@@ -46,7 +58,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
     if replaced {
         vec![]
     } else {
-        vec![ALLOC_MODULE]
+        vec![ALLOC_MODULE, STRING_MODULE]
     }
 }
 

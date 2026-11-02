@@ -1,7 +1,7 @@
 //! ADR 0018 の決定 5（A）: 文字列とパスを解放する。作っては捨てる繰り返しで、生きている塊の数が
 //! 繰り返しの回数に比例して増えないことを、実行ファイルの `SIGIL_RT_LIVE`（終了時に数を標準エラーへ出す）で確かめる。
-//! 二重解放は、全体の数が負になる、または解放済みの印が残る塊を再び解放する場合に限り、ランタイムが異常終了して
-//! 見つかる（最善の努力。どのテストも終了コード 0 を求める）。直接の検査は `runtime/core` の `double_free_of_a_string_aborts`。
+//! 文字列は Sigil 製の確保器の塊（補足 D）なので、`strs=` は 0 固定で、漏れと二重解放は `sigil_blocks=` の完全一致
+//! （1000 回と 100000 回で同じ）で見る。塊の表の直接の試験は `tests/str_35b.rs`。
 
 mod common;
 use common::native::{exec_env, scratch, try_build};
@@ -55,7 +55,10 @@ fn live(src: &str, n: i64) -> (i64, i64, String) {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| panic!("{key} がない: {line}"))
     };
-    (num("strs="), num("blocks="), got.stdout)
+    // 文字列は Sigil 製の確保器の塊になった（補足 D-5）ので、`strs=` は 0 固定で、文字列の漏れ・二重解放は
+    // `sigil_blocks=` の厳密一致で見る。返す 1 つ目は `sigil_blocks=`。
+    assert_eq!(num("strs="), 0, "strs= は 0 固定: {line}");
+    (num("sigil_blocks="), num("blocks="), got.stdout)
 }
 
 #[test]
@@ -73,7 +76,7 @@ fn create_and_discard_does_not_grow_with_the_iteration_count() {
     );
     assert!(
         s2 < 100 && b2 < 100,
-        "生きている数が多い: strs={s2} blocks={b2}"
+        "生きている数が多い: sigil_blocks={s2} blocks={b2}"
     );
 }
 
@@ -91,5 +94,5 @@ fn console_log_does_not_grow_with_the_iteration_count() {
         (s2, b2),
         "console.log の繰り返しで生きている数が増えた"
     );
-    assert!(s2 < 100 && b2 < 100, "strs={s2} blocks={b2}");
+    assert!(s2 < 100 && b2 < 100, "sigil_blocks={s2} blocks={b2}");
 }

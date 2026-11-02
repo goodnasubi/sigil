@@ -308,7 +308,8 @@ fn large_free(a: Int, size: Int, i: Int)
     base = raw.load_i64(raw.int_to_addr(a - 32));
     len = raw.load_i64(raw.int_to_addr(a - 24));
     let d = a - base;
-    if d < 32 || d > 4096 || len <= 0 || len % 4096 != 0 {
+    // 正しい塊では d == align で、map_len = round_up(align + 16 + size)（補足 B-1）。等式で確かめる。
+    if d < 32 || d > 4096 || len != round_page(d + 16 + size) {
       halt();
       return;
     }
@@ -373,7 +374,7 @@ pub fn free(a: Addr, size: Int, align: Int)
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。ネイティブでは align を頭と突き合わせない（補足 A-4）"
+  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。align は範囲と 2 の冪だけを検査し、確保時の align とは突き合わせない（補足 A-4・B-1）"
 {
   let ai = raw.addr_to_int(a);
   if ai == 0 || size <= 0 || size > MAX_SIZE {

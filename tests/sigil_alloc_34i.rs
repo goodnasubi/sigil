@@ -206,8 +206,9 @@ fn small_large_aligned_roundtrip_matches_and_frees_everything() {
 }
 
 #[test]
-fn reuse_loop_does_not_grow_and_leaks_are_counted() {
-    // 1000 回の確保と解放（小・大・整列）。生存数は 0 に戻り、最後に残した 3 つだけが数えられる。
+fn alloc_free_loop_matches_and_leaks_are_counted() {
+    // 1000 回の確保と解放（小・大・整列）を評価器とネイティブで突き合わせ、最後に残した 3 つだけが数えられる。
+    // 番地の再利用と生存数が増えないことは、確保器を直接呼ぶ reuse_returns_the_freed_block_and_loops_do_not_grow で確かめる。
     let body = "  let mut i = 0;\n  let mut s = 0;\n  while i < 1000 {\n    let p = raw.alloc(1 + i % 2100, 8);\n    let q = raw.alloc(64, 1 << (i % 13));\n    raw.store_u8(p, i % 200);\n    s = s + raw.load_u8(p);\n    raw.free(q, 64, 1 << (i % 13));\n    raw.free(p, 1 + i % 2100, 8);\n    i = i + 1;\n  }\n  raw.alloc(16, 8);\n  raw.alloc(5000, 8);\n  raw.alloc(16, 64);\n  return s;";
     let (v, live) = both_user(body);
     assert_eq!(v, "99500");
@@ -245,6 +246,63 @@ fn large_aligned_layout_matches_b1() {
     let body = "  let p = alloc(5000, 1024);\n  let a = raw.addr_to_int(p);\n  let base = raw.load_i64(raw.int_to_addr(a - 32));\n  let len = raw.load_i64(raw.int_to_addr(a - 24));\n  let q = alloc(3000, 8);\n  let qa = raw.addr_to_int(q);\n  let r = (a - base) * 1000000 + len * 10 + match base % 4096 == 0 { true => 0, false => 1 } + match qa % 4096 == 16 { true => 0, false => 2 };\n  free(p, 5000, 1024);\n  free(q, 3000, 8);\n  return r;";
     // a - base = 1024、len = round_up(1024 + 16 + 5000, 4096) = 8192。
     assert_eq!(both_driver(body), "1024081920");
+}
+
+/// 解放した小ブロックをすぐ取り直すと同じ番地が返り、確保と解放を繰り返しても番地は動かず、生存数も増えない。
+const REUSE: &str = "  let p = alloc(64, 8);\n  free(p, 64, 8);\n  let q = alloc(64, 8);\n  let mut same = 0;\n  if raw.addr_to_int(p) == raw.addr_to_int(q) {\n    same = 1;\n  }\n  free(q, 64, 8);\n  let mut moved = 0;\n  let mut grew = 0;\n  let mut i = 0;\n  while i < 1000 {\n    let size = 1 + i % 2100;\n    let al = 1 << (i % 13);\n    let a = alloc(size, 8);\n    let b = alloc(64, al);\n    if live_blocks() != 2 {\n      grew = grew + 1;\n    }\n    free(b, 64, al);\n    free(a, size, 8);\n    let c = alloc(64, 8);\n    if raw.addr_to_int(c) != raw.addr_to_int(p) {\n      moved = moved + 1;\n    }\n    free(c, 64, 8);\n    if live_blocks() != 0 {\n      grew = grew + 1;\n    }\n    i = i + 1;\n  }\n  return same * 100000000 + moved * 10000 + grew;";
+
+#[test]
+fn reuse_returns_the_freed_block_and_loops_do_not_grow() {
+    assert_eq!(both_driver(REUSE), "100000000");
+}
+
+/// 各 (size, align) を確保し、頭の class と size の語を読む（class を 1 桁ずつ並べた数を返す）。
+fn class_digits(cases: &[(i64, i64)]) -> String {
+    let mut b = String::from("  let mut r = 0;\n");
+    for (n, (size, align)) in cases.iter().enumerate() {
+        b += &format!("  let p{n} = alloc({size}, {align});\n  let h{n} = raw.offset(p{n}, -16);\n  if raw.load_i64(raw.offset(h{n}, 8)) != {size} || raw.addr_to_int(p{n}) % {align} != 0 {{\n    return -1;\n  }}\n  r = r * 10 + (raw.load_i64(h{n}) - 0x5349474C414C0000);\n");
+    }
+    b += &format!(
+        "  if live_blocks() != {} {{\n    return -2;\n  }}\n",
+        cases.len()
+    );
+    for (n, (size, align)) in cases.iter().enumerate() {
+        b += &format!("  free(p{n}, {size}, {align});\n");
+    }
+    b += "  if live_blocks() != 0 {\n    return -3;\n  }\n  return r;";
+    b
+}
+
+#[test]
+fn size_classes_at_every_boundary() {
+    // サイズクラス 16 << k の境界の両側（1..2048）と、2047〜2050 の小・大の境目。
+    let small: Vec<(i64, i64)> = [
+        1, 16, 17, 32, 33, 64, 65, 128, 129, 256, 257, 512, 513, 1024, 1025, 2047, 2048,
+    ]
+    .iter()
+    .map(|&s| (s, 8))
+    .collect();
+    assert_eq!(both_driver(&class_digits(&small)), "112233445566777");
+    let edge = [
+        (2047, 16),
+        (2048, 16),
+        (2049, 16),
+        (2050, 8),
+        (2049, 1),
+        (2047, 32),
+        (2048, 32),
+        (2049, 32),
+    ];
+    assert_eq!(both_driver(&class_digits(&edge)), "77888999");
+}
+
+#[test]
+fn small_large_boundary_layout() {
+    // alloc(2048, 16) はスラブ（class 7、block+16）、alloc(2049, 8) は大ブロック（class 8、ページの先頭 + 16）、
+    // alloc(2048, 32) は整列の大ブロック（class 9、ret = base + 32）。生存数も 3。
+    let body = "  let a = alloc(2048, 16);\n  let b = alloc(2049, 8);\n  let c = alloc(2048, 32);\n  let m = 0x5349474C414C0000;\n  let ka = raw.load_i64(raw.offset(a, -16)) - m;\n  let kb = raw.load_i64(raw.offset(b, -16)) - m;\n  let kc = raw.load_i64(raw.offset(c, -16)) - m;\n  let cb = raw.load_i64(raw.offset(c, -32));\n  let cl = raw.load_i64(raw.offset(c, -24));\n  let lay = match raw.addr_to_int(b) % 4096 == 16 { true => 0, false => 1 } + match raw.addr_to_int(c) - cb == 32 { true => 0, false => 2 } + match cl == 4096 { true => 0, false => 4 };\n  let n = live_blocks();\n  free(a, 2048, 16);\n  free(b, 2049, 8);\n  free(c, 2048, 32);\n  return ka * 100000 + kb * 10000 + kc * 1000 + n * 100 + lay * 10 + live_blocks();";
+    // c の map_len = round_up(32 + 16 + 2048, 4096) = 4096。
+    assert_eq!(both_driver(body), "789300");
 }
 
 // ---- 否定の試験 ----
@@ -302,7 +360,12 @@ fn foreign_or_interior_pointer_stops() {
     driver_halts("  free(raw.addr_null(), 16, 8);\n  return 0;");
     driver_halts("  let p = alloc(64, 8);\n  free(p, 63, 8);\n  return 0;");
     driver_halts("  let p = alloc(5000, 8);\n  free(p, 4999, 8);\n  return 0;");
+    // スラブの端: class 1（ブロック 48B、1 ページに 85 個）の最初のブロック p に対し、p + 4080 は 86 個目の位置で
+    // ページに収まらない。頭の位置に正しい頭を偽造しても止まる。
+    driver_halts(SLAB_TAIL);
 }
+
+const SLAB_TAIL: &str = "  let p = alloc(32, 8);\n  let h = raw.offset(p, 4064);\n  raw.store_i64(h, 0x5349474C414C0001);\n  raw.store_i64(raw.offset(h, 8), 32);\n  free(raw.offset(p, 4080), 32, 8);\n  return 0;";
 
 #[test]
 fn bad_class_in_header_stops() {
@@ -331,7 +394,13 @@ fn munmap_checks_stop_before_unmapping() {
     driver_halts(&corrupt(-24, "raw.load_i64(m) + 1"));
     // map_len が 0
     driver_halts(&corrupt(-24, "0"));
+    // map_len が 4096 の倍数だが記録と違う（多すぎ・少なすぎ。等式 len == round_up(d + 16 + size) で止める）
+    driver_halts(&corrupt(-24, "raw.load_i64(m) + 4096"));
+    driver_halts(LEN_TOO_SHORT);
 }
+
+/// align 4096 の大ブロック（map_len = round_up(4096 + 16 + 100) = 8192）の map_len を 4096 に縮める。
+const LEN_TOO_SHORT: &str = "  let p = alloc(100, 4096);\n  raw.store_i64(raw.offset(p, -24), 4096);\n  free(p, 100, 4096);\n  return 0;";
 
 // ---- 変異の試験 ----
 
@@ -379,12 +448,16 @@ fn mutations_of_checks_are_caught() {
         "d > 4096 || ",
         "",
     );
-    // map_len が 4096 の倍数
-    mutation_is_caught(
+    // map_len の等式（4096 の倍数でない・多すぎ・少なすぎ）。外すと評価器の munmap の完全一致検査で別の停止になる
+    for body in [
         "  let p = alloc(100, 64);\n  let m = raw.offset(p, -24);\n  raw.store_i64(m, raw.load_i64(m) + 1);\n  free(p, 100, 64);\n  return 0;",
-        " || len % 4096 != 0",
-        "",
-    );
+        "  let p = alloc(100, 64);\n  let m = raw.offset(p, -24);\n  raw.store_i64(m, raw.load_i64(m) + 4096);\n  free(p, 100, 64);\n  return 0;",
+        LEN_TOO_SHORT,
+    ] {
+        mutation_is_caught(body, " || len != round_page(d + 16 + size)", "");
+    }
+    // スラブのページの端（ブロックの番号の上限）
+    mutation_is_caught(SLAB_TAIL, " || off / bs >= 4096 / bs", "");
     // align の範囲（2 の冪）
     mutation_is_caught(
         "  alloc(16, 24);\n  return 0;",
@@ -397,6 +470,63 @@ fn mutations_of_checks_are_caught() {
         "  if size <= 0 || size > MAX_SIZE {\n    halt();\n    return raw.addr_null();",
         "  if size <= 0 {\n    halt();\n    return raw.addr_null();",
     );
+}
+
+/// 本番のソースでは `want` を返し、変異させたソースでは別の値か停止になる。
+fn mutation_changes_value(body: &str, want: &str, from: &str, to: &str) {
+    assert_eq!(eval_driver(body, None).as_deref(), Ok(want), "本番の値");
+    let r = eval_driver(body, Some(mutate(from, to)));
+    assert!(
+        r.as_deref() != Ok(want),
+        "変異 {from:?} -> {to:?} でも同じ値（試験が見ていない）"
+    );
+}
+
+#[test]
+fn mutations_of_reuse_and_boundaries_are_caught() {
+    // 解放したブロックを空きリストに戻さない
+    mutation_changes_value(
+        REUSE,
+        "100000000",
+        "  raw.store_addr(slot, raw.int_to_addr(a));\n  LIVE = LIVE - 1;",
+        "  LIVE = LIVE - 1;",
+    );
+    // 生存数を減らさない（小・大）
+    mutation_changes_value(
+        REUSE,
+        "100000000",
+        "  raw.store_addr(slot, raw.int_to_addr(a));\n  LIVE = LIVE - 1;",
+        "  raw.store_addr(slot, raw.int_to_addr(a));",
+    );
+    mutation_changes_value(
+        REUSE,
+        "100000000",
+        "  unmap(base, len);\n  LIVE = LIVE - 1;",
+        "  unmap(base, len);",
+    );
+    // 小・大の境目（size と align）
+    let edge = class_digits(&[(2048, 16), (2049, 16), (2049, 8), (2048, 32), (2047, 32)]);
+    for (from, to) in [
+        (
+            "if align <= 16 && size <= 2048 {",
+            "if align <= 16 && size <= 2049 {",
+        ),
+        (
+            "if align <= 16 && size <= 2048 {",
+            "if align <= 16 && size < 2048 {",
+        ),
+        (
+            "if align <= 16 && size <= 2048 {",
+            "if align <= 32 && size <= 2048 {",
+        ),
+        (
+            "if align <= 16 && size <= 2048 {",
+            "if align < 16 && size <= 2048 {",
+        ),
+        ("while (16 << k) < size {", "while (16 << k) <= size {"),
+    ] {
+        mutation_changes_value(&edge, "78899", from, to);
+    }
 }
 
 #[test]

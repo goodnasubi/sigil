@@ -565,28 +565,6 @@ pub unsafe extern "C" fn sigil_rt_list_sum_float(l: *const RtList) -> f64 {
     acc
 }
 
-/// `List.min`・`List.max` の位置（一覧は空でない）。同順位は先のもの、比べられない相手は取らない。
-///
-/// # Safety
-/// `l` は有効。`d` は要素の記述子。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_best(l: *const RtList, d: D, want_max: i32) -> i64 {
-    let xs = list_items(l);
-    let mut best = 0usize;
-    for i in 1..xs.len() {
-        let o = cmp(d, xs[i], xs[best]);
-        let better = if want_max != 0 {
-            o == Some(Ordering::Greater)
-        } else {
-            o == Some(Ordering::Less)
-        };
-        if better {
-            best = i;
-        }
-    }
-    best as i64
-}
-
 // ---------------------------------------------------------------------------
 // 入口の引数（`sigil run` と同じ書き方。宣言の型の記述子に合わせて語にする）
 
@@ -732,8 +710,6 @@ mod tests {
                 s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)),
                 "[3, 1, 2]"
             );
-            assert_eq!(sigil_rt_list_best(l, int.as_ptr(), 1), 0);
-            assert_eq!(sigil_rt_list_best(l, int.as_ptr(), 0), 1);
             let c = sigil_rt_val_shadow(list.as_ptr(), l as i64);
             assert_ne!(c, l as i64);
             assert_eq!(sigil_rt_val_eq(list.as_ptr(), c, l as i64), 1);

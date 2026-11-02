@@ -395,10 +395,10 @@ pub unsafe extern "C" fn sigil_rt_bytes_from_list(
     out: *mut *mut RtBytes,
     err: *mut *mut RtStr,
 ) -> i32 {
-    let n = (*l).len;
+    let n = sigil_rt_list_len(l).max(0) as usize;
     let mut v = Vec::with_capacity(n);
     for i in 0..n {
-        let val = *((*l).buf as *const i64).add(i);
+        let val = *(sigil_rt_list_get(l, i as i64) as *const i64);
         if !(0..=255).contains(&val) {
             *err = new_str("0..=255 の範囲外".to_string());
             return 0;
@@ -512,6 +512,7 @@ const LIST_ALIGN: usize = 16;
 
 #[no_mangle]
 pub extern "C" fn sigil_rt_list_new(elem_size: usize) -> *mut RtList {
+    live_blocks(1);
     Box::into_raw(Box::new(RtList {
         elem: elem_size,
         len: 0,
@@ -533,6 +534,7 @@ pub unsafe extern "C" fn sigil_rt_list_free(l: *mut RtList) {
     if !b.buf.is_null() {
         sigil_rt_free(b.buf, b.cap * b.elem, LIST_ALIGN);
     }
+    live_blocks(-1);
 }
 
 /// 要素が `*mut RtStr` の一覧を、要素ごと解放する。

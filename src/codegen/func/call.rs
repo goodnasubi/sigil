@@ -137,8 +137,34 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let c = self.b.ins().icmp_imm_s(IntCC::Equal, n, 0);
                 self.fail_if(c, code);
                 let d = self.desc_addr(&elem);
-                let w = self.ic((b == ListMax) as i64);
-                let idx = self.rt("list_best", &[l, d, w]);
+                // 最良の位置を持つ。最初の要素を仮の最良とし、`val_cmp` が望む向きを返したときだけ取り替える
+                // （同順位は先のもの、比べられない相手（戻り 2）は取らない）。
+                let want = if b == ListMax { 1 } else { -1 };
+                let bs = self.tmp(8);
+                let ba = self.saddr(bs);
+                let z = self.ic(0);
+                self.st(z, ba, 0);
+                self.loop_range(n, |s, i| {
+                    let ba = s.saddr(bs);
+                    let bi = s.ld(ba, 0);
+                    let pi = s.rt("list_get", &[l, i]);
+                    let pb = s.rt("list_get", &[l, bi]);
+                    let (xi, xb) = (s.ld(pi, 0), s.ld(pb, 0));
+                    let c = s.rt("val_cmp", &[d, xi, xb]);
+                    let e = s.b.ins().icmp_imm_s(IntCC::Equal, c, want);
+                    let better = s.b2i(e);
+                    s.branch(
+                        better,
+                        |s| {
+                            let ba = s.saddr(bs);
+                            s.st(i, ba, 0);
+                            s.ic(0)
+                        },
+                        |s| s.ic(0),
+                    );
+                });
+                let ba = self.saddr(bs);
+                let idx = self.ld(ba, 0);
                 let p = self.rt("list_get", &[l, idx]);
                 (p, Ty::Ref(Box::new(elem)))
             }

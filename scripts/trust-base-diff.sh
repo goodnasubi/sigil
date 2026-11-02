@@ -185,7 +185,8 @@ def unchecked_fns(text, path):
         n, key = 2, name
         while key in found:
             key, n = f"{name}#{n}", n + 1
-        code = "\n".join(strip_comment(x) for x in (" ".join(header) + "\n" + body).split("\n"))
+        # コメントは連結する前に、行ごとに落とす（途中の行の // が後ろの行を消さないように）。
+        code = "\n".join(strip_comment(x) for x in [*header, *body.split("\n")])
         found[key] = (premise, norm(code))
     return found
 
@@ -320,7 +321,7 @@ changes="$(printf '%s\n' "$out" | sed -n '1s/^CHANGES=//p')"
 report="$(printf '%s\n' "$out" | sed '1d')"
 # 前提の文などに `::` で始まる行があっても、ワークフローコマンドとして解釈させない。
 if [ -n "${GITHUB_ACTIONS:-}" ]; then
-  token="tbd-$RANDOM$RANDOM$RANDOM"
+  token="tbd-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   echo "::stop-commands::$token"
   printf '%s\n' "$report"
   echo "::$token::"

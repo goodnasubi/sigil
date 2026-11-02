@@ -286,3 +286,17 @@ fn comment_only_change_is_ignored_and_count_is_per_function() {
     assert_eq!(rc, 1);
     assert!(err.contains("1 件検出"), "{err}");
 }
+
+#[test]
+fn multiline_decl_with_midline_comment_still_detects_later_change() {
+    let src = |ty: &str| {
+        format!("pub const S: &str = r#\"module std.os\n  trust base\npub fn f(a: Int, // 説明\n    b: {ty})\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"P\"\n{{\n  raw.x();\n}}\n\"#;\n")
+    };
+    let r = Repo::new("mlc", &[(F, &src("Int"))]);
+    let base = r.commit();
+    r.write(&[(F, &src("Text"))]);
+    r.commit();
+    let (rc, out) = r.run(&base, "fail");
+    assert_eq!(rc, 1, "{out}");
+    assert!(out.contains("本体（宣言を含む）の変更"), "{out}");
+}

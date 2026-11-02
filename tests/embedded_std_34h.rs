@@ -274,6 +274,19 @@ fn user_impl_on_user_type_cannot_use_unchecked() {
 }
 
 #[test]
+fn user_trait_impl_cannot_use_unchecked() {
+    let user = format!(
+        "module app.main\n  targets server\n  trust none\n\ntrait Show {{\n  fn size(self: &Self) -> Int\n    intent \"x\"\n    requires none\n    ensures none\n    effects none;\n}}\n\nstruct Acct2 {{\n  v: Int,\n}}\n\nimpl Show for Acct2 {{\n  fn size(self: &Acct2) -> Int\n{TAIL}  unchecked \"x\"\n  {{\n    return 1;\n  }}\n}}\n\npub fn main() -> Int\n{TAIL}{{\n  return 1;\n}}\n"
+    );
+    let r = link_sources(&[&user], &copts(&["std.os.a"]));
+    assert_eq!(
+        kind(r),
+        ErrorKind::UncheckedOutsideTrustBase,
+        "利用者の trait impl で unchecked を通してはいけない"
+    );
+}
+
+#[test]
 fn non_entry_user_trust_base_module_is_still_rejected_by_link() {
     let lib = base_mod(
         "lib.t",

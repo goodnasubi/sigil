@@ -1,8 +1,9 @@
 //! Issue #191、修正は #193: 全タスクが `task.yield` と読み出しだけを繰り返し、状態が変わらない
 //! 状態（ライブロック）を、デッドロックと同じ異常停止で止める。正常な `yield` は止めない。
 
+use sigil::exec::Options;
 use sigil::exec::{RunError, StopKind};
-use sigil::ir_eval::run;
+use sigil::ir_eval::{run, run_with};
 
 fn prog(body: &str) -> String {
     format!("module m.a\n  targets server\n  trust none\n\n{body}\n")
@@ -269,4 +270,85 @@ fn run() -> Int
 }
 "#);
     assert!(v.starts_with("5300"), "{v}");
+}
+
+// ---- Issue #198: sleep 中の空転（ADR 0026 決定 6）----
+
+const SLEEPER_WRITES: &str = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task
+{
+  return task.scope(|s| {
+    let flag = Atomic.new(0);
+    let w = flag.clone();
+    let r = flag.clone();
+    let sleeper = s.spawn(move || {
+      task.sleep(50);
+      w.store(7);
+      return 0;
+    });
+    let waiter = s.spawn(move || {
+      while r.load() == 0 {
+        task.yield();
+      }
+      return r.load();
+    });
+    return waiter.join() + sleeper.join();
+  });
+}
+"#;
+
+#[test]
+fn spin_on_flag_written_by_sleeper_finishes_when_clock_advances() {
+    assert_eq!(ok(SLEEPER_WRITES), "7");
+}
+
+#[test]
+fn spin_on_flag_with_sleeper_that_never_writes_is_stopped() {
+    assert_livelock(
+        r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task
+{
+  return task.scope(|s| {
+    let flag = Atomic.new(0);
+    let r = flag.clone();
+    let sleeper = s.spawn(move || {
+      task.sleep(50);
+      return 0;
+    });
+    let waiter = s.spawn(move || {
+      while r.load() == 0 {
+        task.yield();
+      }
+      return 1;
+    });
+    return waiter.join() + sleeper.join();
+  });
+}
+"#,
+    );
+}
+
+#[test]
+fn sleeper_and_spinner_give_same_result_for_every_seed() {
+    for seed in 1..=16 {
+        let o = run_with(
+            &prog(SLEEPER_WRITES),
+            "run",
+            &[],
+            &Options {
+                schedule_seed: Some(seed),
+                ..Options::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("seed={seed} {:?}", e.error));
+        assert_eq!(o.value.to_string(), "7", "seed={seed}");
+    }
 }

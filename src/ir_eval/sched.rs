@@ -1206,11 +1206,12 @@ impl<'p> M<'p> {
     }
 
     /// `task.yield` で中断したタスク `t` の後で、全タスクが `task.yield` と読み出しだけを繰り返し、
-    /// 共有の状態が変わらない状態か（ライブロック。Issue #191、修正は #193）。
+    /// 共有の状態が変わらない状態か（ライブロック。Issue #191、修正は #193、時間待ちとの共存は #198）。
     ///
     /// タスクの枠の指紋（枠の積み重ね全体の局所の中身）と共有の状態の版が、連続する 2 回の `task.yield` で
     /// 同じなら、そのタスクは同じ状態に戻っている（決定的な実行なので、次も同じになる）。実行可能な
-    /// タスクがすべてそうで、時間待ちのタスクもいなければ、誰も状態を変えられず、永久に続く。
+    /// タスクがすべてそうなら、時計が進まない限り誰も状態を変えられない。時間待ちのタスクがいなければ永久に続く
+    /// （呼び出し側が停止にする）。いれば呼び出し側が時計を進める。
     /// 指紋を取れないタスク（`LockGuard` を持つなど）は対象にしない（検出の取りこぼしはあるが、誤検出はない）。
     fn yield_livelock(&mut self, t: usize) -> bool {
         let ver = self.sch.ver;
@@ -1221,12 +1222,50 @@ impl<'p> M<'p> {
             (Some(f), _) => Some((f, ver, false)),
             (None, _) => None,
         };
-        self.sch.sleepers.is_empty()
-            && self
-                .sch
-                .ready
-                .iter()
-                .all(|&r| matches!(self.sch.tasks[r].spin, Some((_, v, true)) if v == ver))
+        self.sch
+            .ready
+            .iter()
+            .all(|&r| matches!(self.sch.tasks[r].spin, Some((_, v, true)) if v == ver))
+    }
+
+    /// 仮想の時計を最も早い目覚めの時刻まで進め、その時刻のタスクを登録順に起こす。時間待ちのタスクがいること。
+    fn advance_clock(&mut self) {
+        let at = self
+            .sch
+            .sleepers
+            .iter()
+            .map(|s| (s.0, s.1))
+            .min()
+            .expect("要素")
+            .0;
+        self.sch.clock = at;
+        let mut due: Vec<(u64, Wake)> = vec![];
+        self.sch.sleepers.retain(|&(a, sq, w)| {
+            if a == at {
+                due.push((sq, w));
+                false
+            } else {
+                true
+            }
+        });
+        due.sort_by_key(|&(sq, _)| sq);
+        for (_, w) in due {
+            match w {
+                Wake::Sleep(t) => {
+                    if self.sch.tasks[t].state == State::Sleeping {
+                        self.wake(t, None);
+                    }
+                }
+                Wake::Timeout(sid) => {
+                    if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                        self.cancel_scope(sid);
+                        self.sch.tasks[w].waiting_scope = None;
+                        let none = self.none();
+                        self.wake(w, Some(none));
+                    }
+                }
+            }
+        }
     }
 
     /// ルートタスク 1 つ分の後始末。そのルートに属するタスクを新しいものから順に取り消し、
@@ -1330,42 +1369,7 @@ impl<'p> M<'p> {
                     }
                     continue;
                 }
-                let at = self
-                    .sch
-                    .sleepers
-                    .iter()
-                    .map(|s| (s.0, s.1))
-                    .min()
-                    .expect("要素")
-                    .0;
-                self.sch.clock = at;
-                let mut due: Vec<(u64, Wake)> = vec![];
-                self.sch.sleepers.retain(|&(a, sq, w)| {
-                    if a == at {
-                        due.push((sq, w));
-                        false
-                    } else {
-                        true
-                    }
-                });
-                due.sort_by_key(|&(sq, _)| sq);
-                for (_, w) in due {
-                    match w {
-                        Wake::Sleep(t) => {
-                            if self.sch.tasks[t].state == State::Sleeping {
-                                self.wake(t, None);
-                            }
-                        }
-                        Wake::Timeout(sid) => {
-                            if let Some(w) = self.sch.scopes[sid].waiter.take() {
-                                self.cancel_scope(sid);
-                                self.sch.tasks[w].waiting_scope = None;
-                                let none = self.none();
-                                self.wake(w, Some(none));
-                            }
-                        }
-                    }
-                }
+                self.advance_clock();
                 continue;
             };
             self.sch.cur = t;
@@ -1382,11 +1386,17 @@ impl<'p> M<'p> {
             if matches!(run, Run::Suspend) {
                 self.sch.tasks[t].frames = frames;
                 if std::mem::take(&mut self.sch.yielded) && self.yield_livelock(t) {
-                    run = Run::Fail(self.stop_at(
-                        0,
-                        Some(StopKind::StdRequiresViolated),
-                        Some("デッドロック（task.yield だけで進行しない）"),
-                    ));
+                    if self.sch.sleepers.is_empty() {
+                        run = Run::Fail(self.stop_at(
+                            0,
+                            Some(StopKind::StdRequiresViolated),
+                            Some("デッドロック（task.yield だけで進行しない）"),
+                        ));
+                    } else {
+                        // 実行可能なタスクが全員空転している間は、時計を進めないと起きられない
+                        // タスクがいる。時計を最も早い起床時刻まで進めて続ける（起床で共有の状態の版が進む）。
+                        self.advance_clock();
+                    }
                 }
                 frames = vec![];
             }

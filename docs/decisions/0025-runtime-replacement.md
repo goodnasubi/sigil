@@ -353,11 +353,11 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 
 #### C-3. `Float` のビット列と、libc の関数の置き換え
 
-- `Float` の表示（最短で往復できる表現）・入口の引数の解析・`%` を Sigil で書くために、`Float` のビット列を出し入れする関数を、**原始操作ではない通常の標準ライブラリの関数**として核の層に置く（原始操作として `RAW_OPS` に置く案は採らない）: `Float.to_bits(x: Float) -> Int`・`Float.from_bits(n: Int) -> Float`（効果 `none`、IEEE 754 binary64 のビット列を `Int` の 64 ビットとしてそのまま読み替える）。
+- `Float` の表示（最短で往復できる表現）・入口の引数の解析・`fmod` を Sigil で書くために、`Float` のビット列を出し入れする関数を、**原始操作ではない通常の標準ライブラリの関数**として核の層に置く（原始操作として `RAW_OPS` に置く案は採らない）: `Float.to_bits(x: Float) -> Int`・`Float.from_bits(n: Int) -> Float`（効果 `none`、IEEE 754 binary64 のビット列を `Int` の 64 ビットとしてそのまま読み替える）。
   - 理由: ビット列の読み替えは、どの値に対しても安全で、前提の文が要らない。`RAW_OPS` に置くと、使う関数がすべて `unchecked` になり、検査を外す範囲が無用に広がる（ADR 0016 の評価の観点 2）。
   - 評価器は `f64::to_bits`/`f64::from_bits`、ネイティブは Cranelift の `bitcast` で実装する。標準ライブラリの表に関数を足すのは言語の仕様の変更なので、実装の PR（3-5a）は所有者の承認を要する。
 - `memmove`・`memset`（`raw.copy`/`raw.set` が呼ぶ）は、codegen が自分のオブジェクトの中に関数として生成する（バイト単位のループ。`memmove` は重なりの向きで分岐する）。
-- `fmod`（`Float` の `%`）は、埋め込みの Sigil の関数として書き、`Float.to_bits` を使って厳密に計算する（musl の `fmod` と同じ方式）。`unchecked` は要らない。評価器の Rust の `%` との突き合わせで確かめる。
+- `Float.to_bits`/`from_bits` を使う Sigil の関数 `fmod` を、`std.core.float`（`src/stdlib/core_float.sigil`）に書いて埋め込みの `std` に登録する（musl の `fmod` と同じ方式で厳密に計算する。`unchecked` は要らない）。`Float` の `%` 演算子は変えない（ADR 0011 の決定のとおり、`%` は `Float` に使えず検査器が拒否する）ので、`fmod` はどのプログラムにも暗黙には結ばず、登録のみとする（現実装 #228）。評価器の Rust の `%`（`f64`）との突き合わせの試験で値を確かめる。
 
 #### C-4. `_start`・システムコールの入口の生成方式と aarch64
 
@@ -411,10 +411,10 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 | 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`） | 3-5b・3-7a（D-6 で置換） |
 | 3-5d | `Bytes`・`int_rot*` | 3-5b・3-7a（D-6 で置換） |
 | 3-5e | 型の記述子の処理の生成（C-1）・`Shared`/`Cell`・`--trace-drops`。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5） | 3-5c・3-5d・3-7a・3-7b（D-6 で置換） |
-| 3-5f | 表示（`val_show`・`print_result`・`Float` の最短表現） | 3-5e |
-| 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析）と停止の報告（`stop`/`report`） | 3-5f |
+| 3-5f | 表示（`val_show`・`print_result`・`Float` の最短表現）（D-6 で置換: `show_*` を加える） | 3-5e |
+| 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析）と停止の報告（`stop`/`report`）（D-6 で置換: `new_lossy` を加える） | 3-5f |
 | 3-6a | `console.log`。`write` は全部を書き終えるまで繰り返す（部分書き込みは残りから続け、−4（EINTR）は同じ位置から再試行し、その他の負の値は書くのをやめる。今の Rust 版と同じく失敗を呼び出し側へ返さない）。末尾の改行を書く。`os_buf_free` を廃止 | 3-5b・3-7a（D-6 で置換） |
-| 3-6b | `fs.read`/`fs.write` と `Path`。詳細は下の表の後の項 | 3-6a |
+| 3-6b | `fs.read`/`fs.write` と `Path`。詳細は下の表の後の項（D-6 で置換: `valid_utf8` を加える） | 3-6a |
 | 3-6c | `env`（C-4 の大域 `std.os.env.ENVP` を読む。`RAW_OPS` は変えない） | 3-5b・3-7a・3-7b（D-6 で置換） |
 | 3-7a | 確保器を一本化する（C-2。`raw_alloc_rust` の経路を消す）。`sigil spec` から埋め込みの `std.*` を外し、`sigil spec --std` を実装する（C-2。`sigil spec` の変更は要承認） | 補足 C |
 | 3-7b | `_start`・`sigil_syscall6`・`mmap` のスタックとガードページの生成（C-4・C-6）、`SIGIL_RT_LIVE` の出力を生成コードへ移す（C-5）。この時点では glibc をリンクしたまま `-nostartfiles` で、`main`・`sigil_rt_enter`・`sigil_rt_raw_syscall` を使わない。完了基準に C-6 の深い再帰の試験を含める（**要承認**: 信頼基盤に入る機械語のバイト列と、起動の経路の変更） | 補足 C |
@@ -470,8 +470,8 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 - 不変条件: `0 <= len <= cap`、`len > 0` なら `ptr..ptr+len` は読める、`ptr..ptr+len` は正しい UTF-8。`String` は今の言語では書き換えないので、作るときは `cap` = `len` とする（`cap` は将来の追記のために持つ）。
 - 破棄は、`cap > 0` なら `raw.free(ptr, cap, 1)`、続いて `raw.free(頭, 24, 8)`（本文の決定 4 のデストラクタの具体）。
 - **UTF-8 の検証**（**仮置き: D-8 の 5**）:
-  - `std.core.string` は、作る関数を 2 つ持つ。`new_lossy(p, n)` は今の `sigil_rt_str_new`（`from_utf8_lossy`）と同じく、不正な列を置換文字 U+FFFD にして作る（正しい列はそのまま複写する）。`new(p, n)` は検証せずに複写し、前提の文に「`p..p+n` は正しい UTF-8」を書く。あわせて `valid_utf8(p, n) -> Bool` を置く（3-5d の `bytes_to_string_utf8`、3-6b の `fs.read`、3-6c の `env` が使う）。この 3 つは 3-5b-i に入れる。
-  - 生成コードと Rust ランタイムが呼ぶ `sigil_rt_str_new`（シムと関数表の `new`）は `new_lossy` を呼ぶ。外から来たバイト列（入口の引数・ファイル・環境変数）を含め、どの経路から作っても不変条件が成り立つ。検証の手間は今の `from_utf8_lossy` と同じく長さに比例する。
+  - `std.core.string` は、作る関数を 2 つ持つ。`new_lossy(p, n)` は今の `sigil_rt_str_new`（`from_utf8_lossy`）と同じく、不正な列を置換文字 U+FFFD にして作る（正しい列はそのまま複写する）。`new(p, n)` は検証せずに複写し、前提の文に「`p..p+n` は正しい UTF-8」を書く。あわせて `valid_utf8(p, n) -> Int`（正しい UTF-8 なら 1、そうでなければ 0。D-3 の「`Addr`・`Int` だけを受け渡す」に合わせ、シムの戻りは 32 ビットへ切り詰める規約のとおり `Int` で返す）を置く（3-5d の `bytes_to_string_utf8` と 3-6b の `fs.read` が使う）。この 3 つは 3-5b-i に入れる。
+  - 生成コードと Rust ランタイムが呼ぶ `sigil_rt_str_new`（シムと関数表の `new`）は `new_lossy` を呼ぶ。外から来たバイト列（入口の引数・ファイル・環境変数。環境変数は `new_lossy`）を含め、どの経路から作っても不変条件が成り立つ。検証の手間は今の `from_utf8_lossy` と同じく長さに比例する。
   - 検証なしの `new` を呼ぶのは、出力が構成上正しい UTF-8 になる `std.core.string` 自身の関数（`clone`・`trim`・`concat`、3-5c の `lines`）と、正しさを自分で確かめた埋め込みの `std.*` に限る。呼ぶ関数は `unchecked` で、前提の文に根拠を書く（S2 のレビューの対象）。
   - Rust の側の境界はそのまま残す: 入口の引数は今のとおり `to_string_lossy`、`fs.read` は Rust の検証、`bytes_to_string_utf8` は `String::from_utf8` で、それぞれ 3-5g・3-6b・3-5d で Sigil へ移すときに `new_lossy`・`valid_utf8` へ置き換える。
   - Rust の消費者が中身を `&str` として読むとき（今の `s(p)`）は、`std::str::from_utf8` で検査し、不正なら異常停止（終了コード 70）する。`from_utf8_unchecked` にすると、信頼の義務が `new` を呼ぶすべての箇所に掛かるため。検査の手間は 3-7d で Rust の消費者が無くなるまでの一時的なものとする。
@@ -529,7 +529,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 | 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析。不正な UTF-8 は `new_lossy`）と停止の報告（`stop`/`report`） | 3-5f |
 | 3-6a | `console.log`（C-7 のとおり） | 3-5b-i・3-7a |
 | 3-6b | `fs.read`/`fs.write` と `Path`（C-7 のとおり。UTF-8 の検証は `valid_utf8`） | 3-6a |
-| 3-6c | `env`（C-7 のとおり。UTF-8 の扱いは今の Rust 版と同じ結果になるよう `valid_utf8`・`new_lossy` から選ぶ） | 3-5b-i・3-7a・3-7b |
+| 3-6c | `env`（C-7 のとおり。UTF-8 の扱いは `new_lossy` に確定する: 今の Rust の `runtime/` に環境変数を読む関数はなく、外から来るバイト列の既存の扱いは入口の引数の `to_string_lossy`（不正な列を U+FFFD にする）なので、それと同じ結果にする。`valid_utf8` は使わない） | 3-5b-i・3-7a・3-7b |
 
 - 3-5b-i は、作る側と読む側を一度に替える必要があるので、それ以上には分けない。3-5b-ii は、関数ごとに分けてもよい（`len`・`is_empty` と `trim`・`concat`・`parse_int`・`eq`・`cmp` の 2 つなど）。
 - 3-5c・3-5d・3-6a・3-6c は、文字列を作る・読むことだけが要るので、3-5b-i の後なら 3-5b-ii と並行してよい（3-5c の `lines` が要るのは `new` だけで、`len`・`trim` には依存しない）。3-5e は `eq`・`cmp` を使うので 3-5b-ii の後にする。
@@ -542,6 +542,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 - **評価器とネイティブの突き合わせ**: 3-5b-i は振る舞いを変えないので、既存の全件の突き合わせと `scripts/native-report.sh` がそのまま通ることを基準にする。3-5b-ii は、上の入力の組をネイティブでも走らせる。
 - **`runtime/core` の単体の `cargo test`**: `#[cfg(test)]` の試験用の関数表（同じ 24B の頭を Rust の確保で持つ小さな実装）を、試験の始めに一度だけ登録する。生成コードのシンボルに依存しないので、スタブのシンボルは要らない。`LIVE_STRS` と文字列の二重解放の試験は D-5 のとおり消す。
 - **`tests/runtime_parity.rs`**: C のドライバ（`DRIVER`）は今 `sigil_rt_str_new`・`_free`・`_data`・`_bytes` を Rust の関数として呼んでいるが、3-5b-i でこれらは Rust から消える。そのため、ドライバの側に同じ名前の C の関数（`malloc` で同じ 24B の頭を持つ。長さ 0 の扱いは D-2）を定義し、`main` の冒頭で `sigil_rt_set_str_ops` に登録する。`core_alone_links_without_os` の `d.c` も、`sigil_rt_show_int` → `sigil_rt_print_result` が関数表の `new`・`data`/`bytes` を通るので、同じ C の関数表の定義と登録を足す（リンクの対象と期待の出力 `42` は変えない）。3-5b-i の時点では `len`・`trim`・`parse_int`・`lines` は Rust の実装のままなので、突き合わせはそのまま意味を持つ。3-5b-ii で移した関数の組は、ドライバでは C の関数表を試すだけになるので、このファイルから外し、`tests/str_35b.rs` の突き合わせへ移す。
+- `tests/m5_free_strings.rs` の冒頭のコメントは、`double_free_of_a_string_aborts` を「直接の検査」と呼んでいる。D-5 でその試験を消すので、該当の PR（3-5b-i）でコメントも直す（直接の検査が無くなり、二重解放は D-5 の数の完全一致と確保器の印で見つける、と書く）。
 - 既存の試験ファイルの変更（`m5_free_strings.rs`・`fn_types_2_4d_exec.rs`・`runtime_parity.rs`）は、本補足を根拠として該当の PR で行う（AGENTS.md の「既存のテストファイルへの追記」の例外）。
 
 #### D-8. 未決の選択肢（推奨つき。所有者の確認待ち）

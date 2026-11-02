@@ -1,0 +1,115 @@
+// 例 07: Bytes とビット演算の書き方（ADR 0023）
+// バイナリのメッセージ（種別 1 バイト＋長さ 4 バイトのビッグエンディアン＋本体）を組み立て、読み戻す。
+// あわせて、ビット演算と回転を使った簡単なチェックサムを示す。
+
+module examples.bytes
+  targets server
+  trust none
+
+// 範囲: Bytes を組み立てる。push は 1 バイト、push_u32_be は長さの 4 バイト、extend は本体の連結。
+fn build_packet(tag: Int, first: Int, second: Int) -> Bytes
+  intent "種別と長さを前に付けたバイナリメッセージを組み立てる"
+  requires 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
+  ensures result.len() == 7
+  effects none
+{
+  let mut payload = Bytes.new();
+  payload.push(first);
+  payload.push(second);
+  let mut packet = Bytes.new();
+  packet.push(tag);
+  packet.push_u32_be(payload.len());
+  packet.extend(&payload);
+  return packet;
+}
+
+// 範囲: 先頭の種別バイトを読む。get は範囲外なら None を返すので、unwrap_or で既定値に倒す。
+fn packet_tag(packet: &Bytes) -> Int
+  intent "メッセージの種別バイトを返す"
+  requires none
+  ensures none
+  effects none
+{
+  return packet.get(0).unwrap_or(0);
+}
+
+// 範囲: 2 バイト目から 4 バイトのビッグエンディアンを読み、本体の長さとして解釈する。
+fn declared_len(packet: &Bytes) -> Int
+  intent "メッセージに書かれた本体の長さを返す"
+  requires none
+  ensures none
+  effects none
+{
+  return packet.read_u32_be(1).unwrap_or(0);
+}
+
+// 範囲: 全バイトを XOR と 32 ビット回転で混ぜる。回転は rotr32（32 ビット幅で右回転）。
+fn checksum(packet: &Bytes) -> Int
+  intent "全バイトを XOR と回転で混ぜたチェックサムを返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut acc = 0;
+  let mut i = 0;
+  while i < packet.len() {
+    let b = packet.get(i).unwrap_or(0);
+    acc = (acc ^ b).rotr32(1);
+    i = i + 1;
+  }
+  return acc;
+}
+
+// 範囲: ビット演算で下位 2 バイトを取り出して混ぜる（& でマスク、>> でずらし、^ で合成）。
+fn scramble(x: Int) -> Int
+  intent "下位 2 バイトを取り出し、回転と XOR で混ぜる"
+  requires none
+  ensures none
+  effects none
+{
+  let low = x & 255;
+  let high = x >> 8 & 255;
+  return low.rotr32(3) ^ high;
+}
+
+// 以下は、組み立てたメッセージの各部を取り出す小物（実行して確かめるために使う）。
+
+fn sample_len(tag: Int, first: Int, second: Int) -> Int
+  intent "組み立てたメッセージ全体の長さを返す"
+  requires 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
+  ensures result == 7
+  effects none
+{
+  let packet = build_packet(tag, first, second);
+  return packet.len();
+}
+
+fn sample_tag(tag: Int, first: Int, second: Int) -> Int
+  intent "組み立てたメッセージの種別バイトを返す"
+  requires 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
+  ensures result == tag
+  effects none
+{
+  let packet = build_packet(tag, first, second);
+  return packet_tag(&packet);
+}
+
+fn sample_declared_len(tag: Int, first: Int, second: Int) -> Int
+  intent "組み立てたメッセージに書かれた本体の長さを返す"
+  requires 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
+  ensures result == 2
+  effects none
+{
+  let packet = build_packet(tag, first, second);
+  return declared_len(&packet);
+}
+
+fn sample_checksum(tag: Int, first: Int, second: Int) -> Int
+  intent "組み立てたメッセージのチェックサムを返す"
+  requires 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
+  ensures none
+  effects none
+{
+  let packet = build_packet(tag, first, second);
+  return checksum(&packet);
+}

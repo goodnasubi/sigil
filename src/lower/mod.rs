@@ -304,11 +304,17 @@ impl<'a> L<'a> {
         // 呼び、評価器は呼ばない（ADR 0025 補足 A-2・B-2・B-3）。
         // 文字列の表現（`std.core.string`。補足 D-3）の入口も同じ。`eq`・`cmp` は 3-5e が呼ぶまで入れない。
         use crate::stdlib::embedded::{
-            ALLOC_FN, FREE_FN, LIVE_FN, STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN,
+            ALLOC_FN, FREE_FN, LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN,
+            LIST_PUSH_FN, LIVE_FN, STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN,
             STR_FREE_FN, STR_IS_EMPTY_FN, STR_LEN_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN,
             STR_TRIM_FN,
         };
         for n in [
+            LIST_CREATE_FN,
+            LIST_FREE_FN,
+            LIST_PUSH_FN,
+            LIST_GET_FN,
+            LIST_LEN_FN,
             ALLOC_FN,
             FREE_FN,
             LIVE_FN,

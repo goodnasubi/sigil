@@ -1,0 +1,110 @@
+module std.core.list
+  targets bare, browser, server
+  trust base
+
+// `List` の表現の Sigil 実装（ADR 0025 補足 E、PR 3-5c-ii）。`Addr`・`Int` だけを受け渡す。
+// 言語の `List<T>` の語は、24B の頭の塊の番地とする（E-1）。
+//   頭: buf（+0, Addr）・len（+8, 要素の数）・cap（+16, buf の塊に入る要素の数）。頭は raw.alloc(24, 8)、要素の領域は raw.alloc(cap * 8, 8)。
+//   要素は 8B の語に固定する（頭に elem を持たない）。空の一覧は buf = 空番地・len = cap = 0 で、領域を確保しない。
+//   最初の追加で cap = 4、満ちたら 2 倍にする。
+//   不変条件: 0 <= len <= cap、cap > 0 なら buf は raw.alloc(cap * 8, 8) の塊の先頭、cap == 0 なら buf は空番地。
+// 評価器の `List` は Rust の組み込みのまま（補足 C-7）で、この関数は呼ばない。ネイティブはシムから create・free・push・get・len を
+// 呼ぶ（E-3）。利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）ので、不変条件を破る経路はない。
+// 要素の破棄は呼び出し側が先に行う（free は入れ物だけを捨てる。E-1）。
+// 異常停止は確保器の異常停止（exit_group(70)）に頼る（確保器と同じ終了コード）。排他を持たない単一スレッド前提（A-5）。
+
+fn halt()
+  intent "異常停止する（exit_group(70)）"
+  requires none
+  ensures none
+  effects none
+  unchecked "raw.alloc は size <= 0 を異常停止（exit_group(70)）にするので戻らない。このモジュールは bare でも使うため raw.syscall を直接は使わない（補足 A-4・E-1）"
+{
+  raw.free(raw.alloc(-1, 1), 1, 1);
+}
+
+pub fn create(elem: Int) -> Addr
+  intent "空の一覧（頭だけ。領域は確保しない）を作る。要素の大きさ elem は 8 だけを受け付け、それ以外は異常停止"
+  requires none
+  ensures none
+  effects none
+  unchecked "頭は raw.alloc(24, 8) で得て 3 つの欄を書く。elem != 8 のときは頭を確保する前に異常停止する（補足 E-1・E-9 の 1）"
+{
+  if elem != 8 {
+    halt();
+    return raw.addr_null();
+  }
+  let head = raw.alloc(24, 8);
+  raw.store_addr(head, raw.addr_null());
+  raw.store_i64(raw.offset(head, 8), 0);
+  raw.store_i64(raw.offset(head, 16), 0);
+  return head;
+}
+
+pub fn free(l: Addr)
+  intent "一覧の入れ物（cap > 0 のとき領域、続いて頭）を解放する。要素は呼び出し側が先に捨てる。空番地は何もしない"
+  requires none
+  ensures none
+  effects none
+  unchecked "l は空番地か、このモジュールの create が返し、まだ解放していない頭（したがって cap > 0 なら buf は raw.alloc(cap * 8, 8) の塊の先頭）（補足 E-1）"
+{
+  if raw.addr_to_int(l) == 0 {
+    return;
+  }
+  let cap = raw.load_i64(raw.offset(l, 16));
+  if cap > 0 {
+    raw.free(raw.load_addr(l), cap * 8, 8);
+  }
+  raw.free(l, 24, 8);
+}
+
+pub fn len(l: Addr) -> Int
+  intent "要素の数を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "l はこのモジュールの create が返し、まだ解放していない頭（補足 E-1）"
+{
+  return raw.load_i64(raw.offset(l, 8));
+}
+
+pub fn get(l: Addr, i: Int) -> Addr
+  intent "位置 i の要素の番地を返す。範囲外（i < 0 または i >= len）は空番地。返した番地は次の push で無効になりうる"
+  requires none
+  ensures none
+  effects none
+  unchecked "l はこのモジュールの create が返し、まだ解放していない頭（したがって 0 <= len <= cap で、buf..buf+8*len は読める 8 バイト境界の領域）（補足 E-1）"
+{
+  if i < 0 || i >= raw.load_i64(raw.offset(l, 8)) {
+    return raw.addr_null();
+  }
+  return raw.offset(raw.load_addr(l), i * 8);
+}
+
+pub fn push(l: Addr, e: Addr)
+  intent "e の指す語（8 バイト）を末尾へ写す。満ちていれば領域を（0 → 4 → 2 倍に）取り直し、古い領域を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "l はこのモジュールの create が返し、まだ解放していない頭。e は 8 バイト読める番地（l の領域の中でもよいが、取り直しの前に読む）（補足 E-1）"
+{
+  let word = raw.load_i64(e);
+  let n = raw.load_i64(raw.offset(l, 8));
+  let cap = raw.load_i64(raw.offset(l, 16));
+  if n == cap {
+    let mut ncap = 4;
+    if cap > 0 {
+      ncap = cap * 2;
+    }
+    let nbuf = raw.alloc(ncap * 8, 8);
+    if cap > 0 {
+      let prev = raw.load_addr(l);
+      raw.copy(nbuf, prev, n * 8);
+      raw.free(prev, cap * 8, 8);
+    }
+    raw.store_addr(l, nbuf);
+    raw.store_i64(raw.offset(l, 16), ncap);
+  }
+  raw.store_i64(raw.offset(raw.load_addr(l), n * 8), word);
+  raw.store_i64(raw.offset(l, 8), n + 1);
+}

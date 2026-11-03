@@ -22,8 +22,8 @@ typedef struct RtList RtList;
 void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
                           const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
 RtList* sigil_rt_str_lines(const RtStr*);
-int64_t sigil_rt_list_len(const RtList*);
-uint8_t* sigil_rt_list_get(const RtList*, int64_t);
+void sigil_rt_set_list_ops(RtList* (*)(size_t), void (*)(RtList*), void (*)(RtList*, const uint8_t*),
+                           uint8_t* (*)(const RtList*, int64_t), int64_t (*)(const RtList*));
 RtStr* sigil_rt_show_int(int64_t);
 RtStr* sigil_rt_show_float(double);
 RtStr* sigil_rt_show_str(const RtStr*);
@@ -49,6 +49,30 @@ static RtStr* sigil_rt_str_clone(const RtStr* s) { const Head* h = (const Head*)
 static const uint8_t* sigil_rt_str_data(const RtStr* s) { return ((const Head*)s)->ptr; }
 static int64_t sigil_rt_str_bytes(const RtStr* s) { return ((const Head*)s)->len; }
 
+/* 一覧の関数表（補足 E-3）。本物は Sigil 製（std.core.list）で、ここでは同じ配置の 24B の頭を malloc で作る。 */
+typedef struct { uint8_t* buf; int64_t len; int64_t cap; } LHead;
+static RtList* lst_new(size_t elem) {
+  if (elem != 8) abort();
+  LHead* h = calloc(1, sizeof(LHead));
+  return (RtList*)h;
+}
+static void lst_free(RtList* l) { LHead* h = (LHead*)l; if (!h) return; free(h->buf); free(h); }
+static void lst_push(RtList* l, const uint8_t* e) {
+  LHead* h = (LHead*)l;
+  if (h->len == h->cap) {
+    int64_t ncap = h->cap == 0 ? 4 : h->cap * 2;
+    h->buf = realloc(h->buf, (size_t)ncap * 8);
+    h->cap = ncap;
+  }
+  memcpy(h->buf + h->len * 8, e, 8);
+  h->len++;
+}
+static uint8_t* lst_get(const RtList* l, int64_t i) {
+  const LHead* h = (const LHead*)l;
+  return (i < 0 || i >= h->len) ? NULL : h->buf + i * 8;
+}
+static int64_t lst_len(const RtList* l) { return ((const LHead*)l)->len; }
+
 static void put(RtStr* s) { fwrite(sigil_rt_str_data(s), 1, sigil_rt_str_bytes(s), stdout); sigil_rt_str_free(s); }
 
 int main(int argc, char** argv) {
@@ -56,15 +80,19 @@ int main(int argc, char** argv) {
   const char* a = argc > 2 ? argv[2] : "";
   const char* b = argc > 3 ? argv[3] : "";
   sigil_rt_set_str_ops(sigil_rt_str_new, sigil_rt_str_free, sigil_rt_str_clone, sigil_rt_str_data, sigil_rt_str_bytes);
+  sigil_rt_set_list_ops(lst_new, lst_free, lst_push, lst_get, lst_len);
   RtStr* s = sigil_rt_str_new((const uint8_t*)a, (int64_t)strlen(a));
   if (!strcmp(cmd, "float")) {
     put(sigil_rt_show_float(strtod(a, NULL)));
   } else if (!strcmp(cmd, "lines")) {
     RtList* l = sigil_rt_str_lines(s); printf("[");
-    for (int64_t i = 0; i < sigil_rt_list_len(l); i++) {
+    for (int64_t i = 0; i < lst_len(l); i++) {
       if (i) printf(", ");
-      put(sigil_rt_show_str(*(RtStr**)sigil_rt_list_get(l, i)));
+      RtStr* e = *(RtStr**)lst_get(l, i);
+      put(sigil_rt_show_str(e));
+      sigil_rt_str_free(e);
     }
+    lst_free(l);
     printf("]");
   } else if (!strcmp(cmd, "join")) {
     uint8_t* p; size_t n; sigil_rt_path_join((const uint8_t*)a, strlen(a), (const uint8_t*)b, strlen(b), &p, &n);

@@ -102,6 +102,11 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_free" => ("p", 'v'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" => ("pp", 'i'),
+        // 一覧の表現（`std.core.list`。補足 E-3）
+        "list_new" | "list_len" => ("p", 'p'),
+        "list_get" => ("pp", 'p'),
+        "list_push" => ("pp", 'v'),
+        "list_free" => ("p", 'v'),
         _ => return None,
     })
 }
@@ -109,8 +114,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
 /// ランタイム関数の引数と戻りの形（`p` 語・`i` 32 ビット整数・`f` 倍精度・`v` なし）。
 pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
-        "alloc" | "list_get" | "val_shadow" | "val_clone" => ("pp", 'p'),
-        "blk_new" | "str_lines" | "list_len" | "list_new" => ("p", 'p'),
+        "alloc" | "val_shadow" | "val_clone" => ("pp", 'p'),
+        "blk_new" | "str_lines" => ("p", 'p'),
         "bytes_new" => ("", 'p'),
         "bytes_with_capacity" | "bytes_clone" | "bytes_len" | "str_as_bytes" => ("p", 'p'),
         "bytes_concat" => ("pp", 'p'),
@@ -128,10 +133,10 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
-        "set_str_ops" => ("ppppp", 'v'),
+        "set_str_ops" | "set_list_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "list_sum_int" | "enter" => ("pp", 'i'),
-        "list_push" | "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
+        "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
         "trace_on" => ("", 'v'),
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
@@ -167,6 +172,8 @@ pub(crate) struct Cg<'p> {
     pub live_shim: Option<FuncId>,
     /// 文字列の関数表に登録するシム（new・free・clone・data・bytes。補足 D-3）。
     pub str_ops: Option<[FuncId; 5]>,
+    /// 一覧の関数表に登録するシム（create・free・push・get・len。補足 E-3）。
+    pub list_ops: Option<[FuncId; 5]>,
 }
 
 impl<'p> Cg<'p> {
@@ -513,12 +520,15 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         gids,
         live_shim: None,
         str_ops: None,
+        list_ops: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
     let mut shims = alloc_shims(&mut cg)?;
     // 文字列の表現（`std.core.string`）のシム（補足 D-3）。常に必要で、結ばれていなければ内部エラーで止める。
     shims.extend(str_shims(&mut cg)?);
+    // 一覧の表現（`std.core.list`）のシム（補足 E-3）。同じく常に必要。
+    shims.extend(list_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
 
@@ -680,6 +690,40 @@ fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         out.push((id, target, np, ret));
     }
     cg.str_ops = Some([ids[0], ids[1], ids[2], ids[3], ids[4]]);
+    Ok(out)
+}
+
+/// 一覧の表現（`std.core.list`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する（補足 E-3）。
+/// 生成コードの呼び出し先の名前と形は変えない。シムは公開せず（`Linkage::Local`）、番地を関数表で Rust ランタイムに渡す。
+fn list_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::{
+        LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN, LIST_PUSH_FN,
+    };
+    let mut out = vec![];
+    let mut ids = vec![];
+    // 関数表の順（create・free・push・get・len）。
+    for (name, target_fn, np, ret) in [
+        ("list_new", LIST_CREATE_FN, 1, 'p'),
+        ("list_free", LIST_FREE_FN, 1, 'v'),
+        ("list_push", LIST_PUSH_FN, 2, 'v'),
+        ("list_get", LIST_GET_FN, 2, 'p'),
+        ("list_len", LIST_LEN_FN, 1, 'p'),
+    ] {
+        let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
+            return Err(internal("std.core.list が結ばれていない".to_string()));
+        };
+        let id =
+            cg.m.declare_function(
+                &format!("sigil_rt_{name}"),
+                Linkage::Local,
+                &shim_sig(cg.cc, np, ret),
+            )
+            .map_err(internal)?;
+        cg.rt.insert(name, id);
+        ids.push(id);
+        out.push((id, target, np, ret));
+    }
+    cg.list_ops = Some([ids[0], ids[1], ids[2], ids[3], ids[4]]);
     Ok(out)
 }
 

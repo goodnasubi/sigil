@@ -43,6 +43,6 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0021](0021-module-unit-and-visibility.md) | モジュールの単位と公開の範囲 | 承認 |
 | [0022](0022-type-identity-traits-and-function-types.md) | 型の同一性、利用者のトレイト、関数の型をフィールド・戻り値に置くこと | 提案 |
 | [0023](0023-bytes-and-bitwise.md) | Bytes 型とビット演算 | 提案 |
-| [0024](0024-crypto-primitives.md) | 暗号の基本部品（SHA-256・HMAC・PBKDF2・定数時間比較・秘密値の保護） | 提案 |
+| [0024](0024-crypto-primitives.md) | 暗号の基本部品（SHA-256・HMAC・PBKDF2・定数時間比較・秘密値の保護） | 承認 |
 | [0025](0025-runtime-replacement.md) | ランタイムの置き換え（原始操作・大域状態・確保器・標準ライブラリの Sigil 実装） | 提案 |
 | [0026](0026-p1a-concurrency.md) | 並行処理 P1-a（SIR 評価器での構造化並行処理・性質の手付け・要求の隔離） | 提案 |

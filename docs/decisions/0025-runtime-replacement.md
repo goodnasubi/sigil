@@ -716,14 +716,14 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 | 17 | `bytes_push_u64_be` | Sigil `push_u64_be(b, v)` | 3-5d-ii | 64 ビット（`>>` は論理右シフト） |
 | 18 | `bytes_push_u32_le` | Sigil `push_u32_le(b, v)` | 3-5d-ii | |
 | 19 | `bytes_read_u32_be`（`("ppp", 'i')`） | Sigil `read_u32_be(b, off, out) -> Int` | 3-5d-ii | 範囲の判定は `off >= 0 && len >= 4 && off <= len - 4`（`off + 4` を計算しない。`off` が `Int` の最大に近いと Sigil の `+` が停止するため）。形は変えない |
-| 20 | `bytes_ct_eq`（`("pp", 'i')`） | Sigil `ct_eq(a, b) -> Bool` | 3-5d-ii | ADR 0023 決定 4 の 2 のとおり。長さが違えば偽、同じなら全バイトの `x ^ y` を `|` で積み、途中で抜けない。分岐は長さ（公開の情報）と添字にだけ依存する |
+| 20 | `bytes_ct_eq`（`("pp", 'i')`） | Sigil `ct_equal(a, b) -> Bool` | 3-5d-ii | ADR 0023 決定 4 の 2 のとおり。名前は `ct_eq` ではなく `ct_equal`（言語の自由関数 `ct_eq` が、埋め込みモジュールの検査で同名の宣言と衝突する `DuplicateDefinition` になるため。3-5d-ii で確かめた。シムの名前 `bytes_ct_eq` は変えない）。長さが違えば偽、同じなら全バイトの `x ^ y` を `|` で積み、途中で抜けない。分岐は長さ（公開の情報）と添字にだけ依存する |
 | 21 | `str_as_bytes`（`("p", 'p')`） | codegen | 3-5d-iii | `str_data`・`str_bytes` のシムで読み、`bytes_from_raw` のシム（F-4）で写す。ループは要らない |
 | 22 | `int_rotl`（`("ppp", 'i')`） | Sigil `std.core.int.rotl(x, n, w)` | 3-5d-i | 形は 3-5d-0 で先に `("ppp", 'p')` に直す（F-0 の不具合）。3-5d-i でシムへ移すときもその形を保つ |
 | 23 | `int_rotr`（`("ppp", 'i')`） | Sigil `std.core.int.rotr(x, n, w)` | 3-5d-i | 同上 |
 | 24 | `int_rotr32`（`("pp", 'i')`） | Sigil `std.core.int.rotr32(x, n)` | 3-5d-i | 形は 3-5d-0 で先に `("pp", 'p')` に直す |
 | 追加 | （なし） | Sigil `from_raw(p, n) -> Addr` | 3-5d-ii | `p..p+n` を写して作る。`n < 0` は停止。`n == 0` なら `p` を読まない（空番地でよい。D-2 の長さ 0 の扱いと同じ）。関数表（Rust の `str_as_bytes`・`bytes_from_list` が 3-5d-iii まで使う）と、3-5d-iii の `str_as_bytes` のシム |
 | 追加 | （なし） | Sigil `data(b) -> Addr` | 3-5d-ii | 関数表（Rust の `val_show`・`eq`・`cmp`・`bytes_to_string_utf8`）と、3-5d-iii の `to_string_utf8` のシム。長さ 0 なら空番地を返しうる（D-2 と同じく、読む側は長さ 0 で番地を使わない） |
-| 追加 | （なし） | Sigil `eq(a, b) -> Bool`・`cmp(a, b) -> Int` | 3-5d-ii | 足して試験だけをし、使うのは 3-5e（D-3 の文字列の `eq`・`cmp` と同じ扱い。`cmp` はバイト列の辞書順で −1・0・1）。`eq` は早く抜けてよい（定数時間は `ct_eq` だけ。`eq` を秘密の値の比較に使わない） |
+| 追加 | （なし） | Sigil `eq(a, b) -> Bool`・`cmp(a, b) -> Int` | 3-5d-ii | 足して試験だけをし、使うのは 3-5e（D-3 の文字列の `eq`・`cmp` と同じ扱い。`cmp` はバイト列の辞書順で −1・0・1）。`eq` は早く抜けてよい（定数時間は `ct_equal` だけ。`eq` を秘密の値の比較に使わない） |
 
 - 3-5d-ii の後、`rt_spec` に残る `Bytes` の名前は `bytes_to_string_utf8`・`bytes_from_list`・`str_as_bytes` の 3 つで、3-5d-iii で 0 になる。Rust に残る `Bytes` の関数は、関数表の登録 `sigil_rt_set_bytes_ops` だけになる（3-7d で消す）。
 

@@ -1,0 +1,407 @@
+module std.core.bytes
+  targets bare, browser, server
+  trust base
+
+// `Bytes` の表現の Sigil 実装（ADR 0025 補足 F、PR 3-5d-ii）。`Addr`・`Int`・`Bool` だけを受け渡す。
+// 言語の `Bytes` の語は、24B の頭の塊の番地とする（F-1）。
+//   頭: buf（+0, Addr）・len（+8, バイト数）・cap（+16, buf の塊のバイト数）。頭は raw.alloc(24, 8)、領域は raw.alloc(cap, 1)。
+//   空の `Bytes` は buf = 空番地・len = cap = 0 で、領域を確保しない。満ちたら max(2 * cap, len + k, 8) に取り直す。
+//   clone・slice・concat・from_raw の結果は cap = len。with_capacity（create）の cap <= 0 は領域を確保しない。
+//   不変条件: 0 <= len <= cap、cap > 0 なら buf は raw.alloc(cap, 1) の塊の先頭、cap == 0 なら buf は空番地。
+// 評価器の `Bytes` は Rust の組み込みのまま（補足 C-7）で、この関数は呼ばない。ネイティブはシムから呼ぶ（F-4）。
+// 利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）ので、不変条件を破る経路はない。
+// 異常停止は確保器の異常停止（exit_group(70)）に頼る。排他を持たない単一スレッド前提（A-5）。
+// ほかの埋め込みモジュールを `use` しない（F-3）。ct_equal（ADR の名前は ct_eq。言語の自由関数 ct_eq と衝突するため改名）は ADR 0023 決定 4 の 2 のとおり、秘密に依存する分岐を持たない。
+
+fn halt()
+  intent "異常停止する（exit_group(70)）"
+  requires none
+  ensures none
+  effects none
+  unchecked "raw.alloc は size <= 0 を異常停止（exit_group(70)）にするので戻らない。このモジュールは bare でも使うため raw.syscall を直接は使わない（補足 A-4・F-1）"
+{
+  raw.free(raw.alloc(-1, 1), 1, 1);
+}
+
+pub fn empty() -> Addr
+  intent "空の Bytes（頭だけ。領域は確保しない）を作る"
+  requires none
+  ensures none
+  effects none
+  unchecked "頭は raw.alloc(24, 8) で得て 3 つの欄を書く（補足 F-1）"
+{
+  let head = raw.alloc(24, 8);
+  raw.store_addr(head, raw.addr_null());
+  raw.store_i64(raw.offset(head, 8), 0);
+  raw.store_i64(raw.offset(head, 16), 0);
+  return head;
+}
+
+pub fn create(cap: Int) -> Addr
+  intent "len = 0 で cap バイトの領域を持つ Bytes を作る。cap <= 0 は領域を確保しない"
+  requires none
+  ensures none
+  effects none
+  unchecked "empty が返した頭に、cap > 0 のときだけ raw.alloc(cap, 1) の領域を結ぶ。cap は大きすぎれば確保器が異常停止する（補足 F-1・F-8）"
+{
+  let head = empty();
+  if cap > 0 {
+    raw.store_addr(head, raw.alloc(cap, 1));
+    raw.store_i64(raw.offset(head, 16), cap);
+  }
+  return head;
+}
+
+pub fn free(b: Addr)
+  intent "Bytes（cap > 0 のとき領域、続いて頭）を解放する。空番地は何もしない"
+  requires none
+  ensures none
+  effects none
+  unchecked "b は空番地か、このモジュールが返し、まだ解放していない頭（したがって cap > 0 なら buf は raw.alloc(cap, 1) の塊の先頭）（補足 F-1）"
+{
+  if raw.addr_to_int(b) == 0 {
+    return;
+  }
+  let cap = raw.load_i64(raw.offset(b, 16));
+  if cap > 0 {
+    raw.free(raw.load_addr(b), cap, 1);
+  }
+  raw.free(b, 24, 8);
+}
+
+pub fn from_raw(p: Addr, n: Int) -> Addr
+  intent "p..p+n を写した Bytes（cap = len = n）を作る。n < 0 は異常停止。n == 0 なら p を読まない"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める（n == 0 なら p は使わない）。n > 0 のとき領域は raw.alloc(n, 1) で得て、n バイトを写す（補足 F-2）"
+{
+  if n < 0 {
+    halt();
+    return raw.addr_null();
+  }
+  let head = empty();
+  if n > 0 {
+    let buf = raw.alloc(n, 1);
+    raw.copy(buf, p, n);
+    raw.store_addr(head, buf);
+    raw.store_i64(raw.offset(head, 8), n);
+    raw.store_i64(raw.offset(head, 16), n);
+  }
+  return head;
+}
+
+pub fn clone(b: Addr) -> Addr
+  intent "内容を写した新しい Bytes（cap = len）を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭（補足 F-1）"
+{
+  return from_raw(raw.load_addr(b), raw.load_i64(raw.offset(b, 8)));
+}
+
+pub fn data(b: Addr) -> Addr
+  intent "領域の先頭の番地を返す。長さ 0 のときは空番地のことがある（読む側は長さ 0 で番地を使わない）"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭（補足 F-1）"
+{
+  return raw.load_addr(b);
+}
+
+pub fn len(b: Addr) -> Int
+  intent "バイト数を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭（補足 F-1）"
+{
+  return raw.load_i64(raw.offset(b, 8));
+}
+
+pub fn is_empty(b: Addr) -> Bool
+  intent "バイト数が 0 か"
+  requires none
+  ensures none
+  effects none
+  unchecked "len と同じ（補足 F-1）"
+{
+  return raw.load_i64(raw.offset(b, 8)) == 0;
+}
+
+pub fn get(b: Addr, i: Int, out: Addr) -> Int
+  intent "位置 i が範囲内なら out に値（0..=255）を書いて 1 を返し、範囲外は out を変えずに 0 を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭（0 <= i < len なら buf + i は読める）。out は 8 バイト書ける 8 バイト境界の番地（補足 F-2）"
+{
+  if i < 0 || i >= raw.load_i64(raw.offset(b, 8)) {
+    return 0;
+  }
+  raw.store_i64(out, raw.load_u8(raw.offset(raw.load_addr(b), i)));
+  return 1;
+}
+
+pub fn set(b: Addr, i: Int, v: Int) -> Int
+  intent "位置 i を v に書き換える。0 = 成功、1 = 添字が範囲外、2 = 値が 0..=255 の範囲外（添字を先に調べる）"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭（0 <= i < len なら buf + i は書ける）。store_u8 の値は 0..=255 を確かめてから渡す（補足 F-2）"
+{
+  if i < 0 || i >= raw.load_i64(raw.offset(b, 8)) {
+    return 1;
+  }
+  if v < 0 || v > 255 {
+    return 2;
+  }
+  raw.store_u8(raw.offset(raw.load_addr(b), i), v);
+  return 0;
+}
+
+fn reserve(b: Addr, k: Int)
+  intent "あと k バイト（k >= 0）を入れられるように、必要なら領域を max(2 * cap, len + k, 8) に取り直し、古い領域を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭。取り直しでは古い領域の len バイトを新しい領域へ写してから、古い領域を raw.alloc(cap, 1) と同じ大きさで返す（補足 F-1）"
+{
+  let n = raw.load_i64(raw.offset(b, 8));
+  let cap = raw.load_i64(raw.offset(b, 16));
+  let need = n + k;
+  if need > cap {
+    let mut ncap = cap * 2;
+    if ncap < need {
+      ncap = need;
+    }
+    if ncap < 8 {
+      ncap = 8;
+    }
+    let nbuf = raw.alloc(ncap, 1);
+    if cap > 0 {
+      let prev = raw.load_addr(b);
+      raw.copy(nbuf, prev, n);
+      raw.free(prev, cap, 1);
+    }
+    raw.store_addr(b, nbuf);
+    raw.store_i64(raw.offset(b, 16), ncap);
+  }
+}
+
+pub fn push(b: Addr, v: Int)
+  intent "v & 255 を末尾へ追加する"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭。reserve の後は buf + len が書ける（補足 F-2）"
+{
+  reserve(b, 1);
+  let n = raw.load_i64(raw.offset(b, 8));
+  raw.store_u8(raw.offset(raw.load_addr(b), n), v & 255);
+  raw.store_i64(raw.offset(b, 8), n + 1);
+}
+
+fn push_be(b: Addr, v: Int, k: Int)
+  intent "v の下位 k バイト（1 <= k <= 8）を上位から順に末尾へ追加する（>> は論理右シフト）"
+  requires none
+  ensures none
+  effects none
+  unchecked "push と同じ"
+{
+  reserve(b, k);
+  let n = raw.load_i64(raw.offset(b, 8));
+  let buf = raw.load_addr(b);
+  let mut j = 0;
+  while j < k {
+    raw.store_u8(raw.offset(buf, n + j), (v >> ((k - 1 - j) * 8)) & 255);
+    j = j + 1;
+  }
+  raw.store_i64(raw.offset(b, 8), n + k);
+}
+
+pub fn push_u16_be(b: Addr, v: Int)
+  intent "v の下位 16 ビットをビッグエンディアンで末尾へ追加する"
+  requires none
+  ensures none
+  effects none
+  unchecked "push と同じ"
+{
+  push_be(b, v, 2);
+}
+
+pub fn push_u32_be(b: Addr, v: Int)
+  intent "v の下位 32 ビットをビッグエンディアンで末尾へ追加する"
+  requires none
+  ensures none
+  effects none
+  unchecked "push と同じ"
+{
+  push_be(b, v, 4);
+}
+
+pub fn push_u64_be(b: Addr, v: Int)
+  intent "v の 64 ビットをビッグエンディアンで末尾へ追加する"
+  requires none
+  ensures none
+  effects none
+  unchecked "push と同じ"
+{
+  push_be(b, v, 8);
+}
+
+pub fn push_u32_le(b: Addr, v: Int)
+  intent "v の下位 32 ビットをリトルエンディアンで末尾へ追加する"
+  requires none
+  ensures none
+  effects none
+  unchecked "push と同じ"
+{
+  reserve(b, 4);
+  let n = raw.load_i64(raw.offset(b, 8));
+  let buf = raw.load_addr(b);
+  let mut j = 0;
+  while j < 4 {
+    raw.store_u8(raw.offset(buf, n + j), (v >> (j * 8)) & 255);
+    j = j + 1;
+  }
+  raw.store_i64(raw.offset(b, 8), n + 4);
+}
+
+pub fn read_u32_be(b: Addr, off: Int, out: Addr) -> Int
+  intent "off から 4 バイトをビッグエンディアンで読んで out に書き 1 を返す。範囲外（off < 0 または off + 4 > len）は out を変えずに 0"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭。0 <= off <= len - 4 なら buf + off..+4 は読める（off + 4 は計算しない）。out は 8 バイト書ける 8 バイト境界の番地（補足 F-2）"
+{
+  let n = raw.load_i64(raw.offset(b, 8));
+  if off < 0 || n < 4 || off > n - 4 {
+    return 0;
+  }
+  let p = raw.offset(raw.load_addr(b), off);
+  let hi = (raw.load_u8(p) << 24) | (raw.load_u8(raw.offset(p, 1)) << 16);
+  let lo = (raw.load_u8(raw.offset(p, 2)) << 8) | raw.load_u8(raw.offset(p, 3));
+  raw.store_i64(out, hi | lo);
+  return 1;
+}
+
+pub fn slice(b: Addr, s: Int, e: Int) -> Addr
+  intent "[s, e) を写した新しい Bytes を返す。0 <= s <= e <= len でなければ空番地"
+  requires none
+  ensures none
+  effects none
+  unchecked "b はこのモジュールが返し、まだ解放していない頭。範囲を確かめてから from_raw に渡すので buf + s..+(e - s) は読める（補足 F-2）"
+{
+  let n = raw.load_i64(raw.offset(b, 8));
+  if s < 0 || s > e || e > n {
+    return raw.addr_null();
+  }
+  return from_raw(raw.offset(raw.load_addr(b), s), e - s);
+}
+
+pub fn concat(a: Addr, b: Addr) -> Addr
+  intent "a の後に b を並べた新しい Bytes（cap = len）を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "a・b はこのモジュールが返し、まだ解放していない頭（同じ頭でもよい。読むだけ）（補足 F-2）"
+{
+  let na = raw.load_i64(raw.offset(a, 8));
+  let nb = raw.load_i64(raw.offset(b, 8));
+  let r = create(na + nb);
+  if na > 0 {
+    raw.copy(raw.load_addr(r), raw.load_addr(a), na);
+  }
+  if nb > 0 {
+    raw.copy(raw.offset(raw.load_addr(r), na), raw.load_addr(b), nb);
+  }
+  raw.store_i64(raw.offset(r, 8), na + nb);
+  return r;
+}
+
+pub fn extend(a: Addr, b: Addr)
+  intent "a の末尾へ b の内容を追加する"
+  requires none
+  ensures none
+  effects none
+  unchecked "a・b はこのモジュールが返し、まだ解放していない頭で、a != b（&mut a と &a を同時に取れないので借用の検査が保証する）。b の長さを先に読み、a を伸ばした後で b の buf を読む。a の取り直しは b の領域に触れない（a != b。補足 F-2）"
+{
+  let nb = raw.load_i64(raw.offset(b, 8));
+  reserve(a, nb);
+  let na = raw.load_i64(raw.offset(a, 8));
+  if nb > 0 {
+    raw.copy(raw.offset(raw.load_addr(a), na), raw.load_addr(b), nb);
+  }
+  raw.store_i64(raw.offset(a, 8), na + nb);
+}
+
+pub fn ct_equal(a: Addr, b: Addr) -> Bool
+  intent "同じ長さで全バイトが等しいか。長さが違えば偽。同じ長さなら途中で抜けず、全バイトの x ^ y を | で積んで最後に 0 と比べる（秘密の値に依存する分岐・添字がない。ADR 0023 決定 4 の 2）"
+  requires none
+  ensures none
+  effects none
+  unchecked "a・b はこのモジュールが返し、まだ解放していない頭（長さ n > 0 なら buf..buf+n は読める。n == 0 なら buf は読まない）。分岐は長さ（公開の情報）と添字にだけ依存する（補足 F-2）"
+{
+  let n = raw.load_i64(raw.offset(a, 8));
+  if n != raw.load_i64(raw.offset(b, 8)) {
+    return false;
+  }
+  let pa = raw.load_addr(a);
+  let pb = raw.load_addr(b);
+  let mut diff = 0;
+  let mut i = 0;
+  while i < n {
+    diff = diff | (raw.load_u8(raw.offset(pa, i)) ^ raw.load_u8(raw.offset(pb, i)));
+    i = i + 1;
+  }
+  return diff == 0;
+}
+
+pub fn cmp(a: Addr, b: Addr) -> Int
+  intent "バイト列の辞書順で比べる（-1・0・1。Rust の [u8]::cmp と同じ）。早く抜けてよい（秘密の値の比較には使わない）"
+  requires none
+  ensures none
+  effects none
+  unchecked "a・b はこのモジュールが返し、まだ解放していない頭（長さ 0 なら buf は読まない。補足 F-2）"
+{
+  let na = raw.load_i64(raw.offset(a, 8));
+  let nb = raw.load_i64(raw.offset(b, 8));
+  let pa = raw.load_addr(a);
+  let pb = raw.load_addr(b);
+  let mut m = na;
+  if nb < na {
+    m = nb;
+  }
+  let mut i = 0;
+  while i < m {
+    let x = raw.load_u8(raw.offset(pa, i));
+    let y = raw.load_u8(raw.offset(pb, i));
+    if x < y {
+      return -1;
+    }
+    if x > y {
+      return 1;
+    }
+    i = i + 1;
+  }
+  if na < nb {
+    return -1;
+  }
+  if na > nb {
+    return 1;
+  }
+  return 0;
+}
+
+pub fn eq(a: Addr, b: Addr) -> Bool
+  intent "バイト列が等しいか。早く抜ける（秘密の値の比較には ct_equal を使う）"
+  requires none
+  ensures none
+  effects none
+  unchecked "cmp と同じ（補足 F-2）"
+{
+  return cmp(a, b) == 0;
+}

@@ -113,6 +113,17 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "list_sum_int" => ("pp", 'i'),
         // 戻りは `Float` のビット列の語（E-9 の 6）。生成コードの `Float` の値も語なので、そのまま使える
         "list_sum_float" => ("p", 'p'),
+        // バイト列の表現（`std.core.bytes`。補足 F-4）。`Int` を返すものは `'p'`、`Bool`・小さい状態（0..=2）は `'i'`
+        "bytes_new" => ("", 'p'),
+        "bytes_with_capacity" | "bytes_clone" | "bytes_data" | "bytes_len" => ("p", 'p'),
+        "bytes_from_raw" | "bytes_concat" => ("pp", 'p'),
+        "bytes_slice" => ("ppp", 'p'),
+        "bytes_push" | "bytes_extend" | "bytes_push_u16_be" | "bytes_push_u32_be"
+        | "bytes_push_u64_be" | "bytes_push_u32_le" => ("pp", 'v'),
+        "bytes_free" => ("p", 'v'),
+        "bytes_is_empty" => ("p", 'i'),
+        "bytes_ct_eq" => ("pp", 'i'),
+        "bytes_get" | "bytes_read_u32_be" | "bytes_set" => ("ppp", 'i'),
         _ => return None,
     })
 }
@@ -122,23 +133,12 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
         "alloc" | "val_shadow" | "val_clone" => ("pp", 'p'),
         "blk_new" => ("p", 'p'),
-        "bytes_new" => ("", 'p'),
-        "bytes_with_capacity" | "bytes_clone" | "bytes_len" | "str_as_bytes" => ("p", 'p'),
-        "bytes_concat" => ("pp", 'p'),
-        "bytes_push" | "bytes_extend" | "bytes_push_u16_be" | "bytes_push_u32_be"
-        | "bytes_push_u64_be" | "bytes_push_u32_le" => ("pp", 'v'),
-        "bytes_free" => ("p", 'v'),
-        "bytes_is_empty" => ("p", 'i'),
-        "bytes_ct_eq" => ("pp", 'i'),
-        "bytes_get" | "bytes_read_u32_be" | "bytes_from_list" | "bytes_to_string_utf8" => {
-            ("ppp", 'i')
-        }
-        "bytes_set" => ("pppp", 'i'),
-        "bytes_slice" => ("ppppp", 'i'),
+        "str_as_bytes" => ("p", 'p'),
+        "bytes_from_list" | "bytes_to_string_utf8" => ("ppp", 'i'),
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
-        "set_str_ops" | "set_list_ops" => ("ppppp", 'v'),
+        "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "enter" => ("pp", 'i'),
         "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
@@ -178,6 +178,8 @@ pub(crate) struct Cg<'p> {
     pub str_ops: Option<[FuncId; 5]>,
     /// 一覧の関数表に登録するシム（create・free・push・get・len。補足 E-3）。
     pub list_ops: Option<[FuncId; 5]>,
+    /// バイト列の関数表に登録するシム（from_raw・free・clone・data・len。補足 F-4）。
+    pub bytes_ops: Option<[FuncId; 5]>,
 }
 
 impl<'p> Cg<'p> {
@@ -525,6 +527,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         live_shim: None,
         str_ops: None,
         list_ops: None,
+        bytes_ops: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
@@ -534,6 +537,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     // 一覧の表現（`std.core.list`）のシム（補足 E-3）。同じく常に必要。
     shims.extend(list_shims(&mut cg)?);
     shims.extend(int_shims(&mut cg)?);
+    // バイト列の表現（`std.core.bytes`）のシム（補足 F-4）。同じく常に必要。
+    shims.extend(bytes_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
 
@@ -733,6 +738,51 @@ fn list_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         out.push((id, target, np, ret));
     }
     cg.list_ops = Some([ids[0], ids[1], ids[2], ids[3], ids[4]]);
+    Ok(out)
+}
+
+/// バイト列の表現（`std.core.bytes`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する（補足 F-4）。
+/// `bytes_set`・`bytes_slice` は形が変わる（`Err` の文字列は呼び出し側が作る。F-2）。シムは公開しない。
+fn bytes_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::*;
+    let mut out = vec![];
+    // 先頭の 5 つは関数表の順（from_raw・free・clone・data・len）。
+    for (name, target_fn, np, ret) in [
+        ("bytes_from_raw", BYTES_FROM_RAW_FN, 2, 'p'),
+        ("bytes_free", BYTES_FREE_FN, 1, 'v'),
+        ("bytes_clone", BYTES_CLONE_FN, 1, 'p'),
+        ("bytes_data", BYTES_DATA_FN, 1, 'p'),
+        ("bytes_len", BYTES_LEN_FN, 1, 'p'),
+        ("bytes_new", BYTES_EMPTY_FN, 0, 'p'),
+        ("bytes_with_capacity", BYTES_CREATE_FN, 1, 'p'),
+        ("bytes_is_empty", BYTES_IS_EMPTY_FN, 1, 'i'),
+        ("bytes_get", BYTES_GET_FN, 3, 'i'),
+        ("bytes_set", BYTES_SET_FN, 3, 'i'),
+        ("bytes_push", BYTES_PUSH_FN, 2, 'v'),
+        ("bytes_slice", BYTES_SLICE_FN, 3, 'p'),
+        ("bytes_concat", BYTES_CONCAT_FN, 2, 'p'),
+        ("bytes_extend", BYTES_EXTEND_FN, 2, 'v'),
+        ("bytes_push_u16_be", BYTES_PUSH_U16_BE_FN, 2, 'v'),
+        ("bytes_push_u32_be", BYTES_PUSH_U32_BE_FN, 2, 'v'),
+        ("bytes_push_u64_be", BYTES_PUSH_U64_BE_FN, 2, 'v'),
+        ("bytes_push_u32_le", BYTES_PUSH_U32_LE_FN, 2, 'v'),
+        ("bytes_read_u32_be", BYTES_READ_U32_BE_FN, 3, 'i'),
+        ("bytes_ct_eq", BYTES_CT_EQ_FN, 2, 'i'),
+    ] {
+        let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
+            return Err(internal("std.core.bytes が結ばれていない".to_string()));
+        };
+        let id =
+            cg.m.declare_function(
+                &format!("sigil_rt_{name}"),
+                Linkage::Local,
+                &shim_sig(cg.cc, np, ret),
+            )
+            .map_err(internal)?;
+        cg.rt.insert(name, id);
+        out.push((id, target, np, ret));
+    }
+    cg.bytes_ops = Some([out[0].0, out[1].0, out[2].0, out[3].0, out[4].0]);
     Ok(out)
 }
 

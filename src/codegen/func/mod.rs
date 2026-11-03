@@ -358,6 +358,17 @@ impl<'a, 'p> Fx<'a, 'p> {
                 .collect();
             self.rt("set_list_ops", &addrs);
         }
+        // バイト列の関数表は一覧の次（`set_str_ops` → `set_list_ops` → `set_bytes_ops` → `enter`。補足 F-4）。
+        if let Some(ids) = self.cg.bytes_ops {
+            let addrs: Vec<Value> = ids
+                .iter()
+                .map(|&id| {
+                    let r = self.cg.m.declare_func_in_func(id, self.b.func);
+                    self.b.ins().func_addr(types::I64, r)
+                })
+                .collect();
+            self.rt("set_bytes_ops", &addrs);
+        }
         let r = self.rt("enter", &[fa, a]);
         let r32 = self.b.ins().ireduce(types::I32, r);
         self.b.ins().return_(&[r32]);

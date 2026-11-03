@@ -212,6 +212,8 @@ fn source_has_no_branches() {
         " >= ",
         "&&",
         "||",
+        " / ",
+        " % ",
         "return if",
     ] {
         assert!(!code.contains(bad), "分岐になりうる `{bad}` がある");

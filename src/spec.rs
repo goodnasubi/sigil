@@ -1094,7 +1094,9 @@ mod std_tests {
             std_specs_of(&r, &opts)
         };
         assert!(run("std.core.lib.f;").is_ok());
-        assert!(run("std.core.lib.nothing;").is_err());
-        assert!(run("std.core.nowhere.f;").is_err());
+        for bad in ["std.core.lib.nothing;", "std.core.nowhere.f;"] {
+            let e = run(bad).expect_err(bad);
+            assert_eq!(e.kind, crate::error::ErrorKind::UnresolvedUse, "{bad}");
+        }
     }
 }

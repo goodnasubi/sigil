@@ -43,6 +43,7 @@ pub const STR_CONCAT_FN: &str = "std.core.string.concat";
 pub const STR_PARSE_INT_FN: &str = "std.core.string.parse_int";
 pub const STR_EQ_FN: &str = "std.core.string.eq";
 pub const STR_CMP_FN: &str = "std.core.string.cmp";
+pub const STR_LINES_FN: &str = "std.core.string.lines";
 
 /// `List` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 E-2・E-3、PR 3-5c-ii）。
 /// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_list_*` のシムから呼ぶ。
@@ -52,6 +53,9 @@ pub const LIST_FREE_FN: &str = "std.core.list.free";
 pub const LIST_PUSH_FN: &str = "std.core.list.push";
 pub const LIST_GET_FN: &str = "std.core.list.get";
 pub const LIST_LEN_FN: &str = "std.core.list.len";
+/// 3-5c-iii で移した操作（`sum_int`・`sum_float`・`std.core.string.lines`）。
+pub const LIST_SUM_INT_FN: &str = "std.core.list.sum_int";
+pub const LIST_SUM_FLOAT_FN: &str = "std.core.list.sum_float";
 
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[

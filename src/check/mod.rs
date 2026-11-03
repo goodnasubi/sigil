@@ -460,8 +460,12 @@ pub fn fn_reports(file: &File, opts: &Options) -> R<HashMap<usize, FnReport>> {
 
 /// 埋め込み標準モジュール（ADR 0025 補足 A-6）の関数ごとの記録（`sigil spec` が暗黙に結ぶモジュールを出すとき。
 /// 補足 B-3）。`check_module_embedded` と同じ検査をする。
-pub(crate) fn fn_reports_embedded(file: &File, opts: &Options) -> R<HashMap<usize, FnReport>> {
-    analyze(file, &[], &[], opts, true).map(|ck| ck.reports)
+pub(crate) fn fn_reports_embedded(
+    file: &File,
+    externs: &[Item],
+    opts: &Options,
+) -> R<HashMap<usize, FnReport>> {
+    analyze(file, externs, &[], opts, true).map(|ck| ck.reports)
 }
 
 /// 移動の状態。移動した場所（`a`・`a.owner`）とその位置、そして経路が早期の戻りで終わったか。

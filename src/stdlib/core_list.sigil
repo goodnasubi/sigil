@@ -108,3 +108,52 @@ pub fn push(l: Addr, e: Addr)
   raw.store_i64(raw.offset(raw.load_addr(l), n * 8), word);
   raw.store_i64(raw.offset(l, 8), n + 1);
 }
+
+pub fn sum_int(l: Addr, out: Addr) -> Int
+  intent "Int の一覧の合計を求める。あふれるなら足す前に検出して 1 を返し（out は変えない）、成功なら 0 を返して out に合計を書く（空は 0）"
+  requires none
+  ensures none
+  effects none
+  unchecked "l はこのモジュールの create が返し、まだ解放していない頭で、要素は Int の語。out は 8 バイト書ける。足す前に x > 0 && acc > MAX - x、x < 0 && acc < MIN - x を比べるので、MAX - x・MIN - x・acc + x はあふれない（補足 E-3）"
+{
+  let n = raw.load_i64(raw.offset(l, 8));
+  let buf = raw.load_addr(l);
+  let hi = 9223372036854775807;
+  let lo = -9223372036854775807 - 1;
+  let mut acc = 0;
+  let mut i = 0;
+  while i < n {
+    let x = raw.load_i64(raw.offset(buf, i * 8));
+    if x > 0 && acc > hi - x {
+      return 1;
+    }
+    if x < 0 && acc < lo - x {
+      return 1;
+    }
+    acc = acc + x;
+    i = i + 1;
+  }
+  raw.store_i64(out, acc);
+  return 0;
+}
+
+pub fn sum_float(l: Addr) -> Float
+  intent "Float の一覧の合計を先頭から順に求める。空は 0.0。最初の要素を初期値にするので [-0.0] の和は -0.0"
+  requires none
+  ensures none
+  effects none
+  unchecked "l はこのモジュールの create が返し、まだ解放していない頭で、要素は Float のビット列の語（補足 E-3）"
+{
+  let n = raw.load_i64(raw.offset(l, 8));
+  if n == 0 {
+    return 0.0;
+  }
+  let buf = raw.load_addr(l);
+  let mut acc = Float.from_bits(raw.load_i64(buf));
+  let mut i = 1;
+  while i < n {
+    acc = acc + Float.from_bits(raw.load_i64(raw.offset(buf, i * 8)));
+    i = i + 1;
+  }
+  return acc;
+}

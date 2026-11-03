@@ -9,7 +9,11 @@ module std.core.string
 //   不変条件: 0 <= len <= cap、len > 0 なら ptr..ptr+len は読める、ptr..ptr+len は正しい UTF-8。作るときは cap = len。
 // 評価器の `String` は Rust の組み込みのまま（補足 C-7）で、この関数は呼ばない。ネイティブはシムから new_lossy・free・
 // clone・data・bytes を呼ぶ（D-3）。利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）ので、不変条件を破る経路はない。
+// `lines` は `std.core.list` の create・push で一覧を作る（文字列の配置を知るのはここだけ、一覧の配置を知るのは std.core.list だけ。補足 E-2）。
 // 異常停止は確保器の異常停止（exit_group(70)）に頼る（確保器と同じ終了コード）。排他を持たない単一スレッド前提（A-5）。
+
+use std.core.list.create;
+use std.core.list.push;
 
 fn halt()
   intent "異常停止する（exit_group(70)）"
@@ -456,4 +460,48 @@ pub fn eq(a: Addr, b: Addr) -> Bool
   unchecked "cmp と同じ（補足 D-2）"
 {
   return cmp(a, b) == 0;
+}
+
+fn push_line(lst: Addr, tmp: Addr, p: Addr, start: Int, end: Int)
+  intent "p[start..end) の末尾の CR を 1 つ外して 1 行の文字列を作り、一覧 lst の末尾へ積む（tmp は 8 バイトの作業領域）"
+  requires none
+  ensures none
+  effects none
+  unchecked "start <= end で p[start..end) は読める。切り口は ASCII の LF の位置と、その手前の CR の位置だけなので、正しい UTF-8 の部分列は正しい UTF-8 のまま（new を呼ぶ条件。補足 D-2・E-3）。lst は std.core.list の頭、tmp は 8 バイト書ける"
+{
+  let mut e = end;
+  if e > start {
+    if raw.load_u8(raw.offset(p, e - 1)) == 13 {
+      e = e - 1;
+    }
+  }
+  raw.store_addr(tmp, new(raw.offset(p, start), e - start));
+  push(lst, tmp);
+}
+
+pub fn lines(s: Addr) -> Addr
+  intent "LF で分けた行の一覧（List<String>）を返す。最後の空の行は落とし、各行の末尾の CR を 1 つ外す（src/shared/text.rs の lines と同じ）"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は std.core.string が返し、まだ解放していない頭（したがって ptr..ptr+len は正しい UTF-8）。作業領域は 8 バイトを確保して最後に返す（補足 E-3）"
+{
+  let lst = create(8);
+  let p = raw.load_addr(s);
+  let n = raw.load_i64(raw.offset(s, 8));
+  let tmp = raw.alloc(8, 8);
+  let mut start = 0;
+  let mut i = 0;
+  while i < n {
+    if raw.load_u8(raw.offset(p, i)) == 10 {
+      push_line(lst, tmp, p, start, i);
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if start < n {
+    push_line(lst, tmp, p, start, n);
+  }
+  raw.free(tmp, 8, 8);
+  return lst;
 }

@@ -174,6 +174,57 @@
       "title": "PR 4-2g: サンプルと記録（ADR 0026）",
       "labels": ["lane:E"],
       "body": "## 背景・目的\n\n[ADR 0026](docs/decisions/0026-p1a-concurrency.md) の PR 4-2g（段階 4 の締め）。前提は PR 4-2f までの全 PR。\n\n## 内容\n\n- `examples/` に並行処理のサンプルを加える（ADR 0007 が予告した並行処理サンプル。番号は空きを使う）\n- ADR 0007 決定 6 の条件の P1-a の列の完了を記録する\n\n## 完了条件\n\n- [ ] 上記が実装され、`cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-6-1a-ct-framework",
+      "depends_on_issues": [
+        265
+      ],
+      "title": "PR 6-1a: 定数時間検査の土台（ADR 0024）",
+      "labels": [
+        "lane:C1",
+        "lane:E",
+        "needs-human"
+      ],
+      "body": "## 背景・目的\n\n[ADR 0024](docs/decisions/0024-crypto-primitives.md)（暗号の基本部品）が 2026-11-03 に所有者承認された（#265）。本 PR は移行計画の最初の一歩として、定数時間であることを機械的に確かめる検査の土台を作る。後続の 6-1b〜d はこの土台の上で検証される。\n\n## 内容\n\n- 対象の包括基準（`ct_` 接頭辞の関数／引数・戻り値に `Secret` を含む関数／`std.crypto` のハッシュ・MAC・KDF 関数）を機械可読な表にし、漏れがあればテストが落ちるようにする\n- 静的検査 `ct_rules_static`: SIR 上のテイント解析で、秘密値に依存する分岐・インデックス・除算・非ホワイトリスト関数への受け渡し・ログ出力を検出する\n- 最適化後検査 `ct_rules_clif`: Cranelift IR で分岐数の増加・除算命令・ゼロ化コードの消去を検出する\n- 統計的計測 `ct_measure` の置き場を用意する（dudect 方式、Welch's t-test、100 万回試行、|t| < 4.5、`#[ignore]`、陽性対照つき）\n\n## 注意（着手前に決めること）\n\n検証の置き場 `tests/ct_rules.rs` は AGENTS.md の特別なファイル表で「人間のみ（CODEOWNERS）」とされている一方、本 ADR の計画ではエージェント担当になっている。どちらで進めるか（所有者が土台を用意する／規則側を改める等）を着手前に所有者と決めること。\n\n## 完了条件\n\n- [ ] 上記の土台が入り、対象表の漏れ・静的検査・IR 検査がテストとして動く\n- [ ] `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-6-1b-secret-cteq",
+      "depends_on_ids": [
+        "pr-6-1a-ct-framework"
+      ],
+      "title": "PR 6-1b: Secret 型と ct_eq（ADR 0024）",
+      "labels": [
+        "lane:D2",
+        "lane:C2",
+        "lane:E"
+      ],
+      "body": "## 背景・目的\n\n[ADR 0024](docs/decisions/0024-crypto-primitives.md) 決定 1 のうち、秘密値を守る `Secret` 型と定数時間比較 `ct_eq` を実装する。前提は PR 6-1a（定数時間検査の土台）。\n\n## 内容\n\n- `Secret` 型: `Displayable` を実装しない（表示・ログ埋め込み不可）、破棄時に内部の `Bytes` をゼロ化、中身の露出は明示的な expose 系メソッドのみ\n- `ct_eq`: 長さは公開情報とし、長さが違えば即 false。長さが一致する場合は XOR 累積で早期リターンなく比較する\n- 6-1a の検査土台で `ct_eq` と `Secret` の扱いが定数時間規則に適合することを確かめるテストを加える\n\n## 完了条件\n\n- [ ] `Secret` と `ct_eq` が ADR 0024 決定 1 のとおりに実装され、テストが通る\n- [ ] `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-6-1c-sha256",
+      "depends_on_ids": [
+        "pr-6-1a-ct-framework"
+      ],
+      "title": "PR 6-1c: SHA-256（ADR 0024）",
+      "labels": [
+        "lane:D2",
+        "lane:E"
+      ],
+      "body": "## 背景・目的\n\n[ADR 0024](docs/decisions/0024-crypto-primitives.md) 決定 1 のうち、SHA-256 を `std.crypto` に実装する。前提は PR 6-1a（定数時間検査の土台）。\n\n## 内容\n\n- SHA-256 本体: ストリーミング型（更新・確定）とワンショットの両方。32 ビット加算は 64 ビット `Int` で計算してから `& 0xFFFFFFFF` で切り、ADR 0023 のビット演算のみを使う\n- テストベクタは RFC 6234。ストリーミングとワンショットの一致も性質として確かめる\n- 6-1a の検査土台で定数時間規則に適合することを確かめる\n\n## 完了条件\n\n- [ ] SHA-256 が RFC 6234 のベクタを通り、テストが通る\n- [ ] `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
+    },
+    {
+      "id": "pr-6-1d-hmac-pbkdf2",
+      "depends_on_ids": [
+        "pr-6-1b-secret-cteq",
+        "pr-6-1c-sha256"
+      ],
+      "title": "PR 6-1d: HMAC-SHA-256 と PBKDF2（ADR 0024）",
+      "labels": [
+        "lane:D2",
+        "lane:E"
+      ],
+      "body": "## 背景・目的\n\n[ADR 0024](docs/decisions/0024-crypto-primitives.md) 決定 1 のうち、HMAC-SHA-256 と PBKDF2-HMAC-SHA-256 を実装し、PR 6-1 の系列を締める。前提は PR 6-1b（`Secret`）と PR 6-1c（SHA-256）。\n\n## 内容\n\n- HMAC-SHA-256: 鍵は `Secret` 必須。32 バイト未満は `requires` 違反で異常停止、64 バイト超は SHA-256 で圧縮してから使う。出力も `Secret`\n- PBKDF2-HMAC-SHA-256: 反復回数の範囲 4096〜100000 を `requires` で強制。1024 回ごとに `task.yield` する（並行処理 ADR 0026 は合流済みのため、ADR 本文の「段階 4 の合流までは仮置き」の但し書きは解消済みで、本実装として入れる）\n- テストベクタは RFC 4231（ケース 1〜7）と RFC 6070。契約違反（短い鍵・範囲外の反復回数）が異常停止になることも確かめる\n- ファジング／性質テスト: `ct_eq` の反射性、ストリーミングとワンショットの一致など ADR 決定 4 の項目\n\n## 完了条件\n\n- [ ] HMAC と PBKDF2 が RFC のベクタを通り、テストが通る\n- [ ] `cargo fmt --check`・`cargo clippy --all-targets -- -D warnings`・`cargo test` が通る\n"
     }
   ]
 }

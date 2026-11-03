@@ -135,7 +135,7 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "trace_on" => ("", 'v'),
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
-        "val_show" | "list_best" => ("ppi", 'p'),
+        "val_show" => ("ppi", 'p'),
         "val_eq" | "val_cmp" => ("ppp", 'i'),
         "list_sum_float" => ("p", 'f'),
         "entry_args" => ("ippppppp", 'i'),

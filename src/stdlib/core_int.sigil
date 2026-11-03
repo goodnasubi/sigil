@@ -1,0 +1,74 @@
+module std.core.int
+  targets bare, browser, server
+  trust none
+
+// `Int` の回転（ADR 0025 補足 F-3、PR 3-5d-i）。ADR 0023 決定 4 の 1 のとおり、秘密に依存しうるので分岐を持たない
+// （比較・`if`・ループ・添字を使わず、ビット演算とシフトだけで書く）。`raw.*` も `unchecked` も使わない。
+//
+// 規則は評価器・ネイティブの今の Rust の関数と同じ（ADR 0023 の `requires` は実行時には調べない）:
+// - 有効幅 `ew` は、引数 `w` が 32 のとき 32、それ以外はすべて 64。
+// - 回転の量は `n & (ew - 1)`（負の `n` も 2 の補数のまま）。
+// - 32 ビット幅の結果は 0..2^32 の非負の `Int`（上位 32 ビットは 0）。入力の `x` も下位 32 ビットだけを使う。
+// `<<` はあふれで止まらず、`>>` は論理右シフト（ADR 0023 決定 3）で、シフトの量は常に 0..=63 に入る。
+
+fn is_wide(w: Int) -> Int
+  intent "w が 32 でなければ 1、32 なら 0 を返す（分岐なし。差のビットを下へ畳んで最下位ビットを取る）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut t = w ^ 32;
+  t = t | (t >> 32);
+  t = t | (t >> 16);
+  t = t | (t >> 8);
+  t = t | (t >> 4);
+  t = t | (t >> 2);
+  t = t | (t >> 1);
+  return t & 1;
+}
+
+fn rotl_ew(x: Int, k: Int, wide: Int) -> Int
+  intent "有効幅（wide が 0 なら 32、1 なら 64）で左へ k（0..ew-1）回す"
+  requires none
+  ensures none
+  effects none
+{
+  let m = 0 - wide;
+  let mask = 0xFFFFFFFF | (m << 32);
+  let ew = 32 + (wide << 5);
+  let u = x & mask;
+  let s = (ew - k) & (ew - 1);
+  return ((u << k) | (u >> s)) & mask;
+}
+
+pub fn rotl(x: Int, n: Int, w: Int) -> Int
+  intent "x を幅 w（32 以外は 64）で n ビット左へ回した値を返す（分岐なし）"
+  requires none
+  ensures none
+  effects none
+{
+  let wide = is_wide(w);
+  let ew = 32 + (wide << 5);
+  return rotl_ew(x, n & (ew - 1), wide);
+}
+
+pub fn rotr(x: Int, n: Int, w: Int) -> Int
+  intent "x を幅 w（32 以外は 64）で n ビット右へ回した値を返す（分岐なし）"
+  requires none
+  ensures none
+  effects none
+{
+  let wide = is_wide(w);
+  let ew = 32 + (wide << 5);
+  let k = n & (ew - 1);
+  return rotl_ew(x, (ew - k) & (ew - 1), wide);
+}
+
+pub fn rotr32(x: Int, n: Int) -> Int
+  intent "x を幅 32 で n ビット右へ回した値を返す（分岐なし）"
+  requires none
+  ensures none
+  effects none
+{
+  return rotr(x, n, 32);
+}

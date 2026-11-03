@@ -114,7 +114,7 @@ pub fn sum_int(l: Addr, out: Addr) -> Int
   requires none
   ensures none
   effects none
-  unchecked "l はこのモジュールの create が返し、まだ解放していない頭で、要素は Int の語。out は 8 バイト書ける。足す前に x > 0 && acc > MAX - x、x < 0 && acc < MIN - x を比べるので、MAX - x・MIN - x・acc + x はあふれない（補足 E-3）"
+  unchecked "l はこのモジュールの create が返し、まだ解放していない頭で、要素は Int の語。out は 8 バイト書ける 8 バイト境界の番地。足す前に x > 0 && acc > MAX - x、x < 0 && acc < MIN - x を比べるので、MAX - x・MIN - x・acc + x はあふれない（補足 E-3）"
 {
   let n = raw.load_i64(raw.offset(l, 8));
   let buf = raw.load_addr(l);

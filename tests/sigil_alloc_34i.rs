@@ -634,6 +634,7 @@ fn spec_hides_embedded_std_and_spec_std_shows_it() {
         "{out}"
     );
     assert!(out.contains("標準モジュール: std.core.float\n"), "{out}");
+    assert!(out.contains("標準モジュール: std.core.int\n"), "{out}");
     assert!(out.contains("  大域: mut LIVE: Int = 0\n"), "{out}");
     assert!(
         out.contains("  触る大域: FREED（読む）, LIVE（読み書き）, MAGIC（読む）\n"),

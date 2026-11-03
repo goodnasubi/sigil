@@ -461,29 +461,6 @@ pub unsafe extern "C" fn sigil_rt_bytes_ct_eq(a: *const RtBytes, b_ptr: *const R
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigil_rt_int_rotl(x: i64, n: i64, width: i64) -> i64 {
-    if width == 32 {
-        (x as u32).rotate_left((n % 32) as u32) as i64
-    } else {
-        (x as u64).rotate_left((n % 64) as u32) as i64
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn sigil_rt_int_rotr(x: i64, n: i64, width: i64) -> i64 {
-    if width == 32 {
-        (x as u32).rotate_right((n % 32) as u32) as i64
-    } else {
-        (x as u64).rotate_right((n % 64) as u32) as i64
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn sigil_rt_int_rotr32(x: i64, n: i64) -> i64 {
-    (x as u32).rotate_right((n % 32) as u32) as i64
-}
-
 // ---------------------------------------------------------------------------
 // List（24B の頭の塊。表現は Sigil 製の `std.core.list` が持つ。補足 E。要素は 8B の語）
 

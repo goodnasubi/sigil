@@ -11,6 +11,7 @@
 //!   すべてのプログラムに暗黙に結ぶ（補足 C-2。`implicit_roots`）。
 //! - `std.core.string`（3-5b-i）は `String` の表現（24B の頭と中身の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 D）。
 //!   `raw_ops` で確保器を差し替えたときは、確保器も文字列も結ばない。
+//! - `std.core.int`（3-5d-i）は `Int` の回転を持ち、同じく暗黙に結ぶ（補足 F-3）。
 //! - `std.core.list`（3-5c-ii）は `List` の表現（24B の頭と要素の領域の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 E）。
 
 /// Sigil 製の確保器のモジュール名（ADR 0025 決定 3、補足 A-2・B-1）。
@@ -26,6 +27,13 @@ pub const LIVE_FN: &str = "std.os.alloc.live_blocks";
 /// 後続の PR で Sigil 製の標準ライブラリ（`Float` の表示・解析）が `use` して使う。
 pub const FLOAT_MODULE: &str = "std.core.float";
 pub const FMOD_FN: &str = "std.core.float.fmod";
+
+/// `Int` の回転の Sigil 版のモジュール名と関数名（結合後の名前。ADR 0025 補足 F-3、PR 3-5d-i）。
+/// 分岐を持たない（ADR 0023 決定 4 の 1）。`unchecked` も `raw.*` も使わない。ネイティブは `sigil_rt_int_rot*` のシムから呼ぶ。
+pub const INT_MODULE: &str = "std.core.int";
+pub const INT_ROTL_FN: &str = "std.core.int.rotl";
+pub const INT_ROTR_FN: &str = "std.core.int.rotr";
+pub const INT_ROTR32_FN: &str = "std.core.int.rotr32";
 
 /// `String` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 D-3、PR 3-5b-i）。
 /// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_str_*` のシムから呼ぶ。
@@ -63,6 +71,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
     (FLOAT_MODULE, include_str!("core_float.sigil")),
+    (INT_MODULE, include_str!("core_int.sigil")),
 ];
 
 /// 暗黙に結ぶ埋め込みモジュール（補足 C-2）。
@@ -81,7 +90,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
     if replaced {
         vec![]
     } else {
-        vec![ALLOC_MODULE, STRING_MODULE, LIST_MODULE]
+        vec![ALLOC_MODULE, STRING_MODULE, LIST_MODULE, INT_MODULE]
     }
 }
 

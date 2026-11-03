@@ -530,39 +530,6 @@ pub unsafe extern "C" fn sigil_rt_val_clone(d: D, w: i64) -> i64 {
     dup(d, w, true)
 }
 
-/// `List<Int>.sum`。足し算があふれたら 1 を返す（空は 0）。
-///
-/// # Safety
-/// `l` は有効。`out` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_sum_int(l: *const RtList, out: *mut i64) -> i32 {
-    let mut acc = 0i64;
-    for x in list_items(l) {
-        match acc.checked_add(x) {
-            Some(n) => acc = n,
-            None => return 1,
-        }
-    }
-    *out = acc;
-    0
-}
-
-/// `List<Float>.sum`（先頭から順に足す）。
-///
-/// # Safety
-/// `l` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_sum_float(l: *const RtList) -> f64 {
-    let mut it = list_items(l).into_iter().map(|x| f64::from_bits(x as u64));
-    let Some(mut acc) = it.next() else {
-        return 0.0;
-    };
-    for x in it {
-        acc += x;
-    }
-    acc
-}
-
 // ---------------------------------------------------------------------------
 // 入口の引数（`sigil run` と同じ書き方。宣言の型の記述子に合わせて語にする）
 
@@ -712,9 +679,6 @@ mod tests {
             assert_ne!(c, l as i64);
             assert_eq!(sigil_rt_val_eq(list.as_ptr(), c, l as i64), 1);
             assert_eq!(sigil_rt_val_cmp(list.as_ptr(), c, l as i64), 0);
-            let mut out = 0i64;
-            assert_eq!(sigil_rt_list_sum_int(l, &mut out), 0);
-            assert_eq!(out, 6);
         }
     }
 }

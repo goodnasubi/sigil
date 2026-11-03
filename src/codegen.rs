@@ -98,7 +98,7 @@ pub(crate) fn norm(ty: &Ty) -> Ty {
 pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
         "str_new" | "str_concat" => ("pp", 'p'),
-        "str_clone" | "str_data" | "str_bytes" | "str_len" | "str_trim" => ("p", 'p'),
+        "str_clone" | "str_data" | "str_bytes" | "str_len" | "str_trim" | "str_lines" => ("p", 'p'),
         "str_free" => ("p", 'v'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" => ("pp", 'i'),
@@ -107,6 +107,9 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "list_get" => ("pp", 'p'),
         "list_push" => ("pp", 'v'),
         "list_free" => ("p", 'v'),
+        "list_sum_int" => ("pp", 'i'),
+        // 戻りは `Float` のビット列の語（E-9 の 6）。生成コードの `Float` の値も語なので、そのまま使える
+        "list_sum_float" => ("p", 'p'),
         _ => return None,
     })
 }
@@ -115,7 +118,7 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
 pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
         "alloc" | "val_shadow" | "val_clone" => ("pp", 'p'),
-        "blk_new" | "str_lines" => ("p", 'p'),
+        "blk_new" => ("p", 'p'),
         "bytes_new" => ("", 'p'),
         "bytes_with_capacity" | "bytes_clone" | "bytes_len" | "str_as_bytes" => ("p", 'p'),
         "bytes_concat" => ("pp", 'p'),
@@ -135,14 +138,13 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "set_sigil_live" => ("p", 'v'),
         "set_str_ops" | "set_list_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
-        "list_sum_int" | "enter" => ("pp", 'i'),
+        "enter" => ("pp", 'i'),
         "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
         "trace_on" => ("", 'v'),
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" => ("ppi", 'p'),
         "val_eq" | "val_cmp" => ("ppp", 'i'),
-        "list_sum_float" => ("p", 'f'),
         "entry_args" => ("ippppppp", 'i'),
         "fs_read" | "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppppp", 'v'),
@@ -659,7 +661,7 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
 fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
         STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN, STR_FREE_FN, STR_IS_EMPTY_FN,
-        STR_LEN_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
+        STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
     };
     let mut out = vec![];
     let mut ids = vec![];
@@ -674,6 +676,7 @@ fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         ("str_trim", STR_TRIM_FN, 1, 'p'),
         ("str_concat", STR_CONCAT_FN, 2, 'p'),
         ("str_parse_int", STR_PARSE_INT_FN, 2, 'i'),
+        ("str_lines", STR_LINES_FN, 1, 'p'),
     ] {
         let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
             return Err(internal("std.core.string が結ばれていない".to_string()));
@@ -697,7 +700,8 @@ fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
 /// 生成コードの呼び出し先の名前と形は変えない。シムは公開せず（`Linkage::Local`）、番地を関数表で Rust ランタイムに渡す。
 fn list_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
-        LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN, LIST_PUSH_FN,
+        LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN, LIST_PUSH_FN, LIST_SUM_FLOAT_FN,
+        LIST_SUM_INT_FN,
     };
     let mut out = vec![];
     let mut ids = vec![];
@@ -708,6 +712,8 @@ fn list_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         ("list_push", LIST_PUSH_FN, 2, 'v'),
         ("list_get", LIST_GET_FN, 2, 'p'),
         ("list_len", LIST_LEN_FN, 1, 'p'),
+        ("list_sum_int", LIST_SUM_INT_FN, 2, 'i'),
+        ("list_sum_float", LIST_SUM_FLOAT_FN, 1, 'p'),
     ] {
         let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
             return Err(internal("std.core.list が結ばれていない".to_string()));

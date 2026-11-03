@@ -203,20 +203,6 @@ unsafe fn s<'a>(p: *const RtStr) -> &'a str {
     }
 }
 
-/// `String.lines`。要素は `*mut RtStr`（呼び出し側が要素を捨ててから `list_free` する）。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_lines(p: *const RtStr) -> *mut RtList {
-    let l = list_new();
-    for line in text::lines(s(p)) {
-        let e = new_str(line.to_string());
-        list_push(l, e as i64);
-    }
-    l
-}
-
 // ---------------------------------------------------------------------------
 // Bytes（バイト列。可変長、8 バイト境界）
 
@@ -1098,18 +1084,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lines_list_and_shared() {
+    fn shared_and_alloc() {
         unsafe {
-            let l = sigil_rt_str_lines(st("a\r\nb\n\nc\n"));
-            assert_eq!(list_len(l), 4);
-            let e = *(list_get(l, 1) as *mut *mut RtStr);
-            assert_eq!(s(e), "b");
-            assert!(list_get(l, 4).is_null());
-            for i in 0..4 {
-                str_free(*(list_get(l, i) as *mut *mut RtStr));
-            }
-            list_free(l);
-
             let p = sigil_rt_shared_new(8, 8);
             assert_eq!(sigil_rt_shared_count(p), 1);
             sigil_rt_shared_retain(p);
@@ -1171,7 +1147,7 @@ pub(crate) mod tests {
     }
 
     /// 子プロセスで同じテストを走らせ、環境変数の指示のときだけ異常な使い方をして、終了コード 70 を確かめる。
-    fn exits_70_when(mode: &str, name: &str) {
+    fn exits_70_when(mode: &str, name: &str) -> String {
         let exe = std::env::current_exe().unwrap();
         let out = std::process::Command::new(exe)
             .args(["--exact", name, "--test-threads=1", "--nocapture"])
@@ -1179,6 +1155,7 @@ pub(crate) mod tests {
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(70), "{:?}", out.status);
+        String::from_utf8_lossy(&out.stderr).into_owned()
     }
 
     /// 関数表が未登録のまま文字列を作ると、終了コード 70 で止まる。
@@ -1188,7 +1165,24 @@ pub(crate) mod tests {
             Ok("unregistered") => {
                 let _ = str_new_raw(b"a".as_ptr(), 1);
             }
-            _ => exits_70_when("unregistered", "tests::unregistered_table_exits_70"),
+            _ => {
+                exits_70_when("unregistered", "tests::unregistered_table_exits_70");
+            }
+        }
+    }
+
+    /// 一覧の関数表が未登録のまま一覧を作ると、終了コード 70 で止まる。
+    #[test]
+    fn unregistered_list_table_exits_70() {
+        match std::env::var("SIGIL_TEST_STR_MODE").as_deref() {
+            Ok("unregistered") => {
+                let _ = list_new();
+            }
+            _ => {
+                let err = exits_70_when("unregistered", "tests::unregistered_list_table_exits_70");
+                // 別の理由の終了 70 と取り違えない（一覧の表の未登録の報告であること）。
+                assert!(err.contains("一覧の関数表が未登録"), "{err}");
+            }
         }
     }
 
@@ -1201,7 +1195,9 @@ pub(crate) mod tests {
                 let p = table::new(b"\xFF\xFE".as_ptr(), 2);
                 let _ = s(p);
             },
-            _ => exits_70_when("invalid", "tests::invalid_utf8_exits_70"),
+            _ => {
+                exits_70_when("invalid", "tests::invalid_utf8_exits_70");
+            }
         }
     }
 }

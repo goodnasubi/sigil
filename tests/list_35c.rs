@@ -495,3 +495,408 @@ fn native_list_stops_with_70() {
         assert_eq!(r.code, Some(70), "{body}\n{}", r.stderr);
     }
 }
+
+/// 成長規則の固定（3-5c-ii レビューの指摘）: `cap` は 0 → 4 → 8 → 16 → …（2 倍）。`cap + 4` では 9 個目の追加で
+/// 12 になり、13 個目で取り直しが起きる（2 倍なら 16 のまま起きない）ので、個数ごとの `cap` と取り直しの位置で区別する。
+fn cap_after(n: usize) -> i64 {
+    match n {
+        0 => 0,
+        _ => (n as u64).next_power_of_two().max(4) as i64,
+    }
+}
+
+fn cap_block(n: usize, k: usize) -> String {
+    format!(
+        "  let l{k} = create(8);\n  let t{k} = raw.alloc(8, 8);\n  raw.store_i64(t{k}, 1);\n  let mut i{k} = 0;\n  while i{k} < {n} {{\n    push(l{k}, t{k});\n    i{k} = i{k} + 1;\n  }}\n  raw.free(t{k}, 8, 8);\n  let c{k} = raw.load_i64(raw.offset(l{k}, 16));\n  free(l{k});\n"
+    )
+}
+
+#[test]
+fn growth_rule_is_doubling_in_the_evaluator() {
+    for n in (0..=70).chain([100, 129]) {
+        let body = format!("{}  return c0;", cap_block(n, 0));
+        let got = eval_driver(LU, &body).unwrap_or_else(|e| panic!("n={n}: {e}"));
+        assert_eq!(got, cap_after(n).to_string(), "n={n} の cap");
+    }
+}
+
+#[test]
+fn growth_rule_is_doubling_natively() {
+    let ns: Vec<usize> = (0..=70).chain([100, 129]).collect();
+    let mut body = String::new();
+    let mut acc = String::from("  let mut acc = 0;\n");
+    let mut want = 0i64;
+    for (k, &n) in ns.iter().enumerate() {
+        body += &cap_block(n, k);
+        acc += &format!("  acc = (acc * 1000003 + c{k}) % {MODP};\n");
+        want = (want * 1000003 + cap_after(n)) % MODP;
+    }
+    body += &acc;
+    body += "  return acc;";
+    let got = native_driver(LU, &body);
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+    assert_eq!(
+        got.stdout.trim_end().rsplit('\n').next().unwrap(),
+        want.to_string()
+    );
+    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+}
+
+/// 取り直しの位置: 9 個目の後に取った番地は、16 個目まで有効で（2 倍）、17 個目で無効になる。
+/// `cap + 4` だと 13 個目で無効になる。
+#[test]
+fn regrow_happens_only_at_powers_of_two() {
+    let pushes = |n: usize| "  push(l, t);\n".repeat(n);
+    let mk = "  let l = create(8);\n  let t = raw.alloc(8, 8);\n  raw.store_i64(t, 11);\n";
+    // 9 個の後の番地 `a` を、さらに `more` 個を足してから読む。
+    let after = |first: usize, more: usize| {
+        format!(
+            "{mk}{}  let a = get(l, 0);\n{}  let r = raw.load_i64(a);\n  free(l);\n  raw.free(t, 8, 8);\n  return r;",
+            pushes(first),
+            pushes(more)
+        )
+    };
+    for (first, valid_until) in [(1, 4), (5, 8), (9, 16)] {
+        let ok = after(first, valid_until - first);
+        assert_eq!(
+            eval_driver(LU, &ok).unwrap_or_else(|e| panic!("{first}+{}: {e}", valid_until - first)),
+            "11",
+            "{valid_until} 個目までは取り直さない"
+        );
+        let regrown = after(first, valid_until - first + 1);
+        assert!(
+            eval_driver(LU, &regrown).is_err(),
+            "{} 個目で取り直して古い領域が返る",
+            valid_until + 1
+        );
+    }
+}
+
+// ---- 3-5c-iii: sum_int・sum_float・lines ----
+
+fn sum_src() -> String {
+    format!(
+        "{HEAD}{}{}{}",
+        func("si(xs: &List<Int>) -> Int", "return xs.sum();"),
+        func("sf(xs: &List<Float>) -> Float", "return xs.sum();"),
+        func(
+            "sb(xs: &List<Float>) -> Int",
+            "return Float.to_bits(xs.sum());"
+        ),
+    )
+}
+
+/// `sum_int`: 空・1 要素・端のちょうど・1 つ外・途中であふれて後で戻る列（評価器とネイティブの一致は `run` が見る）。
+#[test]
+fn sum_int_boundaries_match_evaluator() {
+    let src = sum_src();
+    let (mx, mn) = (i64::MAX, i64::MIN);
+    let ok: [(&[i64], i64); 14] = [
+        (&[], 0),
+        (&[7], 7),
+        (&[mx], mx),
+        (&[mn], mn),
+        (&[mx - 5, 5], mx),
+        (&[mn + 5, -5], mn),
+        (&[mx, mn], -1),
+        (&[mn, mx], -1),
+        (&[mx, -1, 1], mx),
+        (&[mn, 1, -1], mn),
+        (&[mx, mn, mx, mn], -2),
+        (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], 91),
+        (&[mx, -mx], 0),
+        (&[0, 0, 0], 0),
+    ];
+    for (xs, want) in ok {
+        assert_eq!(out(&src, "si", &[ints(xs)]), want.to_string(), "{xs:?}");
+    }
+    let bad: [&[i64]; 9] = [
+        &[mx, 1],
+        &[mn, -1],
+        &[mx - 5, 6],
+        &[mn + 5, -6],
+        &[mx, mx],
+        &[mn, mn],
+        &[mx, 1, -1],
+        &[mn, -1, 1],
+        &[1, mx],
+    ];
+    for xs in bad {
+        let r = run(&src, "si", &[ints(xs)]);
+        let e = r.expect_err(&format!("あふれが止まらない: {xs:?}"));
+        assert!(
+            format!("{:?}", e.error).to_lowercase().contains("overflow"),
+            "{xs:?}: {:?}",
+            e.error
+        );
+    }
+    // 長い一覧（cap が伸びる）。
+    let long: Vec<i64> = (1..=1000).collect();
+    assert_eq!(out(&src, "si", &[ints(&long)]), "500500");
+}
+
+/// `sum_float`: 空・`-0.0` の保存・inf/NaN・足す順で結果が変わる列。ビット列で比べる。
+#[test]
+fn sum_float_boundaries_match_evaluator() {
+    let src = sum_src();
+    let nan = f64::NAN;
+    let inf = f64::INFINITY;
+    let cases: Vec<Vec<f64>> = vec![
+        vec![],
+        vec![-0.0],
+        vec![0.0],
+        vec![-0.0, -0.0],
+        vec![-0.0, 0.0],
+        vec![0.0, -0.0],
+        vec![inf],
+        vec![inf, 1.0],
+        vec![inf, -inf],
+        vec![-inf, -inf],
+        vec![nan],
+        vec![1.0, nan, 2.0],
+        vec![1e16, 1.0, -1e16],
+        vec![1e16, -1e16, 1.0],
+        vec![0.1, 0.2, 0.3],
+        vec![0.3, 0.2, 0.1],
+        vec![f64::MAX, f64::MAX],
+        vec![f64::MIN_POSITIVE, f64::MIN_POSITIVE / 2.0],
+        (1..=1000).map(|i| i as f64 * 0.1).collect(),
+    ];
+    for xs in &cases {
+        let a = floats(xs);
+        let got = out(&src, "sb", std::slice::from_ref(&a));
+        // 先頭から順に足す（空は 0.0。最初の要素が初期値）。
+        let want = match xs.split_first() {
+            None => 0.0f64,
+            Some((h, t)) => t.iter().fold(*h, |s, x| s + x),
+        };
+        let want_bits = want.to_bits() as i64;
+        if want.is_nan() {
+            // NaN は符号・ペイロードも含めて評価器と同じであること（`run` が両方を突き合わせる）。
+            assert!(
+                f64::from_bits(got.parse::<i64>().unwrap() as u64).is_nan(),
+                "{xs:?}"
+            );
+        } else {
+            assert_eq!(got, want_bits.to_string(), "{xs:?}");
+        }
+        let _ = out(&src, "sf", std::slice::from_ref(&a));
+    }
+    assert_eq!(out(&src, "sf", &[floats(&[-0.0])]), "-0.0");
+    assert_eq!(out(&src, "sf", &[floats(&[])]), "0.0");
+}
+
+fn lines_src() -> String {
+    format!(
+        "{HEAD}{}",
+        func("ls(s: String) -> List<String>", "return s.lines();")
+    )
+}
+
+fn lines_show(s: &str) -> String {
+    let parts: Vec<String> = sigil::shared_text::lines(s)
+        .iter()
+        .map(|l| format!("{l:?}"))
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
+
+/// `lines`: 空・改行だけ・末尾の改行あり/なし・`\r\n`・`\r` だけ・連続した空の行・多バイトの文字。
+#[test]
+fn lines_matches_evaluator_and_shared_text() {
+    let src = lines_src();
+    let cases = [
+        "",
+        "\n",
+        "\n\n",
+        "\n\n\n",
+        "a",
+        "a\n",
+        "a\nb",
+        "a\nb\n",
+        "a\r\nb\r\n",
+        "a\r\nb",
+        "\r\n",
+        "\r\n\r\n",
+        "\r",
+        "\r\r",
+        "a\r",
+        "a\r\r\n",
+        "a\rb",
+        "a\rb\n",
+        "a\n\nb\n",
+        "\na",
+        "\r\na",
+        "日本語\n多バイト\r\n",
+        "héllo\n\u{3000}\n😀\r\n😀",
+        "\u{feff}a\nb",
+        "q\"uote\\\n",
+    ];
+    for s in cases {
+        let got = out(&src, "ls", &[Arg::Str(s.to_string())]);
+        assert_eq!(got, lines_show(s), "lines {s:?}");
+    }
+    let long = "ab\r\n".repeat(1000);
+    assert_eq!(
+        out(&src, "ls", &[Arg::Str(long.clone())]),
+        lines_show(&long)
+    );
+}
+
+const LINES_MODS: &str = "module std.core.t2\n  targets server\n  trust base\n\nuse std.core.string.free;\n\npub fn sfree(s: Addr)\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"s は std.core.string が返した頭\"\n{\n  free(s);\n}\n";
+
+fn lines_driver(body: &str) -> COpts {
+    let src = format!(
+        "module std.core.t\n  targets server\n  trust base\n\nuse std.core.list.free;\nuse std.core.list.get;\nuse std.core.list.len;\nuse std.core.string.bytes;\nuse std.core.string.data;\nuse std.core.string.lines;\nuse std.core.string.new_lossy;\nuse std.core.string.valid_utf8;\nuse std.core.t2.sfree;\n\npub fn run() -> Int\n{TAIL}  unchecked \"単一スレッド\"\n{{\n{body}\n}}\n"
+    );
+    COpts {
+        embedded_extra: vec![
+            ("std.core.t".to_string(), src),
+            ("std.core.t2".to_string(), LINES_MODS.to_string()),
+        ],
+        embedded_roots: vec!["std.core.t".into(), "std.core.t2".into()],
+        ..Default::default()
+    }
+}
+
+/// 1 つの入力（バイト列）を `new_lossy` で文字列にし、`lines` の結果を畳み込み（行数・各行の中身・各行が正しい UTF-8）、
+/// 各行を `std.core.string.free`、一覧を `std.core.list.free` で返して、結果を `r{k}` に置く断片。
+fn lines_block(bytes: &[u8], k: usize) -> String {
+    let n = bytes.len();
+    let mut s = format!("  let b{k} = raw.alloc({}, 1);\n", n.max(1));
+    for (i, b) in bytes.iter().enumerate() {
+        s += &format!("  raw.store_u8(raw.offset(b{k}, {i}), {b});\n");
+    }
+    s += &format!(
+        "  let s{k} = new_lossy(b{k}, {n});\n  raw.free(b{k}, {}, 1);\n  let l{k} = lines(s{k});\n  let mut h{k} = 0;\n  let mut i{k} = 0;\n  while i{k} < len(l{k}) {{\n    let e{k} = raw.load_addr(get(l{k}, i{k}));\n    let d{k} = data(e{k});\n    let m{k} = bytes(e{k});\n    h{k} = (h{k} * 131 + 257 + m{k}) % {MODP};\n    if valid_utf8(d{k}, m{k}) {{\n      h{k} = (h{k} * 131 + 1) % {MODP};\n    }} else {{\n      h{k} = (h{k} * 131 + 999) % {MODP};\n    }}\n    let mut j{k} = 0;\n    while j{k} < m{k} {{\n      h{k} = (h{k} * 131 + raw.load_u8(raw.offset(d{k}, j{k}))) % {MODP};\n      j{k} = j{k} + 1;\n    }}\n    sfree(e{k});\n    i{k} = i{k} + 1;\n  }}\n  let r{k} = h{k} * 1000 + len(l{k});\n  free(l{k});\n  sfree(s{k});\n",
+        n.max(1)
+    );
+    s
+}
+
+fn lines_expect(bytes: &[u8]) -> i64 {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let ls = sigil::shared_text::lines(&text);
+    let mut h = 0i64;
+    for l in &ls {
+        h = (h * 131 + 257 + l.len() as i64) % MODP;
+        h = (h * 131 + 1) % MODP; // 行は常に正しい UTF-8
+        for b in l.bytes() {
+            h = (h * 131 + b as i64) % MODP;
+        }
+    }
+    h * 1000 + ls.len() as i64
+}
+
+fn lines_inputs() -> Vec<Vec<u8>> {
+    let mut v: Vec<Vec<u8>> = [
+        "",
+        "\n",
+        "\r\n",
+        "\r",
+        "a",
+        "a\n",
+        "a\r\n",
+        "\n\n",
+        "a\n\nb\n",
+        "a\r\nb\r\n",
+        "a\r\r\n",
+        "日本語\r\n😀\n",
+        "é\r",
+        "\r\n\r\na",
+    ]
+    .iter()
+    .map(|s| s.as_bytes().to_vec())
+    .collect();
+    // 不正な UTF-8（new_lossy で置き換わる）を、改行・CR のすぐ前後に置く。
+    v.push(vec![0xff, 0x0a, 0xff]);
+    v.push(vec![b'a', 0xe3, 0x81, 0x0a, b'b']);
+    v.push(vec![0xe3, 0x81, 0x0d, 0x0a, 0xf0, 0x9f, 0x98]);
+    v.push(vec![0xc0, 0xaf, 0x0a, 0xed, 0xa0, 0x80, 0x0d]);
+    v.push(vec![0x0d, 0xff, 0x0d, 0x0a]);
+    // 疑似乱数の列（改行・CR・ASCII・多バイトの文字・不正なバイトを混ぜる）。
+    let alphabet: [&[u8]; 9] = [
+        b"\n",
+        b"\r",
+        b"\r\n",
+        b"a",
+        b"b",
+        "é".as_bytes(),
+        "日".as_bytes(),
+        "😀".as_bytes(),
+        &[0xff],
+    ];
+    let mut x: u64 = 0x9e3779b97f4a7c15;
+    for len in 1..40 {
+        let mut b = vec![];
+        for _ in 0..len {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            b.extend_from_slice(alphabet[((x >> 33) % alphabet.len() as u64) as usize]);
+        }
+        v.push(b);
+    }
+    v
+}
+
+#[test]
+fn lines_direct_matches_text_rs_in_the_evaluator() {
+    for (k, b) in lines_inputs().iter().enumerate().step_by(3) {
+        let body = format!("{}  return r{k};", lines_block(b, k));
+        let c = lines_driver(&body);
+        let o = Options {
+            embedded_extra: c.embedded_extra,
+            embedded_roots: c.embedded_roots,
+            ..Options::captured()
+        };
+        let got =
+            match sigil::ir_eval::run_sources_with(&[&user_entry()], "std.core.t.run", &[], &o) {
+                Ok(o) => o.value,
+                Err(f) => panic!("{b:?}: {:?}", f.error),
+            };
+        assert_eq!(got, lines_expect(b).to_string(), "{b:?}");
+    }
+}
+
+/// ネイティブ: 入力を数個ずつの小さなプログラムに分けて走らせ（1 つの巨大な関数はコンパイルが極端に遅い）、
+/// `lines` が作る各行の文字列と一覧が全部返る（終了時の数が 0）。
+#[test]
+fn lines_direct_matches_text_rs_natively_and_frees_everything() {
+    let inputs = lines_inputs();
+    for (g, group) in inputs.chunks(6).enumerate() {
+        let mut body = String::new();
+        let mut acc = String::from("  let mut acc = 0;\n");
+        let mut want = 0i64;
+        for (k, b) in group.iter().enumerate() {
+            body += &lines_block(b, k);
+            acc += &format!("  acc = (acc * 1000003 + r{k}) % {MODP};\n");
+            want = (want * 1000003 + lines_expect(b)) % MODP;
+        }
+        body += &acc;
+        body += "  return acc;";
+        let c = lines_driver(&body);
+        let p = sigil::ir_eval::lower_sources_opts(&[&user_entry()], "std.core.t.run", &c)
+            .unwrap_or_else(|e| panic!("lowering に失敗: {e}"));
+        if let Err(es) = sigil::verify::verify(&p) {
+            panic!("SIR の検証に失敗:\n{}", es.join("\n"));
+        }
+        let dir = scratch("list35c-lines");
+        let exe = dir.join("a.out");
+        sigil::native::build_program(&p, &sigil::codegen::Opts::default(), &exe)
+            .unwrap_or_else(|e| panic!("ネイティブのビルドに失敗: {e}"));
+        let got = exec_env(&exe, &[], &[("SIGIL_RT_LIVE", "1")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got.code, Some(0), "group {g}: {}", got.stderr);
+        assert_eq!(
+            got.stdout.trim_end().rsplit('\n').next().unwrap(),
+            want.to_string(),
+            "group {g}"
+        );
+        assert_eq!(
+            live_line(&got),
+            "strs=0 blocks=0 sigil_blocks=0",
+            "group {g}"
+        );
+    }
+}

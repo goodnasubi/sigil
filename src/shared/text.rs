@@ -31,6 +31,7 @@ pub fn trim(s: &str) -> &str {
 }
 
 /// `String.lines`: `\n` で分け、最後の空の行は落とし、行末の `\r` を外す。
+#[allow(dead_code)] // 3-5c-iii から、ネイティブの runtime/core は Sigil 版（std.core.string.lines）を使う。評価器だけが使う
 pub fn lines(s: &str) -> Vec<&str> {
     let mut parts: Vec<&str> = s.split('\n').collect();
     if parts.last() == Some(&"") {

@@ -45,6 +45,11 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("Cell", 1, Layer::Core),
     // 番地（ADR 0016 の決定 1）。`Copyable` で演算子を持たない。番地の計算は原始操作で行う。
     ("Addr", 0, Layer::Core),
+    // 秘密（ADR 0024 決定 1、PR 6-1b）。中身は `std.crypto` の Sigil 実装が持つ
+    // （埋め込みモジュールの構造体）。表示不可・破棄時ゼロ化は型の性質と
+    // ランタイムの破棄で担保する。検査器には中身を見せない型として登録し、
+    // 実装の構造体と名前で結ぶ。
+    ("Secret", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -227,6 +232,15 @@ pub const REQUIRES: &[(&str, &str)] = &[
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
 pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
+    (
+        Layer::Core,
+        "Secret",
+        &[
+            ("from_bytes(b: Bytes) -> Secret", "none"),
+            ("expose(self: &Secret) -> Bytes", "none"),
+            ("len(self: &Secret) -> Int", "none"),
+        ],
+    ),
     (
         Layer::Core,
         "<T> List<T>",

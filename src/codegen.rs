@@ -148,6 +148,8 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "console_log" | "os_buf_free" | "stop" => ("pp", 'v'),
         // `--trace-drops` の 1 行（補足 G-3）: 構造体の値と記述子を取り、標準エラーへ書く。生成した破棄の段が呼ぶ。
         "trace_drop" => ("pp", 'v'),
+        // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
+        "zeroize_bytes" => ("p", 'v'),
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" => ("ppi", 'p'),
@@ -412,7 +414,15 @@ impl<'p> Cg<'p> {
                 let def = &p.types[*t];
                 match &def.kind {
                     TypeKind::Struct { fields } => {
-                        ws.push(W::I(9));
+                        // `Secret`（ADR 0024、PR 6-1b）は秘密の種類（17）にする:
+                        // ランタイムの破棄が中身のバイト列をゼロ化してから解放する。
+                        // 名前は利用者側の `Secret` と実装側の `std.crypto.Secret` の 2 形。
+                        let kind = if def.name == "Secret" || def.name == "std.crypto.Secret" {
+                            17
+                        } else {
+                            9
+                        };
+                        ws.push(W::I(kind));
                         ws.extend(self.name_words(&def.name)?);
                         ws.push(W::I(fields.len() as i64));
                         for (n, ft) in fields {

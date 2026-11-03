@@ -66,9 +66,16 @@ use std::process::Command;
 const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     // 既にある実装（ADR 0023）。引数 a・b の中身が秘密、長さは公開。
     ("std.core.bytes.ct_equal", &[]),
-    // ADR 0024 の部品（PR 6-1b〜d で実装される。先に載せておき、実装が
+    // `Secret` の入口（PR 6-1b）。メソッドの SIR 名は裸の名前になる。
+    // `from_bytes` の引数は取り込む秘密、`expose` は明示的な取り出し
+    // （秘密を返すこと自体は違反ではない）、`len` は長さ（公開）だけを見る。
+    ("from_bytes", &[]),
+    ("expose", &[]),
+    ("len", &[]),
+    // ADR 0024 の部品（PR 6-1c〜d で実装される。先に載せておき、実装が
     // 現れた時点で自動で検査の対象になる）。
-    ("std.crypto.ct_eq", &[]),
+    // なお std.crypto の比較は言語の自由関数 `ct_eq` が担い（ADR 0024 決定 1）、
+    // 実体は上の `std.core.bytes.ct_equal` なので、ここには別に載せない。
     ("std.crypto.sha256_compress", &[]),
     ("std.crypto.hmac_sha256", &[]),
     ("std.crypto.verify_hmac_sha256", &[]),
@@ -82,7 +89,6 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
 /// 対象表のうち、まだ実装が存在しない行（先行登録）。
 /// 実装が現れたら、ここから外して通常の行として扱う。
 const CT_AHEAD: &[&str] = &[
-    "std.crypto.ct_eq",
     "std.crypto.sha256_compress",
     "std.crypto.hmac_sha256",
     "std.crypto.verify_hmac_sha256",
@@ -548,7 +554,8 @@ fn corpus() -> Program {
     let src = "module ctprobe\n  targets server\n  trust none\n\n\
                fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects none\n{\n  \
                let a = Bytes.new();\n  let b = Bytes.new();\n  \
-               if ct_eq(&a, &b) {\n    return 1;\n  }\n  return 0;\n}\n";
+               let s = Secret.from_bytes(a);\n  let inner = s.expose();\n  \
+               if ct_eq(&inner, &b) {\n    return s.len();\n  }\n  return 0;\n}\n";
     sigil::ir_eval::lower_sources(&[src], "main").expect("コーパスの組み立てに失敗")
 }
 
@@ -567,11 +574,13 @@ fn is_ct_candidate(program: &Program, func: &Func) -> bool {
         loop {
             match t {
                 Ty::Adt(id) => {
+                    // 実体の名前は `Secret`（利用者側）と `std.crypto.Secret`
+                    // （実装側）の 2 形があるため、末尾の区間で比べる。
                     return program
                         .types
                         .get(*id)
-                        .map(|d| d.name == "Secret")
-                        .unwrap_or(false)
+                        .map(|d| d.name == "Secret" || d.name.ends_with(".Secret"))
+                        .unwrap_or(false);
                 }
                 Ty::Ref(inner) | Ty::MutRef(inner) => t = inner,
                 _ => return false,
@@ -964,5 +973,47 @@ fn clif_real_ct_equal_is_clean() {
         delta.branch <= budget,
         "ct_equal の CLIF 分岐 {0} が SIR の予算 {budget} を超えた: {delta:?}",
         delta.branch
+    );
+}
+
+/// `Secret` の記述子が「秘密の種類」（17）で出ることを、組み立てた
+/// オブジェクトのデータで確かめる（PR 6-1b の完了条件の 1 つ）。
+/// CLIF のテキストは関数の命令だけを持ち、記述子の内容は含まないため、
+/// ここではオブジェクトを語単位で走査し、`[種類=17, 名前への参照, 名前の
+/// 長さ, フィールド数=1]` の並びを探す。通常の構造体（種類 9）では
+/// 現れないことも対照で確かめる。ゼロ化そのものの振る舞いは
+/// ランタイム（runtime/core）の単体テストが担保する。
+/// 記述子は、型ごとの生成関数へ移った設計（ADR 0025 補足 G）では
+/// 必要になったときにだけ出る。`--trace-drops` は破棄の表示のために
+/// 記述子を要する経路なので、両方のプログラムとも有効にして組む。
+#[test]
+fn clif_secret_descriptor_is_zeroizing_kind() {
+    fn object_of(src: &str) -> Vec<i64> {
+        let p = sigil::ir_eval::lower_sources(&[src], "main").expect("組み立てに失敗");
+        let opts = sigil::codegen::Opts {
+            trace_drops: true,
+            ..Default::default()
+        };
+        let obj = sigil::codegen::compile(&p, &opts).expect("オブジェクト生成に失敗");
+        obj.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| i64::from_le_bytes(*c))
+            .collect()
+    }
+    fn has_secret_desc(words: &[i64]) -> bool {
+        words
+            .windows(4)
+            .any(|w| w[0] == 17 && (w[2] == 6 || w[2] == 17) && w[3] == 1)
+    }
+    let secret_src = "module dprobe\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let s = Secret.from_bytes(Bytes.new());\n  return s.len();\n}\n";
+    assert!(
+        has_secret_desc(&object_of(secret_src)),
+        "Secret の記述子（種類 17）がオブジェクトにない"
+    );
+    let plain_src = "module dprobe\n  targets server\n  trust none\n\nstruct W {\n  data: Bytes,\n}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let w = W { data: Bytes.new() };\n  return w.data.len();\n}\n";
+    assert!(
+        !has_secret_desc(&object_of(plain_src)),
+        "通常の構造体に秘密の種類（17）が出てしまった"
     );
 }

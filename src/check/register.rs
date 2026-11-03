@@ -86,7 +86,11 @@ impl Ck {
         for f in &i.fns {
             self.span = f.span;
             let key = (tn.clone(), f.name.clone());
-            if self.methods.contains_key(&key) {
+            // 埋め込み標準モジュール（`std.*`）の `impl` は、標準ライブラリの表が
+            // 先に登録した宣言の「実体」である（二重宣言ではない。ADR 0024、PR 6-1b:
+            // `Secret` のメソッドは表で利用者へ見せ、実体は `std.crypto` が持つ）。
+            // 置き換えを許すのは埋め込みモジュールの検査のときだけに限る。
+            if self.methods.contains_key(&key) && !self.embedded {
                 return self.err(
                     ErrorKind::DuplicateDefinition,
                     format!("`{tn}` のメソッド `{}` が二重に宣言されている", f.name),

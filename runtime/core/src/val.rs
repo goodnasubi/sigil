@@ -21,7 +21,8 @@
 //! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
 
 use super::{
-    bytes_slice, list_get, list_len, list_new, list_push, new_str, s, text, RtBytes, RtList, RtStr,
+    bytes_data, bytes_len, bytes_slice, list_get, list_len, list_new, list_push, new_str, s, text,
+    RtBytes, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::io::Write;
@@ -42,6 +43,10 @@ const K_SHARED: i64 = 12;
 const K_CELL: i64 = 13;
 const K_FN: i64 = 14;
 const K_BYTES: i64 = 15;
+/// 秘密（ADR 0024、PR 6-1b）。レイアウトは構造体と同じ（中身の `Bytes` が
+/// フィールド 0）だが、破棄のときにバイト列の領域をゼロで上書きしてから
+/// 解放し、表示では中身を出さない。生成系が `Secret` 型の記述子にだけ付ける。
+const K_SECRET: i64 = 17;
 
 type D = *const i64;
 
@@ -116,6 +121,10 @@ unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
         K_BYTES => {
             let bytes = bytes_slice(w as *const RtBytes);
             out.push_str(&format!("Bytes({:?})", bytes));
+        }
+        K_SECRET => {
+            // 中身は出さない（長さも含め、秘密に関わる情報は表示しない）。
+            out.push_str("Secret(***)");
         }
         K_PARSE_ERROR => out.push_str("ParseError"),
         K_LIST => {
@@ -198,6 +207,27 @@ pub unsafe extern "C" fn sigil_rt_val_show(d: D, w: i64, quote: i32) -> *mut RtS
     let mut o = String::new();
     show_into(d, w, quote != 0, &mut o);
     new_str(o)
+}
+
+/// `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes `b` のデータ領域を
+/// ゼロで上書きする。生成された破棄の段（codegen の `sigil_dstep`）が、
+/// `Secret` の中身の Bytes を解放する前に呼ぶ。0 は何もしない。
+///
+/// # Safety
+/// `b` は生きている Bytes の値（頭の番地）。
+#[no_mangle]
+pub unsafe extern "C" fn sigil_rt_zeroize_bytes(b: i64) {
+    if b == 0 {
+        return;
+    }
+    let head = b as *const RtBytes;
+    let data = bytes_data(head) as *mut u8;
+    let len = bytes_len(head);
+    if !data.is_null() && len > 0 {
+        unsafe {
+            std::ptr::write_bytes(data, 0, len);
+        }
+    }
 }
 
 /// `--trace-drops`（補足 G-3）: 構造体の値 `w` を `drop: <表示>` として標準エラーへ 1 行出す。
@@ -357,6 +387,55 @@ mod tests {
                 s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)),
                 "[3, 1, 2]"
             );
+        }
+    }
+
+    /// `Secret` の表示は中身を出さず、破棄の段が呼ぶゼロ化で中身のバイト列が
+    /// 消える（ADR 0024、PR 6-1b）。
+    #[test]
+    fn secret_drop_zeroizes_and_show_hides() {
+        // テスト用のバイト列の頭（ptr・len・cap の 24B、本物と同じ配置）。
+        // cap を 0 にすると、表側の free は領域を解放しないので、
+        // 破棄のあとに中身を観察できる。
+        #[repr(C)]
+        struct Head {
+            ptr: *mut u8,
+            len: i64,
+            cap: i64,
+        }
+        let bytes_desc = [K_BYTES];
+        let make = |kind: i64, buf: &mut Vec<u8>| -> ([i64; 7], i64) {
+            let head = Box::into_raw(Box::new(Head {
+                ptr: buf.as_mut_ptr(),
+                len: buf.len() as i64,
+                cap: 0,
+            }));
+            let desc = [
+                kind,
+                0,
+                0,
+                1,
+                0,
+                0,
+                bytes_desc.as_ptr() as i64,
+            ];
+            let block = Box::into_raw(Box::new(0i64));
+            unsafe {
+                *block = head as i64;
+            }
+            (desc, block as i64)
+        };
+        unsafe {
+            // 秘密: 表示は中身を出さない。
+            let mut buf = vec![9u8, 8, 7];
+            let (desc, w) = make(K_SECRET, &mut buf);
+            assert_eq!(s(sigil_rt_val_show(desc.as_ptr(), w, 1)), "Secret(***)");
+            // 破棄の段が解放前に呼ぶゼロ化（w のフィールド 0 が Bytes の頭）。
+            let head = *(w as *const i64);
+            sigil_rt_zeroize_bytes(head);
+            assert_eq!(buf, [0, 0, 0], "ゼロ化で中身が消えていない");
+            // 0 は何もしない。
+            sigil_rt_zeroize_bytes(0);
         }
     }
 }

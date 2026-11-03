@@ -1,0 +1,62 @@
+module std.crypto
+  targets bare, browser, server
+  trust none
+
+// 暗号の基本部品（ADR 0024、PR 6-1b）。秘密を型で隔離する `Secret` と、
+// その入口の関数を置く。SHA-256 などは後続の PR で足す。
+//
+// API の形について: 標準ライブラリの表（src/stdlib.rs の IMPLS）にも
+// 同じメソッドを宣言して利用者へ見せる。表の宣言とこのモジュールの
+// 実装が二重にならないよう、検査器は埋め込みモジュールの `impl` を
+// 宣言の実体として受け取る（check/register.rs の register_impl）。
+//
+// `Secret` は表示（Displayable）を持たない。破棄のときに中身をゼロで
+// 上書きするのは、生成系とランタイムの側の取り決め（記述子による破棄）で、
+// このモジュールでは中身の置き場を 1 つに保つことで、それを可能にする。
+//
+// 定数時間のバイト列比較は、言語の自由関数 `ct_eq` が担う（ADR 0024
+// 決定 1 の 2: std.crypto の主たる比較手段として位置付け、実体は
+// std.core.bytes.ct_equal）。埋め込みモジュール側で同じ名前の関数を
+// 置くと自由関数と衝突するため、ここには置かない
+// （std.core.bytes の ct_equal と同じ先例）。
+
+pub struct Secret {
+  data: Bytes,
+}
+
+impl Secret {
+  // 範囲: バイト列を取り込んで秘密にする。生成はこの入口に限る。
+  pub fn from_bytes(b: Bytes) -> Secret
+    intent "バイト列を取り込んで秘密にする"
+    requires none
+    ensures none
+    effects none
+  {
+    return Secret { data: b };
+  }
+
+  // 範囲: 中身のバイト列の複製を返す。秘密を取り出す唯一の明示的な入口で、
+  // 定数時間検査の対象（tests/ct_rules.rs の対象表）に含める。
+  // ADR 0024 の素描は `-> &Bytes` だが、場所への参照を返すのは言語の
+  // 組み込みだけに許される形で、Sigil で書いたメソッドは値の複製を返す
+  // 形になる（取り出しが明示的な 1 点に限られる、という不変条件は保つ。
+  // 複製は呼び出し側の所有物になり、元の秘密の破棄・ゼロ化とは独立する）。
+  pub fn expose(self: &Secret) -> Bytes
+    intent "中身のバイト列の複製を返す（秘密の明示的な取り出し）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.data.clone();
+  }
+
+  // 範囲: 中身の長さ。長さは公開の情報（ADR 0020 決定 1）。
+  pub fn len(self: &Secret) -> Int
+    intent "中身のバイト列の長さを返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.data.len();
+  }
+}

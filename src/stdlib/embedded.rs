@@ -70,6 +70,13 @@ pub const LIST_SUM_FLOAT_FN: &str = "std.core.list.sum_float";
 /// `Bytes` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 F-2・F-4、PR 3-5d-ii）。
 /// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_bytes_*` のシムから呼ぶ。`eq`・`cmp` は 3-5e-i から `bytes_eq`・`bytes_cmp` のシムを持つ。
 pub const BYTES_MODULE: &str = "std.core.bytes";
+
+/// `Secret` と暗号の基本部品のモジュール（ADR 0024、PR 6-1b）。
+/// すべてのプログラムに暗黙に結ぶ（定数時間検査の対象表が std.crypto の
+/// 関数を常に走査できるようにするためでもある）。
+pub const CRYPTO_MODULE: &str = "std.crypto";
+/// `std.crypto.ct_eq`（結合後の名前）。
+pub const CRYPTO_CT_EQ_FN: &str = "std.crypto.ct_eq";
 pub const BYTES_EMPTY_FN: &str = "std.core.bytes.empty";
 pub const BYTES_CREATE_FN: &str = "std.core.bytes.create";
 pub const BYTES_FREE_FN: &str = "std.core.bytes.free";
@@ -101,6 +108,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (FLOAT_MODULE, include_str!("core_float.sigil")),
     (INT_MODULE, include_str!("core_int.sigil")),
     (BYTES_MODULE, include_str!("core_bytes.sigil")),
+    (CRYPTO_MODULE, include_str!("crypto.sigil")),
 ];
 
 /// 暗黙に結ぶ埋め込みモジュール（補足 C-2）。
@@ -125,6 +133,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             LIST_MODULE,
             INT_MODULE,
             BYTES_MODULE,
+            CRYPTO_MODULE,
         ]
     }
 }

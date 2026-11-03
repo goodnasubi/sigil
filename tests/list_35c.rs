@@ -672,7 +672,8 @@ fn sum_float_boundaries_match_evaluator() {
         };
         let want_bits = want.to_bits() as i64;
         if want.is_nan() {
-            // NaN は符号・ペイロードも含めて評価器と同じであること（`run` が両方を突き合わせる）。
+            // NaN は NaN であること（`is_nan`）だけを確かめる。符号・ペイロードの一致は保証しない（Float の加算全般で
+            // 評価器とネイティブのペイロードに既知の差がある）。
             assert!(
                 f64::from_bits(got.parse::<i64>().unwrap() as u64).is_nan(),
                 "{xs:?}"

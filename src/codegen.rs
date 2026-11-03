@@ -102,6 +102,9 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_free" => ("p", 'v'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" => ("pp", 'i'),
+        // `Int` の回転（`std.core.int`。補足 F-3）。`Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。F-0・F-4）
+        "int_rotl" | "int_rotr" => ("ppp", 'p'),
+        "int_rotr32" => ("pp", 'p'),
         // 一覧の表現（`std.core.list`。補足 E-3）
         "list_new" | "list_len" => ("p", 'p'),
         "list_get" => ("pp", 'p'),
@@ -127,12 +130,9 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "bytes_free" => ("p", 'v'),
         "bytes_is_empty" => ("p", 'i'),
         "bytes_ct_eq" => ("pp", 'i'),
-        // `Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。ADR 0025 補足 F-0・F-4）
-        "int_rotr32" => ("pp", 'p'),
         "bytes_get" | "bytes_read_u32_be" | "bytes_from_list" | "bytes_to_string_utf8" => {
             ("ppp", 'i')
         }
-        "int_rotl" | "int_rotr" => ("ppp", 'p'),
         "bytes_set" => ("pppp", 'i'),
         "bytes_slice" => ("ppppp", 'i'),
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
@@ -533,6 +533,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(str_shims(&mut cg)?);
     // 一覧の表現（`std.core.list`）のシム（補足 E-3）。同じく常に必要。
     shims.extend(list_shims(&mut cg)?);
+    shims.extend(int_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
 
@@ -732,6 +733,32 @@ fn list_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         out.push((id, target, np, ret));
     }
     cg.list_ops = Some([ids[0], ids[1], ids[2], ids[3], ids[4]]);
+    Ok(out)
+}
+
+/// `Int` の回転（`std.core.int`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する（補足 F-3）。
+/// 生成コードの呼び出し先の名前と形は変えない。関数表は持たない（Rust の消費者がない）。
+fn int_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::{INT_ROTL_FN, INT_ROTR32_FN, INT_ROTR_FN};
+    let mut out = vec![];
+    for (name, target_fn, np) in [
+        ("int_rotl", INT_ROTL_FN, 3),
+        ("int_rotr", INT_ROTR_FN, 3),
+        ("int_rotr32", INT_ROTR32_FN, 2),
+    ] {
+        let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
+            return Err(internal("std.core.int が結ばれていない".to_string()));
+        };
+        let id =
+            cg.m.declare_function(
+                &format!("sigil_rt_{name}"),
+                Linkage::Local,
+                &shim_sig(cg.cc, np, 'p'),
+            )
+            .map_err(internal)?;
+        cg.rt.insert(name, id);
+        out.push((id, target, np, 'p'));
+    }
     Ok(out)
 }
 

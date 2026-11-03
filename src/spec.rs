@@ -179,16 +179,24 @@ pub fn extract(src: &str) -> Result<Spec, Error> {
 /// 検査器の設定（テスト用の原始操作）を指定して仕様の構造を作る。
 pub fn extract_with(src: &str, opts: &crate::effects::Options) -> Result<Spec, Error> {
     let file = parse(src)?;
-    Ok(extract_file(&file, opts, false, &[]))
+    extract_file(&file, opts, false, &[])
 }
 
 /// 埋め込みの `std.*` すべての仕様（`sigil spec --std`。ADR 0025 補足 C-2）。`sigil spec` は利用者のモジュールだけを
 /// 表示し、埋め込みのモジュール（確保器 `std.os.alloc` など）はここで別に表示する。処理系の版が同じなら、どのプログラムでも
 /// 同じ出力になる。登録順（`EMBEDDED`）。
 pub fn std_specs(opts: &crate::effects::Options) -> Result<Vec<Spec>, Error> {
+    std_specs_of(crate::stdlib::embedded::EMBEDDED, opts)
+}
+
+/// `std_specs` の本体（モジュールの一覧を引数にとる。埋め込みの検査の失敗が `Err` になることを試験するため）。
+fn std_specs_of(
+    modules: &[(&str, &str)],
+    opts: &crate::effects::Options,
+) -> Result<Vec<Spec>, Error> {
     // 埋め込みモジュールは標準の名前を定義するので、予約名の検査をしない構文解析を使う。
     let mut files = vec![];
-    for (_, src) in crate::stdlib::embedded::EMBEDDED {
+    for (_, src) in modules {
         files.push(crate::parser::parse_std(src)?);
     }
     let mut out = vec![];
@@ -200,6 +208,7 @@ pub fn std_specs(opts: &crate::effects::Options) -> Result<Vec<Spec>, Error> {
                 continue;
             };
             let m = m.join(".");
+            let before = externs.len();
             for other in files.iter().filter(|f| f.module.name.join(".") == m) {
                 for it in &other.items {
                     if let crate::ast::Item::Fn(f) = it {
@@ -209,8 +218,19 @@ pub fn std_specs(opts: &crate::effects::Options) -> Result<Vec<Spec>, Error> {
                     }
                 }
             }
+            // 対応する `pub fn` がなければ、検査が黙って外部の宣言を欠かないよう失敗にする。
+            if externs.len() == before {
+                return Err(Error::new(
+                    crate::error::ErrorKind::UnresolvedUse,
+                    u.span,
+                    format!(
+                        "`use {}` に対応する埋め込みの `pub fn` がない",
+                        u.path.join(".")
+                    ),
+                ));
+            }
         }
-        out.push(extract_file(file, opts, true, &externs));
+        out.push(extract_file(file, opts, true, &externs)?);
     }
     Ok(out)
 }
@@ -242,7 +262,7 @@ fn extract_file(
     opts: &crate::effects::Options,
     embedded: bool,
     externs: &[crate::ast::Item],
-) -> Spec {
+) -> Result<Spec, Error> {
     // `使う原始操作:`・`推論できない効果:` は検査器の解決結果から作る。`unchecked` の関数があるときだけ検査器を呼ぶ。
     // `sigil spec` は許可を検査しないので、このモジュール自身を `trust_base` に挙げて呼ぶ（ADR 0016 の決定 6）。
     let unchecked = unchecked_count(&file.items);
@@ -254,7 +274,13 @@ fn extract_file(
         } else {
             crate::check::fn_reports(file, &o)
         };
-        Some(r.ok())
+        // 利用者のソースは検査に失敗しても仕様を出す（分からない項目を `None` にする）。埋め込みのモジュールは
+        // 処理系のソースなので、検査の失敗は表示欠けにせず、`sigil spec --std` の失敗として返す。
+        match r {
+            Ok(r) => Some(Some(r)),
+            Err(e) if embedded => return Err(e),
+            Err(_) => Some(None),
+        }
     } else {
         None
     };
@@ -380,7 +406,7 @@ fn extract_file(
             }),
         }
     }
-    Spec { module, items }
+    Ok(Spec { module, items })
 }
 
 /// `unchecked` の節を持つ関数（`impl` のメソッドを含む）の数。
@@ -1025,4 +1051,50 @@ fn fn_spec_json(f: &FnSpec) -> Vec<(&'static str, Value)> {
         u.is_some_and(|u| u.raw_ops.is_none()).into(),
     ));
     fields
+}
+
+#[cfg(test)]
+mod std_tests {
+    use super::*;
+
+    const TAIL: &str = "  intent \"x\"\n  requires none\n  ensures none\n  effects none\n";
+
+    fn module(body: &str) -> String {
+        format!(
+            "module std.core.bad\n  targets server\n  trust base\n\npub fn f(a: Addr) -> Int\n{TAIL}  unchecked \"a は読める\"\n{{\n{body}\n}}\n"
+        )
+    }
+
+    /// 埋め込みの `unchecked` の関数の検査が失敗したら、表示欠けにせず `sigil spec --std` の失敗にする。
+    #[test]
+    fn embedded_check_failure_is_an_error() {
+        let ok = module("  return raw.load_i64(a);");
+        let bad = module("  return missing_name;");
+        let opts = crate::effects::Options::default();
+        assert!(std_specs_of(&[("std.core.bad", ok.as_str())], &opts).is_ok());
+        assert!(std_specs_of(&[("std.core.bad", bad.as_str())], &opts).is_err());
+        // 利用者のソースは従来どおり、検査に失敗しても仕様を出す。
+        let user = bad.replace("module std.core.bad", "module m.bad");
+        assert!(extract(&user).is_ok());
+    }
+
+    /// 埋め込みモジュールの `use` に対応する `pub fn` がなければ失敗にする。
+    #[test]
+    fn embedded_use_without_pub_fn_is_an_error() {
+        let opts = crate::effects::Options::default();
+        let lib = module("  return raw.load_i64(a);").replace("std.core.bad", "std.core.lib");
+        let user = |path: &str| {
+            format!(
+                "module std.core.usr\n  targets server\n  trust none\n\nuse {path}\n\npub fn g() -> Int\n{TAIL}{{\n  return 0;\n}}\n"
+            )
+        };
+        let run = |u: &str| {
+            let m = [("std.core.lib", lib.clone()), ("std.core.usr", user(u))];
+            let r: Vec<(&str, &str)> = m.iter().map(|(a, b)| (*a, b.as_str())).collect();
+            std_specs_of(&r, &opts)
+        };
+        assert!(run("std.core.lib.f;").is_ok());
+        assert!(run("std.core.lib.nothing;").is_err());
+        assert!(run("std.core.nowhere.f;").is_err());
+    }
 }

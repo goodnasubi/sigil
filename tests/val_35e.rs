@@ -400,3 +400,42 @@ if a == c { r = r + 10; }
 return r;"#;
     assert_eq!(val(&prog(DEFS, body)), "1");
 }
+
+/// 比べられない値（NaN）が混ざった `Float` の `min`/`max`/`min_by`/`max_by`。`sigil_cmp_<k>` の 2 の扱いを通る。
+/// 結果は評価器とネイティブの一致（`common::run`）で確かめ、値は 1 桁ずつ「結果が自分と等しい（NaN でない）」かどうか。
+#[test]
+fn float_min_max_with_nan() {
+    let body = r#"let n = 0.0 / 0.0;
+let mut a = List.new();
+a.push(2.0);
+a.push(n);
+a.push(1.0);
+let mut b = List.new();
+b.push(n);
+b.push(2.0);
+b.push(1.0);
+let mut c = List.new();
+c.push(2.0);
+c.push(1.0);
+c.push(n);
+let mut r = 0;
+let m1 = a.min();
+if m1 == m1 { r = r + 1; }
+let m2 = a.max();
+if m2 == m2 { r = r + 2; }
+let m3 = b.min();
+if m3 == m3 { r = r + 4; }
+let m4 = b.max();
+if m4 == m4 { r = r + 8; }
+let m5 = c.min();
+if m5 == m5 { r = r + 16; }
+let m6 = c.max();
+if m6 == m6 { r = r + 32; }
+let k1 = a.max_by(|x| x * 1.0);
+match k1 { Some(w) => { if w == w { r = r + 64; } } None => {} }
+let k2 = c.min_by(|x| x * 1.0);
+match k2 { Some(w) => { if w == w { r = r + 128; } } None => {} }
+return r;"#;
+    // 先頭が NaN なら NaN のまま（3・4 番目）。それ以外は NaN に負けない。
+    assert_eq!(val(&prog("", body)), "243");
+}

@@ -21,9 +21,8 @@
 //! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
 
 use super::{
-    bytes_slice, list_free, list_get, list_len, list_new, list_push, new_str, s, sigil_rt_alloc,
-    bytes_clone, bytes_free, sigil_rt_free, str_clone, str_free, text, RtBytes,
-    RtList, RtStr,
+    bytes_clone, bytes_free, bytes_slice, list_free, list_get, list_len, list_new, list_push,
+    new_str, s, sigil_rt_alloc, sigil_rt_free, str_clone, str_free, text, RtBytes, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::cmp::Ordering;

@@ -931,7 +931,11 @@ pub(crate) mod tests {
             } else {
                 (std::ptr::null_mut(), 0)
             };
-            Box::into_raw(Box::new(BHead { buf, len: n.max(0), cap })) as *mut RtBytes
+            Box::into_raw(Box::new(BHead {
+                buf,
+                len: n.max(0),
+                cap,
+            })) as *mut RtBytes
         }
 
         extern "C" fn b_free(b: *mut RtBytes) {

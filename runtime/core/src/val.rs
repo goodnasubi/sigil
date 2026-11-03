@@ -21,12 +21,10 @@
 //! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
 
 use super::{
-    bytes_clone, bytes_free, bytes_slice, list_free, list_get, list_len, list_new, list_push,
-    new_str, s, sigil_rt_alloc, sigil_rt_free, str_clone, str_free, text, RtBytes, RtList, RtStr,
+    bytes_slice, list_get, list_len, list_new, list_push, new_str, s, text, RtBytes, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering as AOrd};
 
 const K_UNIT: i64 = 0;
 const K_INT: i64 = 1;
@@ -86,6 +84,14 @@ unsafe fn variant(d: D, tag: i64) -> (&'static str, usize, usize) {
         pos += 3 + nf;
         i += 1;
     }
+}
+
+/// 破棄の対象になる（見出しつきの塊や列を持つ）種類。
+fn owning_kind(k: i64) -> bool {
+    matches!(
+        k,
+        K_LIST | K_TUPLE | K_STRUCT | K_ENUM | K_SHARED | K_CELL | K_FN
+    )
 }
 
 unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
@@ -194,244 +200,16 @@ pub unsafe extern "C" fn sigil_rt_val_show(d: D, w: i64, quote: i32) -> *mut RtS
     new_str(o)
 }
 
-/// 塊の前に置く 2 語の見出し。`[大きさ（と黙ったかの印）][参照の数]` の後ろに中身が続く。
-const SILENT: i64 = 1 << 62;
-const HEAD: usize = 16;
-/// 解放した塊の参照の数の場所に書く印。
-const FREED: i64 = 0x5afe_dead_0000_0001;
-
-/// 見出しつきの塊を作る（参照の数 1）。戻り値は中身の先頭。
-unsafe fn blk_alloc(bytes: usize) -> *mut i64 {
-    let n = bytes.max(8).div_ceil(8) * 8;
-    let h = sigil_rt_alloc(HEAD + n, 8) as *mut i64;
-    *h = n as i64;
-    *h.add(1) = 1;
-    super::live_blocks(1);
-    h.add(2)
-}
-
-unsafe fn blk_free(p: *mut i64) {
-    let h = p.sub(2);
-    // 二重解放は、解放済みの印が残っているうちなら見つけて止める（最善の努力。解放後にアロケータが印を上書きすれば見逃す）。
-    if *h.add(1) == FREED {
-        std::process::abort();
-    }
-    *h.add(1) = FREED;
-    let n = (*h & !SILENT) as usize;
-    super::live_blocks(-1);
-    sigil_rt_free(h as *mut u8, HEAD + n, 8);
-}
-
-unsafe fn blk_silent(p: *mut i64) {
-    *p.sub(2) |= SILENT;
-}
-
-unsafe fn rc_inc(p: i64) {
-    *(p as *mut i64).sub(1) += 1;
-}
-
-/// 参照の数を 1 減らし、0 になったら真。
-unsafe fn rc_dec(p: i64) -> bool {
-    let r = (p as *mut i64).sub(1);
-    *r -= 1;
-    *r == 0
-}
-
-/// 生成したコードが作る塊（タプル・構造体・列挙型・`Cell`・`Shared`・クロージャ）の確保。
-///
-/// # Safety
-/// 戻り値は `sigil_rt_val_drop` が解放する。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_blk_new(bytes: usize) -> *mut u8 {
-    blk_alloc(bytes) as *mut u8
-}
-
-unsafe fn block(n: usize) -> *mut i64 {
-    blk_alloc(8 * n)
-}
-
-/// 破棄の対象になる（見出しつきの塊や列を持つ）種類。
-fn owning_kind(k: i64) -> bool {
-    matches!(
-        k,
-        K_LIST | K_TUPLE | K_STRUCT | K_ENUM | K_SHARED | K_CELL | K_FN
-    )
-}
-
-/// `deep` が真なら `clone`（`Cell` は独立した複製）、偽なら `Copy`（共有するものは共有のまま）。
-/// 共有する `Cell`・`Shared`・クロージャは参照の数を増やす。文字列・パスは新しく複写する（所有するので）。
-unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
-    let k = rd(d, 0);
-    if w == 0 && owning_kind(k) {
-        return w;
-    }
-    match k {
-        K_LIST => {
-            let l = list_new();
-            for x in list_items(w as *const RtList) {
-                let y = dup(dp(d, 1), x, deep);
-                list_push(l, y);
-            }
-            l as i64
-        }
-        K_TUPLE => {
-            let n = rd(d, 1) as usize;
-            let (x, o) = (w as *const i64, block(n));
-            for i in 0..n {
-                *o.add(i) = dup(dp(d, 2 + i), *x.add(i), deep);
-            }
-            o as i64
-        }
-        K_STRUCT => {
-            let n = rd(d, 3) as usize;
-            let (x, o) = (w as *const i64, block(n));
-            for i in 0..n {
-                *o.add(i) = dup(dp(d, 4 + 3 * i + 2), *x.add(i), deep);
-            }
-            if !deep {
-                blk_silent(o);
-            }
-            o as i64
-        }
-        K_ENUM => {
-            let x = w as *const i64;
-            let (_, nf, fpos) = variant(d, *x);
-            let o = block((1 + nf).max(2));
-            *o = *x;
-            for i in 0..nf {
-                *o.add(1 + i) = dup(dp(d, fpos + i), *x.add(1 + i), deep);
-            }
-            if !deep {
-                blk_silent(o);
-            }
-            o as i64
-        }
-        K_CELL if deep => {
-            let o = block(1);
-            *o = dup(dp(d, 1), *(w as *const i64), deep);
-            o as i64
-        }
-        K_CELL | K_SHARED => {
-            rc_inc(w);
-            w
-        }
-        K_FN => {
-            if *(w as *const i64).add(1) != 0 {
-                rc_inc(w);
-            }
-            w
-        }
-        K_STR | K_PATH if w != 0 => str_clone(w as *const RtStr) as i64,
-        K_BYTES if w != 0 => bytes_clone(w as *const RtBytes) as i64,
-        _ => w,
-    }
-}
-
-static TRACE: AtomicBool = AtomicBool::new(false);
-
-/// `--trace-drops`: 以後の破棄を `drop: <表示>` として標準エラーに出す。
-#[no_mangle]
-pub extern "C" fn sigil_rt_trace_on() {
-    TRACE.store(true, AOrd::Relaxed);
-}
-
-/// 値を破棄する。再帰せず、順序は SIR の評価器と同じ（値そのもの、次にフィールド・要素を宣言の順）。
-/// 構造体は、黙っておらず移動済みのフィールドがなければ、破棄の前に `drop: …` を出す。
-/// 文字列・パスも解放する（ADR 0018 の決定 5）。
-///
-/// # Safety
-/// `d` は記述子、`w` はその型の値（0 は移動済み）。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
-    let mut st: Vec<(D, i64)> = vec![];
-    let push = |st: &mut Vec<(D, i64)>, d: D, w: i64| {
-        if w != 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH | K_BYTES)) {
-            st.push((d, w));
-        }
-    };
-    push(&mut st, d, w);
-    let trace = TRACE.load(AOrd::Relaxed);
-    while let Some((d, w)) = st.pop() {
-        match rd(d, 0) {
-            K_LIST => {
-                let l = w as *mut RtList;
-                for x in list_items(l).into_iter().rev() {
-                    push(&mut st, dp(d, 1), x);
-                }
-                list_free(l);
-            }
-            K_TUPLE => {
-                let n = rd(d, 1) as usize;
-                let b = w as *mut i64;
-                for i in (0..n).rev() {
-                    push(&mut st, dp(d, 2 + i), *b.add(i));
-                }
-                blk_free(b);
-            }
-            K_STRUCT => {
-                let n = rd(d, 3) as usize;
-                let b = w as *mut i64;
-                if trace && *b.sub(2) & SILENT == 0 {
-                    let moved = (0..n).any(|i| {
-                        let k = rd(dp(d, 4 + 3 * i + 2), 0);
-                        *b.add(i) == 0 && (owning_kind(k) || matches!(k, K_STR | K_PATH | K_BYTES))
-                    });
-                    if !moved {
-                        let mut t = String::new();
-                        show_into(d, w, true, &mut t);
-                        let _ = writeln!(std::io::stderr().lock(), "drop: {t}");
-                    }
-                }
-                for i in (0..n).rev() {
-                    push(&mut st, dp(d, 4 + 3 * i + 2), *b.add(i));
-                }
-                blk_free(b);
-            }
-            K_ENUM => {
-                let b = w as *mut i64;
-                let (_, nf, fpos) = variant(d, *b);
-                for i in (0..nf).rev() {
-                    push(&mut st, dp(d, fpos + i), *b.add(1 + i));
-                }
-                blk_free(b);
-            }
-            K_CELL | K_SHARED => {
-                if rc_dec(w) {
-                    push(&mut st, dp(d, 1), *(w as *const i64));
-                    blk_free(w as *mut i64);
-                }
-            }
-            K_FN => {
-                let b = w as *mut i64;
-                let env = *b.add(1);
-                if env != 0 && rc_dec(w) {
-                    push(&mut st, *b.add(2) as D, env);
-                    blk_free(b);
-                }
-            }
-            K_STR | K_PATH => str_free(w as *mut RtStr),
-            K_BYTES => bytes_free(w as *mut RtBytes),
-            _ => {}
-        }
-    }
-}
-
-/// `Copy`: 塊は新しく作り、参照・文字列・`Cell`・`Shared`・関数の値は共有する。
+/// `--trace-drops`（補足 G-3）: 構造体の値 `w` を `drop: <表示>` として標準エラーへ 1 行出す。
+/// 表示は Rust の中で作る（Sigil 製の文字列を使わない。スタックの下限の付近でも、Sigil の関数を呼ばずに出せる）。
 ///
 /// # Safety
 /// `d` は記述子、`w` はその型の値。
 #[no_mangle]
-pub unsafe extern "C" fn sigil_rt_val_shadow(d: D, w: i64) -> i64 {
-    dup(d, w, false)
-}
-
-/// `clone`: `Cell` も独立した複製にする。
-///
-/// # Safety
-/// `d` は記述子、`w` はその型の値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_val_clone(d: D, w: i64) -> i64 {
-    dup(d, w, true)
+pub unsafe extern "C" fn sigil_rt_trace_drop(d: D, w: i64) {
+    let mut t = String::new();
+    show_into(d, w, true, &mut t);
+    let _ = writeln!(std::io::stderr().lock(), "drop: {t}");
 }
 
 // ---------------------------------------------------------------------------
@@ -579,8 +357,6 @@ mod tests {
                 s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)),
                 "[3, 1, 2]"
             );
-            let c = sigil_rt_val_shadow(list.as_ptr(), l as i64);
-            assert_ne!(c, l as i64);
         }
     }
 }

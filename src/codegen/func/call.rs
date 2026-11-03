@@ -7,7 +7,11 @@ use cranelift_module::Module;
 
 impl<'a, 'p> Fx<'a, 'p> {
     pub(super) fn call_direct(&mut self, g: usize, args: &[Value]) -> Value {
-        self.guard_stack();
+        // 確保器（`std.os.alloc`）の中の呼び出しは、スタックの検査をしない。確保器は下限の外の残りの範囲で一定量しか使わず、
+        // 検査すると確保の途中で `exit_group(70)` になり、利用者の枠の破棄（巻き戻し）が行われなくなる（補足 G-2・C-6）。
+        if !self.cg.p.funcs[g].name.starts_with("std.os.alloc.") {
+            self.guard_stack();
+        }
         let fr = self.cg.m.declare_func_in_func(self.cg.fids[g], self.b.func);
         let inst = self.b.ins().call(fr, args);
         let r = self.b.inst_results(inst).to_vec();

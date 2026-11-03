@@ -1,27 +1,31 @@
-use super::{aggregate, strip, CgError, Fx, NOARGS};
+use super::{aggregate, CgError, Fx, NOARGS};
 use crate::ir::Ty;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, InstBuilder, Value};
 
 impl<'a, 'p> Fx<'a, 'p> {
+    /// 影（`Copy` の複写。共有するものは共有のまま。補足 G-1）。
     pub(super) fn shadow(&mut self, t: &Ty, w: Value) -> Value {
-        let d = self.desc_addr(t);
-        self.rt("val_shadow", &[d, w])
+        self.copy_val(t, w, false)
     }
 
-    /// 見出しつきの塊（`sigil_rt_val_drop` が解放する）。
-    pub(super) fn blk(&mut self, bytes: i64) -> Value {
-        let sz = self.ic(bytes);
-        self.rt("blk_new", &[sz])
-    }
-
-    /// 型 `t` の値 `w` を破棄する（0 は移動済みで何もしない）。
+    /// 型 `t` の値 `w` を破棄する（0 は移動済みで何もしない）。生成した `sigil_drop_<k>` を呼ぶ（補足 G-2）。
+    /// 文字列・パス・バイト列は子を持たないので、生成の関数を通さずに直接解放する。解放の関数は空番地（0）を
+    /// 何もせずに返すので（`std.core.string.free`・`std.core.bytes.free`）、ここに分岐を置かない（補足 G-2）。
     pub(super) fn drop_val(&mut self, t: &Ty, w: Value) {
-        if !aggregate(t) {
-            return;
+        match t {
+            Ty::Str | Ty::Path => {
+                self.rt("str_free", &[w]);
+            }
+            Ty::Bytes => {
+                self.rt("bytes_free", &[w]);
+            }
+            _ => {
+                if !self.drop_flat(t, w) {
+                    self.drop_call(t, w);
+                }
+            }
         }
-        let d = self.desc_addr(&strip(t));
-        self.rt("val_drop", &[d, w]);
     }
 
     pub(super) fn jump_cleanup(&mut self, code: Value) {

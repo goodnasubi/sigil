@@ -7,9 +7,8 @@
 //! 所有の約束: `*mut` で返された値は呼び出し側のもので、対の `..._free` で解放する。`*const` で受け取る値は借用。
 //! 生成したコードは正しい番地だけを渡す前提で、関数は `unsafe` である。
 
-use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::io::Write;
-use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "../../../src/shared/args.rs"]
 mod args;
@@ -24,34 +23,6 @@ pub const STACK_BYTES: usize = 256 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // 確保と解放（ADR 0014 の決定 2: 確保器は環境が供給する）
-
-fn layout(size: usize, align: usize) -> Layout {
-    match Layout::from_size_align(size.max(1), align.max(1)) {
-        Ok(l) => l,
-        Err(_) => std::process::abort(),
-    }
-}
-
-/// # Safety
-/// `align` は 2 の冪。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_alloc(size: usize, align: usize) -> *mut u8 {
-    let l = layout(size, align);
-    let p = alloc(l);
-    if p.is_null() {
-        handle_alloc_error(l);
-    }
-    p
-}
-
-/// # Safety
-/// `p` は同じ `size`・`align` の `sigil_rt_alloc` の戻り値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_free(p: *mut u8, size: usize, align: usize) {
-    if !p.is_null() {
-        dealloc(p, layout(size, align));
-    }
-}
 
 // ---------------------------------------------------------------------------
 // String（UTF-8。不透明な入れ物。表現は Sigil 製の `std.core.string` が持つ。補足 D）
@@ -121,11 +92,6 @@ pub(crate) fn str_free(p: *mut RtStr) {
     }
 }
 
-pub(crate) fn str_clone(p: *const RtStr) -> *mut RtStr {
-    let f: StrClone = unsafe { std::mem::transmute(str_op(2)) };
-    f(p)
-}
-
 fn str_data(p: *const RtStr) -> *const u8 {
     let f: StrData = unsafe { std::mem::transmute(str_op(3)) };
     f(p)
@@ -141,15 +107,6 @@ fn str_bytes(p: *const RtStr) -> usize {
 //
 // 文字列の数 `strs=` は、文字列を Sigil 製の確保器が持つようになったので 0 に固定する（補足 D-5。書式は 3-5e まで保つ）。
 // 文字列の漏れ・二重解放は `sigil_blocks=` の厳密一致で見る。
-
-static LIVE_BLOCKS: AtomicIsize = AtomicIsize::new(0);
-
-/// 見出しつきの塊の数を `d` だけ増やす。0 を下回ったら二重解放として止める。
-pub(crate) fn live_blocks(d: isize) {
-    if LIVE_BLOCKS.fetch_add(d, Ordering::Relaxed) + d < 0 {
-        std::process::abort();
-    }
-}
 
 /// Sigil 製の確保器の生存数を返す関数（生成コードの `sigil_rt_sigil_live_blocks`。0 は未登録。補足 B-5）。
 static SIGIL_LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -177,10 +134,10 @@ pub extern "C" fn sigil_rt_live_strs() -> isize {
     0
 }
 
-/// 生きている見出しつきの塊の数。
+/// 生きている見出しつきの塊の数（補足 G-5。塊は Sigil 製の確保器が数えるので、ここは常に 0）。
 #[no_mangle]
 pub extern "C" fn sigil_rt_live_blocks() -> isize {
-    LIVE_BLOCKS.load(Ordering::Relaxed)
+    0
 }
 
 /// Rust の文字列から作る（正しい UTF-8 なので `new_lossy` は複写と同じ）。
@@ -265,19 +222,6 @@ pub(crate) fn bytes_from_raw(p: *const u8, n: usize) -> *mut RtBytes {
     f(p, n as i64)
 }
 
-/// Bytes を解放する。null は何もしない。
-pub(crate) fn bytes_free(b: *mut RtBytes) {
-    if !b.is_null() {
-        let f: BytesFree = unsafe { std::mem::transmute(bytes_op(1)) };
-        f(b)
-    }
-}
-
-pub(crate) fn bytes_clone(b: *const RtBytes) -> *mut RtBytes {
-    let f: BytesClone = unsafe { std::mem::transmute(bytes_op(2)) };
-    f(b)
-}
-
 fn bytes_data(b: *const RtBytes) -> *const u8 {
     let f: BytesData = unsafe { std::mem::transmute(bytes_op(3)) };
     f(b)
@@ -358,14 +302,6 @@ pub(crate) fn list_new() -> *mut RtList {
     f(8)
 }
 
-/// 入れ物だけを解放する（要素の破棄は呼び出し側が先に行う）。null は何もしない。
-pub(crate) fn list_free(l: *mut RtList) {
-    if !l.is_null() {
-        let f: ListFree = unsafe { std::mem::transmute(list_op(1)) };
-        f(l)
-    }
-}
-
 /// 語 `w` を末尾へ写す。
 pub(crate) fn list_push(l: *mut RtList, w: i64) {
     let f: ListPush = unsafe { std::mem::transmute(list_op(2)) };
@@ -381,64 +317,6 @@ pub(crate) fn list_get(l: *const RtList, i: i64) -> *mut u8 {
 pub(crate) fn list_len(l: *const RtList) -> i64 {
     let f: ListLen = unsafe { std::mem::transmute(list_op(4)) };
     f(l)
-}
-
-// ---------------------------------------------------------------------------
-// Shared<T>（参照の数は原子的でない。単一スレッド用。ADR 0006 の条件 2）
-// 領域: 先頭 16 バイトが参照の数（i64）、続いて中身。
-
-const SHARED_HEAD: usize = 16;
-
-/// 参照の数 1 の領域を作る。戻り値は領域の先頭。
-///
-/// # Safety
-/// `align` は 2 の冪。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_shared_new(size: usize, align: usize) -> *mut u8 {
-    let p = sigil_rt_alloc(SHARED_HEAD + size, align.max(SHARED_HEAD));
-    *(p as *mut i64) = 1;
-    p
-}
-
-/// 中身の番地。
-///
-/// # Safety
-/// `p` は `sigil_rt_shared_new` の戻り値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_shared_payload(p: *mut u8) -> *mut u8 {
-    p.add(SHARED_HEAD)
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_shared_retain(p: *mut u8) {
-    *(p as *mut i64) += 1;
-}
-
-/// 参照の数を 1 減らす。0 になったら 1 を返す（呼び出し側が中身を破棄して `sigil_rt_shared_free` を呼ぶ）。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_shared_release(p: *mut u8) -> i32 {
-    let c = p as *mut i64;
-    *c -= 1;
-    (*c == 0) as i32
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_shared_count(p: *const u8) -> i64 {
-    *(p as *const i64)
-}
-
-/// # Safety
-/// `size`・`align` は `sigil_rt_shared_new` に渡したもの。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_shared_free(p: *mut u8, size: usize, align: usize) {
-    sigil_rt_free(p, SHARED_HEAD + size, align.max(SHARED_HEAD));
 }
 
 // ---------------------------------------------------------------------------
@@ -530,16 +408,6 @@ pub unsafe extern "C" fn sigil_rt_stop(ptr: *const u8, len: usize) -> ! {
 pub extern "C" fn sigil_rt_exit(code: i32) -> ! {
     flush_out();
     std::process::exit(code)
-}
-
-/// `--trace-drops`: `drop: <表示>` を標準エラーに 1 行出す。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_trace_drop(p: *const RtStr) {
-    let mut e = std::io::stderr().lock();
-    let _ = writeln!(e, "drop: {}", s(p));
 }
 
 // ---------------------------------------------------------------------------
@@ -948,23 +816,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn shared_and_alloc() {
-        unsafe {
-            let p = sigil_rt_shared_new(8, 8);
-            assert_eq!(sigil_rt_shared_count(p), 1);
-            sigil_rt_shared_retain(p);
-            assert_eq!(sigil_rt_shared_count(p), 2);
-            assert_eq!(sigil_rt_shared_release(p), 0);
-            assert_eq!(sigil_rt_shared_release(p), 1);
-            sigil_rt_shared_free(p, 8, 8);
-
-            let m = sigil_rt_alloc(32, 16);
-            assert_eq!(m as usize % 16, 0);
-            sigil_rt_free(m, 32, 16);
-        }
-    }
-
-    #[test]
     fn entry_args() {
         unsafe {
             let mut err = std::ptr::null_mut();
@@ -980,18 +831,23 @@ pub(crate) mod tests {
 
     #[test]
     fn bytes_through_table() {
+        type BytesFree = extern "C" fn(*mut RtBytes);
+        type BytesClone = extern "C" fn(*const RtBytes) -> *mut RtBytes;
         unsafe {
+            // 複写と解放は関数表の Sigil の関数を直接呼ぶ（Rust の包みは持たない。補足 G-6）。
+            let clone: BytesClone = std::mem::transmute(bytes_op(2));
+            let free: BytesFree = std::mem::transmute(bytes_op(1));
             let e = bytes_from_raw(std::ptr::null(), 0);
             assert_eq!(bytes_len(e), 0);
             assert_eq!(bytes_slice(e), b"");
             let b = bytes_from_raw(b"abc".as_ptr(), 3);
             assert_eq!(bytes_slice(b), b"abc");
-            let c = bytes_clone(b);
+            let c = clone(b);
             assert_eq!(bytes_slice(c), b"abc");
-            bytes_free(b);
+            free(b);
             assert_eq!(bytes_slice(c), b"abc");
             for x in [e, c] {
-                bytes_free(x);
+                free(x);
             }
         }
     }

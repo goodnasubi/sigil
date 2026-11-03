@@ -105,11 +105,12 @@ cargo test
 | ファイル | 規則 |
 |---|---|
 | `.github/workflows/**`, `.github/CODEOWNERS` | 人間のみ変更する |
-| `src/limits.rs`, `tests/ct_rules.rs` | CODEOWNERS により人間のみ |
+| `src/limits.rs` | CODEOWNERS により人間のみ |
 | `src/ast.rs`, `src/ir.rs` | 契約変更。変更だけの小さい PR を単独で出し、`contract-change` ラベルを付ける |
 | `Cargo.toml`, `Cargo.lock` | 依存の追加は ADR が必要。単独の PR にする |
 | `src/lib.rs`, `src/error.rs` | 追加のみ。1 エントリ 1 行、アルファベット順、他の変更を混ぜない |
 
+- `tests/ct_rules.rs` は、所有者の決定（2026-11-03、#271）により CODEOWNERS の対象から外れた。通常のテストファイルとして扱い、新規作成・変更とも通常の PR の手続きによる。
 - テストは原則、新しいファイル（`tests/<機能>.rs`）を足す。既存のテストファイルへの追記は、そのレーンの担当だけが行う。
 - 依存クレートは足さない方針（JSON も自前実装）。
 

@@ -63,7 +63,7 @@
 | `src/ir.rs` | **契約変更**（§7）。レーン C1 の許可がある PR だけ |
 | `Cargo.toml` / `Cargo.lock` | 依存の追加は ADR が必要（自前実装の方針）。単独の PR にする |
 | `.github/workflows/**`, `.github/CODEOWNERS` | 人間のみ変更（ADR 0020） |
-| `src/limits.rs`, `tests/ct_rules.rs` | CODEOWNERS により人間のみ |
+| `src/limits.rs` | CODEOWNERS により人間のみ（`tests/ct_rules.rs` は 2026-11-03 の所有者決定で対象外） |
 
 ## 5. 作業の流れ
 

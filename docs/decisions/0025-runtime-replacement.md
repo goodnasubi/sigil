@@ -381,7 +381,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 
 - **出す主体**: 3-7b より前は、今のとおり Rust の `sigil_rt_enter_with` が終了時に出す。3-7b からは `sigil_rt_enter` を使わないので、環境変数の判定と終了時の出力を生成コード（起動の処理。`envp` は C-4）が行う。`strs=`・`blocks=` の数は、残っている Rust の関数（`sigil_rt_live_strs`・`sigil_rt_live_blocks`）を呼んで得る。主体が移っても書式は変えない。
 - **`sigil_blocks=` を出す条件**: どちらの主体でも B-5 のとおり、確保器を結んだときだけ出す（書式は `live: strs=<数> blocks=<数> sigil_blocks=<数>`）。3-7a より前は、確保器を結ぶプログラムだけで出る。3-7a からは、すべてのプログラムが確保器を結ぶ（C-2）ので、常に出る。
-- 3-5e（3-7a と 3-7b の両方の後）で、Rust の確保の経路を消す。それに合わせて、`strs=`・`blocks=` を外し、`live: sigil_blocks=<数>` にする。
+- 3-5e（3-7a と 3-7b の両方の後）で、Rust の確保の経路を消す。それに合わせて、`strs=`・`blocks=` を外し、`live: sigil_blocks=<数>` にする。（補足 G-7 で改める: 書式を変えるのは 3-5e-iii で、3-7b とはどちらが先に合流してもよい。後から合流する方が新しい書式と出す主体を持っていく。）
 - `tests/m5_free_strings.rs` の期待は、3-5e で「`sigil_blocks=` が繰り返しの回数に比例して増えない」に改める。（補足 D で置換: 期待の改めは 3-5b-i に前倒しし、3-5b-i から `strs=` は常に 0。D-5）
 
 #### C-6. 256MiB のスタック
@@ -410,7 +410,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 | 3-5b | `String`（`str_*`。`len` は Unicode のスカラー値の数）（補足 D で置換: 3-5b-i・3-5b-ii に分割。D-6） | 3-5a・3-7a |
 | 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`）（補足 E で置換: 3-5c-i・3-5c-ii・3-5c-iii に分割。`list_best` は Sigil へ移さず codegen のループにする。E-3・E-6） | 3-5b・3-7a（D-6 で置換） |
 | 3-5d | `Bytes`・`int_rot*` | 3-5b・3-7a（D-6 で置換。補足 F で置換: 3-5d-0・3-5d-i・3-5d-ii・3-5d-iii に分割。F-9） |
-| 3-5e | 型の記述子の処理の生成（C-1）・`Shared`/`Cell`・`--trace-drops`。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5） | 3-5c・3-5d・3-7a・3-7b（D-6 で置換） |
+| 3-5e | 型の記述子の処理の生成（C-1）・`Shared`/`Cell`・`--trace-drops`。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5）（補足 G で置換: 3-5e-i・3-5e-ii・3-5e-iii に分割。G-9） | 3-5c・3-5d・3-7a・3-7b（D-6 で置換） |
 | 3-5f | 表示（`val_show`・`print_result`・`Float` の最短表現）（D-6 で置換: `show_*` を加える） | 3-5e |
 | 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析）と停止の報告（`stop`/`report`）（D-6 で置換: `new_lossy` を加える） | 3-5f |
 | 3-6a | `console.log`。`write` は全部を書き終えるまで繰り返す（部分書き込みは残りから続け、−4（EINTR）は同じ位置から再試行し、その他の負の値は書くのをやめる。今の Rust 版と同じく失敗を呼び出し側へ返さない）。末尾の改行を書く。`os_buf_free` を廃止 | 3-5b・3-7a（D-6 で置換） |
@@ -481,7 +481,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 
 - **Sigil 側**: 埋め込みのモジュール `std.core.string`（`src/stdlib/core_string.sigil`、`targets bare, browser, server`、`trust base`。C-1 の置き場所）に、`Addr`・`Int` だけを受け渡す関数を置く。バイトや頭を読み書きする関数は `unchecked` で、前提の文に「`s` は `std.core.string` が返し、まだ解放していない頭（したがって `len <= cap`、`len > 0` なら `ptr..ptr+len` は読める正しい UTF-8）」「`p..p+n` は読める」などを書く。
   - 3-5b-i: `new`・`new_lossy`・`valid_utf8`・`free`・`clone`・`data`・`bytes`。
-  - 3-5b-ii: `len`（スカラー値の数。続きのバイト `0b10xxxxxx` でないバイトを数える）・`is_empty`・`trim`（Rust の `str::trim` と同じ `White_Space` の符号点の表）・`concat`・`parse_int(s: Addr, out: Addr) -> Int`・`eq`・`cmp`（バイト列の辞書順。Rust の `str::cmp` と同じ）。`eq`・`cmp` は 3-5b-ii で足して試験し、3-5e の生成する `val_eq`・`val_cmp` の文字列の腕が呼ぶ。それまで `val_eq`・`val_cmp` は Rust のまま関数表で読んで比べる。Rust の `sigil_rt_str_cmp`（生成コードからは呼ばれていない）は 3-5e で消す。
+  - 3-5b-ii: `len`（スカラー値の数。続きのバイト `0b10xxxxxx` でないバイトを数える）・`is_empty`・`trim`（Rust の `str::trim` と同じ `White_Space` の符号点の表）・`concat`・`parse_int(s: Addr, out: Addr) -> Int`・`eq`・`cmp`（バイト列の辞書順。Rust の `str::cmp` と同じ）。`eq`・`cmp` は 3-5b-ii で足して試験し、3-5e の生成する `val_eq`・`val_cmp` の文字列の腕が呼ぶ。それまで `val_eq`・`val_cmp` は Rust のまま関数表で読んで比べる。Rust の `sigil_rt_str_cmp`（生成コードからは呼ばれていない）は 3-5e で消す（補足 G-0: main `9cf93f7` の時点で既に無い）。
   - 長さと確保の検査: `new`・`new_lossy` は `n < 0` なら停止する（終了コード 70）。`n` = 0 なら `p` を読まない。`concat` の長さの和は、各長さが確保器の上限（2^46。A-4）未満なので `Int` であふれず、上限を超える確保は確保器が停止する。
   - 確保器（`std.os.alloc`）と同じく、すべてのプログラムに暗黙に結び（`implicit_roots`。C-2）、lowering は入口から辿れなくても SIR に入れる（`src/lower/mod.rs` の確保器の関数の扱いと同じ。`src/ir.rs` は変えない）。評価器でも結ぶが、評価器の `String` の組み込みは Rust のまま（C-7 の最後の項）で、これらの関数は呼ばない。
   - 試験用の差し込み（`Options::raw_ops`）で `raw.alloc`/`raw.free` を置き換えたときは、確保器と同じく `std.core.string` も結ばない（偽の原始操作で文字列を作らないため）。そのときにネイティブ出力を求めたら、codegen は「`std.core.string` が結ばれていない」として `CgError::Internal` で止める（差し込みは検査と評価器の試験だけで使う）。
@@ -524,7 +524,7 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 | 3-5b-ii | 操作の移し替え: `len`（スカラー値の数）・`is_empty`・`trim`・`concat`（`+`）・`parse_int` を Sigil へ。`eq`・`cmp` を足す（使うのは 3-5e）。`rt_spec` から `str_len`・`str_is_empty`・`str_trim`・`str_concat`・`str_parse_int` を消す。下書きの `core_sigil.rs` の `String` の部分とその構文試験を消す（C-1）（**要承認**: S2） | 3-5b-i |
 | 3-5c | `List`（`list_*`・`list_sum_*`・`list_best`）に加えて `str_lines`（`List<String>` を返すので `List` と一緒に移す。D-8 の 6 は補足 E で案 A に確定）（補足 E で置換: 3-5c-i・3-5c-ii・3-5c-iii に分割。E-6） | 3-5b-i・3-7a |
 | 3-5d | `Bytes`・`int_rot*`。`str_as_bytes`・`bytes_to_string_utf8`（補足 F-5 で改める: `valid_utf8` ではなく `std.core.string.from_utf8` を使う）も移す（補足 F で置換: 3-5d-0・3-5d-i・3-5d-ii・3-5d-iii に分割。F-9） | 3-5b-i・3-7a・3-5c-ii（補足 E-6 で追加: `bytes_from_list` が `std.core.list` を読む） |
-| 3-5e | 型の記述子の処理の生成（C-1。`val_eq`・`val_cmp`・`val_clone`・`val_drop` の文字列の腕は `std.core.string` の `eq`・`cmp`・`clone`・`free` を呼ぶ）・`Shared`/`Cell`・`--trace-drops`（`trace_drop` を含む）。Rust の `sigil_rt_str_cmp` を消す。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5。試験の期待の改めは 3-5b-i に前倒し済み） | 3-5b-ii・3-5c（補足 E-6 で置換: 3-5c-iii）・3-5d・3-7a・3-7b |
+| 3-5e | 型の記述子の処理の生成（C-1。`val_eq`・`val_cmp`・`val_clone`・`val_drop` の文字列の腕は `std.core.string` の `eq`・`cmp`・`clone`・`free` を呼ぶ）・`Shared`/`Cell`・`--trace-drops`（`trace_drop` を含む）。Rust の `sigil_rt_str_cmp` を消す。`SIGIL_RT_LIVE` の `strs=`/`blocks=` を外す（C-5。試験の期待の改めは 3-5b-i に前倒し済み）（補足 G で置換: 3-5e-i・3-5e-ii・3-5e-iii に分割。`sigil_rt_str_cmp` は既に無い。`trace_drop` の書き出しは 3-5f へ移す。G-3・G-9） | 3-5b-ii・3-5c（補足 E-6 で置換: 3-5c-iii）・3-5d・3-7a・3-7b（補足 G-9 で置換: 3-7b に依存するのは 3-5e-iii だけで、どちらが先でもよい） |
 | 3-5f | 表示（`val_show`・`show_*`・`print_result`・`Float` の最短表現） | 3-5e |
 | 3-5g | 入口の引数（`arg_*`・`entry_args`・`Float` の解析。不正な UTF-8 は `new_lossy`）と停止の報告（`stop`/`report`） | 3-5f |
 | 3-6a | `console.log`（C-7 のとおり） | 3-5b-i・3-7a |
@@ -819,6 +819,174 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 3. **`to_string_utf8` の失敗の文言の組み立て**（F-5）: codegen が失敗の分岐でリテラル・`show_int`・`str_concat` を生成する（**推奨**。Rust を足さず、3-5f で `show_int` が Sigil になれば自動で追随する。起草時の相談（jev）でも同じ選択）／Rust ランタイムに一時的な `sigil_rt_utf8_error_msg(i, n)` を足す（3-7d で消す Rust が増える）／Sigil の側で 10 進の変換と文言を組み立てる（リテラルのバイト列を `raw.store_u8` で並べる `unchecked` が増える）。
 4. **`blocks=` の扱い**（F-6）: 3-5d-ii で `sigil_blocks=` へ移す（**推奨**。E-5 の `List` と同じ）／Rust の数を残し、シムから増減する（Sigil の確保と二重に数え、3-5e で消す手間が増える）。
 5. **`set`・`slice` の失敗の表し方**（F-2）: Sigil は番号（`set`）・空番地（`slice`）を返し、codegen が文言を作る（**推奨**。文言を生成コードの静的データに置き、Sigil に文字列のリテラルを持ち込まない）／今の形（`err` の出力の引数）のまま、Sigil が `std.core.string` で文言を作る（`std.core.bytes` が `std.core.string` を `use` することになり、2 の衝突が起きる）。
+
+### 補足 G（PR 3-5e の前）: 型ごとの値の処理の生成と 3-5e の分割
+
+- **日付**: 2026-11-03
+- **状態**: 提案（推奨案で本文を書いた。細目の選択は G-12 に推奨つきで並べ、異論があれば本補足の修正 PR で直す）。本文・補足 A〜F と食い違う箇所は、本補足が置き換える。
+- 3-5e（`val_eq`・`val_cmp`・`val_clone`・`val_drop` の型ごとの生成、`Shared`/`Cell`、`--trace-drops`、`SIGIL_RT_LIVE` の `live: sigil_blocks=<数>` への一本化）の着手の前（main `9cf93f7`。3-5a・3-7a・3-5b・3-5c・3-5d は合流済み、3-7b・3-6a は未合流）に、C-1・C-5・D-6・E-6・F-6 では生成する関数の形・破棄の反復・塊の頭の操作・Rust に残す範囲・試験の期待が決まっていないと実装担当から報告があった。`runtime/core/src/val.rs`・`lib.rs` と codegen の呼び出し箇所を棚卸しして、それらを決め、分割を決める。
+
+#### G-0. 現状の確認（main `9cf93f7`）
+
+- **生成コードが呼ぶ Rust の値の処理**（`rt_spec`）: `val_eq`・`val_cmp`（`("ppp", 'i')`。`src/codegen/func/expr.rs` の `compare`、`call.rs` の `ListMin`/`ListMax`・`ListMaxBy`/`ListMinBy` のループ）、`val_clone`（`expr.rs` の `Rvalue::Clone`）、`val_shadow`（`drop.rs` の `shadow`。`finish` と `SharedGet`）、`val_drop`（`drop.rs` の `drop_val`。`Stmt::Drop`・`store_drop`・`SharedSet`・入口の戻り値・大域）、`blk_new`（`drop.rs` の `blk`。組・構造体・列挙型・`Cell`/`Shared`・クロージャの環境と本体の塊）、`trace_on`（`thunk`。`--trace-drops` のとき）、`val_show`（3-5f）。
+- **塊の頭**（`val.rs`）: `blk_new(bytes)` は `n = max(bytes, 8)` を 8 の倍数に切り上げ、`sigil_rt_alloc(16 + n, 8)`（Rust・glibc の確保器）で取り、頭の 2 語 `[n（第 62 ビットは黙った印 SILENT）][参照の数 = 1]` を書いて中身の先頭（頭 + 16）を返し、`LIVE_BLOCKS`（`blocks=`）を 1 増やす。`blk_free` は参照の数の場所が `FREED`（`0x5afe_dead_0000_0001`）なら `abort`、違えば `FREED` を書いて `LIVE_BLOCKS` を 1 減らし（負なら `abort`）、`sigil_rt_free(頭, 16 + n, 8)` で返す。`Cell`/`Shared` は中身の語 1 つの塊で、参照の数は頭の第 2 語（中身 − 8）。
+- **`sigil_rt_shared_*`（`lib.rs`）は使われていない**: `rt_spec` にない。生成コードは `Cell`/`Shared` を `blk_new` で作り、参照の数を `val_shadow`・`val_clone`・`val_drop` が増減する。`sigil_rt_shared_*` を呼ぶのは Rust の単体試験（`shared_and_alloc`）だけである。`rt_spec` の `alloc` も呼び出し箇所がない。
+- **クロージャ**: 本体は 24B の塊 `[関数の番地][環境の塊（なければ 0）][環境の型の記述子]`（`expr.rs` の `MakeClosure`）。環境を持たない関数の値は頭のない 16B の静的データ `[関数の番地][0]`（`fnblock`）で、参照の数を持たない。`val_drop` の `K_FN` の腕は、環境が 0 でなく参照の数が 0 になったときだけ、+16 の記述子で環境を積んで本体を解放する。記述子の鍵は関数の型の中身を消す（`norm_with(ty, true)`）ので、関数の値の型からは環境の型が分からない。
+- **`--trace-drops`**: 生成コードは `cg.trace`（`Opts::trace_drops`。コンパイル時に決まる）のときだけ `thunk` で `sigil_rt_trace_on` を呼び、Rust の `val_drop` が実行時の `TRACE` を見て、構造体を破棄する前に `drop: <表示>`（`show_into` の引用符つきの表示）を `stderr().lock()` へ書く。`sigil_rt_trace_drop`（`lib.rs`）は `rt_spec` になく、使われていない。
+- **既に済んでいるもの**: Rust の `sigil_rt_str_cmp`（D-3・D-6 が 3-5e で消すとしたもの）と `sigil_rt_list_free_strs`（E-1）は、main `9cf93f7` に既に無い（`grep` で 0 件）。3-5e で消す Rust の関数には数えない。
+- **評価器**（`src/ir_eval/value.rs`）: 破棄は明示の積み（`drain`）で再帰しない。300 万段の `enum L { Nil, Cons(Int, L) }` の破棄が通る（`tests/interp.rs` の `very_deep_value_is_dropped_without_overflowing_the_host_stack`）。`val_eq`・`cmp_val` は再帰し、深すぎれば `DEEP` を立てて `StackExhausted` の停止にする。`Addr` は `==`・`<` で比べられる（`val.rs` の記述子の種類 16 は `eq`・`cmp` の腕がなく、偽・比べられないになる。G-10）。
+
+#### G-1. 生成する関数の形と呼び出し規約
+
+- **作る関数**: 型 `T` ごとに次の 6 つを、必要になったものだけ生成する。すべて `Linkage::Local`、C の呼び出し規約（`cg.cc`）で、Sigil の関数の `(値, 停止の符号)` の形はとらない（停止しない。確保の失敗は確保器とシムが `exit_group(70)` で止める）。
+  - `sigil_eq_<k>(a, b) -> i64`（1 = 等しい、0 = 違う）
+  - `sigil_cmp_<k>(a, b) -> i64`（−1・0・1、比べられないときは 2。今の `val_cmp` の戻りと同じ値）
+  - `sigil_clone_<k>(w) -> i64`（`clone`。`Cell` も独立した複製にする）
+  - `sigil_shadow_<k>(w) -> i64`（影。`Copy` の複写。共有するものは共有のまま）
+  - `sigil_drop_<k>(w)`（破棄の入口。G-2）
+  - `sigil_dstep_<k>(w)`（破棄の 1 段。G-2。入口からと、積みの取り出しからだけ呼ぶ）
+- **鍵と重複の排除**: 鍵は記述子と同じ正規形 `norm_with(strip(ty), true)`（参照の入れ子を 1 段にし、関数の型の中身を消す）。`Cg` に `HashMap<(Op, Ty), FuncId>` を持ち、`<k>` はその表の通し番号とする。同じ鍵の関数は 1 つだけ作る。
+- **再帰する型と生成の順**: 関数は最初に要った時点で宣言だけして表に入れ、本体は待ち行列に積む。利用者の関数をすべて定義した後、待ち行列が空になるまで本体を定義する（本体の生成が新しい鍵を要求すれば、宣言して積む）。宣言が本体より先なので、`enum L { Nil, Cons(Int, L) }` の `sigil_eq_L` は自分自身を `FuncId` で呼べる。`UserFuncName` の番号は既存の関数・シム・`memmove` の後に続けて振る。
+- **呼び出し箇所の置き換え**: `rt("val_eq", [d, x, y])` → `sigil_eq_<k>(x, y)`、`val_cmp`・`val_clone`・`val_shadow`・`val_drop` も同じ。記述子の番地は渡さない。`sigil_eq`・`sigil_cmp` の戻りは `i64` になる（今の `rt` の `'i'` は 32 ビット）。`compare` と `ListMin`/`ListMax`・`ListMaxBy`/`ListMinBy` のループは `icmp_imm` で比べているだけなので、幅を合わせれば式は変わらない。
+- **その場で済ませるもの**（関数を作らない）: スカラー（`Int`・`Bool`・`Float`・`Unit`・`Addr`・`ParseError`）の比較・複写と、`String`・`Path`・`Bytes` の破棄・複写は、呼び出し箇所でシムを直接呼ぶか命令にしてよい（今の `Rvalue::Clone` が `String`・`Path` で `str_clone` を直接呼ぶのと同じ）。生成する関数の中でも、スカラーのフィールドは命令で比べる。
+- **種類ごとの規則**（今の `val.rs` の `eq`・`cmp`・`dup`・`val_drop` を写す。違うのは G-10 の `Addr` だけ）:
+
+| 型 | `eq` | `cmp` | `clone` / `shadow` | 破棄（`dstep`） |
+|---|---|---|---|---|
+| `Unit`・`ParseError` | 1 | 2 | 語のまま | なし |
+| `Int`・`Bool`・`Addr` | 語の `==` | 符号つきの比較 | 語のまま | なし |
+| `Float` | `fcmp` の `==`（`-0.0 == 0.0`、NaN は 0） | `partial_cmp`（NaN を含めば 2） | 語のまま | なし |
+| `String` | `std.core.string.eq` | `std.core.string.cmp` | 0 なら 0、それ以外は `str_clone` | `str_free` |
+| `Path` | `std.core.string.eq` | 2 | 同上 | `str_free` |
+| `Bytes` | `std.core.bytes.eq` | `std.core.bytes.cmp` | 0 なら 0、それ以外は `bytes_clone` | `bytes_free` |
+| `List<T>` | 長さが同じで要素ごとに `eq_T` | 短い方の長さまで `cmp_T`（2 ならすぐ 2、0 以外ならそれ）、続いて長さの比較 | 0 なら 0。`list_new(8)` に要素ごとの `clone_T`/`shadow_T` を `list_push` | 要素を積み（逆順）、`list_free` |
+| 組 | フィールドごとに `eq` | 組の順に `cmp`（2 はすぐ 2）、全部 0 なら 0 | 0 なら 0。`blk_new(8n)` に各フィールドの複写 | フィールドを積み（逆順）、`blk_free` |
+| 構造体 | フィールドごとに `eq` | 2 | 組と同じ。`shadow` は塊に SILENT を立てる | trace（G-3）、フィールドを積み（逆順）、`blk_free` |
+| 列挙型 | 腕の番号が同じで、その腕のフィールドごとに `eq` | 2 | 0 なら 0。`blk_new(8 * max(1 + nf, 2))` に番号とフィールドの複写。`shadow` は SILENT を立てる | その腕のフィールドを積み（逆順）、`blk_free` |
+| `Ref<T>` | 両方の指す語で `eq_T` | 両方の指す語で `cmp_T` | 語のまま（共有） | なし |
+| `Shared<T>` | 番地が同じなら 1、違えば中身の語で `eq_T` | 2 | 0 なら 0。参照の数 +1 | 参照の数 −1、0 になれば中身を積み `blk_free` |
+| `Cell<T>` | `Shared` と同じ | 2 | `clone`: 0 なら 0、`blk_new(8)` に中身の `clone_T`。`shadow`: 参照の数 +1 | `Shared` と同じ |
+| 関数の値 | 0 | 2 | +8（環境）が 0 でなければ参照の数 +1 | G-2 |
+
+  - 文字列・バイト列の `eq`・`cmp` は、シム `str_eq`（`("pp", 'i')`）・`str_cmp`（`("pp", 'p')`）・`bytes_eq`（`("pp", 'i')`）・`bytes_cmp`（`("pp", 'p')`）を `shim_spec` に足して呼ぶ（F-4 の「`bytes_eq`・`bytes_cmp` は 3-5e でシムにする」。`cmp` は −1 を返すので `'p'`。F-4 の規則）。シムの本体は `Fx::alloc_shim`（状態が 0 でなければ停止）。
+  - 一覧の要素は、今と同じく一覧のシム `list_len`・`list_get` で読む（E-6 の 3-5c-ii の注と同じく、呼び出しの手間は測らずに許容する）。
+- **入れ子の深さ**: `eq`・`cmp`・`clone`・`shadow` は、今の Rust と同じく値の入れ子に沿って再帰し、深さの検査はしない（G-2 の破棄だけは反復にする）。評価器は深い比較を `StackExhausted` で止めるが、比較の式（`Rvalue::Binary`）には停止の場所（`StopId`）がなく、生成した関数から呼び出し元の位置の停止を報告するには `src/ir.rs` の契約変更が要る。そのため本補足では変えず、既知の差として残す（G-10）。
+
+#### G-2. 破棄の反復と順序
+
+- **反復にする**（再帰は許さない）。理由: 評価器も今の Rust も積みで反復しており、300 万段の連鎖の破棄が通る（G-0）。破棄は停止の後始末（下限 192MiB に掛かった後の残り 64MiB。C-6）でも走るので、値の深さに比例してスタックを使う形にすると、後始末の途中で溢れる。深さの上限は置かない（積みは確保器から伸ばし、上限を超える確保は確保器が `exit_group(70)` で止める）。
+- **積み（作業の列）**: 項は `(段の関数の番地, 語)` の 16B。生成コードの静的データ（書ける、0 で始まる。単一スレッド前提。A-5）に、項 4096 個分の領域（64KiB）と、`top`（項の数）・`buf`（今の領域の番地）・`cap`（今の領域の項の数）の 3 語を置く。`top` が `cap` に達したら、`raw.alloc`（シム `sigil_rt_raw_alloc`）で 2 倍の領域を取り、中身を `memmove` で写し、前の領域が確保した領域なら `raw.free` で返す。`top` が 0 に戻ったとき、確保した領域を使っていれば返して静的な領域に戻す。こうすると、入口が終わった時点（`SIGIL_RT_LIVE` を出す時点）に積みの領域は残らず、`sigil_blocks=` の終了時の完全一致は変わらない。
+- **入口と取り出し**: `sigil_drop_<k>(w)` は、`w` が 0 なら何もしない。それ以外は、`base = top` を覚え、`(sigil_dstep_<k>, w)` を積み、`top > base` の間、項を 1 つ取り出してその段の関数を間接呼び出しで呼ぶ。`base` を覚えるのは入れ子の呼び出しへの備えで、今の段の関数から破棄の入口を呼ぶ経路はない（表示・解放のシムは生成した破棄を呼ばない）。
+- **順序**: 段の関数は、値そのものを処理し（構造体なら G-3 の trace）、子（フィールド・要素）を**宣言の逆順に**積んでから、自分の塊を解放する。取り出しは後入れ先出しなので、子は宣言の順に、それぞれの子孫を先に処理しながら破棄される（深さ優先の前順）。今の Rust の `val_drop` と評価器の `drain` と同じ順である。積む前に子の語を読んでおく（塊の解放の後に読まない）。
+  - 積むのは、0 でなく、型が破棄の対象（`aggregate` が真: 組・構造体・列挙型・一覧・`Cell`・`Shared`・関数の値・`String`・`Path`・`Bytes`）の子だけ（今の `push` の条件と同じ）。参照・スカラーは積まない。
+  - 子が `String`・`Path`・`Bytes`（子孫を持たず、trace も出さない）なら、積まずにその場で解放してよい。観測できる順序（`drop:` の行）は変わらない。長い `List<String>` で積みが要素の数だけ伸びるのを避けるためである。
+- **関数の値の環境**: クロージャの本体の +16 には、記述子ではなく、環境の組の型の段の関数 `sigil_dstep_<環境の型>` の番地を置く（`MakeClosure` を直す）。関数の値の段は、+8 の環境が 0 でなく、参照の数を 1 減らして 0 になったときだけ、`(+16 の番地, 環境)` を積んで本体を `blk_free` する（今の `K_FN` の腕と同じ）。+16 を読む Rust のコードは `val_drop` だけで、`val_show` の `K_FN` は `<関数>` を出すだけなので、表示には影響しない。
+- **C-6 との関係**: 破棄はスタックを一定しか使わない。`eq`・`cmp`・`clone`・`shadow` の再帰は今の Rust と同じく下限の検査をせず、溢れは 3-7b より前は Rust のスレッドのガードページ、3-7b からは C-6 のガードページで止まる（黙って壊れない）。
+
+#### G-3. `--trace-drops` と表示・記述子
+
+- **出すかどうかはコンパイル時に決める**: `cg.trace` が偽なら、構造体の段に trace の命令を入れない。真なら入れる。Rust の `TRACE`・`sigil_rt_trace_on` と、`thunk` の `trace_on` の呼び出しを消す。
+- **条件の移し方**（構造体の段の先頭、子を積む前）: 頭の第 1 語（中身 − 16）の SILENT（第 62 ビット）が立っていない、かつ、破棄の対象の型のフィールド（G-2 の積む条件と同じ型）のどれも語が 0（移動済み）でない、とき出す。フィールドの型は静的に分かるので、調べるフィールドの列は生成時に決まり、展開した比較の列になる。今の Rust の `moved` と同じ判定である。
+- **出し方**: 表示は 3-5f まで Rust の `val_show` に任せる。段の関数は `rt("val_show", [構造体の記述子, w, 1])` で引用符つきの表示を作り、`rt("trace_drop", [s])`（`sigil_rt_trace_drop`。`rt_spec` に `("p", 'v')` で足し直す）で `drop: <表示>` の 1 行を標準エラーへ書き、`str_free(s)` で捨てる。`sigil_rt_trace_drop` は今の `val_drop` と同じく `stderr().lock()` へ `writeln!` するので、出力は 1 字も変わらない。
+  - D-6 の「3-5e は `--trace-drops`（`trace_drop` を含む）」を改める: `trace_drop`（書き出し）は 3-5f へ移す。入力が `val_show` の文字列で、標準エラーへの全部を書き切るまでの書き込みの繰り返しは 3-6a の `console.log` の書き込みと同じ処理になるためで、3-5e で別に書くと 3-6a と重なる。3-5f は `val_show` を型ごとの生成にするときに、`trace_drop` を生成コードの書き込み（3-6a が合流していればその関数）にする。
+- **記述子の表を残す範囲**: 3-5e の後も、記述子（`Cg::desc`）は `val_show`（表示・trace。3-5f まで）と `entry_args`/`coerce`（入口の引数。3-5g まで）のために、今の形（`K_*` の番号、`K_BYTES` = 15 を含む）のまま残す。3-5e で記述子を読まなくなるのは比較・複写・破棄だけで、クロージャの +16 は記述子でなくなる（G-2）。記述子の生成は 3-5g で使い手がなくなったときに消す。
+
+#### G-4. 塊の頭と `Shared`/`Cell`
+
+- **頭の配置は今と同じ**（C-1）: 塊は `16 + n` バイト（`n = max(bytes, 8)` を 8 の倍数に切り上げ）、頭は `[n | SILENT][参照の数]`、中身の先頭（頭 + 16）が値の語。`Cell`/`Shared` の中身は語 1 つ。`FREED` = `0x5afe_dead_0000_0001`、SILENT = `1 << 62`。Rust の `val_show` は中身だけを読む（`Shared`/`Cell` は `*(w)`）ので、頭の配置を Rust と揃え続ける必要はない。
+- **codegen が生成する**（Sigil の `std.*` に置かない。**G-12 の 2**）:
+  - `sigil_blk_new(bytes) -> 番地`（`Linkage::Local`）: 頭を `raw.alloc(16 + n, 8)`（シム）で取り、`n` と 1 を書いて頭 + 16 を返す。`rt("blk_new")` の呼び出しはこれを呼ぶ（呼び出し箇所の `self.blk` は変えない）。
+  - `sigil_blk_free(p)`: `h = p − 16`。`h[1] == FREED` なら停止する（下の項）。違えば `h[1] = FREED` を書き、`raw.free(h, 16 + (h[0] & !SILENT), 8)`（シム）で返す。
+  - 参照の数の増減・SILENT の設定は、関数にせず命令でその場に書く（`p − 8` の語の `+1`・`−1` と 0 との比較、`p − 16` の語の `| SILENT`）。
+  - 理由: 頭の配置を知るのは codegen の 1 か所になる（作る `blk_new`、読む `dstep`・`clone`・`shadow` のすべてが生成コード）。Sigil に置くと、頭を読み書きする `unchecked` の関数（S2）と、参照の数の増減ごとのシムの呼び出しが増える。C-1 の「`shared_*` も型ごとに生成する」に合う。
+- **確保器が替わる**: 塊は Rust・glibc の確保器ではなく、Sigil 製確保器（`std.os.alloc`）から取る。`sigil_blocks=` が塊を数え、`blocks=`（`LIVE_BLOCKS`）は増えなくなる（G-5・G-7）。
+- **二重解放・解放後の使用の検出**（今の Rust と同じ点で調べる）:
+  - `sigil_blk_free` の `FREED` の検査は、今と同じ位置（頭の第 2 語）・同じ値で行う。Sigil 製確保器の小さい塊の解放は、空きの連結を中身の先頭の語（= 塊の頭の第 1 語）に書き、第 2 語は再利用されるまで残すので、今（glibc。空きの管理が中身の第 2 語を上書きしうる）より `FREED` が残りやすい。確保器自身も解放済みの印（A-4）で二重の `free` を止めるので、検出は今より弱くならない。
+  - 停止の仕方は `abort`（SIGABRT）から、`rt("stop", ..)`（`sigil_rt_stop`。3-5g で生成コードへ移る）で `sigil: 解放済みの塊をもう一度解放した` を出して終了コード 70 に変える（A-4 の確保器の異常停止と同じ 70。生成コードには `abort` がない）。この経路の試験は今もない（わざと 2 回解放する版を手元で確かめる。G-9）。
+  - `LIVE_BLOCKS` が負になったら `abort` する検査は、数え自体を消す（G-5）ので無くなる。その代わりは D-5・E-5 と同じく `sigil_blocks=` の 1000 回と 100000 回の完全一致である。
+  - 解放後の使用（解放した `Shared` の参照の数の増減など）は、今の Rust も調べていない（`FREED` の語を増減するだけで止まらない）。本補足でも足さない。
+- **Rust の `sigil_rt_shared_*` を消す**（3-5e-ii）: 使われていない（G-0）。単体試験 `shared_and_alloc` も消す（`sigil_rt_alloc`/`sigil_rt_free` の部分を含む。下の項）。
+- **`sigil_rt_alloc`/`sigil_rt_free` を消す**（3-5e-ii）: 使い手は `blk_alloc`・`blk_free`・`sigil_rt_shared_*` だけで、どれも消える。`rt_spec` の `alloc`（呼び出し箇所がない）も消す。
+
+#### G-5. `val_shadow`・`blk_new` と `LIVE_BLOCKS` の時期
+
+- **`val_shadow` は 3-5e に含める**（3-5e-ii）: `clone` と同じ複写の生成（`deep` の真偽の違いだけ。G-1 の表）で、`Cell` の扱いと SILENT の設定のほかは同じ本体になる。分けると、同じ鍵の複写の生成器を 2 つの PR で作ることになる。
+- **`blk_new` も 3-5e-ii に含める**: 塊を作る側（`blk_new`）と捨てる側（`blk_free`、生成した破棄）は同じ確保器でなければならず、`clone`・`shadow`・破棄・`Cell`/`Shared` の生成と一度に替える必要がある（D-6 の 3-5b-i と同じ理由）。
+- **`LIVE_BLOCKS`・`blocks=`**: 3-5e-ii で `LIVE_BLOCKS` と `live_blocks` を消し、`sigil_rt_live_blocks` は常に 0 を返す（`sigil_rt_live_strs` と同じ扱い。D-5）。書式は 3-5e-iii まで変えない。3-5e-iii で `sigil_rt_live_strs`・`sigil_rt_live_blocks` ごと消し、書式を `live: sigil_blocks=<数>` にする（G-7）。
+
+#### G-6. Rust の消費者の線引き
+
+| Rust の関数・処理 | 3-5e での扱い | 移す PR |
+|---|---|---|
+| `val.rs` の `eq`・`cmp`・`sigil_rt_val_eq`・`sigil_rt_val_cmp`（`K_BYTES` の腕を含む） | 消す | 3-5e-i |
+| `val.rs` の `dup`・`sigil_rt_val_clone`・`sigil_rt_val_shadow`・`sigil_rt_val_drop`・`TRACE`・`sigil_rt_trace_on`・`blk_alloc`・`blk_free`・`blk_silent`・`rc_inc`・`rc_dec`・`block`・`sigil_rt_blk_new`・`owning_kind`（`show_into` の移動済みの判定で使う分は残す） | 消す | 3-5e-ii |
+| `lib.rs` の `sigil_rt_shared_*`・`sigil_rt_alloc`・`sigil_rt_free`・`LIVE_BLOCKS`・`live_blocks` | 消す | 3-5e-ii |
+| `lib.rs` の `sigil_rt_live_strs`・`sigil_rt_live_blocks`・`sigil_rt_enter_with` の `live:` の行の組み立て | 書式を改める（G-7） | 3-5e-iii |
+| `val.rs` の `show_into`・`sigil_rt_val_show`、`lib.rs` の `show_*`・`print_result`・`sigil_rt_trace_drop` | 残す（3-5e-ii から `trace_drop` を生成コードが呼ぶ） | 3-5f |
+| `val.rs` の `coerce`・`entry_args`・`kind_name`、`lib.rs` の `arg_*`・`report`・`stop`・`exit` | 残す | 3-5g |
+| `lib.rs` の `stack_*`・`enter`・`enter_with` | 残す | 3-7b |
+| 関数表（`set_str_ops`・`set_list_ops`・`set_bytes_ops`）とその Rust の包み | 表の形（5 項目）は変えない。Rust の側で使われなくなった包み（`list_free`・`bytes_clone`・`bytes_free`・`str_clone` など）は、`clippy -D warnings` の未使用の警告に合わせて消す | 3-7d（表そのもの） |
+
+- 3-5e の後に Rust が記述子を読むのは `show_into`（3-5f）と `coerce`（3-5g）だけである。どちらも `List` の要素を関数表の `len`・`get` で読み、`coerce` は `create`・`push` で作る。
+
+#### G-7. `SIGIL_RT_LIVE` の出す主体と既存の試験
+
+- **出す主体**: C-5 のとおり、3-7b より前は Rust の `sigil_rt_enter_with`、3-7b からは生成コード（起動の処理）。3-5e-iii と 3-7b は**どちらが先に合流してもよい**（C-5 の「3-5e は 3-7b の後」を改める）。
+  - 3-5e-iii が先: `sigil_rt_enter_with` の行を `live: sigil_blocks=<数>` に改め、`sigil_rt_live_strs`・`sigil_rt_live_blocks` を消す。後の 3-7b は、生成コードで生存数のシム（`sigil_rt_sigil_live_blocks`）だけを呼び、同じ書式で出す。
+  - 3-7b が先: 3-7b は C-5 のとおり今の書式で、Rust の `sigil_rt_live_strs`・`sigil_rt_live_blocks` を呼んで出す。後の 3-5e-iii は、生成コードの出力を `live: sigil_blocks=<数>` に改め、その 2 つの Rust の関数を消す。
+  - 理由: 書式の変更と出す主体の移動は互いに独立で、どちらの順でも 1 か所を直すだけで済む（D-3・E-3 の関数表の登録と同じ「後から合流する方が持っていく」）。
+- **生存数の関数が未登録のとき**: 3-7a からすべてのネイティブのプログラムが確保器を結ぶ（C-2）ので起きない。起きた場合は `live:` の行を出さない（試験が「`live` の行がない」で失敗して見つかる。偽の 0 を出さない）。
+- **既存の試験の期待**（3-5e-iii で直す。本補足を根拠に、既存の試験ファイルを該当の PR で変える。D-7 の最後の項と同じ例外）:
+  - `tests/m5_free_strings.rs`・`tests/fn_types_2_4d_exec.rs`: `live()` の `num("strs=")` の検査と `blocks=` の戻りを外し、`sigil_blocks=` だけを返す。期待は「1000 回と 100000 回で `sigil_blocks=` が完全に一致し、100 未満」にする。3-5e-ii で組・構造体・列挙型・クロージャの塊が `blocks=` から `sigil_blocks=` へ移るので、`fn_types_2_4d_exec` の `stored_closure_drop_does_not_grow_with_the_iteration_count`（クロージャの塊）は 3-5e-ii から `sigil_blocks=` の比較で漏れを見る形になる（`(s1, b1) == (s2, b2)` の比較のままでも成り立つ。`b` は 0 になる）。
+  - `"strs=0 blocks=0 sigil_blocks=<数>"` の完全一致を持つ `tests/sigil_alloc_34i.rs`・`tests/str_35b.rs`・`tests/list_35c.rs`・`tests/bytes_35d.rs`・`tests/bytes_35dii.rs`・`tests/bytes_35diii.rs` は、`"sigil_blocks=<数>"` に機械的に直す（数は変えない。`num("strs=")`・`num("blocks=")` の検査も外す）。
+  - `tests/globals_backend_34g.rs` の `globals_leave_no_live_blocks_at_exit` は、大域の組・構造体の塊が 3-5e-ii で `sigil_blocks=` へ移るので、3-5e-ii で期待を `sigil_blocks=0` を含むことに改める（`blocks=0` だけを見ると、`sigil_blocks=0` の部分文字列にも当たって検査が働かなくなる）。3-5e-iii で行全体の一致 `sigil_blocks=0` にする。
+  - 3-5e-ii の時点で、終了時の `sigil_blocks=<数>` の完全一致の期待は、終了時に組・構造体などの塊が残らない限り変わらない見込みである（今の期待はすべて `blocks=0`）。変わる場合は、実装の PR に理由を書く。
+  - `tests/request_isolation_4_2f.rs` の `live: frames=0 chunks=0` は別の数（評価器の要求の分離）で、変えない。
+
+#### G-8. 契約変更の有無
+
+- `src/ir.rs`（`Builtin`・`Ty`・`Rvalue`・`Term`）・`src/ast.rs`・`RAW_OPS` は変えない。生成するのは codegen の中の関数とシムだけで、lowering も評価器も変えない。順序は「本補足 G（ADR）→ 3-5e-i → 3-5e-ii → 3-5e-iii」。
+- 深い比較を評価器と同じ `StackExhausted` の停止にする（比較の式に停止の場所を持たせる）のは契約変更になるので、本補足の範囲で行わない（G-1・G-10）。行うなら `src/ir.rs` だけの `contract-change` の PR を先に出す。
+
+#### G-9. 分割と完了基準
+
+実装担当の提案の 3 段（i: 比較、ii: 複写・破棄・塊・trace、iii: `SIGIL_RT_LIVE`）は妥当なので、そのまま採る。理由: i は読むだけの処理で塊の確保器に触れず、単独で戻せる。ii の複写・破棄・`blk_new`・`Cell`/`Shared` は同じ確保器で作って捨てる組なので分けられない（G-5）。iii は書式の機械的な直しで試験ファイルを多く触るので、意味の変わる ii と分けた方がレビューしやすい。
+
+| PR | 範囲 | 依存 | 要承認 |
+|---|---|---|---|
+| 補足 G | 本補足（docs のみ）。C-5・C-7・D-3・D-6 の 3-5e の記述に注を付ける（G-11） | 補足 F | 不要（ADR） |
+| 3-5e-i | `sigil_eq_<k>`・`sigil_cmp_<k>` の生成（G-1）と `compare`・`ListMin`/`ListMax`・`ListMaxBy`/`ListMinBy` の付け替え。シム `str_eq`・`str_cmp`・`bytes_eq`・`bytes_cmp` を足す。`rt_spec` から `val_eq`・`val_cmp` を消し、Rust の `eq`・`cmp`・`sigil_rt_val_eq`・`sigil_rt_val_cmp`（`K_BYTES` の腕を含む）を消す。`tests/val_35e.rs` を足す | 補足 G（と合流済みの 3-5d-iii） | 不要（`unchecked` を足さない。`std.core.string`・`std.core.bytes` の `eq`・`cmp` は既にある。言語の振る舞いは G-10 の `Addr` のほか変えない。生成器の変更は通常のレビュー。C-1） |
+| 3-5e-ii | `sigil_clone_<k>`・`sigil_shadow_<k>`・`sigil_drop_<k>`・`sigil_dstep_<k>`・`sigil_blk_new`・`sigil_blk_free` と積み（G-1・G-2・G-4）、クロージャの +16 の段の関数の番地への変更、`--trace-drops` の生成（G-3。`sigil_rt_trace_drop` を `rt_spec` に足し直す）。G-6 の 3-5e-ii の行の Rust を消し、`sigil_rt_live_blocks` を常に 0 にする。`globals_backend_34g` の期待を直す（G-7） | 3-5e-i | 不要（`unchecked` を足さない。`--trace-drops` の出力・`sigil spec` は変わらない。塊の確保器が Sigil 製に替わるのは 3-7a で承認済みの方針（C-2）の帰結） |
+| 3-5e-iii | `live: sigil_blocks=<数>` への書式の変更と `sigil_rt_live_strs`・`sigil_rt_live_blocks` の削除（G-7。出す主体は合流の時点のもの）、既存の試験の期待の機械的な更新 | 3-5e-ii（3-7b とはどちらが先でもよい） | 不要（書式は C-5 で承認済み） |
+
+- **各 PR の完了基準**（C-7 の共通の基準に加えて）:
+  - 3-5e-i: 既存の全件の突き合わせと `scripts/native-report.sh` が通る。`tests/val_35e.rs` で、`==`・`!=`・`<`・`<=`・`>`・`>=` と `min`/`max`/`max_by`/`min_by` を、評価器とネイティブで突き合わせる（検査器が許す組み合わせだけ）: `Int`（最小・最大）、`Float`（`-0.0` と `0.0`、NaN、`inf`）、`Bool`、`String`（空・多バイト・接頭辞の関係）、`Path`（`==`）、`Bytes`（空・接頭辞・255 と 0）、`List`（空・接頭辞・長さ違い・NaN を含む要素）、組（NaN の要素で 2 が伝わること。先の要素で決まれば後の NaN を見ないこと）、構造体と列挙型の `==`（腕の違い・フィールドの違い・`Option`・`Result`）、`Shared`/`Cell` の `==`（同じ塊・別の塊で中身が同じ）、参照を含む組、`Addr` を含む組（G-10）、再帰する列挙型（`L.Cons` の連鎖。1000 段程度）。`rt_spec` から `val_eq`・`val_cmp` が消え、`runtime/core` に `fn eq(`・`fn cmp(` が残っていない。
+  - 3-5e-ii: 上に加えて、(1) 評価器とネイティブの `drop:` の行を突き合わせる既存の試験（`tests/m3_drop_order.rs`・`tests/m3_drop_limits.rs`・`tests/fn_types_2_4d_exec.rs` など、`common::native::native_drops` を使うもの）が通る。(2) `tests/val_35e.rs` に、ネイティブで 300 万段の `L.Cons` の連鎖を作って捨てても溢れないこと（評価器の `very_deep_value_is_dropped_without_overflowing_the_host_stack` と同じ入力）と、積みが 4096 項を超えて確保した領域へ移り、戻ったときに返されること（幅の広い値: 要素が組の 1 万要素の一覧の入れ子など。終了時の `sigil_blocks=` で確かめる）を置く。(3) `clone` と影の違い（構造体の `clone` は破棄で `drop:` を出し、影は出さない。`Cell` の `clone` は独立し、影は共有する）と、`Shared`/`Cell` の参照の数（複写の後に片方を捨てても中身が残り、最後の 1 つで捨てられる）を、評価器とネイティブの `drop:` の行と値で突き合わせる。(4) 組・構造体・列挙型・`Cell`・`Shared`・クロージャ（環境あり・なし、`move` で捕まえた文字列）・`List<組>` を作って捨てる繰り返しを 1000 回と 100000 回で走らせ、`sigil_blocks=` が完全に一致し、`blocks=` が 0 であること。わざと `blk_free` を 1 つ抜いた版と、2 回にした版（`sigil_blk_free` の `FREED` の検査で終了コード 70 と文言が出ること）で失敗することを手元で確かめ、PR に結果を書く（D-5 の 1 と同じ）。(5) `rt_spec` から `val_clone`・`val_shadow`・`val_drop`・`blk_new`（`rt` の名前はシムとして残る）・`trace_on`・`alloc` が消え、`runtime/core` に `sigil_rt_val_drop`・`sigil_rt_shared_`・`sigil_rt_alloc`・`LIVE_BLOCKS` がない（`grep`）。`runtime/core` の単体の `cargo test` と `tests/runtime_parity.rs` が、未定義のシンボルなしにリンクして通る。
+  - 3-5e-iii: 上に加えて、`SIGIL_RT_LIVE` の行が `live: sigil_blocks=<数>` と完全に一致し、`strs=`・`blocks=` を含まないことの試験がある（`tests/val_35e.rs`）。G-7 の試験ファイルがすべて新しい書式で通る。`runtime/core` に `sigil_rt_live_strs`・`sigil_rt_live_blocks` がない。3-7b が先に合流していた場合は、生成コードの出力で同じことを確かめる。
+- **`unchecked` の要否**: 3 つとも要らない。埋め込みの `std.*` に関数を足さない（使う `eq`・`cmp`・`clone`・`free` は 3-5b-ii・3-5c・3-5d で足して S2 のレビューを経た）。生成コードは Sigil の `unchecked` の関数ではないので、CI の信頼基盤の差分の検出には掛からない（C-1）。生成器（`src/codegen/**`）の変更は通常のレビューで見る。
+- **試験の置き場所**: `tests/val_35e.rs`（新しいファイル）に、3-5e の 3 つの PR の試験を置く。駆動は `tests/list_35c.rs`・`tests/bytes_35d.rs` と同じく、評価器（`ir_eval::run_with`）とネイティブ（`common::native`）の両方で走らせる。既存の試験ファイルの変更は G-7 に挙げたものだけとする。
+- **並行と順序**: 3-5e-i・ii・iii は直列にする（ii は i で作る生成の仕組み（鍵の表と待ち行列）を使い、iii は ii で `blocks=` が 0 になった後の書式の変更）。3-5e-i・ii は 3-7b・3-6a と並行してよい（起動の経路と `console.log` に触れない）。3-5f は 3-5e-ii の後にする（`trace_drop` を移すため。3-5e-iii とは並行してよい）。
+
+#### G-10. 既知の差
+
+- **`Addr` の比較**: 今のネイティブは、組・構造体などの中の `Addr`（記述子の種類 16）を `val_eq` で偽、`val_cmp` で比べられない（2）としており、評価器（番地の値で比べる）と食い違う。3-5e-i で生成する `eq`・`cmp` は評価器に合わせて番地の値で比べる（ネイティブの不具合の修正。`tests/val_35e.rs` に回帰試験を置く）。
+- **深い比較・複写**: 評価器は深い `==`・`<` を `StackExhausted` の停止にするが、ネイティブは今と同じく再帰し、スタックの端（ガードページ）で SIGSEGV になる（G-1）。複写（`clone`・影）は評価器も再帰する。差は今のまま残し、試験は評価器の停止を基準にしない（ネイティブの深い比較の試験は置かない）。
+- **二重解放の停止の仕方**: `abort`（SIGABRT）から終了コード 70 に変わる（G-4）。どちらも異常終了で、言語の値は変わらない。
+
+#### G-11. 既存の記述との整合（本補足の PR で直したもの）
+
+1. **C-5 の「3-5e（3-7a と 3-7b の両方の後）」**: 3-5e-iii と 3-7b はどちらが先でもよい、と注を付けた（G-7）。
+2. **C-7・D-6 の表の 3-5e の行**: 「補足 G で置換: 3-5e-i・3-5e-ii・3-5e-iii に分割。G-9」の注を付けた。依存の 3-7b は 3-5e-iii についてだけ「どちらが先でもよい」とし、i・ii は 3-7b に依存しない。D-6 の「`--trace-drops`（`trace_drop` を含む）」の `trace_drop` は 3-5f へ移す（G-3）。「Rust の `sigil_rt_str_cmp` を消す」は既に済んでいる（G-0）。
+3. **D-3 の「Rust の `sigil_rt_str_cmp`（生成コードからは呼ばれていない）は 3-5e で消す」**: 既に無い（G-0）と注を付けた。
+
+#### G-12. 選択肢と推奨（本文はすべて推奨案で書いた）
+
+1. **破棄の形**（G-2）: 生成コードの積みによる反復（**推奨**。評価器と今の Rust と同じ順で、深さによらず後始末でも溢れない）／型ごとの再帰（単純だが、300 万段の連鎖や停止の後始末で溢れる）／再帰に深さの上限を付け、超えたら停止（評価器と結果が変わる）。
+2. **塊の頭と参照の数の操作の置き場所**（G-4）: codegen が `blk_new`・`blk_free` を関数として、参照の数を命令として生成する（**推奨**。配置を知るのが codegen の 1 か所。`unchecked` が要らない）／Sigil の `std.core.shared` に置く（頭を読み書きする `unchecked` と、増減ごとのシムの呼び出しが増える）。
+3. **積みの領域**（G-2）: 静的な 4096 項＋あふれたら確保器から 2 倍で伸ばし、空になったら返す（**推奨**。普段は確保しない。終了時の `sigil_blocks=` が変わらない）／毎回の破棄で確保する（確保と解放が破棄のたびに増える）／確保した領域を返さずに持ち続ける（終了時の `sigil_blocks=` が入力によって変わる）。
+4. **trace の書き出し**（G-3）: 3-5f まで Rust の `sigil_rt_trace_drop` を呼ぶ（**推奨**。出力が 1 字も変わらず、書き込みの繰り返しを 3-6a と重ねて書かない）／3-5e で生成コードが `write` を直接発行する（部分書き込みと EINTR の扱いを 3-6a と別に書くことになる）。
+5. **3-5e の分割**（G-9）: 実装担当の提案の 3 段（**推奨**）／ii を複写（`clone`・影）と破棄・塊に分ける（複写だけを先にすると、Rust の `blk_new` で作った塊を生成した複写が作り、Rust の `val_drop` が捨てる中間の形になり、確保器を替えるのは結局 ii の後半で一度に行う必要がある。分けるなら ii の中のコミットの順にとどめる）／ii と iii をまとめる（意味の変わる変更と多数の試験ファイルの機械的な直しが混ざる）。
+6. **`eq`・`cmp` の戻りの幅**（G-1）: `i64`（**推奨**。生成コードの語と同じ。−1 と 2 をそのまま返せる）／今の `rt` と同じ 32 ビット（呼び出し側は変えずに済むが、生成する関数の中で切り詰める命令が増える）。
 
 ---
 

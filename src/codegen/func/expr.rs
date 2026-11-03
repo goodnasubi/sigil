@@ -264,10 +264,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 match t {
                     Ty::Int | Ty::Float | Ty::Bool | Ty::Unit | Ty::Addr | Ty::ParseError => v,
                     Ty::Str | Ty::Path => self.rt("str_clone", &[v]),
-                    _ => {
-                        let d = self.desc_addr(&t);
-                        self.rt("val_clone", &[d, v])
-                    }
+                    _ => self.copy_val(&t, v, true),
                 }
             }
             Rvalue::Discriminant(op) => {
@@ -304,7 +301,8 @@ impl<'a, 'p> Fx<'a, 'p> {
                 } else {
                     Ty::Tuple(vec![Ty::Unit; vals.len()])
                 };
-                let envd = self.desc_addr(&envty);
+                // 環境の段の破棄の関数の番地（補足 G-2）。関数の値の段が +16 から読んで積む。
+                let envd = self.dstep_addr(&envty);
                 let fr = self
                     .cg
                     .m

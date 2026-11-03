@@ -11,7 +11,7 @@ module std.os.alloc
 //   align > 16 は ret-32 に base、ret-24 に map_len を置く（B-1）。
 // - 頭（ret-16）: magic|class の語と size の語。class は 0..7 が小ブロック、8 が align <= 16 の大ブロック、
 //   9 が align > 16 の大ブロック。解放済みの小ブロックは FREED|class。
-// - 状態のページ（STATE）: 0..63 に各クラスの空きリストの先頭、64 に表の番地、72 に表の長さ、80 に表の容量。
+// - 状態のページ（STATE）: 0..63 に各クラスの空きリストの先頭、64 に表の番地、72 に表の長さ、80 に表の容量、88 に索引の番地、96 に索引の大きさ（2 の冪。語の値は項目の番号 + 1、0 は空き）。
 // - 表: 1 項目 16B（鍵, 印）。印 -1 は生きた大ブロック（鍵は返却番地）、0..7 はスラブのページ（鍵はページの先頭、
 //   印はクラス）。解放時に番地を表で引いてから頭を読むので、解放済みの大ブロックや確保器の外の番地の頭を読まない
 //   （SIGSEGV に頼らない。A-4）。
@@ -108,18 +108,76 @@ fn state() -> Addr
   return STATE;
 }
 
-fn tbl_find(key: Int, large: Bool) -> Int
-  intent "表で鍵を引き、項目の番号を返す（ないときは -1）。large なら印 -1 の項目、でなければ印 0..7 の項目だけを見る"
+fn bucket_home(key: Int, size: Int) -> Int
+  intent "鍵の番地が索引（大きさ size）の中で始まる位置。ページの番地（4096 の倍数）も大ブロックの番地も散らす"
   requires none
   ensures none
   effects none
-  unchecked "表は状態のページが指す生きた mmap の範囲で、長さまでの項目は書き込み済み（補足 A-5）"
+{
+  let x = key / 4096 % 1000003;
+  return (x * 1009 + key % 4096 / 16) % size;
+}
+
+fn index_put(idx: Addr, size: Int, key: Int, val: Int)
+  intent "索引に（項目の番号 + 1）を入れる。空きの位置を線形に探す（索引は項目の数の 2 倍以上あり、空きが必ずある）"
+  requires none
+  ensures none
+  effects none
+  unchecked "idx は size 個の語で、size >= 2 * 項目の数（補足 A-5）"
+{
+  let mut h = bucket_home(key, size);
+  while raw.load_i64(raw.offset(idx, 8 * h)) != 0 {
+    h = (h + 1) % size;
+  }
+  raw.store_i64(raw.offset(idx, 8 * h), val);
+}
+
+fn index_slot(idx: Addr, size: Int, key: Int, val: Int) -> Int
+  intent "索引で、鍵 key から始めて値 val の位置を返す（ないときは -1）"
+  requires none
+  ensures none
+  effects none
+  unchecked "idx は size 個の語（補足 A-5）"
+{
+  let mut h = bucket_home(key, size);
+  let mut probes = 0;
+  while probes < size {
+    let v = raw.load_i64(raw.offset(idx, 8 * h));
+    if v == val {
+      return h;
+    }
+    if v == 0 {
+      return -1;
+    }
+    h = (h + 1) % size;
+    probes = probes + 1;
+  }
+  return -1;
+}
+
+fn tbl_find(key: Int, large: Bool) -> Int
+  intent "表で鍵を引き、項目の番号を返す（ないときは -1）。large なら印 -1 の項目、でなければ印 0..7 の項目だけを見る。索引で引くので、項目の数によらず速い"
+  requires none
+  ensures none
+  effects none
+  unchecked "表と索引は状態のページが指す生きた mmap の範囲で、項目の数までは書き込み済み（補足 A-5）"
 {
   let st = state();
-  let t = raw.load_addr(raw.offset(st, 64));
   let n = raw.load_i64(raw.offset(st, 72));
-  let mut i = 0;
-  while i < n {
+  if n == 0 {
+    return -1;
+  }
+  let t = raw.load_addr(raw.offset(st, 64));
+  let idx = raw.load_addr(raw.offset(st, 88));
+  let size = raw.load_i64(raw.offset(st, 96));
+  let mut h = bucket_home(key, size);
+  let mut probes = 0;
+  while probes < size {
+    let v = raw.load_i64(raw.offset(idx, 8 * h));
+    if v == 0 {
+      return -1;
+    }
+    let i = v - 1;
     let e = raw.offset(t, 16 * i);
     if raw.load_i64(e) == key {
       let tag = raw.load_i64(raw.offset(e, 8));
@@ -127,17 +185,18 @@ fn tbl_find(key: Int, large: Bool) -> Int
         return i;
       }
     }
-    i = i + 1;
+    h = (h + 1) % size;
+    probes = probes + 1;
   }
   return -1;
 }
 
 fn tbl_add(key: Int, tag: Int)
-  intent "表に項目を足す（満杯なら倍の大きさに作り直す）"
+  intent "表に項目を足す（満杯なら倍の大きさに作り直す。索引も項目の 2 倍の大きさに作り直す）"
   requires none
   ensures none
   effects none
-  unchecked "表の作り直しは新しい mmap に写してから古い範囲を munmap する（補足 A-5）"
+  unchecked "表と索引の作り直しは新しい mmap に写してから古い範囲を munmap する（補足 A-5）"
 {
   let st = state();
   let mut t = raw.load_addr(raw.offset(st, 64));
@@ -156,15 +215,34 @@ fn tbl_add(key: Int, tag: Int)
     t = nt;
     raw.store_addr(raw.offset(st, 64), t);
     raw.store_i64(raw.offset(st, 80), ncap);
+    // 索引は項目の数の 2 倍（2 の冪）。作り直して、既存の項目を入れ直す。
+    let oldidx = raw.load_addr(raw.offset(st, 88));
+    let oldsize = raw.load_i64(raw.offset(st, 96));
+    let size = ncap * 2;
+    let idx = raw.int_to_addr(map(size * 8));
+    let mut j = 0;
+    while j < n {
+      let kj = raw.load_i64(raw.offset(t, 16 * j));
+      index_put(idx, size, kj, j + 1);
+      j = j + 1;
+    }
+    if oldsize > 0 {
+      unmap(raw.addr_to_int(oldidx), oldsize * 8);
+    }
+    raw.store_addr(raw.offset(st, 88), idx);
+    raw.store_i64(raw.offset(st, 96), size);
   }
   let e = raw.offset(t, 16 * n);
   raw.store_i64(e, key);
   raw.store_i64(raw.offset(e, 8), tag);
+  let size = raw.load_i64(raw.offset(st, 96));
+  let idx = raw.load_addr(raw.offset(st, 88));
+  index_put(idx, size, key, n + 1);
   raw.store_i64(raw.offset(st, 72), n + 1);
 }
 
 fn tbl_remove(i: Int)
-  intent "表の i 番の項目を、最後の項目で埋めて除く"
+  intent "表の i 番の項目を、最後の項目で埋めて除く（索引も直す）"
   requires none
   ensures none
   effects none
@@ -173,10 +251,45 @@ fn tbl_remove(i: Int)
   let st = state();
   let t = raw.load_addr(raw.offset(st, 64));
   let n = raw.load_i64(raw.offset(st, 72));
-  let last = raw.offset(t, 16 * (n - 1));
-  let e = raw.offset(t, 16 * i);
-  raw.store_i64(e, raw.load_i64(last));
-  raw.store_i64(raw.offset(e, 8), raw.load_i64(raw.offset(last, 8)));
+  let idx = raw.load_addr(raw.offset(st, 88));
+  let size = raw.load_i64(raw.offset(st, 96));
+  let ki = raw.load_i64(raw.offset(t, 16 * i));
+  // 1. 索引から i 番の位置を消し、後ろの項目を前へ詰める（開番地法の削除）。
+  let s = index_slot(idx, size, ki, i + 1);
+  if s < 0 {
+    halt();
+    return;
+  }
+  raw.store_i64(raw.offset(idx, 8 * s), 0);
+  let mut hole = s;
+  let mut j = (s + 1) % size;
+  while raw.load_i64(raw.offset(idx, 8 * j)) != 0 {
+    let vj = raw.load_i64(raw.offset(idx, 8 * j));
+    let kj = raw.load_i64(raw.offset(t, 16 * (vj - 1)));
+    let home = bucket_home(kj, size);
+    let dist_home = (j + size - home) % size;
+    let dist_hole = (j + size - hole) % size;
+    if dist_home >= dist_hole {
+      raw.store_i64(raw.offset(idx, 8 * hole), vj);
+      raw.store_i64(raw.offset(idx, 8 * j), 0);
+      hole = j;
+    }
+    j = (j + 1) % size;
+  }
+  // 2. 最後の項目を i 番へ移し、索引の指す先を直す。
+  let last = n - 1;
+  if i != last {
+    let kl = raw.load_i64(raw.offset(t, 16 * last));
+    let sl = index_slot(idx, size, kl, n);
+    if sl < 0 {
+      halt();
+      return;
+    }
+    raw.store_i64(raw.offset(idx, 8 * sl), i + 1);
+    let e = raw.offset(t, 16 * i);
+    raw.store_i64(e, kl);
+    raw.store_i64(raw.offset(e, 8), raw.load_i64(raw.offset(t, 16 * last + 8)));
+  }
   raw.store_i64(raw.offset(st, 72), n - 1);
 }
 

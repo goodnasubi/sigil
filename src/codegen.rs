@@ -7,7 +7,11 @@
 //!
 //! 関数は `(語…) -> (値, 停止の符号)` の形で呼ぶ（符号が 0 でなければ停止中で、`Resume` が呼び出し元の `cleanup` へ返す）。
 //! 局所は 8 バイトの stack slot に置き、基本ブロックの境界をまたぐ値は slot を通す（ブロック引数は使わない）。
-//! 表示・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。等しさ・順序は型ごとに生成する `sigil_eq_<k>`・`sigil_cmp_<k>` で行う（補足 G）。破棄は SIR の `Stmt::Drop`・`Stmt::Assign` の旧値で、型の記述子を使う `sigil_rt_val_drop` を呼んで行う（ヘッダつきの塊は参照数で解放し、`--trace-drops` では構造体の破棄を順に標準エラーへ出す）。文字列・パスも同じ道で解放する（ADR 0018 の決定 5）。既知の制限: クロージャの破棄の時期と停止の経路での漏れは SIR の評価器と厳密には揃えない。
+//! 表示は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。等しさ・順序・複写・破棄は型ごとに生成する関数で行う:
+//! `sigil_eq_<k>`・`sigil_cmp_<k>`（補足 G-1）、`sigil_clone_<k>`・`sigil_shadow_<k>`、破棄の入口 `sigil_drop_<k>` と 1 段 `sigil_dstep_<k>`
+//! （補足 G-2。破棄は作業の列で反復し、再帰しない）。塊は Sigil 製の確保器から取り、頭は `[大きさ | 黙った印][参照の数]`（補足 G-4）。
+//! `--trace-drops` では構造体の破棄を順に標準エラーへ出す（補足 G-3）。文字列・パスも同じ道で解放する（ADR 0018 の決定 5）。
+//! 既知の制限: クロージャの破棄の時期と停止の経路での漏れは SIR の評価器と厳密には揃えない。
 //!
 //! 出せない構文・組み込みはない（SIR の不変条件が崩れたときだけ `CgError::Internal`）。
 
@@ -135,16 +139,15 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
 /// ランタイム関数の引数と戻りの形（`p` 語・`i` 32 ビット整数・`f` 倍精度・`v` なし）。
 pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
-        "alloc" | "val_shadow" | "val_clone" => ("pp", 'p'),
-        "blk_new" => ("p", 'p'),
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
         "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "enter" => ("pp", 'i'),
-        "console_log" | "os_buf_free" | "stop" | "val_drop" => ("pp", 'v'),
-        "trace_on" => ("", 'v'),
+        "console_log" | "os_buf_free" | "stop" => ("pp", 'v'),
+        // `--trace-drops` の 1 行（補足 G-3）: 構造体の値と記述子を取り、標準エラーへ書く。生成した破棄の段が呼ぶ。
+        "trace_drop" => ("pp", 'v'),
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" => ("ppi", 'p'),
@@ -181,11 +184,61 @@ pub(crate) struct Cg<'p> {
     pub list_ops: Option<[FuncId; 5]>,
     /// バイト列の関数表に登録するシム（from_raw・free・clone・data・len。補足 F-4）。
     pub bytes_ops: Option<[FuncId; 5]>,
-    /// 生成する等しさ・順序の関数（補足 G-1）。鍵は（順序か, 型）で、型は `norm_with(strip(ty), true)`。表の長さが通し番号 `<k>`。
-    eqcmp: HashMap<(bool, Ty), FuncId>,
-    /// まだ本体を作っていない `eqcmp` の関数（本体が新しい鍵を求めるので、空になるまで回す）。
-    eqcmp_q: Vec<(FuncId, bool, Ty, usize)>,
+    /// 型ごとに生成する関数（補足 G-1）。鍵は（種類, 型）で、型は `norm_with(strip(ty), true)`。通し番号 `<k>` は `gen_n` から取る。
+    gen: HashMap<(Gk, Ty), FuncId>,
+    /// まだ本体を作っていない生成の関数（本体が新しい鍵を求めるので、空になるまで回す）。
+    gen_q: Vec<(FuncId, Gk, Ty, usize)>,
+    /// 生成の関数の通し番号の次の値（`sigil_<種類>_<k>` の `<k>` と、関数の番号の添字に使う）。
+    gen_n: usize,
+    /// 作業の列の静的な領域（補足 G-2）。`None` なら、この生成では使っていない。
+    ws: Option<DataId>,
+    /// 0 でなければ塊を解放する `sigil_blkfree_nz`（どのプログラムにも置く。子を持たない値の破棄が呼ぶ。補足 G-2）。
+    pub blkfree_nz: Option<FuncId>,
 }
+
+/// 型ごとに生成する関数の種類（補足 G-1・G-2）。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Gk {
+    /// `sigil_eq_<k>`: 等しさ（1 なら等しい）
+    Eq,
+    /// `sigil_cmp_<k>`: 順序（−1・0・1。比べられなければ 2）
+    Cmp,
+    /// `sigil_clone_<k>`: `clone`（`Cell` は独立した複製）
+    Clone,
+    /// `sigil_shadow_<k>`: 影（`Copy` の複写。共有するものは共有のまま）
+    Shadow,
+    /// `sigil_drop_<k>`: 破棄の入口（作業の列を回す）
+    Drop,
+    /// `sigil_dstep_<k>`: 破棄の 1 段（子を積み、自分の塊を解放する）
+    Dstep,
+}
+
+impl Gk {
+    fn prefix(self) -> &'static str {
+        match self {
+            Gk::Eq => "eq",
+            Gk::Cmp => "cmp",
+            Gk::Clone => "clone",
+            Gk::Shadow => "shadow",
+            Gk::Drop => "drop",
+            Gk::Dstep => "dstep",
+        }
+    }
+
+    /// 引数の数と戻りの印（`shim_sig` の形）。
+    pub(crate) fn arity(self) -> (usize, ShimRet) {
+        match self {
+            Gk::Eq | Gk::Cmp => (2, 'p'),
+            Gk::Clone | Gk::Shadow => (1, 'p'),
+            Gk::Drop | Gk::Dstep => (1, 'v'),
+        }
+    }
+}
+
+/// 作業の列の静的な領域の大きさ（項の数）。項は 16 バイト（`(段の関数の番地, 語)`）。補足 G-2。
+pub(crate) const WS_INLINE_ITEMS: usize = 4096;
+/// 作業の列の静的な領域の 1 つ分の大きさ（バイト）。先頭の 24 バイトは `[項の数][確保した領域][その項の数]`。
+pub(crate) const WS_BYTES: usize = 24 + WS_INLINE_ITEMS * 16;
 
 impl<'p> Cg<'p> {
     pub fn sig(&self, n: usize) -> Signature {
@@ -233,21 +286,41 @@ impl<'p> Cg<'p> {
         Ok(id)
     }
 
-    /// 型 `ty`（`norm_with(.., true)` で正規化済み）の `sigil_eq_<k>`（`is_cmp` なら `sigil_cmp_<k>`）。
-    /// 鍵になければ宣言して表に入れ、本体は待ち行列に積む（補足 G-1。再帰する型でも宣言が先なので終わる）。
+    /// 型 `ty`（`norm_with(strip(..), true)` で正規化済み）の等しさ・順序の関数（補足 G-1）。
     pub fn eqcmp_fn(&mut self, is_cmp: bool, ty: &Ty) -> Result<FuncId, CgError> {
-        if let Some(id) = self.eqcmp.get(&(is_cmp, ty.clone())) {
+        self.gen_fn(if is_cmp { Gk::Cmp } else { Gk::Eq }, ty)
+    }
+
+    /// 種類 `k` と型 `ty`（正規化済み）の生成の関数。鍵になければ宣言して表に入れ、本体は待ち行列に積む
+    /// （補足 G-1。再帰する型でも宣言が先なので終わる）。
+    pub fn gen_fn(&mut self, k: Gk, ty: &Ty) -> Result<FuncId, CgError> {
+        if let Some(id) = self.gen.get(&(k, ty.clone())) {
             return Ok(*id);
         }
-        let k = self.eqcmp.len();
-        let name = format!("sigil_{}_{k}", if is_cmp { "cmp" } else { "eq" });
+        let n = self.gen_n;
+        self.gen_n += 1;
+        let name = format!("sigil_{}_{n}", k.prefix());
+        let (np, r) = k.arity();
         let id = self
             .m
-            .declare_function(&name, Linkage::Local, &shim_sig(self.cc, 2, 'p'))
+            .declare_function(&name, Linkage::Local, &shim_sig(self.cc, np, r))
             .map_err(internal)?;
-        self.eqcmp.insert((is_cmp, ty.clone()), id);
-        self.eqcmp_q.push((id, is_cmp, ty.clone(), k));
+        self.gen.insert((k, ty.clone()), id);
+        self.gen_q.push((id, k, ty.clone(), n));
         Ok(id)
+    }
+
+    /// 作業の列の静的な領域のデータ（補足 G-2）。初めて使うときに宣言し、最後に 0 で定義する。
+    pub fn ws_data(&mut self) -> Result<DataId, CgError> {
+        if let Some(d) = self.ws {
+            return Ok(d);
+        }
+        let d = self
+            .m
+            .declare_anonymous_data(true, false)
+            .map_err(internal)?;
+        self.ws = Some(d);
+        Ok(d)
     }
 
     fn data_anon(&mut self) -> Result<DataId, CgError> {
@@ -550,8 +623,11 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         str_ops: None,
         list_ops: None,
         bytes_ops: None,
-        eqcmp: HashMap::new(),
-        eqcmp_q: vec![],
+        gen: HashMap::new(),
+        gen_q: vec![],
+        gen_n: 0,
+        ws: None,
+        blkfree_nz: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
@@ -565,6 +641,11 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(bytes_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
+    // 0 でなければ塊を解放する共通の関数（補足 G-2）。使わないプログラムでも置く（比べる試験の分岐の数を揃えるため）。
+    let blkfree =
+        cg.m.declare_function("sigil_blkfree_nz", Linkage::Local, &shim_sig(cc, 1, 'v'))
+            .map_err(internal)?;
+    cg.blkfree_nz = Some(blkfree);
 
     for (i, f) in p.funcs.iter().enumerate() {
         let sig = cg.sig(f.params.len());
@@ -627,13 +708,27 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fx.c_main(thunk)
     })?;
 
-    // 等しさ・順序の関数の本体（補足 G-1）。本体が新しい鍵を求めるので、待ち行列が空になるまで回す。
+    // 型ごとの生成の関数の本体（補足 G-1・G-2）。本体が新しい鍵を求めるので、待ち行列が空になるまで回す。
     let base = p.funcs.len() as u32 + 3 + shims.len() as u32 + mem.len() as u32;
-    while let Some((id, is_cmp, ty, k)) = cg.eqcmp_q.pop() {
-        let sig = shim_sig(cc, 2, 'p');
-        cg.define(id, base + k as u32, sig, vec![], |fx| {
-            fx.eqcmp_body(is_cmp, &ty)
-        })?;
+    while let Some((id, k, ty, n)) = cg.gen_q.pop() {
+        let (np, r) = k.arity();
+        let sig = shim_sig(cc, np, r);
+        cg.define(id, base + n as u32, sig, vec![], |fx| fx.gen_body(k, &ty))?;
+    }
+
+    // `sigil_blkfree_nz` の本体（補足 G-2）。番号は生成の関数の後に続ける。
+    let blkfree_idx = base + cg.gen_n as u32;
+    cg.gen_n += 1;
+    cg.define(blkfree, blkfree_idx, shim_sig(cc, 1, 'v'), vec![], |fx| {
+        fx.blkfree_nz_body()
+    })?;
+
+    // 作業の列の静的な領域（補足 G-2）。語は 0 で始まり、項の領域は後から確保した領域に替わる。
+    if let Some(d) = cg.ws {
+        let mut dd = DataDescription::new();
+        dd.define(vec![0u8; WS_BYTES].into_boxed_slice());
+        dd.set_align(8);
+        cg.m.define_data(d, &dd).map_err(internal)?;
     }
 
     // 停止の報告の表（16 バイトずつ: 文字列の番地, 長さ）。
@@ -659,7 +754,7 @@ type ShimRet = char;
 /// シム 1 つ（公開する関数, 呼ぶ Sigil の関数の番号, 引数の数, 戻り）。
 type Shim = (FuncId, usize, usize, ShimRet);
 
-fn shim_sig(cc: CallConv, np: usize, ret: ShimRet) -> Signature {
+pub(crate) fn shim_sig(cc: CallConv, np: usize, ret: ShimRet) -> Signature {
     let mut s = Signature::new(cc);
     for _ in 0..np {
         s.params.push(AbiParam::new(types::I64));

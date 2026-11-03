@@ -5,6 +5,7 @@ mod drop;
 mod eqcmp;
 mod expr;
 mod stmt;
+mod valops;
 
 use super::{norm, rt_spec, shim_spec, Cg, CgError, W};
 use crate::ir::{Func, GlobalInit, Term, Ty};
@@ -627,9 +628,6 @@ impl<'a, 'p> Fx<'a, 'p> {
         };
         let dtab = table(self, &dws);
         let ntab = table(self, &nws);
-        if self.cg.trace {
-            self.rt("trace_on", &[]);
-        }
         let (fp, fl) = match self.cg.bytes_data(f.name.as_bytes()) {
             Ok(d) => (self.data_addr(d), self.ic(f.name.len() as i64)),
             Err(e) => (self.fail(e), self.ic(0)),

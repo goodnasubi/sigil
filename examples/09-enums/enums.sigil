@@ -1,0 +1,168 @@
+// 例 09: 列挙型（enum）と match の書き方
+// バリアントごとに、持てる値の形が違う。match は全バリアントを書き切らないと検査で落ちる（網羅性）。
+// ここでは注文の状態遷移を題材に、構築・分解・遷移を示す。
+
+module examples.enums
+  targets server
+  trust none
+
+// 注文の状態。進むにつれて持つ情報が増える（支払額、追跡番号）。
+enum Order {
+  Received(Int),
+  Paid(Int, Int),
+  Shipped(Int, Int),
+  Cancelled(Int),
+}
+
+// どの状態でも注文番号は取り出せる。全バリアントを書き切るのが match の約束。
+fn order_id_of(o: Order) -> Int
+  intent "注文番号を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return match o {
+    Order.Received(id) => id,
+    Order.Paid(id, amount) => id,
+    Order.Shipped(id, tracking) => id,
+    Order.Cancelled(id) => id,
+  };
+}
+
+// 状態を番号に写す。支払額は Paid のときだけ意味を持つ。
+fn state_code(o: Order) -> Int
+  intent "状態の番号を返す（受付 0・支払済 1・発送済 2・取消 3）"
+  requires none
+  ensures 0 <= result && result <= 3
+  effects none
+{
+  return match o {
+    Order.Received(id) => 0,
+    Order.Paid(id, amount) => 1,
+    Order.Shipped(id, tracking) => 2,
+    Order.Cancelled(id) => 3,
+  };
+}
+
+fn paid_amount(o: Order) -> Int
+  intent "支払済なら支払額、それ以外は 0 を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return match o {
+    Order.Received(id) => 0,
+    Order.Paid(id, amount) => amount,
+    Order.Shipped(id, tracking) => 0,
+    Order.Cancelled(id) => 0,
+  };
+}
+
+fn is_finished(o: Order) -> Bool
+  intent "発送済か取消なら true を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return match o {
+    Order.Received(id) => false,
+    Order.Paid(id, amount) => false,
+    Order.Shipped(id, tracking) => true,
+    Order.Cancelled(id) => true,
+  };
+}
+
+// 遷移は、新しい状態を組み立てて返す。値で受け取った列挙型は match で消費されるので、
+// 変えない腕では分解した中身から組み立て直す（受け取った値をそのまま返す書き方はできない）。
+fn pay(o: Order, amount: Int) -> Order
+  intent "受付の注文を支払済にする。それ以外は同じ状態を返す"
+  requires 0 <= amount
+  ensures none
+  effects none
+{
+  return match o {
+    Order.Received(id) => Order.Paid(id, amount),
+    Order.Paid(id, paid) => Order.Paid(id, paid),
+    Order.Shipped(id, tracking) => Order.Shipped(id, tracking),
+    Order.Cancelled(id) => Order.Cancelled(id),
+  };
+}
+
+fn ship(o: Order, tracking: Int) -> Order
+  intent "支払済の注文を発送済にする。それ以外は同じ状態を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return match o {
+    Order.Received(id) => Order.Received(id),
+    Order.Paid(id, amount) => Order.Shipped(id, tracking),
+    Order.Shipped(id, shipped_tracking) => Order.Shipped(id, shipped_tracking),
+    Order.Cancelled(id) => Order.Cancelled(id),
+  };
+}
+
+fn cancel(o: Order) -> Order
+  intent "発送前なら取り消す。発送済と取消は同じ状態を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return match o {
+    Order.Received(id) => Order.Cancelled(id),
+    Order.Paid(id, amount) => Order.Cancelled(id),
+    Order.Shipped(id, tracking) => Order.Shipped(id, tracking),
+    Order.Cancelled(id) => Order.Cancelled(id),
+  };
+}
+
+// 以下は、状態を組み立てて値を取り出す小物（実行して確かめるために使う）。
+
+fn received_id(id: Int) -> Int
+  intent "受付の注文の番号を返す"
+  requires none
+  ensures result == id
+  effects none
+{
+  return order_id_of(Order.Received(id));
+}
+
+fn paid_code_and_amount(id: Int, amount: Int) -> Int
+  intent "支払った注文の、状態番号と支払額の合計を返す"
+  requires 0 <= amount
+  ensures none
+  effects none
+{
+  let o = pay(Order.Received(id), amount);
+  return state_code(o.clone()) * 100000 + paid_amount(o);
+}
+
+fn shipped_code(id: Int, amount: Int, tracking: Int) -> Int
+  intent "支払って発送した注文の状態番号を返す"
+  requires 0 <= amount
+  ensures result == 2
+  effects none
+{
+  let o = ship(pay(Order.Received(id), amount), tracking);
+  return state_code(o);
+}
+
+fn shipped_cancel_code(id: Int, amount: Int, tracking: Int) -> Int
+  intent "発送した注文は取り消せないこと（状態番号が発送済のまま）を返す"
+  requires 0 <= amount
+  ensures result == 2
+  effects none
+{
+  let o = cancel(ship(pay(Order.Received(id), amount), tracking));
+  return state_code(o);
+}
+
+fn paid_cancel_finished(id: Int, amount: Int) -> Bool
+  intent "支払済を取り消すと、終わった状態になることを返す"
+  requires 0 <= amount
+  ensures result == true
+  effects none
+{
+  let o = cancel(pay(Order.Received(id), amount));
+  return is_finished(o);
+}

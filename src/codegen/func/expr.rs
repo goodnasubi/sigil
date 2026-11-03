@@ -319,12 +319,12 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
     }
 
-    /// 構造的な比較（記述子を通す）。結果は 0/1 の語。
+    /// 構造的な比較（型ごとに生成する `sigil_eq_<k>`・`sigil_cmp_<k>` を通す。補足 G）。結果は 0/1 の語。
     pub(super) fn compare(&mut self, op: BinOp, t: &Ty, x: Value, y: Value) -> Value {
-        let d = self.desc_addr(&strip(t));
+        let t = strip(t);
         match op {
             BinOp::Eq | BinOp::Ne => {
-                let e = self.rt("val_eq", &[d, x, y]);
+                let e = self.eq_val(&t, x, y);
                 if op == BinOp::Ne {
                     self.b.ins().bxor_imm_s(e, 1)
                 } else {
@@ -332,7 +332,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 }
             }
             _ => {
-                let c = self.rt("val_cmp", &[d, x, y]);
+                let c = self.cmp_val(&t, x, y);
                 let r = match op {
                     BinOp::Lt => self.b.ins().icmp_imm_s(IntCC::Equal, c, -1),
                     BinOp::Gt => self.b.ins().icmp_imm_s(IntCC::Equal, c, 1),

@@ -44,7 +44,7 @@ pub const STR_FREE_FN: &str = "std.core.string.free";
 pub const STR_CLONE_FN: &str = "std.core.string.clone";
 pub const STR_DATA_FN: &str = "std.core.string.data";
 pub const STR_BYTES_FN: &str = "std.core.string.bytes";
-/// 3-5b-ii で移した操作。`eq`・`cmp` はシムを持たず、SIR にも入れない（3-5e が生成する `val_eq`・`val_cmp` が呼ぶ）。
+/// 3-5b-ii で移した操作。`eq`・`cmp` は 3-5e-i から `str_eq`・`str_cmp` のシムを持ち、生成する `sigil_eq_<k>`・`sigil_cmp_<k>` が呼ぶ。
 pub const STR_LEN_FN: &str = "std.core.string.len";
 pub const STR_IS_EMPTY_FN: &str = "std.core.string.is_empty";
 pub const STR_TRIM_FN: &str = "std.core.string.trim";
@@ -68,7 +68,7 @@ pub const LIST_SUM_INT_FN: &str = "std.core.list.sum_int";
 pub const LIST_SUM_FLOAT_FN: &str = "std.core.list.sum_float";
 
 /// `Bytes` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 F-2・F-4、PR 3-5d-ii）。
-/// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_bytes_*` のシムから呼ぶ。`eq`・`cmp` は 3-5e まで SIR に入れない。
+/// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_bytes_*` のシムから呼ぶ。`eq`・`cmp` は 3-5e-i から `bytes_eq`・`bytes_cmp` のシムを持つ。
 pub const BYTES_MODULE: &str = "std.core.bytes";
 pub const BYTES_EMPTY_FN: &str = "std.core.bytes.empty";
 pub const BYTES_CREATE_FN: &str = "std.core.bytes.create";
@@ -90,6 +90,8 @@ pub const BYTES_PUSH_U64_BE_FN: &str = "std.core.bytes.push_u64_be";
 pub const BYTES_PUSH_U32_LE_FN: &str = "std.core.bytes.push_u32_le";
 pub const BYTES_READ_U32_BE_FN: &str = "std.core.bytes.read_u32_be";
 pub const BYTES_CT_EQ_FN: &str = "std.core.bytes.ct_equal";
+pub const BYTES_EQ_FN: &str = "std.core.bytes.eq";
+pub const BYTES_CMP_FN: &str = "std.core.bytes.cmp";
 
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[

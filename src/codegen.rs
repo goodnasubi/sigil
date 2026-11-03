@@ -7,7 +7,7 @@
 //!
 //! 関数は `(語…) -> (値, 停止の符号)` の形で呼ぶ（符号が 0 でなければ停止中で、`Resume` が呼び出し元の `cleanup` へ返す）。
 //! 局所は 8 バイトの stack slot に置き、基本ブロックの境界をまたぐ値は slot を通す（ブロック引数は使わない）。
-//! 表示・比較・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。破棄は SIR の `Stmt::Drop`・`Stmt::Assign` の旧値で、型の記述子を使う `sigil_rt_val_drop` を呼んで行う（ヘッダつきの塊は参照数で解放し、`--trace-drops` では構造体の破棄を順に標準エラーへ出す）。文字列・パスも同じ道で解放する（ADR 0018 の決定 5）。既知の制限: クロージャの破棄の時期と停止の経路での漏れは SIR の評価器と厳密には揃えない。
+//! 表示・複写は型の記述子（読み取り専用のデータ）をランタイムへ渡して行う。等しさ・順序は型ごとに生成する `sigil_eq_<k>`・`sigil_cmp_<k>` で行う（補足 G）。破棄は SIR の `Stmt::Drop`・`Stmt::Assign` の旧値で、型の記述子を使う `sigil_rt_val_drop` を呼んで行う（ヘッダつきの塊は参照数で解放し、`--trace-drops` では構造体の破棄を順に標準エラーへ出す）。文字列・パスも同じ道で解放する（ADR 0018 の決定 5）。既知の制限: クロージャの破棄の時期と停止の経路での漏れは SIR の評価器と厳密には揃えない。
 //!
 //! 出せない構文・組み込みはない（SIR の不変条件が崩れたときだけ `CgError::Internal`）。
 
@@ -101,6 +101,9 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_clone" | "str_data" | "str_bytes" | "str_len" | "str_trim" | "str_lines" => ("p", 'p'),
         "str_free" => ("p", 'v'),
         "str_is_empty" => ("p", 'i'),
+        // 等しさ（0/1）と順序（-1・0・1。`Int` の値なので `'p'`）。生成する `sigil_eq_<k>`・`sigil_cmp_<k>` が呼ぶ（補足 G-1）
+        "str_eq" | "bytes_eq" => ("pp", 'i'),
+        "str_cmp" | "bytes_cmp" => ("pp", 'p'),
         "str_parse_int" => ("pp", 'i'),
         "str_from_utf8" => ("ppp", 'p'),
         // `Int` の回転（`std.core.int`。補足 F-3）。`Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。F-0・F-4）
@@ -145,7 +148,6 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" => ("ppi", 'p'),
-        "val_eq" | "val_cmp" => ("ppp", 'i'),
         "entry_args" => ("ippppppp", 'i'),
         "fs_read" | "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppppp", 'v'),
@@ -179,6 +181,10 @@ pub(crate) struct Cg<'p> {
     pub list_ops: Option<[FuncId; 5]>,
     /// バイト列の関数表に登録するシム（from_raw・free・clone・data・len。補足 F-4）。
     pub bytes_ops: Option<[FuncId; 5]>,
+    /// 生成する等しさ・順序の関数（補足 G-1）。鍵は（順序か, 型）で、型は `norm_with(strip(ty), true)`。表の長さが通し番号 `<k>`。
+    eqcmp: HashMap<(bool, Ty), FuncId>,
+    /// まだ本体を作っていない `eqcmp` の関数（本体が新しい鍵を求めるので、空になるまで回す）。
+    eqcmp_q: Vec<(FuncId, bool, Ty, usize)>,
 }
 
 impl<'p> Cg<'p> {
@@ -224,6 +230,23 @@ impl<'p> Cg<'p> {
             .declare_function(&sym, Linkage::Import, &s)
             .map_err(internal)?;
         self.rt.insert(name, id);
+        Ok(id)
+    }
+
+    /// 型 `ty`（`norm_with(.., true)` で正規化済み）の `sigil_eq_<k>`（`is_cmp` なら `sigil_cmp_<k>`）。
+    /// 鍵になければ宣言して表に入れ、本体は待ち行列に積む（補足 G-1。再帰する型でも宣言が先なので終わる）。
+    pub fn eqcmp_fn(&mut self, is_cmp: bool, ty: &Ty) -> Result<FuncId, CgError> {
+        if let Some(id) = self.eqcmp.get(&(is_cmp, ty.clone())) {
+            return Ok(*id);
+        }
+        let k = self.eqcmp.len();
+        let name = format!("sigil_{}_{k}", if is_cmp { "cmp" } else { "eq" });
+        let id = self
+            .m
+            .declare_function(&name, Linkage::Local, &shim_sig(self.cc, 2, 'p'))
+            .map_err(internal)?;
+        self.eqcmp.insert((is_cmp, ty.clone()), id);
+        self.eqcmp_q.push((id, is_cmp, ty.clone(), k));
         Ok(id)
     }
 
@@ -527,6 +550,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         str_ops: None,
         list_ops: None,
         bytes_ops: None,
+        eqcmp: HashMap::new(),
+        eqcmp_q: vec![],
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
@@ -602,6 +627,15 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fx.c_main(thunk)
     })?;
 
+    // 等しさ・順序の関数の本体（補足 G-1）。本体が新しい鍵を求めるので、待ち行列が空になるまで回す。
+    let base = p.funcs.len() as u32 + 3 + shims.len() as u32 + mem.len() as u32;
+    while let Some((id, is_cmp, ty, k)) = cg.eqcmp_q.pop() {
+        let sig = shim_sig(cc, 2, 'p');
+        cg.define(id, base + k as u32, sig, vec![], |fx| {
+            fx.eqcmp_body(is_cmp, &ty)
+        })?;
+    }
+
     // 停止の報告の表（16 バイトずつ: 文字列の番地, 長さ）。
     let msgs = std::mem::take(&mut cg.msgs);
     let mut ws: Vec<W> = vec![];
@@ -667,8 +701,9 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
 /// 生成コードの呼び出し先の名前と形は変えない。シムは公開せず（`Linkage::Local`）、番地を関数表で Rust ランタイムに渡す。
 fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
-        STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN, STR_FREE_FN, STR_FROM_UTF8_FN,
-        STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
+        STR_BYTES_FN, STR_CLONE_FN, STR_CMP_FN, STR_CONCAT_FN, STR_DATA_FN, STR_EQ_FN, STR_FREE_FN,
+        STR_FROM_UTF8_FN, STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN,
+        STR_PARSE_INT_FN, STR_TRIM_FN,
     };
     let mut out = vec![];
     let mut ids = vec![];
@@ -685,6 +720,8 @@ fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         ("str_parse_int", STR_PARSE_INT_FN, 2, 'i'),
         ("str_lines", STR_LINES_FN, 1, 'p'),
         ("str_from_utf8", STR_FROM_UTF8_FN, 3, 'p'),
+        ("str_eq", STR_EQ_FN, 2, 'i'),
+        ("str_cmp", STR_CMP_FN, 2, 'p'),
     ] {
         let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
             return Err(internal("std.core.string が結ばれていない".to_string()));
@@ -768,6 +805,8 @@ fn bytes_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         ("bytes_push_u32_le", BYTES_PUSH_U32_LE_FN, 2, 'v'),
         ("bytes_read_u32_be", BYTES_READ_U32_BE_FN, 3, 'i'),
         ("bytes_ct_eq", BYTES_CT_EQ_FN, 2, 'i'),
+        ("bytes_eq", BYTES_EQ_FN, 2, 'i'),
+        ("bytes_cmp", BYTES_CMP_FN, 2, 'p'),
     ] {
         let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
             return Err(internal("std.core.bytes が結ばれていない".to_string()));

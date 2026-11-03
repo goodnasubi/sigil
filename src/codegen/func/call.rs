@@ -136,8 +136,8 @@ impl<'a, 'p> Fx<'a, 'p> {
                 );
                 let c = self.b.ins().icmp_imm_s(IntCC::Equal, n, 0);
                 self.fail_if(c, code);
-                let d = self.desc_addr(&elem);
-                // 最良の位置を持つ。最初の要素を仮の最良とし、`val_cmp` が望む向きを返したときだけ取り替える
+                let elem_ty = elem.clone();
+                // 最良の位置を持つ。最初の要素を仮の最良とし、`sigil_cmp_<k>` が望む向きを返したときだけ取り替える
                 // （同順位は先のもの、比べられない相手（戻り 2）は取らない）。
                 let want = if b == ListMax { 1 } else { -1 };
                 let bs = self.tmp(8);
@@ -150,7 +150,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                     let pi = s.rt("list_get", &[l, i]);
                     let pb = s.rt("list_get", &[l, bi]);
                     let (xi, xb) = (s.ld(pi, 0), s.ld(pb, 0));
-                    let c = s.rt("val_cmp", &[d, xi, xb]);
+                    let c = s.cmp_val(&elem_ty, xi, xb);
                     let e = s.b.ins().icmp_imm_s(IntCC::Equal, c, want);
                     let better = s.b2i(e);
                     s.branch(
@@ -236,7 +236,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                     Ty::FnRef(_, r) => *r,
                     _ => Ty::Int,
                 };
-                let kd = self.desc_addr(&strip(&kt));
+                let kts = strip(&kt);
                 let want = if b == ListMaxBy { 1 } else { -1 };
                 let n = self.rt("list_len", &[l]);
                 // 最良の鍵と、その要素の添字（-1 は未定）。
@@ -256,7 +256,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                         first,
                         |s| s.ic(1),
                         |s| {
-                            let c = s.rt("val_cmp", &[kd, k, bk]);
+                            let c = s.cmp_val(&kts, k, bk);
                             let e = s.b.ins().icmp_imm_s(IntCC::Equal, c, want);
                             s.b2i(e)
                         },

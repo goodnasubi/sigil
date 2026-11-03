@@ -302,17 +302,18 @@ impl<'a> L<'a> {
         let fid = self.instance(decl, HashMap::new(), vec![]);
         // 確保器を結んだプログラムでは、入口から辿れなくてもその入口の関数を SIR に入れる。ネイティブはシムから
         // 呼び、評価器は呼ばない（ADR 0025 補足 A-2・B-2・B-3）。
-        // 文字列の表現（`std.core.string`。補足 D-3）の入口も同じ。`eq`・`cmp` は 3-5e が呼ぶまで入れない。
+        // 文字列の表現（`std.core.string`。補足 D-3）の入口も同じ。`eq`・`cmp` もシムから呼ぶので入れる（3-5e-i）。
         use crate::stdlib::embedded::{
-            ALLOC_FN, BYTES_CLONE_FN, BYTES_CONCAT_FN, BYTES_CREATE_FN, BYTES_CT_EQ_FN,
-            BYTES_DATA_FN, BYTES_EMPTY_FN, BYTES_EXTEND_FN, BYTES_FREE_FN, BYTES_FROM_RAW_FN,
-            BYTES_GET_FN, BYTES_IS_EMPTY_FN, BYTES_LEN_FN, BYTES_PUSH_FN, BYTES_PUSH_U16_BE_FN,
-            BYTES_PUSH_U32_BE_FN, BYTES_PUSH_U32_LE_FN, BYTES_PUSH_U64_BE_FN, BYTES_READ_U32_BE_FN,
-            BYTES_SET_FN, BYTES_SLICE_FN, FREE_FN, INT_ROTL_FN, INT_ROTR32_FN, INT_ROTR_FN,
-            LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN, LIST_PUSH_FN,
-            LIST_SUM_FLOAT_FN, LIST_SUM_INT_FN, LIVE_FN, STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN,
-            STR_DATA_FN, STR_FREE_FN, STR_FROM_UTF8_FN, STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN,
-            STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
+            ALLOC_FN, BYTES_CLONE_FN, BYTES_CMP_FN, BYTES_CONCAT_FN, BYTES_CREATE_FN,
+            BYTES_CT_EQ_FN, BYTES_DATA_FN, BYTES_EMPTY_FN, BYTES_EQ_FN, BYTES_EXTEND_FN,
+            BYTES_FREE_FN, BYTES_FROM_RAW_FN, BYTES_GET_FN, BYTES_IS_EMPTY_FN, BYTES_LEN_FN,
+            BYTES_PUSH_FN, BYTES_PUSH_U16_BE_FN, BYTES_PUSH_U32_BE_FN, BYTES_PUSH_U32_LE_FN,
+            BYTES_PUSH_U64_BE_FN, BYTES_READ_U32_BE_FN, BYTES_SET_FN, BYTES_SLICE_FN, FREE_FN,
+            INT_ROTL_FN, INT_ROTR32_FN, INT_ROTR_FN, LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN,
+            LIST_LEN_FN, LIST_PUSH_FN, LIST_SUM_FLOAT_FN, LIST_SUM_INT_FN, LIVE_FN, STR_BYTES_FN,
+            STR_CLONE_FN, STR_CMP_FN, STR_CONCAT_FN, STR_DATA_FN, STR_EQ_FN, STR_FREE_FN,
+            STR_FROM_UTF8_FN, STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN,
+            STR_PARSE_INT_FN, STR_TRIM_FN,
         };
         for n in [
             BYTES_EMPTY_FN,
@@ -335,6 +336,8 @@ impl<'a> L<'a> {
             BYTES_PUSH_U32_LE_FN,
             BYTES_READ_U32_BE_FN,
             BYTES_CT_EQ_FN,
+            BYTES_EQ_FN,
+            BYTES_CMP_FN,
             INT_ROTL_FN,
             INT_ROTR_FN,
             INT_ROTR32_FN,
@@ -360,6 +363,8 @@ impl<'a> L<'a> {
             STR_CONCAT_FN,
             STR_PARSE_INT_FN,
             STR_FROM_UTF8_FN,
+            STR_EQ_FN,
+            STR_CMP_FN,
         ] {
             if n != entry {
                 if let Some(&d) = self.fns.get(n) {

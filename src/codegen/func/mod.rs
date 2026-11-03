@@ -347,6 +347,17 @@ impl<'a, 'p> Fx<'a, 'p> {
                 .collect();
             self.rt("set_str_ops", &addrs);
         }
+        // 一覧の関数表も同じ（入口の引数の `List` を `coerce` が作るので、`enter` より前。補足 E-3）。
+        if let Some(ids) = self.cg.list_ops {
+            let addrs: Vec<Value> = ids
+                .iter()
+                .map(|&id| {
+                    let r = self.cg.m.declare_func_in_func(id, self.b.func);
+                    self.b.ins().func_addr(types::I64, r)
+                })
+                .collect();
+            self.rt("set_list_ops", &addrs);
+        }
         let r = self.rt("enter", &[fa, a]);
         let r32 = self.b.ins().ireduce(types::I32, r);
         self.b.ins().return_(&[r32]);

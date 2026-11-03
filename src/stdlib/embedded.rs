@@ -11,6 +11,7 @@
 //!   すべてのプログラムに暗黙に結ぶ（補足 C-2。`implicit_roots`）。
 //! - `std.core.string`（3-5b-i）は `String` の表現（24B の頭と中身の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 D）。
 //!   `raw_ops` で確保器を差し替えたときは、確保器も文字列も結ばない。
+//! - `std.core.list`（3-5c-ii）は `List` の表現（24B の頭と要素の領域の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 E）。
 
 /// Sigil 製の確保器のモジュール名（ADR 0025 決定 3、補足 A-2・B-1）。
 pub const ALLOC_MODULE: &str = "std.os.alloc";
@@ -43,10 +44,20 @@ pub const STR_PARSE_INT_FN: &str = "std.core.string.parse_int";
 pub const STR_EQ_FN: &str = "std.core.string.eq";
 pub const STR_CMP_FN: &str = "std.core.string.cmp";
 
+/// `List` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 E-2・E-3、PR 3-5c-ii）。
+/// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_list_*` のシムから呼ぶ。
+pub const LIST_MODULE: &str = "std.core.list";
+pub const LIST_CREATE_FN: &str = "std.core.list.create";
+pub const LIST_FREE_FN: &str = "std.core.list.free";
+pub const LIST_PUSH_FN: &str = "std.core.list.push";
+pub const LIST_GET_FN: &str = "std.core.list.get";
+pub const LIST_LEN_FN: &str = "std.core.list.len";
+
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[
     (ALLOC_MODULE, include_str!("os_alloc.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
+    (LIST_MODULE, include_str!("core_list.sigil")),
     (FLOAT_MODULE, include_str!("core_float.sigil")),
 ];
 
@@ -66,7 +77,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
     if replaced {
         vec![]
     } else {
-        vec![ALLOC_MODULE, STRING_MODULE]
+        vec![ALLOC_MODULE, STRING_MODULE, LIST_MODULE]
     }
 }
 

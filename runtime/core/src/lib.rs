@@ -203,16 +203,16 @@ unsafe fn s<'a>(p: *const RtStr) -> &'a str {
     }
 }
 
-/// `String.lines`。要素は `*mut RtStr`（`sigil_rt_list_free_strs` で解放する）。
+/// `String.lines`。要素は `*mut RtStr`（呼び出し側が要素を捨ててから `list_free` する）。
 ///
 /// # Safety
 /// `p` は有効。
 #[no_mangle]
 pub unsafe extern "C" fn sigil_rt_str_lines(p: *const RtStr) -> *mut RtList {
-    let l = sigil_rt_list_new(std::mem::size_of::<*mut RtStr>());
+    let l = list_new();
     for line in text::lines(s(p)) {
         let e = new_str(line.to_string());
-        sigil_rt_list_push(l, &e as *const *mut RtStr as *const u8);
+        list_push(l, e as i64);
     }
     l
 }
@@ -395,10 +395,10 @@ pub unsafe extern "C" fn sigil_rt_bytes_from_list(
     out: *mut *mut RtBytes,
     err: *mut *mut RtStr,
 ) -> i32 {
-    let n = sigil_rt_list_len(l).max(0) as usize;
+    let n = list_len(l).max(0) as usize;
     let mut v = Vec::with_capacity(n);
     for i in 0..n {
-        let val = *(sigil_rt_list_get(l, i as i64) as *const i64);
+        let val = *(list_get(l, i as i64) as *const i64);
         if !(0..=255).contains(&val) {
             *err = new_str("0..=255 の範囲外".to_string());
             return 0;
@@ -499,104 +499,89 @@ pub extern "C" fn sigil_rt_int_rotr32(x: i64, n: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// List（要素の大きさは生成したコードが渡す。要素は 16 バイト境界に置く）
+// List（24B の頭の塊。表現は Sigil 製の `std.core.list` が持つ。補足 E。要素は 8B の語）
 
+/// 24B の頭（buf・len・cap）の塊。Rust 側は中身を知らず、登録された関数表を通してだけ触る。
+#[repr(C)]
 pub struct RtList {
-    elem: usize,
-    len: usize,
-    cap: usize,
-    buf: *mut u8,
+    _p: [u8; 0],
 }
 
-const LIST_ALIGN: usize = 16;
+type ListNew = extern "C" fn(usize) -> *mut RtList;
+type ListFree = extern "C" fn(*mut RtList);
+type ListPush = extern "C" fn(*mut RtList, *const u8);
+type ListGet = extern "C" fn(*const RtList, i64) -> *mut u8;
+type ListLen = extern "C" fn(*const RtList) -> i64;
 
+/// 一覧の関数表（create・free・push・get・len の関数ポインタ。0 は未登録）。
+static LIST_OPS: [AtomicUsize; 5] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+
+/// 生成コードの `main` が、入口を呼ぶ前に一覧の関数表を登録する（補足 E-3）。
 #[no_mangle]
-pub extern "C" fn sigil_rt_list_new(elem_size: usize) -> *mut RtList {
-    live_blocks(1);
-    Box::into_raw(Box::new(RtList {
-        elem: elem_size,
-        len: 0,
-        cap: 0,
-        buf: std::ptr::null_mut(),
-    }))
+pub extern "C" fn sigil_rt_set_list_ops(
+    new: ListNew,
+    free: ListFree,
+    push: ListPush,
+    get: ListGet,
+    len: ListLen,
+) {
+    LIST_OPS[0].store(new as usize, Ordering::Relaxed);
+    LIST_OPS[1].store(free as usize, Ordering::Relaxed);
+    LIST_OPS[2].store(push as usize, Ordering::Relaxed);
+    LIST_OPS[3].store(get as usize, Ordering::Relaxed);
+    LIST_OPS[4].store(len as usize, Ordering::Relaxed);
 }
 
-/// 入れ物だけを解放する（要素の破棄は呼び出し側が先に行う）。
-///
-/// # Safety
-/// `l` は `sigil_rt_list_new` の戻り値（または null）。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_free(l: *mut RtList) {
-    if l.is_null() {
-        return;
+/// 関数表の `i` 番目。未登録なら異常停止（exit_group(70) と同じ終了コード）。
+fn list_op(i: usize) -> usize {
+    #[cfg(test)]
+    if std::env::var("SIGIL_TEST_STR_MODE").as_deref() != Ok("unregistered") {
+        tests::table::init();
     }
-    let b = Box::from_raw(l);
-    if !b.buf.is_null() {
-        sigil_rt_free(b.buf, b.cap * b.elem, LIST_ALIGN);
+    let p = LIST_OPS[i].load(Ordering::Relaxed);
+    if p == 0 {
+        eprintln!("sigil: 一覧の関数表が未登録のまま一覧を使った");
+        std::process::exit(70);
     }
-    live_blocks(-1);
+    p
 }
 
-/// 要素が `*mut RtStr` の一覧を、要素ごと解放する。
-///
-/// # Safety
-/// `l` の要素は `RtStr`。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_free_strs(l: *mut RtList) {
-    if l.is_null() {
-        return;
-    }
-    for i in 0..(*l).len {
-        let e = *((*l).buf as *mut *mut RtStr).add(i);
-        str_free(e);
-    }
-    sigil_rt_list_free(l);
+// SAFETY（以下の 5 つ）: `list_op` が返す値は `sigil_rt_set_list_ops` が受け取った、対応する型の関数ポインタだけ。
+/// 空の一覧を作る（要素は 8B の語）。
+pub(crate) fn list_new() -> *mut RtList {
+    let f: ListNew = unsafe { std::mem::transmute(list_op(0)) };
+    f(8)
 }
 
-/// # Safety
-/// `l` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_len(l: *const RtList) -> i64 {
-    (*l).len as i64
+/// 入れ物だけを解放する（要素の破棄は呼び出し側が先に行う）。null は何もしない。
+pub(crate) fn list_free(l: *mut RtList) {
+    if !l.is_null() {
+        let f: ListFree = unsafe { std::mem::transmute(list_op(1)) };
+        f(l)
+    }
 }
 
-/// `elem` の指す `elem_size` バイトを末尾へ写す（移動。元の破棄は生成したコードが済ませる）。
-///
-/// # Safety
-/// `l` は有効。`elem` は `elem_size` バイト読める。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_push(l: *mut RtList, elem: *const u8) {
-    let r = &mut *l;
-    if r.len == r.cap {
-        let ncap = if r.cap == 0 { 4 } else { r.cap * 2 };
-        let nbuf = sigil_rt_alloc(ncap * r.elem, LIST_ALIGN);
-        if !r.buf.is_null() {
-            std::ptr::copy_nonoverlapping(r.buf, nbuf, r.len * r.elem);
-            sigil_rt_free(r.buf, r.cap * r.elem, LIST_ALIGN);
-        }
-        r.buf = nbuf;
-        r.cap = ncap;
-    }
-    if r.elem > 0 {
-        std::ptr::copy_nonoverlapping(elem, r.buf.add(r.len * r.elem), r.elem);
-    }
-    r.len += 1;
+/// 語 `w` を末尾へ写す。
+pub(crate) fn list_push(l: *mut RtList, w: i64) {
+    let f: ListPush = unsafe { std::mem::transmute(list_op(2)) };
+    f(l, &w as *const i64 as *const u8)
 }
 
 /// 位置 `i` の要素の番地。範囲外は null。
-///
-/// # Safety
-/// `l` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_list_get(l: *const RtList, i: i64) -> *mut u8 {
-    let r = &*l;
-    if i < 0 || i as usize >= r.len {
-        return std::ptr::null_mut();
-    }
-    if r.elem == 0 {
-        return LIST_ALIGN as *mut u8;
-    }
-    r.buf.add(i as usize * r.elem)
+pub(crate) fn list_get(l: *const RtList, i: i64) -> *mut u8 {
+    let f: ListGet = unsafe { std::mem::transmute(list_op(3)) };
+    f(l, i)
+}
+
+pub(crate) fn list_len(l: *const RtList) -> i64 {
+    let f: ListLen = unsafe { std::mem::transmute(list_op(4)) };
+    f(l)
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,9 +1006,69 @@ pub(crate) mod tests {
             unsafe { (*(p as *const Head)).len }
         }
 
+        /// 一覧の頭（buf・len・cap の 24B。本物と同じ配置）。要素の領域は 8 バイト境界の Rust の確保。
+        #[repr(C)]
+        struct LHead {
+            buf: *mut u8,
+            len: i64,
+            cap: i64,
+        }
+
+        extern "C" fn l_new(elem: usize) -> *mut RtList {
+            assert_eq!(elem, 8);
+            Box::into_raw(Box::new(LHead {
+                buf: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            })) as *mut RtList
+        }
+
+        extern "C" fn l_free(l: *mut RtList) {
+            unsafe {
+                let h = Box::from_raw(l as *mut LHead);
+                if h.cap > 0 {
+                    drop(Vec::from_raw_parts(h.buf as *mut i64, 0, h.cap as usize));
+                }
+            }
+        }
+
+        extern "C" fn l_push(l: *mut RtList, e: *const u8) {
+            unsafe {
+                let h = &mut *(l as *mut LHead);
+                let w = *(e as *const i64);
+                let mut v = if h.cap > 0 {
+                    Vec::from_raw_parts(h.buf as *mut i64, h.len as usize, h.cap as usize)
+                } else {
+                    Vec::new()
+                };
+                v.push(w);
+                h.buf = v.as_mut_ptr() as *mut u8;
+                h.len = v.len() as i64;
+                h.cap = v.capacity() as i64;
+                std::mem::forget(v);
+            }
+        }
+
+        extern "C" fn l_get(l: *const RtList, i: i64) -> *mut u8 {
+            unsafe {
+                let h = &*(l as *const LHead);
+                if i < 0 || i >= h.len {
+                    return std::ptr::null_mut();
+                }
+                h.buf.add(i as usize * 8)
+            }
+        }
+
+        extern "C" fn l_len(l: *const RtList) -> i64 {
+            unsafe { (*(l as *const LHead)).len }
+        }
+
         pub fn init() {
             static ONCE: Once = Once::new();
-            ONCE.call_once(|| sigil_rt_set_str_ops(new, free, clone, data, bytes));
+            ONCE.call_once(|| {
+                sigil_rt_set_str_ops(new, free, clone, data, bytes);
+                sigil_rt_set_list_ops(l_new, l_free, l_push, l_get, l_len);
+            });
         }
     }
 
@@ -1056,11 +1101,14 @@ pub(crate) mod tests {
     fn lines_list_and_shared() {
         unsafe {
             let l = sigil_rt_str_lines(st("a\r\nb\n\nc\n"));
-            assert_eq!(sigil_rt_list_len(l), 4);
-            let e = *(sigil_rt_list_get(l, 1) as *mut *mut RtStr);
+            assert_eq!(list_len(l), 4);
+            let e = *(list_get(l, 1) as *mut *mut RtStr);
             assert_eq!(s(e), "b");
-            assert!(sigil_rt_list_get(l, 4).is_null());
-            sigil_rt_list_free_strs(l);
+            assert!(list_get(l, 4).is_null());
+            for i in 0..4 {
+                str_free(*(list_get(l, i) as *mut *mut RtStr));
+            }
+            list_free(l);
 
             let p = sigil_rt_shared_new(8, 8);
             assert_eq!(sigil_rt_shared_count(p), 1);

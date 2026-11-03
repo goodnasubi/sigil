@@ -21,9 +21,9 @@
 //! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
 
 use super::{
-    bytes_slice, new_str, s, sigil_rt_alloc, sigil_rt_bytes_clone, sigil_rt_bytes_free,
-    sigil_rt_free, sigil_rt_list_free, sigil_rt_list_get, sigil_rt_list_len, sigil_rt_list_new,
-    sigil_rt_list_push, str_clone, str_free, text, RtBytes, RtList, RtStr,
+    bytes_slice, list_free, list_get, list_len, list_new, list_push, new_str, s, sigil_rt_alloc,
+    sigil_rt_bytes_clone, sigil_rt_bytes_free, sigil_rt_free, str_clone, str_free, text, RtBytes,
+    RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
 use std::cmp::Ordering;
@@ -71,10 +71,8 @@ unsafe fn word(p: *const u8) -> i64 {
 }
 
 unsafe fn list_items(l: *const RtList) -> Vec<i64> {
-    let n = sigil_rt_list_len(l);
-    (0..n)
-        .map(|i| word(sigil_rt_list_get(l, i) as *const u8))
-        .collect()
+    let n = list_len(l);
+    (0..n).map(|i| word(list_get(l, i) as *const u8)).collect()
 }
 
 /// 列挙型の腕の項（名前、フィールド数、フィールドの記述子の位置）と、次の腕の位置。
@@ -365,10 +363,10 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
     }
     match k {
         K_LIST => {
-            let l = sigil_rt_list_new(8);
+            let l = list_new();
             for x in list_items(w as *const RtList) {
                 let y = dup(dp(d, 1), x, deep);
-                sigil_rt_list_push(l, &y as *const i64 as *const u8);
+                list_push(l, y);
             }
             l as i64
         }
@@ -456,7 +454,7 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                 for x in list_items(l).into_iter().rev() {
                     push(&mut st, dp(d, 1), x);
                 }
-                sigil_rt_list_free(l);
+                list_free(l);
             }
             K_TUPLE => {
                 let n = rd(d, 1) as usize;
@@ -599,10 +597,10 @@ unsafe fn coerce(a: &Arg, mut d: D) -> Result<i64, String> {
         (K_BOOL, Arg::Bool(b)) => Ok(*b as i64),
         (K_STR | K_PATH, Arg::Str(x)) => Ok(new_str(x.clone()) as i64),
         (K_LIST, Arg::List(xs)) => {
-            let l = sigil_rt_list_new(8);
+            let l = list_new();
             for x in xs {
                 let w = coerce(x, dp(d, 1))?;
-                sigil_rt_list_push(l, &w as *const i64 as *const u8);
+                list_push(l, w);
             }
             Ok(l as i64)
         }
@@ -702,9 +700,9 @@ mod tests {
                 )),
                 "1.5"
             );
-            let l = sigil_rt_list_new(8);
+            let l = list_new();
             for x in [3i64, 1, 2] {
-                sigil_rt_list_push(l, &x as *const i64 as *const u8);
+                list_push(l, x);
             }
             assert_eq!(
                 s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)),

@@ -126,11 +126,13 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         | "bytes_push_u64_be" | "bytes_push_u32_le" => ("pp", 'v'),
         "bytes_free" => ("p", 'v'),
         "bytes_is_empty" => ("p", 'i'),
-        "bytes_ct_eq" | "int_rotr32" => ("pp", 'i'),
+        "bytes_ct_eq" => ("pp", 'i'),
+        // `Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。ADR 0025 補足 F-0・F-4）
+        "int_rotr32" => ("pp", 'p'),
         "bytes_get" | "bytes_read_u32_be" | "bytes_from_list" | "bytes_to_string_utf8" => {
             ("ppp", 'i')
         }
-        "int_rotl" | "int_rotr" => ("ppp", 'i'),
+        "int_rotl" | "int_rotr" => ("ppp", 'p'),
         "bytes_set" => ("pppp", 'i'),
         "bytes_slice" => ("ppppp", 'i'),
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),

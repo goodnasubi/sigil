@@ -624,7 +624,10 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             StrAsBytes => {
                 let (s, _) = self.val(&args[0]);
-                (self.rt("str_as_bytes", &[s]), u)
+                // 文字列の中身をそのまま複製する（ランタイムの関数は使わない。補足 F-9）
+                let p = self.rt("str_data", &[s]);
+                let n = self.rt("str_bytes", &[s]);
+                (self.rt("bytes_from_raw", &[p, n]), u)
             }
             IntRotl => {
                 let (x, _) = self.val(&args[0]);
@@ -656,20 +659,57 @@ impl<'a, 'p> Fx<'a, 'p> {
                 (self.rt("bytes_with_capacity", &[c]), u)
             }
             BytesFromList => {
+                // 一覧の要素を順に積む。0..=255 の外が見つかったら、以降は積まずに、最後に解放して Err（補足 F-9）
                 let (l, _) = self.val(&args[0]);
-                let out = self.zero_tmp(8);
-                let err = self.zero_tmp(8);
-                let ok = self.rt("bytes_from_list", &[l, out, err]);
-                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let n = self.rt("list_len", &[l]);
+                let nb = self.rt("bytes_with_capacity", &[n]);
+                let bs = self.tmp(8);
+                let ba = self.saddr(bs);
+                self.st(nb, ba, 0);
+                let bad = self.zero_tmp(8);
+                self.loop_range(n, |s, i| {
+                    let bd = s.ld(bad, 0);
+                    let live = s.b.ins().icmp_imm_s(IntCC::Equal, bd, 0);
+                    s.branch(
+                        live,
+                        |s| {
+                            let p = s.rt("list_get", &[l, i]);
+                            let x = s.ld(p, 0);
+                            let c255 = s.ic(255);
+                            let out = s.b.ins().icmp(IntCC::UnsignedGreaterThan, x, c255);
+                            s.branch(
+                                out,
+                                |s| {
+                                    let one = s.ic(1);
+                                    s.st(one, bad, 0);
+                                    s.ic(0)
+                                },
+                                |s| {
+                                    let ba = s.saddr(bs);
+                                    let b = s.ld(ba, 0);
+                                    s.rt("bytes_push", &[b, x]);
+                                    s.ic(0)
+                                },
+                            )
+                        },
+                        |s| s.ic(0),
+                    );
+                });
+                let bd = self.ld(bad, 0);
+                let isbad = self.b.ins().icmp_imm_s(IntCC::NotEqual, bd, 0);
                 let r = self.branch(
-                    c,
+                    isbad,
                     |s| {
-                        let res = s.ld(out, 0);
-                        s.mk_enum_c(0, &[res])
+                        let ba = s.saddr(bs);
+                        let b = s.ld(ba, 0);
+                        s.rt("bytes_free", &[b]);
+                        let e = s.str_lit("0..=255 の範囲外");
+                        s.mk_enum_c(1, &[e])
                     },
                     |s| {
-                        let e = s.ld(err, 0);
-                        s.mk_enum_c(1, &[e])
+                        let ba = s.saddr(bs);
+                        let b = s.ld(ba, 0);
+                        s.mk_enum_c(0, &[b])
                     },
                 );
                 (r, u)
@@ -755,20 +795,48 @@ impl<'a, 'p> Fx<'a, 'p> {
                 (self.ic(0), u)
             }
             BytesToStringUtf8 => {
+                // 検査と構築は `std.core.string.from_utf8`。失敗の文言は Rust の `Utf8Error` と同じ（補足 F-5）
                 let (b, _) = self.val(&args[0]);
-                let out = self.zero_tmp(8);
-                let err = self.zero_tmp(8);
-                let ok = self.rt("bytes_to_string_utf8", &[b, out, err]);
-                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                let p = self.rt("bytes_data", &[b]);
+                let n = self.rt("bytes_len", &[b]);
+                let info = self.zero_tmp(16);
+                let st = self.rt("str_from_utf8", &[p, n, info]);
+                let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, st, 0);
                 let r = self.branch(
-                    c,
+                    ok,
+                    |s| s.mk_enum_c(0, &[st]),
                     |s| {
-                        let res = s.ld(out, 0);
-                        s.mk_enum_c(0, &[res])
-                    },
-                    |s| {
-                        let e = s.ld(err, 0);
-                        s.mk_enum_c(1, &[e])
+                        let up = s.ld(info, 0);
+                        let el = s.ld(info, 8);
+                        let d = s.desc_addr(&Ty::Int);
+                        let q = s.ic(0);
+                        let ups = s.rt("val_show", &[d, up, q]);
+                        let iszero = s.b.ins().icmp_imm_s(IntCC::Equal, el, 0);
+                        let msg = s.branch(
+                            iszero,
+                            |s| {
+                                let a = s.str_lit("incomplete utf-8 byte sequence from index ");
+                                let m = s.rt("str_concat", &[a, ups]);
+                                s.rt("str_free", &[a]);
+                                m
+                            },
+                            |s| {
+                                let a = s.str_lit("invalid utf-8 sequence of ");
+                                let d = s.desc_addr(&Ty::Int);
+                                let q = s.ic(0);
+                                let els = s.rt("val_show", &[d, el, q]);
+                                let m1 = s.rt("str_concat", &[a, els]);
+                                let c = s.str_lit(" bytes from index ");
+                                let m2 = s.rt("str_concat", &[m1, c]);
+                                let m3 = s.rt("str_concat", &[m2, ups]);
+                                for t in [a, els, m1, c, m2] {
+                                    s.rt("str_free", &[t]);
+                                }
+                                m3
+                            },
+                        );
+                        s.rt("str_free", &[ups]);
+                        s.mk_enum_c(1, &[msg])
                     },
                 );
                 (r, u)

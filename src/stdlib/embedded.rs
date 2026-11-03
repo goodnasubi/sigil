@@ -50,6 +50,7 @@ pub const STR_IS_EMPTY_FN: &str = "std.core.string.is_empty";
 pub const STR_TRIM_FN: &str = "std.core.string.trim";
 pub const STR_CONCAT_FN: &str = "std.core.string.concat";
 pub const STR_PARSE_INT_FN: &str = "std.core.string.parse_int";
+pub const STR_FROM_UTF8_FN: &str = "std.core.string.from_utf8";
 pub const STR_EQ_FN: &str = "std.core.string.eq";
 pub const STR_CMP_FN: &str = "std.core.string.cmp";
 pub const STR_LINES_FN: &str = "std.core.string.lines";

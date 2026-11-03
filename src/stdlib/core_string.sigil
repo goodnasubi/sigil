@@ -137,6 +137,32 @@ pub fn valid_utf8(p: Addr, n: Int) -> Bool
   return true;
 }
 
+pub fn from_utf8(p: Addr, n: Int, info: Addr) -> Addr
+  intent "p から n バイトが正しい UTF-8 なら new(p, n)。不正なら null を返し、info[+0] に valid_up_to、info[+8] に error_len（末尾で切れた列は 0）を書く（Rust の FromUtf8Error と同じ）"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める（n <= 0 なら p は読まない）。info は 16 バイト書ける 8 バイト境界の番地（補足 F-5）"
+{
+  let mut i = 0;
+  while i < n {
+    let k = seq(p, n, i);
+    if k < 0 {
+      let m = 0 - k;
+      let b0 = raw.load_u8(raw.offset(p, i));
+      raw.store_i64(info, i);
+      let mut el = m;
+      if i + m == n && b0 >= 194 && b0 <= 244 {
+        el = 0;
+      }
+      raw.store_i64(raw.offset(info, 8), el);
+      return raw.addr_null();
+    }
+    i = i + k;
+  }
+  return new(p, n);
+}
+
 pub fn new_lossy(p: Addr, n: Int) -> Addr
   intent "p から n バイトで文字列を作る。不正な列は置換文字 U+FFFD にする（Rust の from_utf8_lossy と同じ）。n < 0 は異常停止"
   requires none

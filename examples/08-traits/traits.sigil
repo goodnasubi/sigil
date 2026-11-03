@@ -1,0 +1,122 @@
+// 例 08: トレイトの書き方（ADR 0022）
+// トレイトで「できること」を宣言し、型ごとに impl で実装する。
+// 総称の制約（<T: Shape>）にトレイトを書くと、そのメソッドを制約越しに呼べる。
+
+module examples.traits
+  targets server
+  trust none
+
+// 図形ができること。area は面積、label は名前。宣言だけを書き、本体は impl に置く。
+trait Shape {
+  fn area(self: &Self) -> Int
+    intent "面積を返す"
+    requires none
+    ensures result >= 0
+    effects none;
+
+  fn label(self: &Self) -> String
+    intent "図形の名前を返す"
+    requires none
+    ensures none
+    effects none;
+}
+
+struct Square {
+  side: Int,
+}
+
+struct Rectangle {
+  w: Int,
+  h: Int,
+}
+
+impl Shape for Square {
+  fn area(self: &Square) -> Int
+    intent "面積を返す"
+    requires none
+    ensures result >= 0
+    effects none
+  {
+    return self.side * self.side;
+  }
+
+  fn label(self: &Square) -> String
+    intent "図形の名前を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return "square";
+  }
+}
+
+impl Shape for Rectangle {
+  fn area(self: &Rectangle) -> Int
+    intent "面積を返す"
+    requires none
+    ensures result >= 0
+    effects none
+  {
+    return self.w * self.h;
+  }
+
+  fn label(self: &Rectangle) -> String
+    intent "図形の名前を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return "rectangle";
+  }
+}
+
+// 制約越しの呼び出し。渡せるのは Shape を実装した型だけで、実装していない型は検査で落ちる。
+fn doubled_area<T: Shape>(s: T) -> Int
+  intent "面積の 2 倍を返す"
+  requires none
+  ensures result >= 0
+  effects none
+{
+  return s.area() * 2;
+}
+
+// 以下は、組み立てた図形の値を取り出す小物（実行して確かめるために使う）。
+
+fn square_area(side: Int) -> Int
+  intent "正方形の面積を返す"
+  requires 0 <= side
+  ensures result >= 0
+  effects none
+{
+  let sq = Square { side: side };
+  return sq.area();
+}
+
+fn rectangle_area(w: Int, h: Int) -> Int
+  intent "長方形の面積を返す"
+  requires 0 <= w && 0 <= h
+  ensures result >= 0
+  effects none
+{
+  let r = Rectangle { w: w, h: h };
+  return r.area();
+}
+
+fn square_doubled_area(side: Int) -> Int
+  intent "正方形の面積の 2 倍を、総称の制約越しに返す"
+  requires 0 <= side
+  ensures result >= 0
+  effects none
+{
+  return doubled_area(Square { side: side });
+}
+
+fn rectangle_label(w: Int, h: Int) -> String
+  intent "長方形の名前を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let r = Rectangle { w: w, h: h };
+  return r.label();
+}

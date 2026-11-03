@@ -204,146 +204,96 @@ unsafe fn s<'a>(p: *const RtStr) -> &'a str {
 }
 
 // ---------------------------------------------------------------------------
-// Bytes（バイト列。可変長、8 バイト境界）
+// Bytes（24B の頭の塊。表現は Sigil 製の `std.core.bytes` が持つ。補足 F。バイト列は 1 バイトずつの領域）
 
-pub struct RtBytes(Vec<u8>);
-
-fn new_bytes(v: Vec<u8>) -> *mut RtBytes {
-    live_blocks(1);
-    Box::into_raw(Box::new(RtBytes(v)))
+/// 24B の頭（buf・len・cap）の塊。Rust 側は中身を知らず、登録された関数表を通してだけ触る。
+#[repr(C)]
+pub struct RtBytes {
+    _p: [u8; 0],
 }
 
-unsafe fn bytes_slice<'a>(p: *const RtBytes) -> &'a [u8] {
-    &(*p).0
-}
+type BytesFromRaw = extern "C" fn(*const u8, i64) -> *mut RtBytes;
+type BytesFree = extern "C" fn(*mut RtBytes);
+type BytesClone = extern "C" fn(*const RtBytes) -> *mut RtBytes;
+type BytesData = extern "C" fn(*const RtBytes) -> *const u8;
+type BytesLen = extern "C" fn(*const RtBytes) -> i64;
 
-unsafe fn bytes_vec<'a>(p: *mut RtBytes) -> &'a mut Vec<u8> {
-    &mut (*p).0
-}
+/// バイト列の関数表（from_raw・free・clone・data・len の関数ポインタ。0 は未登録）。
+static BYTES_OPS: [AtomicUsize; 5] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
 
+/// 生成コードの `main` が、入口を呼ぶ前にバイト列の関数表を登録する（補足 F-4）。
 #[no_mangle]
-pub extern "C" fn sigil_rt_bytes_new() -> *mut RtBytes {
-    new_bytes(Vec::new())
+pub extern "C" fn sigil_rt_set_bytes_ops(
+    from_raw: BytesFromRaw,
+    free: BytesFree,
+    clone: BytesClone,
+    data: BytesData,
+    len: BytesLen,
+) {
+    BYTES_OPS[0].store(from_raw as usize, Ordering::Relaxed);
+    BYTES_OPS[1].store(free as usize, Ordering::Relaxed);
+    BYTES_OPS[2].store(clone as usize, Ordering::Relaxed);
+    BYTES_OPS[3].store(data as usize, Ordering::Relaxed);
+    BYTES_OPS[4].store(len as usize, Ordering::Relaxed);
 }
 
-#[no_mangle]
-pub extern "C" fn sigil_rt_bytes_with_capacity(capacity: i64) -> *mut RtBytes {
-    new_bytes(Vec::with_capacity(capacity.max(0) as usize))
+/// 関数表の `i` 番目。未登録なら異常停止（exit_group(70) と同じ終了コード）。
+fn bytes_op(i: usize) -> usize {
+    #[cfg(test)]
+    if std::env::var("SIGIL_TEST_STR_MODE").as_deref() != Ok("unregistered") {
+        tests::table::init();
+    }
+    let p = BYTES_OPS[i].load(Ordering::Relaxed);
+    if p == 0 {
+        eprintln!("sigil: バイト列の関数表が未登録のままバイト列を使った");
+        std::process::exit(70);
+    }
+    p
 }
 
-/// # Safety
-/// `p` は `sigil_rt_bytes_*` が返したもの（または null）。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_free(p: *mut RtBytes) {
-    if !p.is_null() {
-        live_blocks(-1);
-        drop(Box::from_raw(p));
+// SAFETY（以下の 5 つ）: `bytes_op` が返す値は `sigil_rt_set_bytes_ops` が受け取った、対応する型の関数ポインタだけ。
+/// `p` から `n` バイトを写した Bytes を作る。
+pub(crate) fn bytes_from_raw(p: *const u8, n: usize) -> *mut RtBytes {
+    let f: BytesFromRaw = unsafe { std::mem::transmute(bytes_op(0)) };
+    f(p, n as i64)
+}
+
+/// Bytes を解放する。null は何もしない。
+pub(crate) fn bytes_free(b: *mut RtBytes) {
+    if !b.is_null() {
+        let f: BytesFree = unsafe { std::mem::transmute(bytes_op(1)) };
+        f(b)
     }
 }
 
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_clone(p: *const RtBytes) -> *mut RtBytes {
-    new_bytes(bytes_slice(p).to_vec())
+pub(crate) fn bytes_clone(b: *const RtBytes) -> *mut RtBytes {
+    let f: BytesClone = unsafe { std::mem::transmute(bytes_op(2)) };
+    f(b)
 }
 
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_len(p: *const RtBytes) -> i64 {
-    bytes_slice(p).len() as i64
+fn bytes_data(b: *const RtBytes) -> *const u8 {
+    let f: BytesData = unsafe { std::mem::transmute(bytes_op(3)) };
+    f(b)
 }
 
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_is_empty(p: *const RtBytes) -> i32 {
-    if bytes_slice(p).is_empty() {
-        1
-    } else {
-        0
+fn bytes_len(b: *const RtBytes) -> usize {
+    let f: BytesLen = unsafe { std::mem::transmute(bytes_op(4)) };
+    f(b) as usize
+}
+
+/// 中身の読み取り。長さ 0 では `data` を読まない（空番地のことがある）。
+pub(crate) unsafe fn bytes_slice<'a>(p: *const RtBytes) -> &'a [u8] {
+    let n = bytes_len(p);
+    if n == 0 {
+        return &[];
     }
-}
-
-/// # Safety
-/// `p` は有効。`out` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_get(p: *const RtBytes, index: i64, out: *mut i64) -> i32 {
-    if index >= 0 && (index as usize) < bytes_slice(p).len() {
-        *out = bytes_slice(p)[index as usize] as i64;
-        1
-    } else {
-        0
-    }
-}
-
-/// # Safety
-/// `p` は有効。`err` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_set(
-    p: *mut RtBytes,
-    index: i64,
-    byte: i64,
-    err: *mut *mut RtStr,
-) -> i32 {
-    if index < 0 || (index as usize) >= bytes_vec(p).len() {
-        *err = new_str("インデックスが範囲外".to_string());
-        0
-    } else if !(0..=255).contains(&byte) {
-        *err = new_str("バイト値が 0..=255 の範囲外".to_string());
-        0
-    } else {
-        bytes_vec(p)[index as usize] = byte as u8;
-        1
-    }
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_push(p: *mut RtBytes, byte: i64) {
-    bytes_vec(p).push(byte as u8);
-}
-
-/// # Safety
-/// `p` は有効。`out`・`err` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_slice(
-    p: *const RtBytes,
-    start: i64,
-    end: i64,
-    out: *mut *mut RtBytes,
-    err: *mut *mut RtStr,
-) -> i32 {
-    let len = bytes_slice(p).len() as i64;
-    if start >= 0 && start <= end && end <= len {
-        *out = new_bytes(bytes_slice(p)[start as usize..end as usize].to_vec());
-        1
-    } else {
-        *err = new_str("スライス範囲が不正".to_string());
-        0
-    }
-}
-
-/// # Safety
-/// `a`・`b_ptr` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_concat(
-    a: *const RtBytes,
-    b_ptr: *const RtBytes,
-) -> *mut RtBytes {
-    let mut v = Vec::with_capacity(bytes_slice(a).len() + bytes_slice(b_ptr).len());
-    v.extend_from_slice(bytes_slice(a));
-    v.extend_from_slice(bytes_slice(b_ptr));
-    new_bytes(v)
-}
-
-/// # Safety
-/// `a`・`b_ptr` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_extend(a: *mut RtBytes, b_ptr: *const RtBytes) {
-    bytes_vec(a).extend_from_slice(bytes_slice(b_ptr));
+    std::slice::from_raw_parts(bytes_data(p), n)
 }
 
 /// # Safety
@@ -354,12 +304,13 @@ pub unsafe extern "C" fn sigil_rt_bytes_to_string_utf8(
     out: *mut *mut RtStr,
     err: *mut *mut RtStr,
 ) -> i32 {
-    match String::from_utf8(bytes_slice(p).to_vec()) {
-        Ok(s) => {
-            *out = new_str(s);
+    match std::str::from_utf8(bytes_slice(p)) {
+        Ok(t) => {
+            *out = new_str(t.to_string());
             1
         }
         Err(e) => {
+            // `String::from_utf8` の `FromUtf8Error` と同じ文言（`Utf8Error` の `Display` と同じ）
             *err = new_str(e.to_string());
             0
         }
@@ -370,7 +321,8 @@ pub unsafe extern "C" fn sigil_rt_bytes_to_string_utf8(
 /// `p` は有効。
 #[no_mangle]
 pub unsafe extern "C" fn sigil_rt_str_as_bytes(p: *const RtStr) -> *mut RtBytes {
-    new_bytes(s(p).as_bytes().to_vec())
+    let t = s(p).as_bytes();
+    bytes_from_raw(t.as_ptr(), t.len())
 }
 
 /// # Safety
@@ -391,74 +343,8 @@ pub unsafe extern "C" fn sigil_rt_bytes_from_list(
         }
         v.push(val as u8);
     }
-    *out = new_bytes(v);
+    *out = bytes_from_raw(v.as_ptr(), v.len());
     1
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_push_u16_be(p: *mut RtBytes, value: i64) {
-    bytes_vec(p).extend_from_slice(&(value as u16).to_be_bytes());
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_push_u32_be(p: *mut RtBytes, value: i64) {
-    bytes_vec(p).extend_from_slice(&(value as u32).to_be_bytes());
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_push_u64_be(p: *mut RtBytes, value: i64) {
-    bytes_vec(p).extend_from_slice(&(value as u64).to_be_bytes());
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_push_u32_le(p: *mut RtBytes, value: i64) {
-    bytes_vec(p).extend_from_slice(&(value as u32).to_le_bytes());
-}
-
-/// # Safety
-/// `p` は有効。`out` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_read_u32_be(
-    p: *const RtBytes,
-    offset: i64,
-    out: *mut i64,
-) -> i32 {
-    if offset >= 0 && (offset as usize + 4) <= bytes_slice(p).len() {
-        let off = offset as usize;
-        let bytes: [u8; 4] = bytes_slice(p)[off..off + 4].try_into().unwrap();
-        *out = u32::from_be_bytes(bytes) as i64;
-        1
-    } else {
-        0
-    }
-}
-
-/// # Safety
-/// `a`・`b_ptr` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_ct_eq(a: *const RtBytes, b_ptr: *const RtBytes) -> i32 {
-    let ba = bytes_slice(a);
-    let bb = bytes_slice(b_ptr);
-    if ba.len() != bb.len() {
-        return 0;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in ba.iter().zip(bb.iter()) {
-        diff |= x ^ y;
-    }
-    if diff == 0 {
-        1
-    } else {
-        0
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,11 +912,58 @@ pub(crate) mod tests {
             unsafe { (*(l as *const LHead)).len }
         }
 
+        /// バイト列の頭（buf・len・cap の 24B。本物と同じ配置）。領域は Rust の確保（cap バイト）。
+        #[repr(C)]
+        struct BHead {
+            buf: *mut u8,
+            len: i64,
+            cap: i64,
+        }
+
+        extern "C" fn b_from_raw(p: *const u8, n: i64) -> *mut RtBytes {
+            let (buf, cap) = if n > 0 {
+                let mut v = unsafe { std::slice::from_raw_parts(p, n as usize) }.to_vec();
+                v.shrink_to_fit();
+                let b = v.as_mut_ptr();
+                let c = v.capacity() as i64;
+                std::mem::forget(v);
+                (b, c)
+            } else {
+                (std::ptr::null_mut(), 0)
+            };
+            Box::into_raw(Box::new(BHead { buf, len: n.max(0), cap })) as *mut RtBytes
+        }
+
+        extern "C" fn b_free(b: *mut RtBytes) {
+            unsafe {
+                let h = Box::from_raw(b as *mut BHead);
+                if h.cap > 0 {
+                    drop(Vec::from_raw_parts(h.buf, 0, h.cap as usize));
+                }
+            }
+        }
+
+        extern "C" fn b_clone(b: *const RtBytes) -> *mut RtBytes {
+            unsafe {
+                let h = &*(b as *const BHead);
+                b_from_raw(h.buf, h.len)
+            }
+        }
+
+        extern "C" fn b_data(b: *const RtBytes) -> *const u8 {
+            unsafe { (*(b as *const BHead)).buf }
+        }
+
+        extern "C" fn b_len(b: *const RtBytes) -> i64 {
+            unsafe { (*(b as *const BHead)).len }
+        }
+
         pub fn init() {
             static ONCE: Once = Once::new();
             ONCE.call_once(|| {
                 sigil_rt_set_str_ops(new, free, clone, data, bytes);
                 sigil_rt_set_list_ops(l_new, l_free, l_push, l_get, l_len);
+                sigil_rt_set_bytes_ops(b_from_raw, b_free, b_clone, b_data, b_len);
             });
         }
     }
@@ -1092,34 +1025,41 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn bytes_operations() {
+    fn bytes_through_table() {
         unsafe {
-            let b = sigil_rt_bytes_new();
-            assert_eq!(sigil_rt_bytes_len(b), 0);
-            assert_eq!(sigil_rt_bytes_is_empty(b), 1);
-            sigil_rt_bytes_push(b, 0x12);
-            sigil_rt_bytes_push_u16_be(b, 0x3456);
-            assert_eq!(sigil_rt_bytes_len(b), 3);
-            let mut val = 0i64;
-            assert_eq!(sigil_rt_bytes_get(b, 0, &mut val), 1);
-            assert_eq!(val, 0x12);
-            let mut read_u32 = 0i64;
-            assert_eq!(sigil_rt_bytes_read_u32_be(b, 0, &mut read_u32), 0);
-            sigil_rt_bytes_push(b, 0x78);
-            assert_eq!(sigil_rt_bytes_read_u32_be(b, 0, &mut read_u32), 1);
-            assert_eq!(read_u32, 0x12345678);
-
-            let b2 = sigil_rt_bytes_clone(b);
-            assert_eq!(sigil_rt_bytes_ct_eq(b, b2), 1);
-
+            let e = bytes_from_raw(std::ptr::null(), 0);
+            assert_eq!(bytes_len(e), 0);
+            assert_eq!(bytes_slice(e), b"");
+            let b = bytes_from_raw(b"abc".as_ptr(), 3);
+            assert_eq!(bytes_slice(b), b"abc");
+            let c = bytes_clone(b);
+            assert_eq!(bytes_slice(c), b"abc");
+            bytes_free(b);
+            assert_eq!(bytes_slice(c), b"abc");
             let mut out = std::ptr::null_mut();
             let mut err = std::ptr::null_mut();
-            assert_eq!(sigil_rt_bytes_slice(b, 1, 3, &mut out, &mut err), 1);
-            assert_eq!(sigil_rt_bytes_len(out), 2);
-            sigil_rt_bytes_free(out);
+            assert_eq!(sigil_rt_bytes_to_string_utf8(c, &mut out, &mut err), 1);
+            assert_eq!(text(out), "abc");
+            let bad = bytes_from_raw(b"a\xFF".as_ptr(), 2);
+            assert_eq!(sigil_rt_bytes_to_string_utf8(bad, &mut out, &mut err), 0);
+            assert_eq!(text(err), "invalid utf-8 sequence of 1 bytes from index 1");
+            for x in [e, c, bad] {
+                bytes_free(x);
+            }
+        }
+    }
 
-            sigil_rt_bytes_free(b);
-            sigil_rt_bytes_free(b2);
+    /// バイト列の関数表が未登録のままバイト列を使うと、終了コード 70 で止まる。
+    #[test]
+    fn unregistered_bytes_table_exits_70() {
+        match std::env::var("SIGIL_TEST_STR_MODE").as_deref() {
+            Ok("unregistered") => {
+                let _ = bytes_from_raw(std::ptr::null(), 0);
+            }
+            _ => {
+                let err = exits_70_when("unregistered", "tests::unregistered_bytes_table_exits_70");
+                assert!(err.contains("バイト列の関数表が未登録"), "{err}");
+            }
         }
     }
 

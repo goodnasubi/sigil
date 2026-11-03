@@ -99,6 +99,17 @@ impl<'a, 'p> Fx<'a, 'p> {
         (v, t, c, None)
     }
 
+    /// 文字列のリテラルから新しい文字列（`str_new`）を作る。
+    pub(super) fn str_lit(&mut self, text: &str) -> Value {
+        let d = match self.cg.bytes_data(text.as_bytes()) {
+            Ok(d) => d,
+            Err(e) => return self.fail(e),
+        };
+        let a = self.data_addr(d);
+        let n = self.ic(text.len() as i64);
+        self.rt("str_new", &[a, n])
+    }
+
     fn raw_const(&mut self, op: &Operand) -> (Value, Ty, bool) {
         match op {
             Operand::Copy(_) | Operand::Move(_) => unreachable!(),

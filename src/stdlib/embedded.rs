@@ -12,6 +12,7 @@
 //! - `std.core.string`（3-5b-i）は `String` の表現（24B の頭と中身の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 D）。
 //!   `raw_ops` で確保器を差し替えたときは、確保器も文字列も結ばない。
 //! - `std.core.int`（3-5d-i）は `Int` の回転を持ち、同じく暗黙に結ぶ（補足 F-3）。
+//! - `std.core.bytes`（3-5d-ii）は `Bytes` の表現（24B の頭と領域の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 F）。
 //! - `std.core.list`（3-5c-ii）は `List` の表現（24B の頭と要素の領域の 2 つの塊）を持ち、同じく暗黙に結ぶ（補足 E）。
 
 /// Sigil 製の確保器のモジュール名（ADR 0025 決定 3、補足 A-2・B-1）。
@@ -65,6 +66,30 @@ pub const LIST_LEN_FN: &str = "std.core.list.len";
 pub const LIST_SUM_INT_FN: &str = "std.core.list.sum_int";
 pub const LIST_SUM_FLOAT_FN: &str = "std.core.list.sum_float";
 
+/// `Bytes` の表現の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 F-2・F-4、PR 3-5d-ii）。
+/// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_bytes_*` のシムから呼ぶ。`eq`・`cmp` は 3-5e まで SIR に入れない。
+pub const BYTES_MODULE: &str = "std.core.bytes";
+pub const BYTES_EMPTY_FN: &str = "std.core.bytes.empty";
+pub const BYTES_CREATE_FN: &str = "std.core.bytes.create";
+pub const BYTES_FREE_FN: &str = "std.core.bytes.free";
+pub const BYTES_FROM_RAW_FN: &str = "std.core.bytes.from_raw";
+pub const BYTES_CLONE_FN: &str = "std.core.bytes.clone";
+pub const BYTES_DATA_FN: &str = "std.core.bytes.data";
+pub const BYTES_LEN_FN: &str = "std.core.bytes.len";
+pub const BYTES_IS_EMPTY_FN: &str = "std.core.bytes.is_empty";
+pub const BYTES_GET_FN: &str = "std.core.bytes.get";
+pub const BYTES_SET_FN: &str = "std.core.bytes.set";
+pub const BYTES_PUSH_FN: &str = "std.core.bytes.push";
+pub const BYTES_SLICE_FN: &str = "std.core.bytes.slice";
+pub const BYTES_CONCAT_FN: &str = "std.core.bytes.concat";
+pub const BYTES_EXTEND_FN: &str = "std.core.bytes.extend";
+pub const BYTES_PUSH_U16_BE_FN: &str = "std.core.bytes.push_u16_be";
+pub const BYTES_PUSH_U32_BE_FN: &str = "std.core.bytes.push_u32_be";
+pub const BYTES_PUSH_U64_BE_FN: &str = "std.core.bytes.push_u64_be";
+pub const BYTES_PUSH_U32_LE_FN: &str = "std.core.bytes.push_u32_le";
+pub const BYTES_READ_U32_BE_FN: &str = "std.core.bytes.read_u32_be";
+pub const BYTES_CT_EQ_FN: &str = "std.core.bytes.ct_equal";
+
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[
     (ALLOC_MODULE, include_str!("os_alloc.sigil")),
@@ -72,6 +97,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (LIST_MODULE, include_str!("core_list.sigil")),
     (FLOAT_MODULE, include_str!("core_float.sigil")),
     (INT_MODULE, include_str!("core_int.sigil")),
+    (BYTES_MODULE, include_str!("core_bytes.sigil")),
 ];
 
 /// 暗黙に結ぶ埋め込みモジュール（補足 C-2）。
@@ -90,7 +116,13 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
     if replaced {
         vec![]
     } else {
-        vec![ALLOC_MODULE, STRING_MODULE, LIST_MODULE, INT_MODULE]
+        vec![
+            ALLOC_MODULE,
+            STRING_MODULE,
+            LIST_MODULE,
+            INT_MODULE,
+            BYTES_MODULE,
+        ]
     }
 }
 

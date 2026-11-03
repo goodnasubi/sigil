@@ -22,7 +22,7 @@
 
 use super::{
     bytes_slice, list_free, list_get, list_len, list_new, list_push, new_str, s, sigil_rt_alloc,
-    sigil_rt_bytes_clone, sigil_rt_bytes_free, sigil_rt_free, str_clone, str_free, text, RtBytes,
+    bytes_clone, bytes_free, sigil_rt_free, str_clone, str_free, text, RtBytes,
     RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
@@ -418,7 +418,7 @@ unsafe fn dup(d: D, w: i64, deep: bool) -> i64 {
             w
         }
         K_STR | K_PATH if w != 0 => str_clone(w as *const RtStr) as i64,
-        K_BYTES if w != 0 => sigil_rt_bytes_clone(w as *const RtBytes) as i64,
+        K_BYTES if w != 0 => bytes_clone(w as *const RtBytes) as i64,
         _ => w,
     }
 }
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn sigil_rt_val_drop(d: D, w: i64) {
                 }
             }
             K_STR | K_PATH => str_free(w as *mut RtStr),
-            K_BYTES => sigil_rt_bytes_free(w as *mut RtBytes),
+            K_BYTES => bytes_free(w as *mut RtBytes),
             _ => {}
         }
     }

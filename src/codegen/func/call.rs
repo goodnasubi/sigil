@@ -619,8 +619,8 @@ impl<'a, 'p> Fx<'a, 'p> {
             CtEq => {
                 let (a, _) = self.val(&args[0]);
                 let (b, _) = self.val(&args[1]);
-                let eq = self.rt("bytes_ct_eq", &[a, b]);
-                (self.b.ins().uextend(types::I64, eq), u)
+                // `rt` が `'i'` の戻りを `sextend` で 64 ビットにするので、ここで広げ直さない
+                (self.rt("bytes_ct_eq", &[a, b]), u)
             }
             StrAsBytes => {
                 let (s, _) = self.val(&args[0]);
@@ -680,8 +680,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             BytesIsEmpty => {
                 let (b, _) = self.val(&args[0]);
-                let res = self.rt("bytes_is_empty", &[b]);
-                (self.b.ins().uextend(types::I64, res), u)
+                (self.rt("bytes_is_empty", &[b]), u)
             }
             BytesGet => {
                 let (b, _) = self.val(&args[0]);
@@ -700,9 +699,9 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (b, _) = self.val(&args[0]);
                 let (i, _) = self.val(&args[1]);
                 let (val, _) = self.val(&args[2]);
-                let err = self.zero_tmp(8);
-                let ok = self.rt("bytes_set", &[b, i, val, err]);
-                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                // 戻りは 0（成功）・1（添字が範囲外）・2（値が範囲外）。`Err` の文字列はここで作る（補足 F-2・F-11 の 5）。
+                let rc = self.rt("bytes_set", &[b, i, val]);
+                let c = self.b.ins().icmp_imm_s(IntCC::Equal, rc, 0);
                 let r = self.branch(
                     c,
                     |s| {
@@ -710,7 +709,12 @@ impl<'a, 'p> Fx<'a, 'p> {
                         s.mk_enum_c(0, &[z])
                     },
                     |s| {
-                        let e = s.ld(err, 0);
+                        let is_idx = s.b.ins().icmp_imm_s(IntCC::Equal, rc, 1);
+                        let e = s.branch(
+                            is_idx,
+                            |s| s.str_lit("インデックスが範囲外"),
+                            |s| s.str_lit("バイト値が 0..=255 の範囲外"),
+                        );
                         s.mk_enum_c(1, &[e])
                     },
                 );
@@ -726,18 +730,14 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (b, _) = self.val(&args[0]);
                 let (st, _) = self.val(&args[1]);
                 let (en, _) = self.val(&args[2]);
-                let out = self.zero_tmp(8);
-                let err = self.zero_tmp(8);
-                let ok = self.rt("bytes_slice", &[b, st, en, out, err]);
-                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                // 不正な範囲は空番地。`Err` の文字列はここで作る（補足 F-2）。
+                let res = self.rt("bytes_slice", &[b, st, en]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, res, 0);
                 let r = self.branch(
                     c,
+                    |s| s.mk_enum_c(0, &[res]),
                     |s| {
-                        let res = s.ld(out, 0);
-                        s.mk_enum_c(0, &[res])
-                    },
-                    |s| {
-                        let e = s.ld(err, 0);
+                        let e = s.str_lit("スライス範囲が不正");
                         s.mk_enum_c(1, &[e])
                     },
                 );

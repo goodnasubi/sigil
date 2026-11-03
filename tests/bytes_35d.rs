@@ -419,7 +419,7 @@ fn ct_eq_case() -> (String, i64) {
     (grid_src(&body), want)
 }
 
-/// 評価器の上の `ct_eq`・`is_empty`。ネイティブは下の試験（既知の不具合で無視中）。
+/// 評価器の上の `ct_eq`・`is_empty`。ネイティブは下の試験で同じ入力・同じ期待値を確かめる。
 #[test]
 fn baseline_ct_eq_and_is_empty_evaluator() {
     let (src, want) = ct_eq_case();
@@ -428,11 +428,8 @@ fn baseline_ct_eq_and_is_empty_evaluator() {
     assert_eq!(r.value, want.to_string());
 }
 
-/// 既知の不具合: 旧実装のネイティブは `ct_eq`・`is_empty` を含むプログラムを作れない（codegen の `CtEq`・`BytesIsEmpty` の腕が、
-/// すでに 64 ビットに伸ばした `rt` の戻りへもう一度 `uextend` して、Cranelift の検証器が落ちる）。3-5d-ii（`ct_eq`・`is_empty` を
-/// Sigil へ移す PR）で直すときに、`#[ignore]` を外す。
+/// ネイティブの `ct_eq`・`is_empty`（3-5d-ii で codegen の二重 `uextend` を直した。評価器と同じ入力・期待値）。
 #[test]
-#[ignore = "既知の不具合: ct_eq・is_empty はネイティブを作れない（codegen の uextend）"]
 fn baseline_ct_eq_and_is_empty_native() {
     let (src, want) = ct_eq_case();
     assert_eq!(run0(&src), want.to_string());
@@ -730,8 +727,8 @@ fn live(src: &str, n: i64) -> (i64, i64, String) {
 }
 
 /// 作って捨てる繰り返しで、`blocks=` と `sigil_blocks=` が 1000 回と 100000 回で完全に一致し、終了時に 0 になる。
-/// 旧実装では `Bytes` は Rust の頭を `blocks=` に数える。3-5d-ii では `Bytes` の分が `sigil_blocks=` へ移るので、
-/// 移すときはこの期待（`blocks=` が 0 でなければならない箇所）を変えずに、終了時の合計 0 と回数への非依存を保つ。
+/// 3-5d-ii で `Bytes` は Sigil の `std.core.bytes` になり、数えるのは `sigil_blocks=`（頭 1 つと、cap > 0 なら本体 1 つ）。
+/// `blocks=` は 0 のまま。どちらも終了時の合計 0 と、回数への非依存を保つ。
 #[test]
 fn baseline_bytes_blocks_are_exact_across_1000_and_100000_iterations() {
     let src = churn();
@@ -745,4 +742,43 @@ fn baseline_bytes_blocks_are_exact_across_1000_and_100000_iterations() {
         "1000 回と 100000 回で生きている数が違う"
     );
     assert_eq!((b2, s2), (0, 0), "終了時に Bytes の塊が残っている");
+}
+
+/// `ct_equal`（ADR の `ct_eq`）の CLIF に、秘密のバイトに依存する分岐がない（ADR 0023 決定 4 の 2）。
+/// `brif` は長さの比較・ループ条件 `i < n`・`i + 1` の桁あふれの検査の 3 つだけで、`br_table` はない。
+/// 全バイトを `bxor`・`bor` で積み、最後に `icmp eq` で 0 と比べる。
+#[test]
+fn ct_equal_clif_has_only_length_and_index_branches() {
+    let dir = scratch("bytes35d-clif");
+    std::fs::create_dir_all(dir.join("m")).unwrap();
+    std::fs::write(
+        dir.join("m/c.sigil"),
+        "module m.c\n  targets server\n  trust none\n\npub fn f() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let x = \"abc\".as_bytes();\n  let y = \"abd\".as_bytes();\n  if ct_eq(&x, &y) {\n    return 1;\n  }\n  return 0;\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_sigil"))
+        .current_dir(&dir)
+        .env("SIGIL_CLIF_DUMP", "1")
+        .args(["build", "--root", ".", "m/c.sigil", "f", "-o", "c.out"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "{err}");
+    let funcs: Vec<&str> = err.split("\nfunction ").collect();
+    // ct_equal: i8 を 2 回読み、bxor と bor を持ち、icmp eq で 0 と比べて返す関数は 1 つだけ。
+    let hits: Vec<&&str> = funcs
+        .iter()
+        .filter(|f| {
+            f.matches("load.i8").count() == 2
+                && f.contains("bxor")
+                && f.contains(" = bor ")
+                && f.contains("icmp ne")
+                && f.contains("icmp eq")
+        })
+        .collect();
+    assert_eq!(hits.len(), 1, "ct_equal の CLIF が 1 つに決まらない\n{err}");
+    let f = hits[0];
+    assert_eq!(f.matches("brif").count(), 3, "{f}");
+    assert!(!f.contains("br_table") && !f.contains("select"), "{f}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

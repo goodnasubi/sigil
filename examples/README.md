@@ -24,6 +24,7 @@
 | [06-concurrency](06-concurrency/) | タスクの起動と合流・チャネル・時間切れによる取り消し・`Lock`・`Atomic`（`clone` で共有し、待つタスクと書くタスクを組にする） | `task.scope` / `spawn` / `join`、`move` クロージャのとらえ方、`task` 系の効果（[ADR 0007](../docs/decisions/0007-concurrency-model.md)・[ADR 0026](../docs/decisions/0026-p1a-concurrency.md)） |
 | [07-bytes](07-bytes/) | 種別＋長さ＋本体のバイナリメッセージの組み立てと読み戻し、XOR と回転のチェックサム | `Bytes` の生成・`push`・`push_u32_be`・`extend`・`get`・`read_u32_be`、ビット演算（`&` `\|` `^` `~` `>>`）と `rotr32`（[ADR 0023](../docs/decisions/0023-bytes-and-bitwise.md)） |
 | [08-traits](08-traits/) | 図形の面積を題材にしたトレイトの宣言と型ごとの実装、総称の制約越しの呼び出し | `trait` の宣言、`impl トレイト for 型`、総称の制約 `<T: Shape>`（[ADR 0022](../docs/decisions/0022-type-identity-traits-and-function-types.md)） |
+| [09-enums](09-enums/) | 注文の状態遷移（受付・支払済・発送済・取消）を題材にした列挙型の構築と分解、状態遷移 | `enum` のバリアント（値の形がバリアントごとに違う）、全バリアントを書き切る `match` の網羅性、値で受け取った列挙型の消費と再構築（[ADR 0008](../docs/decisions/0008-m0-notation.md)） |
 
 ## 実行のしかた
 

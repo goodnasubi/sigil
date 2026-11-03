@@ -311,8 +311,8 @@ impl<'a> L<'a> {
             BYTES_SET_FN, BYTES_SLICE_FN, FREE_FN, INT_ROTL_FN, INT_ROTR32_FN, INT_ROTR_FN,
             LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN, LIST_PUSH_FN,
             LIST_SUM_FLOAT_FN, LIST_SUM_INT_FN, LIVE_FN, STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN,
-            STR_DATA_FN, STR_FREE_FN, STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN,
-            STR_PARSE_INT_FN, STR_TRIM_FN,
+            STR_DATA_FN, STR_FREE_FN, STR_FROM_UTF8_FN, STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN,
+            STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
         };
         for n in [
             BYTES_EMPTY_FN,
@@ -359,6 +359,7 @@ impl<'a> L<'a> {
             STR_TRIM_FN,
             STR_CONCAT_FN,
             STR_PARSE_INT_FN,
+            STR_FROM_UTF8_FN,
         ] {
             if n != entry {
                 if let Some(&d) = self.fns.get(n) {

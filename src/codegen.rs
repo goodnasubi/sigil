@@ -102,6 +102,7 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_free" => ("p", 'v'),
         "str_is_empty" => ("p", 'i'),
         "str_parse_int" => ("pp", 'i'),
+        "str_from_utf8" => ("ppp", 'p'),
         // `Int` の回転（`std.core.int`。補足 F-3）。`Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。F-0・F-4）
         "int_rotl" | "int_rotr" => ("ppp", 'p'),
         "int_rotr32" => ("pp", 'p'),
@@ -133,8 +134,6 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
         "alloc" | "val_shadow" | "val_clone" => ("pp", 'p'),
         "blk_new" => ("p", 'p'),
-        "str_as_bytes" => ("p", 'p'),
-        "bytes_from_list" | "bytes_to_string_utf8" => ("ppp", 'i'),
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
@@ -668,8 +667,8 @@ fn alloc_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
 /// 生成コードの呼び出し先の名前と形は変えない。シムは公開せず（`Linkage::Local`）、番地を関数表で Rust ランタイムに渡す。
 fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
-        STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN, STR_FREE_FN, STR_IS_EMPTY_FN,
-        STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
+        STR_BYTES_FN, STR_CLONE_FN, STR_CONCAT_FN, STR_DATA_FN, STR_FREE_FN, STR_FROM_UTF8_FN,
+        STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
     };
     let mut out = vec![];
     let mut ids = vec![];
@@ -685,6 +684,7 @@ fn str_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         ("str_concat", STR_CONCAT_FN, 2, 'p'),
         ("str_parse_int", STR_PARSE_INT_FN, 2, 'i'),
         ("str_lines", STR_LINES_FN, 1, 'p'),
+        ("str_from_utf8", STR_FROM_UTF8_FN, 3, 'p'),
     ] {
         let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
             return Err(internal("std.core.string が結ばれていない".to_string()));

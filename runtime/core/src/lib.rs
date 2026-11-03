@@ -259,6 +259,7 @@ fn bytes_op(i: usize) -> usize {
 
 // SAFETY（以下の 5 つ）: `bytes_op` が返す値は `sigil_rt_set_bytes_ops` が受け取った、対応する型の関数ポインタだけ。
 /// `p` から `n` バイトを写した Bytes を作る。
+#[cfg(test)]
 pub(crate) fn bytes_from_raw(p: *const u8, n: usize) -> *mut RtBytes {
     let f: BytesFromRaw = unsafe { std::mem::transmute(bytes_op(0)) };
     f(p, n as i64)
@@ -294,57 +295,6 @@ pub(crate) unsafe fn bytes_slice<'a>(p: *const RtBytes) -> &'a [u8] {
         return &[];
     }
     std::slice::from_raw_parts(bytes_data(p), n)
-}
-
-/// # Safety
-/// `p` は有効。`out`・`err` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_to_string_utf8(
-    p: *const RtBytes,
-    out: *mut *mut RtStr,
-    err: *mut *mut RtStr,
-) -> i32 {
-    match std::str::from_utf8(bytes_slice(p)) {
-        Ok(t) => {
-            *out = new_str(t.to_string());
-            1
-        }
-        Err(e) => {
-            // `String::from_utf8` の `FromUtf8Error` と同じ文言（`Utf8Error` の `Display` と同じ）
-            *err = new_str(e.to_string());
-            0
-        }
-    }
-}
-
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_str_as_bytes(p: *const RtStr) -> *mut RtBytes {
-    let t = s(p).as_bytes();
-    bytes_from_raw(t.as_ptr(), t.len())
-}
-
-/// # Safety
-/// `l` は有効。`out`・`err` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_bytes_from_list(
-    l: *const RtList,
-    out: *mut *mut RtBytes,
-    err: *mut *mut RtStr,
-) -> i32 {
-    let n = list_len(l).max(0) as usize;
-    let mut v = Vec::with_capacity(n);
-    for i in 0..n {
-        let val = *(list_get(l, i as i64) as *const i64);
-        if !(0..=255).contains(&val) {
-            *err = new_str("0..=255 の範囲外".to_string());
-            return 0;
-        }
-        v.push(val as u8);
-    }
-    *out = bytes_from_raw(v.as_ptr(), v.len());
-    1
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,14 +990,7 @@ pub(crate) mod tests {
             assert_eq!(bytes_slice(c), b"abc");
             bytes_free(b);
             assert_eq!(bytes_slice(c), b"abc");
-            let mut out = std::ptr::null_mut();
-            let mut err = std::ptr::null_mut();
-            assert_eq!(sigil_rt_bytes_to_string_utf8(c, &mut out, &mut err), 1);
-            assert_eq!(text(out), "abc");
-            let bad = bytes_from_raw(b"a\xFF".as_ptr(), 2);
-            assert_eq!(sigil_rt_bytes_to_string_utf8(bad, &mut out, &mut err), 0);
-            assert_eq!(text(err), "invalid utf-8 sequence of 1 bytes from index 1");
-            for x in [e, c, bad] {
+            for x in [e, c] {
                 bytes_free(x);
             }
         }

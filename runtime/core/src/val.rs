@@ -25,7 +25,6 @@ use super::{
     new_str, s, sigil_rt_alloc, sigil_rt_free, str_clone, str_free, text, RtBytes, RtList, RtStr,
 };
 use crate::args::{arg_name, parse_arg, Arg};
-use std::cmp::Ordering;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering as AOrd};
 
@@ -193,100 +192,6 @@ pub unsafe extern "C" fn sigil_rt_val_show(d: D, w: i64, quote: i32) -> *mut RtS
     let mut o = String::new();
     show_into(d, w, quote != 0, &mut o);
     new_str(o)
-}
-
-unsafe fn eq(d: D, a: i64, b: i64) -> bool {
-    match rd(d, 0) {
-        K_UNIT | K_PARSE_ERROR => true,
-        K_INT | K_BOOL => a == b,
-        K_FLOAT => f64::from_bits(a as u64) == f64::from_bits(b as u64),
-        K_STR | K_PATH => s(a as *const RtStr) == s(b as *const RtStr),
-        K_BYTES => bytes_slice(a as *const RtBytes) == bytes_slice(b as *const RtBytes),
-        K_LIST => {
-            let (x, y) = (
-                list_items(a as *const RtList),
-                list_items(b as *const RtList),
-            );
-            x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| eq(dp(d, 1), *p, *q))
-        }
-        K_TUPLE => {
-            let n = rd(d, 1) as usize;
-            let (x, y) = (a as *const i64, b as *const i64);
-            (0..n).all(|i| eq(dp(d, 2 + i), *x.add(i), *y.add(i)))
-        }
-        K_STRUCT => {
-            let n = rd(d, 3) as usize;
-            let (x, y) = (a as *const i64, b as *const i64);
-            (0..n).all(|i| eq(dp(d, 4 + 3 * i + 2), *x.add(i), *y.add(i)))
-        }
-        K_ENUM => {
-            let (x, y) = (a as *const i64, b as *const i64);
-            if *x != *y {
-                return false;
-            }
-            let (_, nf, fpos) = variant(d, *x);
-            (0..nf).all(|i| eq(dp(d, fpos + i), *x.add(1 + i), *y.add(1 + i)))
-        }
-        K_REF => eq(dp(d, 1), *(a as *const i64), *(b as *const i64)),
-        K_SHARED | K_CELL => a == b || eq(dp(d, 1), *(a as *const i64), *(b as *const i64)),
-        _ => false,
-    }
-}
-
-/// 構造的な等しさ（1 なら等しい）。
-///
-/// # Safety
-/// `d` は記述子、`a`・`b` はその型の値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_val_eq(d: D, a: i64, b: i64) -> i32 {
-    eq(d, a, b) as i32
-}
-
-unsafe fn cmp(d: D, a: i64, b: i64) -> Option<Ordering> {
-    match rd(d, 0) {
-        K_INT | K_BOOL => Some(a.cmp(&b)),
-        K_FLOAT => f64::from_bits(a as u64).partial_cmp(&f64::from_bits(b as u64)),
-        K_STR => Some(s(a as *const RtStr).cmp(s(b as *const RtStr))),
-        K_BYTES => Some(bytes_slice(a as *const RtBytes).cmp(bytes_slice(b as *const RtBytes))),
-        K_LIST => {
-            let (x, y) = (
-                list_items(a as *const RtList),
-                list_items(b as *const RtList),
-            );
-            for (p, q) in x.iter().zip(&y) {
-                match cmp(dp(d, 1), *p, *q)? {
-                    Ordering::Equal => {}
-                    o => return Some(o),
-                }
-            }
-            Some(x.len().cmp(&y.len()))
-        }
-        K_TUPLE => {
-            let n = rd(d, 1) as usize;
-            let (x, y) = (a as *const i64, b as *const i64);
-            for i in 0..n {
-                match cmp(dp(d, 2 + i), *x.add(i), *y.add(i))? {
-                    Ordering::Equal => {}
-                    o => return Some(o),
-                }
-            }
-            Some(Ordering::Equal)
-        }
-        K_REF => cmp(dp(d, 1), *(a as *const i64), *(b as *const i64)),
-        _ => None,
-    }
-}
-
-/// 構造的な順序（-1・0・1。比べられない値は 2）。
-///
-/// # Safety
-/// `d` は記述子、`a`・`b` はその型の値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_val_cmp(d: D, a: i64, b: i64) -> i32 {
-    match cmp(d, a, b) {
-        Some(o) => o as i32,
-        None => 2,
-    }
 }
 
 /// 塊の前に置く 2 語の見出し。`[大きさ（と黙ったかの印）][参照の数]` の後ろに中身が続く。
@@ -676,8 +581,6 @@ mod tests {
             );
             let c = sigil_rt_val_shadow(list.as_ptr(), l as i64);
             assert_ne!(c, l as i64);
-            assert_eq!(sigil_rt_val_eq(list.as_ptr(), c, l as i64), 1);
-            assert_eq!(sigil_rt_val_cmp(list.as_ptr(), c, l as i64), 0);
         }
     }
 }

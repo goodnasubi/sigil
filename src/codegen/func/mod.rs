@@ -2,6 +2,7 @@
 
 mod call;
 mod drop;
+mod eqcmp;
 mod expr;
 mod stmt;
 

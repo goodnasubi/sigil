@@ -180,7 +180,7 @@ fn out(src: &str, f: &str, args: &[Arg]) -> String {
     }
 }
 
-/// min/max: 同順位は先のもの、1 要素、文字列（要素の記述子が `val_cmp` に渡る）。
+/// min/max: 同順位は先のもの、1 要素、文字列（要素の型の `sigil_cmp_<k>` が呼ばれる）。
 #[test]
 fn list_min_max_loop_matches_evaluator() {
     let src = format!(

@@ -652,8 +652,33 @@ impl<'a> L<'a> {
                     Ok(self.emit_call(Callee::Builtin(b), ops, ret))
                 }
                 n => {
-                    let Some(&decl) = self.fns.get(n) else {
-                        return bail(format!("関数 {n} がない"));
+                    let decl = match self.fns.get(n) {
+                        Some(&d) => d,
+                        None => {
+                            // 標準ライブラリの表で裸の名前で登録され、埋め込み
+                            // モジュールが Sigil の実体を持つ自由関数（ADR 0024、
+                            // PR 6-1c: `sha256`。実体は `std.crypto`）は、結合後の
+                            // 名前でしか宣言がないため、末尾の名前が一致する
+                            // `std.*` の宣言へ寄せて引く（型についての同じ扱いは
+                            // `adt` にある）。裸の名前で見つかる経路は従来どおりで、
+                            // ここは見つからない場合にだけ働く。複数一致は曖昧
+                            // として止める。
+                            let mut found: Option<&'a a::FnDecl> = None;
+                            for (k, d) in self.fns.iter() {
+                                if k.starts_with("std.") && k.rsplit('.').next() == Some(n) {
+                                    if found.is_some() {
+                                        return bail(format!(
+                                            "関数 `{n}` に対応する標準の関数が複数ある（曖昧）"
+                                        ));
+                                    }
+                                    found = Some(d);
+                                }
+                            }
+                            let Some(d) = found else {
+                                return bail(format!("関数 {n} がない"));
+                            };
+                            d
+                        }
                     };
                     let ops = self.args_of(args)?;
                     self.user_call(decl, &r.targs, ops, ret)

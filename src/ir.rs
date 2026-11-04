@@ -120,6 +120,13 @@ pub enum Ty {
 pub struct TypeDef {
     pub name: String,
     pub kind: TypeKind,
+    /// 埋め込みモジュール `std.crypto` が定義した `Secret` そのものか
+    /// （ADR 0024、PR 6-1b）。lower が型を作るときに、どの宣言から来たかで
+    /// 一度だけ決める同一性の印。秘密の扱い（記述子の種類 17・破棄前の
+    /// ゼロ化・表示の秘匿）は生成系がこの印だけを見て決める。名前で
+    /// 決めると、利用者が同名の `struct Secret` を定義したときに誤って
+    /// 秘密扱いになる（先頭フィールドを `Bytes` とみなして壊れる）。
+    pub secret: bool,
 }
 
 #[derive(Debug, Clone)]

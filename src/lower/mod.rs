@@ -252,6 +252,18 @@ impl<'a> L<'a> {
                     if let Some(tn) = last_name(&im.ty) {
                         for f in &im.fns {
                             l.methods.insert((tn.to_string(), f.name.clone()), f);
+                            // 標準ライブラリの表で裸の名前で登録された型のメソッドは、
+                            // 検査器が裸の名前で解決するため、末尾の名前でも引ける
+                            // ようにする（ADR 0024 の `Secret`。実体は `std.crypto`）。
+                            // 利用者自身の同名の型の実装があれば、そちらの登録が
+                            // 後勝ちで上書きする（この別名は `or_insert` で守る）。
+                            if tn.starts_with("std.") {
+                                if let Some(bare) = tn.rsplit('.').next() {
+                                    l.methods
+                                        .entry((bare.to_string(), f.name.clone()))
+                                        .or_insert(f);
+                                }
+                            }
                         }
                     }
                 }
@@ -529,6 +541,26 @@ impl<'a> L<'a> {
     // --- 型 ---
 
     fn adt(&mut self, name: &str, args: Vec<ir::Ty>) -> R<usize> {
+        // 標準ライブラリの表で裸の名前で登録され、埋め込みモジュールが実体を
+        // 持つ型（ADR 0024 の `Secret`）は、利用者側の裸の名前（`Secret`）と
+        // 実装側の結合後の名前（`std.crypto.Secret`）を同じ型として扱うため、
+        // 実体の名前へ寄せてから引く（SIR 上も 1 つの型になる）。
+        let name: &str = if self.structs.contains_key(name) || self.enums.contains_key(name) {
+            name
+        } else {
+            // 末尾の名前が一致する `std.*` の型が複数あると、どれを選ぶかが
+            // 不定になるため、曖昧なときは止める（現在は `Secret` だけ）。
+            let mut found: Option<&str> = None;
+            for k in self.structs.keys().chain(self.enums.keys()) {
+                if k.starts_with("std.") && k.rsplit('.').next() == Some(name) {
+                    if found.is_some() {
+                        return bail(format!("型 `{name}` に対応する標準の型が複数ある（曖昧）"));
+                    }
+                    found = Some(k);
+                }
+            }
+            found.unwrap_or(name)
+        };
         let key = (name.to_string(), args.clone());
         if let Some(&i) = self.type_ids.get(&key) {
             return Ok(i);
@@ -544,6 +576,13 @@ impl<'a> L<'a> {
         self.types.push(ir::TypeDef {
             name: name.to_string(),
             kind: ir::TypeKind::Struct { fields: vec![] },
+            // 秘密の同一性はここで一度だけ決める。寄せた先の名前が
+            // `std.crypto.Secret` のときだけ、その宣言から来た型である。
+            // `std` は標準ライブラリ専用の名前で利用者は名乗れないため、
+            // この結合後の名前は埋め込みモジュールの宣言そのものを指す。
+            // 利用者が定義した同名の型は別のキー（裸の名前や自モジュール
+            // 修飾の名前）になり、ここには来ない。
+            secret: name == "std.crypto.Secret",
         });
         let arg = |i: usize| args.get(i).cloned().unwrap_or(ir::Ty::Unit);
         let v = |n: &str, f: Vec<ir::Ty>| ir::VariantDef {

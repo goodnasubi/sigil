@@ -499,6 +499,13 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             Ty::Adt(id) => match &p.types[*id].kind {
                 TypeKind::Struct { fields } => {
+                    // `Secret`（ADR 0024、PR 6-1b）は、中身の Bytes を解放する前に
+                    // データ領域をゼロ化する。判定は記述子の種類と同じく、
+                    // lower が付けた同一性の印（`secret`）だけを見る。
+                    if p.types[*id].secret {
+                        let b = self.ld(w, 0);
+                        self.rt("zeroize_bytes", &[b]);
+                    }
                     if self.cg.trace {
                         let tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                         self.trace_struct(*id, w, &tys);

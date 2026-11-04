@@ -227,7 +227,7 @@ fn bytes_data(b: *const RtBytes) -> *const u8 {
     f(b)
 }
 
-fn bytes_len(b: *const RtBytes) -> usize {
+pub(crate) fn bytes_len(b: *const RtBytes) -> usize {
     let f: BytesLen = unsafe { std::mem::transmute(bytes_op(4)) };
     f(b) as usize
 }

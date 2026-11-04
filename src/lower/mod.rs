@@ -548,9 +548,14 @@ impl<'a> L<'a> {
         let name: &str = if self.structs.contains_key(name) || self.enums.contains_key(name) {
             name
         } else {
+            // 末尾の名前が一致する `std.*` の型が複数あると、どれを選ぶかが
+            // 不定になるため、曖昧なときは止める（現在は `Secret` だけ）。
             let mut found: Option<&str> = None;
             for k in self.structs.keys().chain(self.enums.keys()) {
                 if k.starts_with("std.") && k.rsplit('.').next() == Some(name) {
+                    if found.is_some() {
+                        return bail(format!("型 `{name}` に対応する標準の型が複数ある（曖昧）"));
+                    }
                     found = Some(k);
                 }
             }
@@ -571,6 +576,13 @@ impl<'a> L<'a> {
         self.types.push(ir::TypeDef {
             name: name.to_string(),
             kind: ir::TypeKind::Struct { fields: vec![] },
+            // 秘密の同一性はここで一度だけ決める。寄せた先の名前が
+            // `std.crypto.Secret` のときだけ、その宣言から来た型である。
+            // `std` は標準ライブラリ専用の名前で利用者は名乗れないため、
+            // この結合後の名前は埋め込みモジュールの宣言そのものを指す。
+            // 利用者が定義した同名の型は別のキー（裸の名前や自モジュール
+            // 修飾の名前）になり、ここには来ない。
+            secret: name == "std.crypto.Secret",
         });
         let arg = |i: usize| args.get(i).cloned().unwrap_or(ir::Ty::Unit);
         let v = |n: &str, f: Vec<ir::Ty>| ir::VariantDef {

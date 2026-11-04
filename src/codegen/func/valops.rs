@@ -500,10 +500,9 @@ impl<'a, 'p> Fx<'a, 'p> {
             Ty::Adt(id) => match &p.types[*id].kind {
                 TypeKind::Struct { fields } => {
                     // `Secret`（ADR 0024、PR 6-1b）は、中身の Bytes を解放する前に
-                    // データ領域をゼロ化する。名前の 2 形は記述子の種類の判定
-                    // （codegen.rs）と同じ。
-                    let def_name = &p.types[*id].name;
-                    if def_name == "Secret" || def_name == "std.crypto.Secret" {
+                    // データ領域をゼロ化する。判定は記述子の種類と同じく、
+                    // lower が付けた同一性の印（`secret`）だけを見る。
+                    if p.types[*id].secret {
                         let b = self.ld(w, 0);
                         self.rt("zeroize_bytes", &[b]);
                     }

@@ -574,13 +574,9 @@ fn is_ct_candidate(program: &Program, func: &Func) -> bool {
         loop {
             match t {
                 Ty::Adt(id) => {
-                    // 実体の名前は `Secret`（利用者側）と `std.crypto.Secret`
-                    // （実装側）の 2 形があるため、末尾の区間で比べる。
-                    return program
-                        .types
-                        .get(*id)
-                        .map(|d| d.name == "Secret" || d.name.ends_with(".Secret"))
-                        .unwrap_or(false);
+                    // 秘密かどうかは lower が付けた同一性の印で見る
+                    // （名前で比べると利用者の同名の型を拾ってしまう）。
+                    return program.types.get(*id).map(|d| d.secret).unwrap_or(false);
                 }
                 Ty::Ref(inner) | Ty::MutRef(inner) => t = inner,
                 _ => return false,

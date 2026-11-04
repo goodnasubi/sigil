@@ -86,3 +86,63 @@ fn secret_compare_via_expose_and_ct_eq() {
     );
     assert_eq!(v, 1);
 }
+
+#[test]
+fn user_defined_secret_is_a_plain_struct() {
+    // レビュー指摘の回帰試験: 利用者が同名の `struct Secret` を定義しても、
+    // 秘密扱い（記述子の種類 17・破棄前のゼロ化）にはならない。名前だけで
+    // 判定していたときは、先頭フィールドを `Bytes` とみなしてしまい、
+    // (Int, String) 形ではネイティブが segfault し、String や List<Int> が
+    // 先頭の形では中身が黙ってゼロ化されていた。3 形とも評価器と
+    // ネイティブで同じ結果になることを確かめる（common::run が突き合わせ、
+    // ネイティブが落ちれば突き合わせ側で失敗になる）。
+    let run_full = |src: &str| -> i64 {
+        let r = common::run(src, "main", &[] as &[Arg]).unwrap();
+        r.value.parse().unwrap()
+    };
+    let tuple_first = format!(
+        "{HEAD}struct Secret {{\n  xs: (Int, String)\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ xs: (7, \"hello\") }};\n  let (n, text) = s.xs;\n  return n + text.len();\n}}\n"
+    );
+    assert_eq!(run_full(&tuple_first), 7 + 5);
+    let string_first = format!(
+        "{HEAD}struct Secret {{\n  name: String,\n  n: Int\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ name: \"abc\", n: 40 }};\n  return s.n + s.name.len();\n}}\n"
+    );
+    assert_eq!(run_full(&string_first), 40 + 3);
+    let list_first = format!(
+        "{HEAD}struct Secret {{\n  xs: List<Int>,\n  n: Int\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let mut xs = List.new();\n  xs.push(10);\n  xs.push(20);\n  let s = Secret {{ xs: xs, n: 1 }};\n  return s.n + s.xs.len();\n}}\n"
+    );
+    assert_eq!(run_full(&list_first), 1 + 2);
+}
+
+#[test]
+fn user_defined_secret_trace_is_not_redacted() {
+    // 利用者の `Secret` の破棄は、通常の構造体として記録される
+    // （`***` で隠されない）。
+    let src = format!(
+        "{HEAD}struct Secret {{\n  xs: (Int, String)\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ xs: (7, \"hello\") }};\n  return 0;\n}}\n"
+    );
+    let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+    assert!(
+        drops.iter().any(|d| d.starts_with("Secret {")),
+        "通常の構造体として記録されていない: {drops:?}"
+    );
+    assert!(
+        !drops.iter().any(|d| d.contains("***")),
+        "利用者の型が秘密として隠されている: {drops:?}"
+    );
+}
+
+#[test]
+fn real_secret_trace_is_redacted() {
+    // 本物の `Secret`（std.crypto）の破棄は `Secret(***)` とだけ記録される。
+    let src = format!(
+        "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let mut b = Bytes.new();\n  b.push(10);\n  let s = Secret.from_bytes(b);\n  return s.len();\n}}\n"
+    );
+    let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+    assert!(
+        drops.iter().any(|d| d == "Secret(***)"),
+        "本物の Secret が隠されていない: {drops:?}"
+    );
+}

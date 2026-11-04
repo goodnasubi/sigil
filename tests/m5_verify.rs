@@ -405,6 +405,7 @@ fn pt_type() -> TypeDef {
         kind: TypeKind::Struct {
             fields: vec![("x".into(), Ty::Int), ("ok".into(), Ty::Bool)],
         },
+        secret: false,
     }
 }
 
@@ -472,6 +473,7 @@ fn global_init_shape_mismatches_are_caught() {
                 indirect: false,
             }],
         },
+        secret: false,
     };
     let p = global_only(
         vec![g("E", Ty::Adt(tag), false, GlobalInit::Int(0))],
@@ -494,6 +496,7 @@ fn global_init_shape_mismatches_are_caught() {
         kind: TypeKind::Struct {
             fields: vec![("x".into(), Ty::Int), ("s".into(), Ty::Str)],
         },
+        secret: false,
     };
     let p = global_only(
         vec![g("B", Ty::Adt(pt), false, GlobalInit::Int(0))],

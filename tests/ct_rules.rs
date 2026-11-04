@@ -78,8 +78,7 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     // だけ（ループ回数・添字はそこから派生する。ADR 0024 決定 3 の表）。
     ("std.crypto.sha256", &[]),
     ("std.crypto.sha256_compress", &["block_count"]),
-    // ADR 0024 の部品（PR 6-1d で実装される。先に載せておき、実装が
-    // 現れた時点で自動で検査の対象になる）。
+    // HMAC と PBKDF2（ADR 0024 決定 1 の 4・5、PR 6-1d で実装）。
     // なお std.crypto の比較は言語の自由関数 `ct_eq` が担い（ADR 0024 決定 1）、
     // 実体は上の `std.core.bytes.ct_equal` なので、ここには別に載せない。
     ("std.crypto.hmac_sha256", &[]),
@@ -93,11 +92,7 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
 
 /// 対象表のうち、まだ実装が存在しない行（先行登録）。
 /// 実装が現れたら、ここから外して通常の行として扱う。
-const CT_AHEAD: &[&str] = &[
-    "std.crypto.hmac_sha256",
-    "std.crypto.verify_hmac_sha256",
-    "std.crypto.pbkdf2_sha256",
-];
+const CT_AHEAD: &[&str] = &[];
 
 // ---------------------------------------------------------------------------
 // 違反の表現
@@ -340,7 +335,16 @@ fn apply_call(
                     format!("定数時間でない関数 {name} へ秘密の値を渡した"),
                 ));
             }
-            set_place_taint(state, dest, any);
+            // `Secret::len`（対象表の `len`。メソッドなので SIR 名は裸の
+            // 名前）の結果は長さであり、長さは公開の情報（ADR 0020 決定 1、
+            // 対象表の `len` の行の注記）。組み込みの *Len と同じ扱いに
+            // しないと、`requires key.len() >= 32` のような「秘密の長さを
+            // 見る契約」が、中身による分岐として誤検出される。
+            if is_ct && name == "len" {
+                set_place_taint(state, dest, false);
+            } else {
+                set_place_taint(state, dest, any);
+            }
         }
         Callee::Indirect(op) => {
             if any {
@@ -560,7 +564,10 @@ fn corpus() -> Program {
                let a = Bytes.new();\n  let b = Bytes.new();\n  \
                let s = Secret.from_bytes(a);\n  let inner = s.expose();\n  \
                let d = sha256(&b);\n  \
-               if ct_eq(&inner, &b) {\n    return s.len() + d.len();\n  }\n  return 0;\n}\n";
+               let h = hmac_sha256(&s, &b);\n  \
+               let ok = verify_hmac_sha256(&s, &b, &d);\n  \
+               let p = pbkdf2_sha256(&s, &b, 4096, 32);\n  \
+               if ct_eq(&inner, &b) && ok {\n    return s.len() + d.len() + h.len() + p.len();\n  }\n  return 0;\n}\n";
     sigil::ir_eval::lower_sources(&[src], "main").expect("コーパスの組み立てに失敗")
 }
 

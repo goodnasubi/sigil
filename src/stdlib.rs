@@ -209,6 +209,26 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     // モジュールの Sigil 実装（埋め込み）。`ct_eq` と違い組み込みではないため、
     // lower が名前で実体へ結ぶ。
     (Layer::Core, "sha256(data: &Bytes) -> Bytes", "none"),
+    // HMAC-SHA-256 と照合、PBKDF2（ADR 0024 決定 1、PR 6-1d）。実体は
+    // `sha256` と同じく `std.crypto` モジュールの Sigil 実装（埋め込み）。
+    // `pbkdf2_sha256` の効果は `none`: 反復ごとの `task.yield` は、効果
+    // `task.suspend` が HOSTED 専用で `std.crypto`（targets に bare を
+    // 含む）では宣言できないため入れていない（crypto.sigil の注記）。
+    (
+        Layer::Core,
+        "hmac_sha256(key: &Secret, message: &Bytes) -> Secret",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret",
+        "none",
+    ),
 ];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
@@ -237,6 +257,20 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
 pub const REQUIRES: &[(&str, &str)] = &[
     ("min(self: &List<T>) -> &T", "self.len() > 0"),
     ("max(self: &List<T>) -> &T", "self.len() > 0"),
+    // 暗号の部品の契約（ADR 0024 決定 2、PR 6-1d）。短すぎる鍵と、
+    // 少なすぎる・多すぎる反復回数を、呼び出し側の責任として弾く。
+    (
+        "hmac_sha256(key: &Secret, message: &Bytes) -> Secret",
+        "key.len() >= 32",
+    ),
+    (
+        "verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool",
+        "key.len() >= 32",
+    ),
+    (
+        "pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret",
+        "iterations >= 4096 && iterations <= 100000 && dk_len > 0",
+    ),
 ];
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。

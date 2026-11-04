@@ -2,10 +2,11 @@ module std.crypto
   targets bare, browser, server
   trust none
 
-// 暗号の基本部品（ADR 0024、PR 6-1b・6-1c）。秘密を型で隔離する `Secret`
-// とその入口の関数、SHA-256（ストリーミング型 `Sha256` とワンショット
-// 関数 `sha256`、内部の圧縮関数 `sha256_compress`）を置く。HMAC・PBKDF2
-// は後続の PR で足す。
+// 暗号の基本部品（ADR 0024、PR 6-1b・6-1c・6-1d）。秘密を型で隔離する
+// `Secret` とその入口の関数、SHA-256（ストリーミング型 `Sha256` と
+// ワンショット関数 `sha256`、内部の圧縮関数 `sha256_compress`）、
+// HMAC-SHA-256（`hmac_sha256` と照合の `verify_hmac_sha256`）、
+// PBKDF2-HMAC-SHA-256（`pbkdf2_sha256`）を置く。
 //
 // API の形について: 標準ライブラリの表（src/stdlib.rs の IMPLS）にも
 // 同じメソッドを宣言して利用者へ見せる。表の宣言とこのモジュールの
@@ -341,4 +342,123 @@ pub fn sha256_compress(st: &List<Int>, data: &Bytes, block_count: Int) -> List<I
     blk = blk + 1;
   }
   return cur;
+}
+
+// ---------------------------------------------------------------------------
+// HMAC-SHA-256（ADR 0024 決定 1 の 4、PR 6-1d）。RFC 2104 / RFC 4231。
+//
+// 鍵は `Secret` 必須で、32 バイト未満は `requires` 違反として異常停止
+// する（長すぎる鍵を黙って切り詰める事故を型と契約で防ぐ。ADR 0024
+// 決定 2）。ブロック長（64 バイト）を超える鍵は SHA-256 で圧縮して
+// から使う。鍵の長さによる分岐は、長さ（公開の情報）にだけ依存する。
+// 対象表では公開の引数は無し、つまり鍵だけでなくメッセージの中身も
+// 秘密として解析する（メッセージは鍵で守る対象でありうるため）。
+// 出力も `Secret`。
+
+pub fn hmac_sha256(key: &Secret, message: &Bytes) -> Secret
+  intent "HMAC-SHA-256 を計算する"
+  requires key.len() >= 32
+  ensures result.len() == 32
+  effects none
+{
+  let mut kb = key.expose();
+  if kb.len() > 64 {
+    kb = sha256(&kb);
+  }
+  while kb.len() < 64 {
+    kb.push(0);
+  }
+  let mut ipad = Bytes.new();
+  let mut opad = Bytes.new();
+  let mut i = 0;
+  while i < 64 {
+    let b = kb.get(i).map(|x| x + 0).unwrap_or(0);
+    ipad.push(b ^ 0x36);
+    opad.push(b ^ 0x5C);
+    i = i + 1;
+  }
+  let mut inner = ipad;
+  inner.extend(&message);
+  let inner_hash = sha256(&inner);
+  let mut outer = opad;
+  outer.extend(&inner_hash);
+  return Secret.from_bytes(sha256(&outer));
+}
+
+// 範囲: HMAC の照合。計算した値を `ct_eq`（定数時間比較）で比べ、結果を
+// そのまま返す（この関数の中で結果による分岐はしない）。
+
+pub fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool
+  intent "HMAC-SHA-256 を定数時間で照合する"
+  requires key.len() >= 32
+  ensures none
+  effects none
+{
+  let mac = hmac_sha256(&key, &message);
+  let got = mac.expose();
+  return ct_eq(&got, &expected);
+}
+
+// ---------------------------------------------------------------------------
+// PBKDF2-HMAC-SHA-256（ADR 0024 決定 1 の 5、PR 6-1d）。RFC 2898。
+//
+// 反復回数は 4096〜100000 を `requires` で強制する（少なすぎる反復を
+// 黙って通さない。ADR 0024 決定 2）。塩・反復回数・出力の長さは公開の
+// 情報（対象表の公開引数）で、ループの回数と添字はすべてそこから
+// 決まる。パスワードだけが秘密。
+//
+// ADR / Issue からの逸脱（要報告）: 反復は長い計算になるため、本来は
+// 1024 回ごとに `task.yield` で実行を譲る設計だが、入れていない。
+// 効果 `task.suspend` は HOSTED（browser / server）専用のカテゴリで、
+// `targets` に bare を含むこのモジュールでは宣言も推論もできない
+// （検査器の EffectTarget: 効果 `task.suspend` は実行対象 `bare` では
+// 使えない）。bare での yield の意味づけ（スケジューラが無い環境で
+// 何をするか）は言語設計の判断が要るため、この PR では `effects none`
+// のまま実装し、逸脱として Issue #289 への報告に残す。
+
+pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret
+  intent "PBKDF2-HMAC-SHA-256 で鍵を導出する"
+  requires iterations >= 4096 && iterations <= 100000 && dk_len > 0
+  ensures result.len() == dk_len
+  effects none
+{
+  let mut out = Bytes.new();
+  // パスワードは鍵ではないので長さの要求はないが、内部で使う
+  // `hmac_sha256` は鍵に 32 バイト以上を要求する。32 バイト未満の
+  // パスワードはゼロバイトを足して 32 バイトにしてから渡す。HMAC は
+  // 鍵を 64 バイトへゼロ詰めするため、この追加は HMAC の値を変えない
+  // （RFC 2898 の構成そのままになる）。
+  let mut pw = password.expose();
+  while pw.len() < 32 {
+    pw.push(0);
+  }
+  let pwkey = Secret.from_bytes(pw);
+  let blocks = (dk_len + 31) / 32;
+  let mut blk = 1;
+  while blk <= blocks {
+    let mut msg = salt.clone();
+    msg.push_u32_be(blk);
+    let s1 = hmac_sha256(&pwkey, &msg);
+    let mut u = s1.expose();
+    let mut t = u.clone();
+    let mut j = 1;
+    while j < iterations {
+      let sj = hmac_sha256(&pwkey, &u);
+      u = sj.expose();
+      let mut nt = Bytes.new();
+      let mut i = 0;
+      while i < t.len() {
+        let tb = t.get(i).map(|x| x + 0).unwrap_or(0);
+        let ub = u.get(i).map(|x| x + 0).unwrap_or(0);
+        nt.push(tb ^ ub);
+        i = i + 1;
+      }
+      t = nt;
+      j = j + 1;
+    }
+    out.extend(&t);
+    blk = blk + 1;
+  }
+  let key = out.slice(0, dk_len).unwrap_or(Bytes.new());
+  return Secret.from_bytes(key);
 }

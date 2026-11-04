@@ -72,11 +72,16 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("from_bytes", &[]),
     ("expose", &[]),
     ("len", &[]),
-    // ADR 0024 の部品（PR 6-1c〜d で実装される。先に載せておき、実装が
+    // SHA-256（PR 6-1c で実装）。ワンショット `sha256` の引数 `data` の
+    // 中身は秘密、長さは公開（解析のモデリングで BytesLen は公開になる）。
+    // 圧縮 `sha256_compress` は、公開なのはブロックの数 `block_count`
+    // だけ（ループ回数・添字はそこから派生する。ADR 0024 決定 3 の表）。
+    ("std.crypto.sha256", &[]),
+    ("std.crypto.sha256_compress", &["block_count"]),
+    // ADR 0024 の部品（PR 6-1d で実装される。先に載せておき、実装が
     // 現れた時点で自動で検査の対象になる）。
     // なお std.crypto の比較は言語の自由関数 `ct_eq` が担い（ADR 0024 決定 1）、
     // 実体は上の `std.core.bytes.ct_equal` なので、ここには別に載せない。
-    ("std.crypto.sha256_compress", &[]),
     ("std.crypto.hmac_sha256", &[]),
     ("std.crypto.verify_hmac_sha256", &[]),
     // 塩・回数・出力の長さは公開（ADR 0020 決定 1 の対象表）。
@@ -89,7 +94,6 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
 /// 対象表のうち、まだ実装が存在しない行（先行登録）。
 /// 実装が現れたら、ここから外して通常の行として扱う。
 const CT_AHEAD: &[&str] = &[
-    "std.crypto.sha256_compress",
     "std.crypto.hmac_sha256",
     "std.crypto.verify_hmac_sha256",
     "std.crypto.pbkdf2_sha256",
@@ -555,7 +559,8 @@ fn corpus() -> Program {
                fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects none\n{\n  \
                let a = Bytes.new();\n  let b = Bytes.new();\n  \
                let s = Secret.from_bytes(a);\n  let inner = s.expose();\n  \
-               if ct_eq(&inner, &b) {\n    return s.len();\n  }\n  return 0;\n}\n";
+               let d = sha256(&b);\n  \
+               if ct_eq(&inner, &b) {\n    return s.len() + d.len();\n  }\n  return 0;\n}\n";
     sigil::ir_eval::lower_sources(&[src], "main").expect("コーパスの組み立てに失敗")
 }
 

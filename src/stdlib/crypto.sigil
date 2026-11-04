@@ -2,8 +2,10 @@ module std.crypto
   targets bare, browser, server
   trust none
 
-// 暗号の基本部品（ADR 0024、PR 6-1b）。秘密を型で隔離する `Secret` と、
-// その入口の関数を置く。SHA-256 などは後続の PR で足す。
+// 暗号の基本部品（ADR 0024、PR 6-1b・6-1c）。秘密を型で隔離する `Secret`
+// とその入口の関数、SHA-256（ストリーミング型 `Sha256` とワンショット
+// 関数 `sha256`、内部の圧縮関数 `sha256_compress`）を置く。HMAC・PBKDF2
+// は後続の PR で足す。
 //
 // API の形について: 標準ライブラリの表（src/stdlib.rs の IMPLS）にも
 // 同じメソッドを宣言して利用者へ見せる。表の宣言とこのモジュールの
@@ -59,4 +61,284 @@ impl Secret {
   {
     return self.data.len();
   }
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256（ADR 0024 決定 1 の 3、PR 6-1c）。RFC 6234 / FIPS 180-4 準拠。
+//
+// 内部の圧縮は `sha256_compress` に寄せる。引数のうち公開なのは
+// `block_count`（処理する 64 バイトブロックの数）だけで、ループ回数・
+// 添字はすべてそこから派生するカウンタと定数で決める（長さも公開の情報
+// だが、ADR の対象表の形に合わせて block_count 駆動にする）。圧縮の
+// 中身は &, |, ^, ~, >>, rotr32 と 32 ビット幅への切り詰め（加算後に
+// & 0xFFFFFFFF）だけで書き、秘密の値に依存する分岐・添字・除算は持たない
+// （tests/ct_rules.rs の対象表と静的検査が担保する）。
+//
+// 書き方の制約（定数時間検査に合わせたもの）:
+// - モジュール内の補助関数は置かない: `std.crypto.` で始まる名前はすべて
+//   包括基準に当たるため、定数表（初期状態・ラウンド定数）の組み立ては
+//   使う場所に直接書く。
+// - 一覧の読みは `get(i).map(|x| x + 0).unwrap_or(0)` で受ける。`match` で
+//   受けると、秘密の領域から読んだ値の振り分け（判別）自体が分岐として
+//   R1 に当たる。範囲外は来ないので既定値は使われない。
+// - 圧縮は次の状態を戻り値で返す。要素への代入（get_mut の受け取り）も
+//   同じ理由で使わず、状態の差し替えは呼び出し側で行う。
+
+pub struct Sha256 {
+  state: List<Int>,
+  buffer: Bytes,
+  total_len: Int,
+}
+
+impl Sha256 {
+  // 範囲: 初期状態（FIPS 180-4 の初期ハッシュ値）を持つ文脈を作る。
+  pub fn new() -> Sha256
+    intent "SHA-256 コンテキストを初期化する"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut st = List.new();
+    st.push(0x6a09e667);
+    st.push(0xbb67ae85);
+    st.push(0x3c6ef372);
+    st.push(0xa54ff53a);
+    st.push(0x510e527f);
+    st.push(0x9b05688c);
+    st.push(0x1f83d9ab);
+    st.push(0x5be0cd19);
+    return Sha256 { state: st, buffer: Bytes.new(), total_len: 0 };
+  }
+
+  // 範囲: バイト列を追加する。64 バイト溜まったブロックから順に圧縮し、
+  // 端数は buffer に残す。圧縮へ渡すブロック数は 1 つずつ（溜まった分を
+  // その場で処理する）。
+  pub fn update(self: &mut Sha256, data: &Bytes)
+    intent "バイト列を追加して状態を更新する"
+    requires none
+    ensures none
+    effects none
+  {
+    self.total_len = self.total_len + data.len();
+    let mut buf = self.buffer.clone();
+    buf.extend(&data);
+    while buf.len() >= 64 {
+      let block = buf.slice(0, 64).unwrap_or(Bytes.new());
+      self.state = sha256_compress(&self.state, &block, 1);
+      buf = buf.slice(64, buf.len()).unwrap_or(Bytes.new());
+    }
+    self.buffer = buf;
+  }
+
+  // 範囲: パディングを適用して 32 バイトのダイジェストを返す。パディング
+  // の形（0x80 の位置・ゼロの数・末尾の長さ欄）は入力の長さ（公開の情報）
+  // だけから決める。
+  pub fn finalize(self: &mut Sha256) -> Bytes
+    intent "パディングを適用し 32 バイトのダイジェストを返す"
+    requires none
+    ensures result.len() == 32
+    effects none
+  {
+    let zero = 0;
+    let mut tail = self.buffer.clone();
+    tail.push(0x80);
+    while tail.len() % 64 != 56 {
+      tail.push(0);
+    }
+    tail.push_u64_be(self.total_len * 8);
+    self.state = sha256_compress(&self.state, &tail, tail.len() / 64);
+    // 状態の読みは写しを取ってから行う（フィールド越しの get と既定値の
+    // 借用が重なると、参照の位置の規則に合わないため）。
+    let done = self.state.clone();
+    let mut out = Bytes.new();
+    out.push_u32_be(done.get(0).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(1).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(2).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(3).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(4).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(5).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(6).map(|x| x + 0).unwrap_or(0));
+    out.push_u32_be(done.get(7).map(|x| x + 0).unwrap_or(0));
+    return out;
+  }
+}
+
+// 範囲: データ全体のダイジェストを 1 回で計算する。パディング済みの全体を
+// 組み立てて圧縮を 1 回呼ぶ（ストリーミングのメソッド経由にはしない:
+// メソッドは定数時間検査の対象表にないため、秘密の値を渡すと R4 の
+// 違反になる。tests/ct_rules.rs の設計判断）。
+pub fn sha256(data: &Bytes) -> Bytes
+  intent "データ全体の SHA-256 ダイジェスト (32 バイト) を計算する"
+  requires none
+  ensures result.len() == 32
+  effects none
+{
+  let mut padded = data.clone();
+  padded.push(0x80);
+  while padded.len() % 64 != 56 {
+    padded.push(0);
+  }
+  padded.push_u64_be(data.len() * 8);
+  let mut st = List.new();
+  st.push(0x6a09e667);
+  st.push(0xbb67ae85);
+  st.push(0x3c6ef372);
+  st.push(0xa54ff53a);
+  st.push(0x510e527f);
+  st.push(0x9b05688c);
+  st.push(0x1f83d9ab);
+  st.push(0x5be0cd19);
+  let done = sha256_compress(&st, &padded, padded.len() / 64);
+  let mut out = Bytes.new();
+  out.push_u32_be(done.get(0).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(1).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(2).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(3).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(4).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(5).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(6).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(done.get(7).map(|x| x + 0).unwrap_or(0));
+  return out;
+}
+
+// 範囲: 圧縮関数の本体。`data` の先頭から `block_count` 個の 64 バイト
+// ブロックを処理し、状態（8 つの 32 ビット語）の次の値を返す。呼び出し側は
+// ブロック単位に整えたバイト列を渡す（端数やパディングは呼び出し側）。
+pub fn sha256_compress(st: &List<Int>, data: &Bytes, block_count: Int) -> List<Int>
+  intent "64 バイトブロックを block_count 個圧縮した次の状態を返す"
+  requires none
+  ensures none
+  effects none
+{
+  // ラウンド定数 K（FIPS 180-4）。定数は公開の値。
+  let mut k = List.new();
+  k.push(0x428a2f98);
+  k.push(0x71374491);
+  k.push(0xb5c0fbcf);
+  k.push(0xe9b5dba5);
+  k.push(0x3956c25b);
+  k.push(0x59f111f1);
+  k.push(0x923f82a4);
+  k.push(0xab1c5ed5);
+  k.push(0xd807aa98);
+  k.push(0x12835b01);
+  k.push(0x243185be);
+  k.push(0x550c7dc3);
+  k.push(0x72be5d74);
+  k.push(0x80deb1fe);
+  k.push(0x9bdc06a7);
+  k.push(0xc19bf174);
+  k.push(0xe49b69c1);
+  k.push(0xefbe4786);
+  k.push(0x0fc19dc6);
+  k.push(0x240ca1cc);
+  k.push(0x2de92c6f);
+  k.push(0x4a7484aa);
+  k.push(0x5cb0a9dc);
+  k.push(0x76f988da);
+  k.push(0x983e5152);
+  k.push(0xa831c66d);
+  k.push(0xb00327c8);
+  k.push(0xbf597fc7);
+  k.push(0xc6e00bf3);
+  k.push(0xd5a79147);
+  k.push(0x06ca6351);
+  k.push(0x14292967);
+  k.push(0x27b70a85);
+  k.push(0x2e1b2138);
+  k.push(0x4d2c6dfc);
+  k.push(0x53380d13);
+  k.push(0x650a7354);
+  k.push(0x766a0abb);
+  k.push(0x81c2c92e);
+  k.push(0x92722c85);
+  k.push(0xa2bfe8a1);
+  k.push(0xa81a664b);
+  k.push(0xc24b8b70);
+  k.push(0xc76c51a3);
+  k.push(0xd192e819);
+  k.push(0xd6990624);
+  k.push(0xf40e3585);
+  k.push(0x106aa070);
+  k.push(0x19a4c116);
+  k.push(0x1e376c08);
+  k.push(0x2748774c);
+  k.push(0x34b0bcb5);
+  k.push(0x391c0cb3);
+  k.push(0x4ed8aa4a);
+  k.push(0x5b9cca4f);
+  k.push(0x682e6ff3);
+  k.push(0x748f82ee);
+  k.push(0x78a5636f);
+  k.push(0x84c87814);
+  k.push(0x8cc70208);
+  k.push(0x90befffa);
+  k.push(0xa4506ceb);
+  k.push(0xbef9a3f7);
+  k.push(0xc67178f2);
+  let mut cur = st.clone();
+  let mut blk = 0;
+  while blk < block_count {
+    // メッセージスケジュール W（64 語）。最初の 16 語はブロックを
+    // ビッグエンディアンで読んだもの、残りは小さい σ で広げる。
+    let mut w = List.new();
+    let mut t = 0;
+    while t < 16 {
+      w.push(data.read_u32_be(blk * 64 + t * 4).unwrap_or(0));
+      t = t + 1;
+    }
+    while t < 64 {
+      let x15 = w.get(t - 15).map(|x| x + 0).unwrap_or(0);
+      let s0 = x15.rotr32(7) ^ x15.rotr32(18) ^ (x15 >> 3);
+      let x2 = w.get(t - 2).map(|x| x + 0).unwrap_or(0);
+      let s1 = x2.rotr32(17) ^ x2.rotr32(19) ^ (x2 >> 10);
+      let w16 = w.get(t - 16).map(|x| x + 0).unwrap_or(0);
+      let w7 = w.get(t - 7).map(|x| x + 0).unwrap_or(0);
+      w.push((w16 + s0 + w7 + s1) & 0xFFFFFFFF);
+      t = t + 1;
+    }
+    // 64 ラウンド。作業変数は局所に置く（Σ・Ch・Maj はすべてビット演算）。
+    let mut a = cur.get(0).map(|x| x + 0).unwrap_or(0);
+    let mut b = cur.get(1).map(|x| x + 0).unwrap_or(0);
+    let mut c = cur.get(2).map(|x| x + 0).unwrap_or(0);
+    let mut d = cur.get(3).map(|x| x + 0).unwrap_or(0);
+    let mut e = cur.get(4).map(|x| x + 0).unwrap_or(0);
+    let mut f = cur.get(5).map(|x| x + 0).unwrap_or(0);
+    let mut g = cur.get(6).map(|x| x + 0).unwrap_or(0);
+    let mut h = cur.get(7).map(|x| x + 0).unwrap_or(0);
+    let mut r = 0;
+    while r < 64 {
+      let bs1 = e.rotr32(6) ^ e.rotr32(11) ^ e.rotr32(25);
+      let ch = (e & f) ^ ((~e) & g);
+      let kw = k.get(r).map(|x| x + 0).unwrap_or(0);
+      let ww = w.get(r).map(|x| x + 0).unwrap_or(0);
+      let t1 = (h + bs1 + ch + kw + ww) & 0xFFFFFFFF;
+      let bs0 = a.rotr32(2) ^ a.rotr32(13) ^ a.rotr32(22);
+      let maj = (a & b) ^ (a & c) ^ (b & c);
+      let t2 = (bs0 + maj) & 0xFFFFFFFF;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + t1) & 0xFFFFFFFF;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) & 0xFFFFFFFF;
+      r = r + 1;
+    }
+    // 状態へ作業変数を加算する（32 ビット幅に切り詰める）。次の状態は
+    // 新しい一覧に組み立てて差し替える。
+    let mut next = List.new();
+    next.push((cur.get(0).map(|x| x + 0).unwrap_or(0) + a) & 0xFFFFFFFF);
+    next.push((cur.get(1).map(|x| x + 0).unwrap_or(0) + b) & 0xFFFFFFFF);
+    next.push((cur.get(2).map(|x| x + 0).unwrap_or(0) + c) & 0xFFFFFFFF);
+    next.push((cur.get(3).map(|x| x + 0).unwrap_or(0) + d) & 0xFFFFFFFF);
+    next.push((cur.get(4).map(|x| x + 0).unwrap_or(0) + e) & 0xFFFFFFFF);
+    next.push((cur.get(5).map(|x| x + 0).unwrap_or(0) + f) & 0xFFFFFFFF);
+    next.push((cur.get(6).map(|x| x + 0).unwrap_or(0) + g) & 0xFFFFFFFF);
+    next.push((cur.get(7).map(|x| x + 0).unwrap_or(0) + h) & 0xFFFFFFFF);
+    cur = next;
+    blk = blk + 1;
+  }
+  return cur;
 }

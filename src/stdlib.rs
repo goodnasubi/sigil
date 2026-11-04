@@ -50,6 +50,11 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // ランタイムの破棄で担保する。検査器には中身を見せない型として登録し、
     // 実装の構造体と名前で結ぶ。
     ("Secret", 0, Layer::Core),
+    // SHA-256 のストリーミング文脈（ADR 0024 決定 1、PR 6-1c）。`Secret` と
+    // 同じく中身は `std.crypto` の Sigil 実装が持ち、検査器には中身を
+    // 見せない型として登録して実装の構造体と名前で結ぶ（秘密ではないので、
+    // 破棄時ゼロ化や表示不可の性質は持たない）。
+    ("Sha256", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -200,6 +205,10 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (Layer::Core, "to_float(n: Int) -> Float", "none"),
     (Layer::Core, "to_int(x: Float) -> Option<Int>", "none"),
     (Layer::Core, "ct_eq(a: &Bytes, b: &Bytes) -> Bool", "none"),
+    // SHA-256 ワンショット（ADR 0024 決定 1、PR 6-1c）。実体は `std.crypto`
+    // モジュールの Sigil 実装（埋め込み）。`ct_eq` と違い組み込みではないため、
+    // lower が名前で実体へ結ぶ。
+    (Layer::Core, "sha256(data: &Bytes) -> Bytes", "none"),
 ];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
@@ -239,6 +248,15 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("from_bytes(b: Bytes) -> Secret", "none"),
             ("expose(self: &Secret) -> Bytes", "none"),
             ("len(self: &Secret) -> Int", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "Sha256",
+        &[
+            ("new() -> Sha256", "none"),
+            ("update(self: &mut Sha256, data: &Bytes)", "none"),
+            ("finalize(self: &mut Sha256) -> Bytes", "none"),
         ],
     ),
     (

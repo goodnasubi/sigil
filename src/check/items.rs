@@ -186,7 +186,13 @@ impl Ck {
             match item {
                 Item::Fn(f) => {
                     self.span = f.span;
-                    if self.fns.contains_key(&f.name) {
+                    // 埋め込み標準モジュール（`std.*`）の自由関数は、標準ライブラリの
+                    // 表が先に登録した宣言の「実体」であることがある（二重宣言では
+                    // ない。ADR 0024、PR 6-1c: `sha256` は表で利用者へ見せ、実体は
+                    // `std.crypto` が持つ。メソッドについての同じ扱いは
+                    // `register_impl` にある）。置き換えを許すのは埋め込みモジュール
+                    // の検査のときだけに限る。
+                    if self.fns.contains_key(&f.name) && !self.embedded {
                         return self.err(
                             ErrorKind::DuplicateDefinition,
                             format!("関数 `{}` が二重に宣言されている", f.name),

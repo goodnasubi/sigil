@@ -410,15 +410,7 @@ mod tests {
                 len: buf.len() as i64,
                 cap: 0,
             }));
-            let desc = [
-                kind,
-                0,
-                0,
-                1,
-                0,
-                0,
-                bytes_desc.as_ptr() as i64,
-            ];
+            let desc = [kind, 0, 0, 1, 0, 0, bytes_desc.as_ptr() as i64];
             let block = Box::into_raw(Box::new(0i64));
             unsafe {
                 *block = head as i64;

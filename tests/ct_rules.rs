@@ -82,6 +82,9 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     // なお std.crypto の比較は言語の自由関数 `ct_eq` が担い（ADR 0024 決定 1）、
     // 実体は上の `std.core.bytes.ct_equal` なので、ここには別に載せない。
     ("std.crypto.hmac_sha256", &[]),
+    // PBKDF2 が使う内部の補助（鍵のパッドを処理済みの状態から HMAC を求める。PR 6-1e）。
+    // 引数の状態・メッセージはすべて秘密、長さは公開。
+    ("std.crypto.hmac_from_pads", &[]),
     ("std.crypto.verify_hmac_sha256", &[]),
     // 塩・回数・出力の長さは公開（ADR 0020 決定 1 の対象表）。
     (

@@ -3,7 +3,7 @@
 //! - `List` を作っては捨てる繰り返しで、`blocks=` と `sigil_blocks=` が、1000 回と 100000 回で完全に一致する。
 //!   3-5c-i では `blocks=` が Rust の `RtList` の頭を、`sigil_blocks=` が `List<String>` の要素の文字列・`lines` の各行を
 //!   数えた。3-5c-ii からは一覧の頭と領域も `sigil_blocks=` が数え、`blocks=` は 0 のまま（E-5）。
-//! - `List.min`/`List.max` は codegen のループ（`val_cmp`）。同順位・比べられない値（NaN）・1 要素・空で、
+//! - `List.min`/`List.max` は codegen のループ（生成した `sigil_cmp_<k>`）。同順位・比べられない値（NaN）・1 要素・空で、
 //!   評価器とネイティブが一致する（`common::run` が両方を走らせて突き合わせる）。
 //! - `Bytes.from_list` は一覧の中身を `len`/`get` 経由で読む。
 //!

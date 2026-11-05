@@ -18,7 +18,7 @@ impl Targets {
         server: true,
         browser: true,
     };
-    /// 実行環境なしを含むすべての出力先で使える（`state` だけ。ADR 0014 決定 3）。
+    /// 実行環境なしを含むすべての出力先で使える（`state` と `task.suspend`。ADR 0014 決定 3、ADR 0028）。
     pub const ANY: Targets = Targets {
         bare: true,
         server: true,
@@ -72,7 +72,12 @@ impl EffectTable {
             ("state", T::ANY),
             ("foreign", T::HOSTED),
             ("task.spawn", T::HOSTED),
-            ("task.suspend", T::HOSTED),
+            // `task.suspend` だけは bare でも使える（ADR 0028）。値を返さず
+            // 権限も与えない「譲る合図」であり、スケジューラの無い bare では
+            // 協調点として no-op に劣化できるため。一般則として、bare を
+            // 含んでよいのは、実行環境なしでも意味が定義でき、値も権限も
+            // 環境とやり取りしない効果に限る（`state` と `task.suspend` のみ）。
+            ("task.suspend", T::ANY),
             ("task.share", T::HOSTED),
         ];
         let mut t = EffectTable { cats: vec![] };

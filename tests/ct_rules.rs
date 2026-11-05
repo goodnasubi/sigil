@@ -560,7 +560,7 @@ fn apply_builtin(
 /// 入口から届かない関数も含めて、標準ライブラリの関数がすべて SIR に現れる。
 fn corpus() -> Program {
     let src = "module ctprobe\n  targets server\n  trust none\n\n\
-               fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects none\n{\n  \
+               fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects task.suspend\n{\n  \
                let a = Bytes.new();\n  let b = Bytes.new();\n  \
                let s = Secret.from_bytes(a);\n  let inner = s.expose();\n  \
                let d = sha256(&b);\n  \

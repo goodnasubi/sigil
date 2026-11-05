@@ -964,10 +964,14 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (a5, _) = self.val(&args[6]);
                 (self.rt("raw_syscall", &[n, a0, a1, a2, a3, a4, a5]), u)
             }
-            TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
-            | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
-            | SyncSharedGet | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut
-            | AtomicNew | AtomicLoad | AtomicStore => {
+            // `task.yield` は協調点（ADR 0028）: ネイティブ出力にはスケジューラが
+            // 無いため、bare の意味づけどおり何もしない。他の並行操作（生成・合流・
+            // チャネル等）は値と意味を持つため、従来どおり未対応のまま。
+            TaskYield => (self.ic(0), u),
+            TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskSleep | TaskChannel
+            | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew | SyncSharedGet
+            | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut | AtomicNew | AtomicLoad
+            | AtomicStore => {
                 let v = self.unsupported("並行処理の操作はネイティブ出力未対応");
                 (v, u)
             }

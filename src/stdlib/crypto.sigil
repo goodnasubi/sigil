@@ -407,20 +407,19 @@ pub fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bo
 // 情報（対象表の公開引数）で、ループの回数と添字はすべてそこから
 // 決まる。パスワードだけが秘密。
 //
-// ADR / Issue からの逸脱（要報告）: 反復は長い計算になるため、本来は
-// 1024 回ごとに `task.yield` で実行を譲る設計だが、入れていない。
-// 効果 `task.suspend` は HOSTED（browser / server）専用のカテゴリで、
-// `targets` に bare を含むこのモジュールでは宣言も推論もできない
-// （検査器の EffectTarget: 効果 `task.suspend` は実行対象 `bare` では
-// 使えない）。bare での yield の意味づけ（スケジューラが無い環境で
-// 何をするか）は言語設計の判断が要るため、この PR では `effects none`
-// のまま実装し、逸脱として Issue #289 への報告に残す。
+// 協調点（ADR 0024 決定 2）: 反復は長い計算になるため、ブロック内の
+// 反復 1024 回ごとに `task.yield` で実行を譲る。6-1d の実装当初は、
+// 効果 `task.suspend` の対象が HOSTED（browser / server）のみで、
+// `targets` に bare を含むこのモジュールでは宣言も推論もできず、
+// 逸脱として yield なしで実装した。その後 ADR 0028 で `task.suspend`
+// の対象に bare が含められ（bare での yield は協調点、スケジューラが
+// 無い実行では no-op）、本実装で逸脱は解消した。
 
 pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret
   intent "PBKDF2-HMAC-SHA-256 で鍵を導出する"
   requires iterations >= 4096 && iterations <= 100000 && dk_len > 0
   ensures result.len() == dk_len
-  effects none
+  effects task.suspend
 {
   let mut out = Bytes.new();
   // パスワードは鍵ではないので長さの要求はないが、内部で使う
@@ -454,6 +453,9 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
         i = i + 1;
       }
       t = nt;
+      if j % 1024 == 0 {
+        task.yield();
+      }
       j = j + 1;
     }
     out.extend(&t);

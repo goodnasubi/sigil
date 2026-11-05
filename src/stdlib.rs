@@ -211,9 +211,10 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (Layer::Core, "sha256(data: &Bytes) -> Bytes", "none"),
     // HMAC-SHA-256 と照合、PBKDF2（ADR 0024 決定 1、PR 6-1d）。実体は
     // `sha256` と同じく `std.crypto` モジュールの Sigil 実装（埋め込み）。
-    // `pbkdf2_sha256` の効果は `none`: 反復ごとの `task.yield` は、効果
-    // `task.suspend` が HOSTED 専用で `std.crypto`（targets に bare を
-    // 含む）では宣言できないため入れていない（crypto.sigil の注記）。
+    // `pbkdf2_sha256` の効果は `task.suspend`: 反復ごとの `task.yield`
+    // （ADR 0024 決定 2）は、効果 `task.suspend` の対象に bare が含まれて
+    // いなかったため 6-1d では入れられなかったが、ADR 0028 で bare が
+    // 許可され、宣言できるようになった（crypto.sigil の注記）。
     (
         Layer::Core,
         "hmac_sha256(key: &Secret, message: &Bytes) -> Secret",
@@ -227,7 +228,7 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (
         Layer::Core,
         "pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret",
-        "none",
+        "task.suspend",
     ),
 ];
 

@@ -19,10 +19,12 @@
 //!   突き合わせる）。PBKDF2 の反復は評価器では遅いため、ベクタは
 //!   最小の反復回数（4096）の組に絞る。
 //!
-//! 逸脱の注記: ADR / Issue は「1024 回ごとに `task.yield`」を求めるが、
-//! 効果 `task.suspend` は HOSTED 専用で `std.crypto`（targets に bare を
-//! 含む）では宣言できないため、この PR の実装には yield が入って
-//! いない（`src/stdlib/crypto.sigil` の注記と Issue #289 への報告）。
+//! 協調点の注記: ADR 0024 決定 2 の「1024 回ごとに `task.yield`」は、
+//! 効果 `task.suspend` の対象に bare が含まれず `std.crypto` では宣言
+//! できなかったため、6-1d では逸脱として yield なしで実装した。その後
+//! ADR 0028 で `task.suspend` の bare が許可され、Issue #291 で yield を
+//! 実装して逸脱は解消した。PBKDF2 を呼ぶ側の `main` は、効果の完全一致
+//! のため `effects task.suspend` を宣言する。
 
 mod common;
 
@@ -276,7 +278,7 @@ fn run_pbkdf2(
     expected_hex: &str,
 ) -> i64 {
     let src = format!(
-        "{HEAD}{MISMATCH_FN}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{}  let pw = Secret.from_bytes(pb);\n{}  let dk = pbkdf2_sha256(&pw, &salt, {iterations}, {dk_len});\n  let got = dk.expose();\n{}  return mismatch(&got, &want);\n}}\n",
+        "{HEAD}{MISMATCH_FN}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects task.suspend\n{{\n{}  let pw = Secret.from_bytes(pb);\n{}  let dk = pbkdf2_sha256(&pw, &salt, {iterations}, {dk_len});\n  let got = dk.expose();\n{}  return mismatch(&got, &want);\n}}\n",
         build_bytes("pb", password),
         build_bytes("salt", salt),
         build_expected("want", expected_hex),
@@ -354,7 +356,7 @@ fn verify_short_key_is_a_contract_violation() {
 fn pbkdf2_out_of_range_is_a_contract_violation() {
     for (iterations, dk_len) in [(4095, 32), (100001, 32), (4096, 0)] {
         let src = format!(
-            "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{}  let pw = Secret.from_bytes(pb);\n{}  let dk = pbkdf2_sha256(&pw, &salt, {iterations}, {dk_len});\n  return dk.len();\n}}\n",
+            "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects task.suspend\n{{\n{}  let pw = Secret.from_bytes(pb);\n{}  let dk = pbkdf2_sha256(&pw, &salt, {iterations}, {dk_len});\n  return dk.len();\n}}\n",
             build_bytes("pb", b"password"),
             build_bytes("salt", b"salt"),
         );

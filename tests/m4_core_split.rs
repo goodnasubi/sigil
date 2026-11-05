@@ -68,7 +68,10 @@ fn spec_shows_bare() {
 // ---- 効果の表 ----
 
 #[test]
-fn bare_column_is_state_only() {
+fn bare_column_is_state_and_task_suspend_only() {
+    // ADR 0028 で `task.suspend` が bare でも使えるようになった。
+    // bare の列は `state` と `task.suspend` の 2 つだけ（一般則: 環境なしでも
+    // 意味が定義でき、値も権限も環境とやり取りしない効果に限る）。
     let t = EffectTable::standard();
     let cats = [
         "console",
@@ -90,7 +93,11 @@ fn bare_column_is_state_only() {
         "task.share",
     ];
     for c in cats {
-        assert_eq!(t.allowed_on(c, "bare"), c == "state", "{c}");
+        assert_eq!(
+            t.allowed_on(c, "bare"),
+            c == "state" || c == "task.suspend",
+            "{c}"
+        );
     }
 }
 
@@ -101,9 +108,18 @@ fn bare_rejects_declared_console() {
 }
 
 #[test]
-fn bare_rejects_task_effects() {
-    let e = check(&core_fn("task.suspend", "  return 0;")).unwrap_err();
+fn bare_rejects_task_spawn() {
+    // ADR 0028 で広げたのは `task.suspend` だけ。`task.spawn` は
+    // 従来どおり bare では使えない。
+    let e = check(&core_fn("task.spawn", "  return 0;")).unwrap_err();
     assert_eq!(e.kind, ErrorKind::EffectTarget);
+}
+
+#[test]
+fn bare_allows_task_suspend() {
+    // ADR 0028: `task.suspend` は bare でも宣言・利用できる
+    // （完全一致のため、本体でも実際に yield する）。
+    check(&core_fn("task.suspend", "  task.yield();\n  return 0;")).unwrap();
 }
 
 #[test]

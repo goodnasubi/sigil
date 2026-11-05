@@ -415,6 +415,52 @@ pub fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bo
 // の対象に bare が含められ（bare での yield は協調点、スケジューラが
 // 無い実行では no-op）、本実装で逸脱は解消した。
 
+// 範囲: 鍵のパッド（ipad・opad の 64 バイト）を処理し終えた 2 つの状態から、
+// メッセージの HMAC-SHA-256 を求める。PBKDF2 は鍵が全反復で同じなので、
+// パッドの圧縮を最初に 1 回だけ行い、反復ごとに内側と外側の 1 ブロックずつ
+// （メッセージが 32 バイトのとき）を圧縮するだけで済む（HMAC を毎回計算すると
+// 反復ごとに 4 回の圧縮が要る）。パディングの形は、パッドの 64 バイトを含めた
+// 全体の長さ（公開の情報）だけから決める。値は `hmac_sha256` と同じ。
+fn hmac_from_pads(ist: &List<Int>, ost: &List<Int>, message: &Bytes) -> Bytes
+  intent "処理済みのパッドの状態から HMAC-SHA-256 を計算する"
+  requires none
+  ensures result.len() == 32
+  effects none
+{
+  let mut inner = message.clone();
+  inner.push(0x80);
+  while inner.len() % 64 != 56 {
+    inner.push(0);
+  }
+  inner.push_u64_be((64 + message.len()) * 8);
+  let ih = sha256_compress(&ist, &inner, inner.len() / 64);
+  let mut outer = Bytes.new();
+  outer.push_u32_be(ih.get(0).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(1).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(2).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(3).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(4).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(5).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(6).map(|x| x + 0).unwrap_or(0));
+  outer.push_u32_be(ih.get(7).map(|x| x + 0).unwrap_or(0));
+  outer.push(0x80);
+  while outer.len() % 64 != 56 {
+    outer.push(0);
+  }
+  outer.push_u64_be((64 + 32) * 8);
+  let oh = sha256_compress(&ost, &outer, outer.len() / 64);
+  let mut out = Bytes.new();
+  out.push_u32_be(oh.get(0).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(1).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(2).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(3).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(4).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(5).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(6).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(oh.get(7).map(|x| x + 0).unwrap_or(0));
+  return out;
+}
+
 pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret
   intent "PBKDF2-HMAC-SHA-256 で鍵を導出する"
   requires iterations >= 4096 && iterations <= 100000 && dk_len > 0
@@ -422,28 +468,48 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
   effects task.suspend
 {
   let mut out = Bytes.new();
-  // パスワードは鍵ではないので長さの要求はないが、内部で使う
-  // `hmac_sha256` は鍵に 32 バイト以上を要求する。32 バイト未満の
-  // パスワードはゼロバイトを足して 32 バイトにしてから渡す。HMAC は
-  // 鍵を 64 バイトへゼロ詰めするため、この追加は HMAC の値を変えない
-  // （RFC 2898 の構成そのままになる）。
-  let mut pw = password.expose();
-  while pw.len() < 32 {
-    pw.push(0);
+  // パスワードは HMAC の鍵として使う（RFC 2898）。64 バイトを超えれば SHA-256 で
+  // 圧縮し、64 バイトに満たなければゼロで詰める（`hmac_sha256` と同じ規則）。
+  // 鍵は全反復で同じなので、ipad・opad のブロックを処理した状態を最初に
+  // 1 回だけ求め、反復ごとに使い回す（`hmac_from_pads`）。
+  let mut kb = password.expose();
+  if kb.len() > 64 {
+    kb = sha256(&kb);
   }
-  let pwkey = Secret.from_bytes(pw);
+  while kb.len() < 64 {
+    kb.push(0);
+  }
+  let mut ipad = Bytes.new();
+  let mut opad = Bytes.new();
+  let mut i0 = 0;
+  while i0 < 64 {
+    let b = kb.get(i0).map(|x| x + 0).unwrap_or(0);
+    ipad.push(b ^ 0x36);
+    opad.push(b ^ 0x5C);
+    i0 = i0 + 1;
+  }
+  let mut init = List.new();
+  init.push(0x6a09e667);
+  init.push(0xbb67ae85);
+  init.push(0x3c6ef372);
+  init.push(0xa54ff53a);
+  init.push(0x510e527f);
+  init.push(0x9b05688c);
+  init.push(0x1f83d9ab);
+  init.push(0x5be0cd19);
+  let ist = sha256_compress(&init, &ipad, 1);
+  let ost = sha256_compress(&init, &opad, 1);
   let blocks = (dk_len + 31) / 32;
   let mut blk = 1;
   while blk <= blocks {
     let mut msg = salt.clone();
     msg.push_u32_be(blk);
-    let s1 = hmac_sha256(&pwkey, &msg);
-    let mut u = s1.expose();
+    let mut u = hmac_from_pads(&ist, &ost, &msg);
     let mut t = u.clone();
     let mut j = 1;
     while j < iterations {
-      let sj = hmac_sha256(&pwkey, &u);
-      u = sj.expose();
+      let nu = hmac_from_pads(&ist, &ost, &u);
+      u = nu;
       let mut nt = Bytes.new();
       let mut i = 0;
       while i < t.len() {

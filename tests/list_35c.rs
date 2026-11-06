@@ -1,14 +1,14 @@
 //! ADR 0025 補足 E の 3-5c-i（`List` の下準備）。
 //!
-//! - `List` を作っては捨てる繰り返しで、`blocks=` と `sigil_blocks=` が、1000 回と 100000 回で完全に一致する。
-//!   3-5c-i では `blocks=` が Rust の `RtList` の頭を、`sigil_blocks=` が `List<String>` の要素の文字列・`lines` の各行を
-//!   数えた。3-5c-ii からは一覧の頭と領域も `sigil_blocks=` が数え、`blocks=` は 0 のまま（E-5）。
+//! - `List` を作っては捨てる繰り返しで、`sigil_blocks=` が、1000 回と 100000 回で完全に一致する。
+//!   3-5c-i では `sigil_blocks=` が `List<String>` の要素の文字列・`lines` の各行を数え、一覧の頭は Rust の `blocks=` が数えた。
+//!   3-5c-ii から一覧の頭と領域も `sigil_blocks=` が数え、3-5e-iii で `blocks=` は書式から外れた（E-5・G-7）。
 //! - `List.min`/`List.max` は codegen のループ（生成した `sigil_cmp_<k>`）。同順位・比べられない値（NaN）・1 要素・空で、
 //!   評価器とネイティブが一致する（`common::run` が両方を走らせて突き合わせる）。
 //! - `Bytes.from_list` は一覧の中身を `len`/`get` 経由で読む。
 //!
 //! 3-5c-ii（表現の切り替え。`std.core.list`）:
-//! - 一覧の頭と要素の領域は Sigil 製の確保器から取るので、`blocks=` ではなく `sigil_blocks=` が数える（E-5）。
+//! - 一覧の頭と要素の領域は Sigil 製の確保器から取るので、`sigil_blocks=` が数える（E-5）。
 //! - 直接の試験: 駆動モジュール（`std.core.t`）から `std.core.list` の関数を評価器とネイティブで呼び、Rust の `Vec`
 //!   の模型と突き合わせる。評価器の塊の表（二重解放・解放後の読み・大きさ違いの解放・取り直した古い領域の読み）。
 
@@ -93,7 +93,7 @@ return total;"#,
     s
 }
 
-fn live(src: &str, n: i64) -> (i64, i64, String) {
+fn live(src: &str, n: i64) -> (i64, String) {
     let dir = scratch("list35c");
     let exe = dir.join("prog");
     try_build(&[src], "run", &exe, false).unwrap_or_else(|e| panic!("{e}\n{src}"));
@@ -112,28 +112,24 @@ fn live(src: &str, n: i64) -> (i64, i64, String) {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| panic!("{key} がない: {line}"))
     };
-    assert_eq!(num("strs="), 0, "strs= は 0 固定: {line}");
-    (num("sigil_blocks="), num("blocks="), got.stdout)
+    // 塊はすべて Sigil 製の確保器が数える。漏れ・二重解放は `sigil_blocks=` の厳密一致で見る（補足 G-7）。
+    (num("sigil_blocks="), got.stdout)
 }
 
-/// `blocks=` と `sigil_blocks=`（一覧の頭と領域・要素の文字列・`lines` の各行）の完全一致。
+/// `sigil_blocks=`（一覧の頭と領域・要素の文字列・`lines` の各行）の完全一致。
 #[test]
 fn list_blocks_are_exact_across_1000_and_100000_iterations() {
     let src = churn();
-    let (s1, b1, out1) = live(&src, 1_000);
-    let (s2, b2, out2) = live(&src, 100_000);
+    let (s1, out1) = live(&src, 1_000);
+    let (s2, out2) = live(&src, 100_000);
     assert!(out1.trim_end().ends_with("10000"), "{out1}");
     assert!(out2.trim_end().ends_with("1000000"), "{out2}");
-    assert_eq!(
-        (s1, b1),
-        (s2, b2),
-        "1000 回と 100000 回で生きている数が違う"
-    );
+    assert_eq!(s1, s2, "1000 回と 100000 回で生きている数が違う");
     // 終了時に残るのは、入口の結果の表示などの一定の分だけ。
-    assert_eq!((s2, b2), (0, 0), "終了時に List の塊が残っている");
+    assert_eq!(s2, 0, "終了時に List の塊が残っている");
 }
 
-/// 一覧の頭と領域は `sigil_blocks=` に数えられ、`blocks=` には入らない。
+/// 一覧の頭と領域は `sigil_blocks=` に数えられる。
 /// 一覧を作ったまま終わる駆動で、数が 0 から動く（空は頭の 1 塊、要素を持てば 2 塊）ことと、
 /// 取り直しで古い領域が返る（数が増えない）ことを確かめる。
 #[test]
@@ -150,15 +146,15 @@ fn list_head_is_counted_in_sigil_blocks() {
         live_line(&r)
     };
     // 空の一覧は頭だけ。
-    assert_eq!(leak(0), "strs=0 blocks=0 sigil_blocks=1");
+    assert_eq!(leak(0), "sigil_blocks=1");
     // 追加すると領域が 1 塊増える。4 → 8 → 16 と取り直しても増えない（古い領域は返る）。
     for n in [1, 4, 5, 8, 9, 16, 17] {
-        assert_eq!(leak(n), "strs=0 blocks=0 sigil_blocks=2", "n={n}");
+        assert_eq!(leak(n), "sigil_blocks=2", "n={n}");
     }
     // 作って捨てると 0 に戻る。
     let freed = "  let l = create(8);\n  let t = raw.alloc(8, 8);\n  raw.store_i64(t, 5);\n  push(l, t);\n  raw.free(t, 8, 8);\n  free(l);\n  return 0;";
     let r = native_driver(LU, freed);
-    assert_eq!(live_line(&r), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&r), "sigil_blocks=0");
 }
 
 fn ints(xs: &[i64]) -> Arg {
@@ -420,7 +416,7 @@ fn list_ops_match_a_vec_model_natively_and_leave_no_blocks() {
         got.stdout.trim_end().rsplit('\n').next().unwrap(),
         want.to_string()
     );
-    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&got), "sigil_blocks=0");
 }
 
 /// 評価器の塊の表: 取り直した古い領域は返り、二重解放・解放後の読み・大きさ違いの解放・`elem != 8` は止まる。
@@ -539,7 +535,7 @@ fn growth_rule_is_doubling_natively() {
         got.stdout.trim_end().rsplit('\n').next().unwrap(),
         want.to_string()
     );
-    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&got), "sigil_blocks=0");
 }
 
 /// 取り直しの位置: 9 個目の後に取った番地は、16 個目まで有効で（2 倍）、17 個目で無効になる。
@@ -894,10 +890,6 @@ fn lines_direct_matches_text_rs_natively_and_frees_everything() {
             want.to_string(),
             "group {g}"
         );
-        assert_eq!(
-            live_line(&got),
-            "strs=0 blocks=0 sigil_blocks=0",
-            "group {g}"
-        );
+        assert_eq!(live_line(&got), "sigil_blocks=0", "group {g}");
     }
 }

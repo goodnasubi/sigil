@@ -630,7 +630,7 @@ fn baseline_utf8_error_messages() {
     assert!(kinds.len() >= 3, "文言の種類が足りない: {kinds:?}");
 }
 
-// ---- 生存数（`blocks=`・`sigil_blocks=`）の完全一致 ----
+// ---- 生存数（`sigil_blocks=`）の完全一致 ----
 
 /// `Bytes` を作っては捨てる繰り返し。1 回で 0 を足す（`total`）。
 fn churn() -> String {
@@ -703,7 +703,7 @@ fn churn() -> String {
     )
 }
 
-fn live(src: &str, n: i64) -> (i64, i64, String) {
+fn live(src: &str, n: i64) -> (i64, String) {
     let dir = scratch("bytes35d-live");
     let exe = dir.join("prog");
     try_build(&[src], "run", &exe, false).unwrap_or_else(|e| panic!("{e}\n{src}"));
@@ -722,26 +722,22 @@ fn live(src: &str, n: i64) -> (i64, i64, String) {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| panic!("{key} がない: {line}"))
     };
-    assert_eq!(num("strs="), 0, "strs= は 0 固定: {line}");
-    (num("blocks="), num("sigil_blocks="), got.stdout)
+    // 塊はすべて Sigil 製の確保器が数える。漏れ・二重解放は `sigil_blocks=` の厳密一致で見る（補足 G-7）。
+    (num("sigil_blocks="), got.stdout)
 }
 
-/// 作って捨てる繰り返しで、`blocks=` と `sigil_blocks=` が 1000 回と 100000 回で完全に一致し、終了時に 0 になる。
+/// 作って捨てる繰り返しで、`sigil_blocks=` が 1000 回と 100000 回で完全に一致し、終了時に 0 になる。
 /// 3-5d-ii で `Bytes` は Sigil の `std.core.bytes` になり、数えるのは `sigil_blocks=`（頭 1 つと、cap > 0 なら本体 1 つ）。
-/// `blocks=` は 0 のまま。どちらも終了時の合計 0 と、回数への非依存を保つ。
+/// 終了時の合計 0 と、回数への非依存を保つ（旧 `blocks=` は 3-5e-iii で書式から外れた）。
 #[test]
 fn baseline_bytes_blocks_are_exact_across_1000_and_100000_iterations() {
     let src = churn();
-    let (b1, s1, out1) = live(&src, 1_000);
-    let (b2, s2, out2) = live(&src, 100_000);
+    let (s1, out1) = live(&src, 1_000);
+    let (s2, out2) = live(&src, 100_000);
     assert!(out1.trim_end().ends_with('0'), "{out1}");
     assert!(out2.trim_end().ends_with('0'), "{out2}");
-    assert_eq!(
-        (b1, s1),
-        (b2, s2),
-        "1000 回と 100000 回で生きている数が違う"
-    );
-    assert_eq!((b2, s2), (0, 0), "終了時に Bytes の塊が残っている");
+    assert_eq!(s1, s2, "1000 回と 100000 回で生きている数が違う");
+    assert_eq!(s2, 0, "終了時に Bytes の塊が残っている");
 }
 
 /// `ct_equal`（ADR の `ct_eq`）の CLIF に、秘密のバイトに依存する分岐がない（ADR 0023 決定 4 の 2）。

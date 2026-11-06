@@ -272,7 +272,7 @@ fn native_ops_match_a_vec_model_and_leave_no_blocks() {
         got.stdout.trim_end().rsplit('\n').next().unwrap(),
         want.to_string()
     );
-    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&got), "sigil_blocks=0");
     assert_eq!(eval(&body).unwrap(), want.to_string());
 }
 

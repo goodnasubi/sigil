@@ -199,7 +199,7 @@ fn new_lossy_and_valid_utf8_match_rust_natively() {
         want.to_string()
     );
     // 作った文字列はすべて解放した。
-    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&got), "sigil_blocks=0");
 }
 
 // ---- 塊の表（D-5 の代わりの手当て） ----
@@ -244,15 +244,15 @@ fn native_blocks_are_exact_for_loops_and_leaks() {
     let b = native_driver(LIFE, &lp(100_000));
     assert_eq!(a.code, Some(0), "{}", a.stderr);
     assert_eq!(b.code, Some(0), "{}", b.stderr);
-    assert_eq!(live_line(&a), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&a), "sigil_blocks=0");
     assert_eq!(live_line(&a), live_line(&b));
     // 残した文字列は 2 つの塊（頭と中身）、空の文字列は頭だけを数える。
     let leak = "  let b = raw.alloc(2, 1);\n  raw.store_u8(b, 97);\n  raw.store_u8(raw.offset(b, 1), 98);\n  let s = new_lossy(b, 2);\n  raw.free(b, 2, 1);\n  return bytes(s);";
     let r = native_driver(LIFE, leak);
-    assert_eq!(live_line(&r), "strs=0 blocks=0 sigil_blocks=2");
+    assert_eq!(live_line(&r), "sigil_blocks=2");
     let leak_empty = "  let s = new_lossy(raw.addr_null(), 0);\n  return bytes(s);";
     let r = native_driver(LIFE, leak_empty);
-    assert_eq!(live_line(&r), "strs=0 blocks=0 sigil_blocks=1");
+    assert_eq!(live_line(&r), "sigil_blocks=1");
 }
 
 #[test]
@@ -568,11 +568,7 @@ fn string_ops_match_rust_natively() {
             "chunk {ci}"
         );
         // 作った文字列はすべて解放した（頭と中身。trim・concat の結果を含む）。
-        assert_eq!(
-            live_line(&got),
-            "strs=0 blocks=0 sigil_blocks=0",
-            "chunk {ci}"
-        );
+        assert_eq!(live_line(&got), "sigil_blocks=0", "chunk {ci}");
     }
 }
 
@@ -617,32 +613,23 @@ fn native_blocks_are_exact_for_trim_and_concat() {
     let b = native_driver(OPS, &lp(50_000));
     assert_eq!(a.code, Some(0), "{}", a.stderr);
     assert_eq!(b.code, Some(0), "{}", b.stderr);
-    assert_eq!(live_line(&a), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&a), "sigil_blocks=0");
     assert_eq!(live_line(&a), live_line(&b));
     // 残した trim の結果は 2 つ、concat の結果は 2 つの塊（頭と中身）。空になる結果は頭だけ。
     let leak_t = format!(
         "{}  let t = trim(a);\n  free(a);\n  return bytes(t);",
         mk("a", " ab ")
     );
-    assert_eq!(
-        live_line(&native_driver(OPS, &leak_t)),
-        "strs=0 blocks=0 sigil_blocks=2"
-    );
+    assert_eq!(live_line(&native_driver(OPS, &leak_t)), "sigil_blocks=2");
     let leak_c = format!(
         "{}{}  let c = concat(a, b);\n  free(a);\n  free(b);\n  return bytes(c);",
         mk("a", "x"),
         mk("b", "y")
     );
-    assert_eq!(
-        live_line(&native_driver(OPS, &leak_c)),
-        "strs=0 blocks=0 sigil_blocks=2"
-    );
+    assert_eq!(live_line(&native_driver(OPS, &leak_c)), "sigil_blocks=2");
     let leak_e = format!(
         "{}  let t = trim(a);\n  free(a);\n  return bytes(t);",
         mk("a", " \u{3000} ")
     );
-    assert_eq!(
-        live_line(&native_driver(OPS, &leak_e)),
-        "strs=0 blocks=0 sigil_blocks=1"
-    );
+    assert_eq!(live_line(&native_driver(OPS, &leak_e)), "sigil_blocks=1");
 }

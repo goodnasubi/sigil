@@ -105,8 +105,8 @@ fn str_bytes(p: *const RtStr) -> usize {
 // ---------------------------------------------------------------------------
 // 生きている塊の数（ADR 0018 の決定 5。テストが解放の漏れと二重解放を見つけるための数え）
 //
-// 文字列の数 `strs=` は、文字列を Sigil 製の確保器が持つようになったので 0 に固定する（補足 D-5。書式は 3-5e まで保つ）。
-// 文字列の漏れ・二重解放は `sigil_blocks=` の厳密一致で見る。
+// 文字列・一覧・バイト列・組・構造体などの塊は、すべて Sigil 製の確保器が持つ。漏れ・二重解放は、終了時の
+// `live: sigil_blocks=<数>` の厳密一致で見る（補足 G-7。以前の `strs=`・`blocks=` は、塊が確保器へ移って常に 0 になったので外した）。
 
 /// Sigil 製の確保器の生存数を返す関数（生成コードの `sigil_rt_sigil_live_blocks`。0 は未登録。補足 B-5）。
 static SIGIL_LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -126,18 +126,6 @@ fn sigil_live_blocks() -> Option<i64> {
     // SAFETY: 0 でない値は `sigil_rt_set_sigil_live` が受け取った関数ポインタだけ。
     let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(p) };
     Some(f())
-}
-
-/// 生きている文字列・パスの数。文字列の表現を Sigil が持つので常に 0（補足 D-5）。
-#[no_mangle]
-pub extern "C" fn sigil_rt_live_strs() -> isize {
-    0
-}
-
-/// 生きている見出しつきの塊の数（補足 G-5。塊は Sigil 製の確保器が数えるので、ここは常に 0）。
-#[no_mangle]
-pub extern "C" fn sigil_rt_live_blocks() -> isize {
-    0
 }
 
 /// Rust の文字列から作る（正しい UTF-8 なので `new_lossy` は複写と同じ）。
@@ -460,17 +448,11 @@ pub unsafe extern "C" fn sigil_rt_enter_with(
     };
     // テスト用: 環境変数 `SIGIL_RT_LIVE` があれば、終わった時点で生きている塊の数を標準エラーに出す。
     if std::env::var_os("SIGIL_RT_LIVE").is_some() {
-        // 確保器を結んだときだけ、既存の書式の末尾に ` sigil_blocks=` を足す（補足 B-5）。
-        let extra = match sigil_live_blocks() {
-            Some(n) => format!(" sigil_blocks={n}"),
-            None => String::new(),
-        };
-        let _ = writeln!(
-            std::io::stderr().lock(),
-            "live: strs={} blocks={}{extra}",
-            sigil_rt_live_strs(),
-            sigil_rt_live_blocks()
-        );
+        // 確保器の生存数が登録されているときだけ出す。未登録なら行を出さない（偽の 0 を出さない。補足 G-7。
+        // 3-7a からすべてのネイティブのプログラムが確保器を結ぶので、通常は常に出る）。
+        if let Some(n) = sigil_live_blocks() {
+            let _ = writeln!(std::io::stderr().lock(), "live: sigil_blocks={n}");
+        }
     }
     code
 }

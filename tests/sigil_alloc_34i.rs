@@ -202,7 +202,7 @@ fn small_large_aligned_roundtrip_matches_and_frees_everything() {
     let body = "  let a = raw.alloc(24, 8);\n  let b = raw.alloc(3000, 8);\n  let c = raw.alloc(100, 256);\n  let d = raw.alloc(1, 1);\n  let e = raw.alloc(2048, 16);\n  raw.store_i64(a, 5);\n  raw.store_i64(b, 6);\n  raw.store_i64(c, 7);\n  raw.store_u8(d, 9);\n  raw.store_i64(raw.offset(e, 2040), 11);\n  let v = raw.load_i64(a) + raw.load_i64(b) * 10 + raw.load_i64(c) * 100 + raw.load_u8(d) * 1000 + raw.load_i64(raw.offset(e, 2040)) * 10000 + raw.addr_to_int(c) % 256 + raw.addr_to_int(e) % 16;\n  raw.free(a, 24, 8);\n  raw.free(b, 3000, 8);\n  raw.free(c, 100, 256);\n  raw.free(d, 1, 1);\n  raw.free(e, 2048, 16);\n  return v;";
     let (v, live) = both_user(body);
     assert_eq!(v, "119765");
-    assert_eq!(live, "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live, "sigil_blocks=0");
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn alloc_free_loop_matches_and_leaks_are_counted() {
     let body = "  let mut i = 0;\n  let mut s = 0;\n  while i < 1000 {\n    let p = raw.alloc(1 + i % 2100, 8);\n    let q = raw.alloc(64, 1 << (i % 13));\n    raw.store_u8(p, i % 200);\n    s = s + raw.load_u8(p);\n    raw.free(q, 64, 1 << (i % 13));\n    raw.free(p, 1 + i % 2100, 8);\n    i = i + 1;\n  }\n  raw.alloc(16, 8);\n  raw.alloc(5000, 8);\n  raw.alloc(16, 64);\n  return s;";
     let (v, live) = both_user(body);
     assert_eq!(v, "99500");
-    assert_eq!(live, "strs=0 blocks=0 sigil_blocks=3");
+    assert_eq!(live, "sigil_blocks=3");
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn many_live_large_blocks_grow_the_table() {
     let body = "  let arr = raw.alloc(8 * 300, 8);\n  let mut i = 0;\n  while i < 300 {\n    let p = raw.alloc(4000, 8);\n    raw.store_i64(p, i);\n    raw.store_i64(raw.offset(p, 3992), i * 3);\n    raw.store_addr(raw.offset(arr, 8 * i), p);\n    i = i + 1;\n  }\n  let mut s = 0;\n  i = 0;\n  while i < 300 {\n    let p = raw.load_addr(raw.offset(arr, 8 * i));\n    s = s + raw.load_i64(p) + raw.load_i64(raw.offset(p, 3992));\n    raw.free(p, 4000, 8);\n    i = i + 1;\n  }\n  raw.free(arr, 8 * 300, 8);\n  return s;";
     let (v, live) = both_user(body);
     assert_eq!(v, (0..300).map(|i| i * 4).sum::<i64>().to_string());
-    assert_eq!(live, "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live, "sigil_blocks=0");
 }
 
 /// 影の表: 大きさ 1..3000・整列 1..4096 の 120 個の塊を確保し、全バイトに模様を書き、
@@ -594,7 +594,7 @@ fn native_live_line_always_has_sigil_blocks() {
     ] {
         let r = native_user(&user_prog(targets, body));
         assert_eq!(r.code, Some(0), "{targets}: {}", r.stderr);
-        assert_eq!(live_line(&r), "strs=0 blocks=0 sigil_blocks=0", "{targets}");
+        assert_eq!(live_line(&r), "sigil_blocks=0", "{targets}");
     }
     // 値は Rust の確保器のときと同じ。
     let r = native_user(&user_prog("browser, server", USES_ALLOC));
@@ -610,7 +610,7 @@ fn evaluator_keeps_builtin_allocator_with_strict_align_check() {
     assert!(e.contains("異なるサイズまたはアライメント"), "{e}");
     let n = native_user(&src);
     assert_eq!(n.code, Some(0), "{}", n.stderr);
-    assert_eq!(live_line(&n), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&n), "sigil_blocks=0");
 }
 
 #[test]

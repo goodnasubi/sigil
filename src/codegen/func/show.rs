@@ -561,7 +561,8 @@ impl<'a, 'p> Fx<'a, 'p> {
         let cplen = self.b.block_params(one)[1];
         let next = self.b.create_block();
         // 名前つきの逃がし。
-        let names: [(&[u8], i64); 5] = [
+        let names: [(&[u8], i64); 6] = [
+            (b"\\0", 0),
             (b"\\t", 9),
             (b"\\n", 10),
             (b"\\r", 13),

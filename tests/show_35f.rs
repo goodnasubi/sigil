@@ -91,6 +91,19 @@ fn int_edges() {
 }
 
 #[test]
+fn string_nul_quote() {
+    // NUL を含む文字列の引用。Rust の `Debug` は NUL を `\0` で出すので、
+    // `sigil_show_quote` も同じになる（名前つきの逃がしに `\0` を足した）。
+    // 文字列は引数ではなく中で作る（コマンドラインの引数には NUL を渡せないため）。
+    // 3-5f-i では入口の `String` の表示は両側とも Rust の `val_show` を通るため、
+    // この突き合わせは期待する表示を固定するもの。`sigil_show_quote` 自体は
+    // 3-5f-ii で `Str` の表示を付け替えたときに、この試験で確かめられる。
+    let src = prog("() -> String", "  return \"a\\u{0}b\";");
+    let o = run(&src, "main", &[]).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    assert_eq!(o.value, "\"a\\0b\"", "{src}");
+}
+
+#[test]
 fn bool_and_unit() {
     check("(x: Bool) -> Bool", Arg::Bool(true));
     check("(x: Bool) -> Bool", Arg::Bool(false));

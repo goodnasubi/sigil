@@ -659,7 +659,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[c70]);
 
         self.b.switch_to_block(showb);
-        let rt = strip(&norm(&f.ret));
+        // 戻り値の型は参照を外さない。参照の戻り値は借りた値で、表示は生成側が
+        // 逆参照して行い、破棄は参照を含まない型として何もしない（Issue #304）。
+        let rt = norm(&f.ret);
         self.show_entry_result(&rt, r[0]);
         self.drop_val(&rt, r[0]);
         self.drop_globals();

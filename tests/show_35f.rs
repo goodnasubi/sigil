@@ -258,9 +258,8 @@ fn ref_show() {
     // 参照を書けるのは引数・戻り値の一番外と `Option<…>` の中だけ（ADR 0012 の決定 1）。
     // 参照を返せるのは借用の引数がちょうど 1 つの関数だけ（ADR 0003 の規則 3）で、
     // `Option<…>` の中の参照は借用した一覧の要素として得るのが定石。
-    // 入口が参照そのものを返す形（`-> &String`）は、入口の戻り値の型から参照が外れて
-    // 表示も破棄もずれる既存の不具合があるため（main でも停止する。別件として報告する）、
-    // ここでは `Option<…>` の中の参照で確かめる。
+    // 入口が参照そのものを返す形は Issue #304 の回帰試験（入口の戻り値の型から
+    // 参照を外すと、表示も破棄もずれた）。
     let src = prog(
         "(xs: &List<String>) -> Option<&String>",
         "  return xs.get(0);",
@@ -270,6 +269,23 @@ fn ref_show() {
     assert_eq!(o.value, "Some(\"hi\")", "{src}");
     let o = run(&src, "main", &[Arg::List(vec![])]).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
     assert_eq!(o.value, "None", "{src}");
+    // 入口が参照そのものを返す形（Issue #304）。借りた値を表示し、破棄はしない。
+    let src = prog("(x: &String) -> &String", "  return x;");
+    let o =
+        run(&src, "main", &[Arg::Str("hi".to_string())]).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    assert_eq!(o.value, "\"hi\"", "{src}");
+    let src = prog("(n: &Int) -> &Int", "  return n;");
+    let o = run(&src, "main", &[Arg::Int(42)]).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    assert_eq!(o.value, "42", "{src}");
+    let src = prog("(xs: &List<String>) -> &List<String>", "  return xs;");
+    let xs = Arg::List(vec![Arg::Str("a".to_string()), Arg::Str("b".to_string())]);
+    let o = run(&src, "main", &[xs]).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    assert_eq!(o.value, "[\"a\", \"b\"]", "{src}");
+    // `&mut` の形も同じ。
+    let src = prog("(x: &mut String) -> &mut String", "  return x;");
+    let o =
+        run(&src, "main", &[Arg::Str("hi".to_string())]).unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    assert_eq!(o.value, "\"hi\"", "{src}");
     // `console.log` へ借用で渡る経路（引用なし）も、文字列で確かめる。
     let src = progx(
         "",

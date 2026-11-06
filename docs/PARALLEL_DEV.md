@@ -69,7 +69,7 @@
 
 1. **バックログの同期（アンロック・自動起票）**:
    - [docs/BACKLOG.json](BACKLOG.json) に Issue 間の依存関係（`unblock_rules`）と、前提完了時に自動起票する後続タスク定義（`spawn_rules`）を管理している。
-   - 着手前および PR マージ直後に `pwsh -File scripts/sync-issues.ps1`（Windows）または `bash scripts/sync-issues.sh`（Linux / Cloud）を実行すると、前提が `CLOSED` になった Issue の `blocked` ラベル解除と、次段階の Issue の自動作成が行われる。
+   - 着手前および PR マージ直後に `pwsh -File scripts/sync-issues.ps1`（Windows）または `bash scripts/sync-issues.sh`（Linux / Cloud。REST だけで動き、`--dry-run` で書き込まずに確認できる）を実行すると、前提が `CLOSED` になった Issue の `blocked` ラベル解除と、次段階の Issue の自動作成が行われる。
    - **同期の実行者は一意に決める**: その同期で解放・起票される前提 Issue を完了させた PR の作成者だけが実行する。他のエージェントは、同じタイミングでは同期を実行しない。ラベルによるロックは「既存の Issue を取る」段階の排他であり、起票（確認してから作成する操作）は別々に走ると競合する。実際、2026-11-01 に PR 3-1 の起票が 2 エージェントで重なり、Issue #138 と #139 が重複した。
    - **起票は必ずスクリプト経由で行う**。スクリプトは Issue 本文の `<!-- backlog-id: <spawn_rules の id> -->` の目印で重複を判定している。スクリプトが使えない環境で手動起票する場合も、この目印を必ず含める。目印のない Issue はスクリプトから重複と検知できない（#139 がこのケースだった）。
    - それでも同じ `spawn_rules` から Issue が重複した場合は、**番号の小さい方を正**とし、大きい方を作ったエージェントが、正の Issue へのリンクをコメントして自分でクローズする（§9）。

@@ -113,3 +113,37 @@ fn repeated_construction_keeps_sigil_blocks_exact_at_1000_and_100000() {
     assert_eq!(a, "sigil_blocks=0", "1000 回の後");
     assert_eq!(b, "sigil_blocks=0", "100000 回の後");
 }
+
+/// 3-5e-iii（補足 G-7）: `SIGIL_RT_LIVE` の行は `live: sigil_blocks=<数>` だけで、`strs=`・`blocks=` を含まない。
+#[test]
+fn live_line_has_only_sigil_blocks() {
+    let src = format!("{HEAD}{}", func("t() -> Int", "return 1;"));
+    let dir = scratch("val35eiii-live");
+    let exe = dir.join("prog");
+    try_build(&[&src], "t", &exe, false).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    let got = exec_env(&exe, &[], &[("SIGIL_RT_LIVE", "1")]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+    let lines: Vec<&str> = got
+        .stderr
+        .lines()
+        .filter(|l| l.starts_with("live: "))
+        .collect();
+    assert_eq!(lines, ["live: sigil_blocks=0"], "{}", got.stderr);
+}
+
+/// 3-5e-iii: Rust のランタイムから、旧書式の `strs=`・`blocks=` の数え（`sigil_rt_live_strs`・`sigil_rt_live_blocks`）が消えている。
+#[test]
+fn old_live_counters_are_gone_from_the_rust_runtime() {
+    let rt = include_str!("../runtime/core/src/lib.rs");
+    for name in ["sigil_rt_live_strs", "sigil_rt_live_blocks"] {
+        assert!(
+            !rt.contains(name),
+            "{name} が Rust のランタイムに残っている"
+        );
+    }
+    assert!(
+        !rt.contains("live: strs="),
+        "旧書式 `live: strs=` が残っている"
+    );
+}

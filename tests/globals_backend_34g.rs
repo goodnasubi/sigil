@@ -353,9 +353,6 @@ fn globals_leave_no_live_blocks_at_exit() {
         .lines()
         .find_map(|l| l.strip_prefix("live: "))
         .unwrap_or_else(|| panic!("live の行がない: {}", got.stderr));
-    // 塊は Sigil 製の確保器が数える（補足 G-7）。`blocks=0` は `sigil_blocks=0` の部分文字列にも当たるので、語として見る。
-    assert!(
-        line.contains("strs=0") && line.split_whitespace().any(|w| w == "sigil_blocks=0"),
-        "大域の塊が残っている: {line}"
-    );
+    // 塊は Sigil 製の確保器が数える。書式は `live: sigil_blocks=<数>` だけで、行全体の一致を見る（補足 G-7）。
+    assert_eq!(line, "sigil_blocks=0", "大域の塊が残っている");
 }

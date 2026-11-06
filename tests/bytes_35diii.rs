@@ -157,7 +157,7 @@ fn from_utf8_native_matches_rust_and_leaves_no_blocks() {
         got.stdout.trim_end().rsplit('\n').next().unwrap(),
         grid_want().to_string()
     );
-    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&got), "sigil_blocks=0");
 }
 
 /// `n == 0` は `p` を読まない（空番地でよい）。成功は文字列の頭を返し、`info` を書き換えない。
@@ -168,7 +168,7 @@ fn from_utf8_empty_does_not_read_p() {
     let got = native(b);
     assert_eq!(got.code, Some(0), "{}", got.stderr);
     assert_eq!(got.stdout.trim_end().rsplit('\n').next().unwrap(), "77078");
-    assert_eq!(live_line(&got), "strs=0 blocks=0 sigil_blocks=0");
+    assert_eq!(live_line(&got), "sigil_blocks=0");
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ fn as_bytes_matches_rust_and_does_not_alias() {
 }
 
 // ---------------------------------------------------------------------------
-// 生存数: 失敗の経路を含めて `blocks=`・`sigil_blocks=` が回数に依らず 0
+// 生存数: 失敗の経路を含めて `sigil_blocks=` が回数に依らず 0
 // ---------------------------------------------------------------------------
 
 fn churn() -> String {
@@ -395,7 +395,7 @@ fn churn() -> String {
     )
 }
 
-fn live(src: &str, n: i64) -> (i64, i64, String) {
+fn live(src: &str, n: i64) -> (i64, String) {
     let dir = scratch("bytes35diii-live");
     let exe = dir.join("prog");
     try_build(&[src], "run", &exe, false).unwrap_or_else(|e| panic!("{e}\n{src}"));
@@ -414,24 +414,20 @@ fn live(src: &str, n: i64) -> (i64, i64, String) {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| panic!("{key} がない: {line}"))
     };
-    assert_eq!(num("strs="), 0, "strs= は 0 固定: {line}");
-    (num("blocks="), num("sigil_blocks="), got.stdout)
+    // 塊はすべて Sigil 製の確保器が数える。漏れ・二重解放は `sigil_blocks=` の厳密一致で見る（補足 G-7）。
+    (num("sigil_blocks="), got.stdout)
 }
 
 /// 失敗の経路（範囲外の一覧・不正な UTF-8）でも塊を漏らさない。1000 回と 100000 回で完全に一致し、終了時に 0。
 #[test]
 fn failure_paths_leave_no_blocks_across_1000_and_100000_iterations() {
     let src = churn();
-    let (b1, s1, out1) = live(&src, 1_000);
-    let (b2, s2, out2) = live(&src, 100_000);
+    let (s1, out1) = live(&src, 1_000);
+    let (s2, out2) = live(&src, 100_000);
     assert_eq!(out1.trim_end().rsplit('\n').next(), Some("0"), "{out1}");
     assert_eq!(out2.trim_end().rsplit('\n').next(), Some("0"), "{out2}");
-    assert_eq!(
-        (b1, s1),
-        (b2, s2),
-        "1000 回と 100000 回で生きている数が違う"
-    );
-    assert_eq!((b2, s2), (0, 0), "終了時に塊が残っている");
+    assert_eq!(s1, s2, "1000 回と 100000 回で生きている数が違う");
+    assert_eq!(s2, 0, "終了時に塊が残っている");
 }
 
 // ---------------------------------------------------------------------------

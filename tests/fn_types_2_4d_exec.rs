@@ -262,7 +262,7 @@ fn stored_closure_capture_drops_with_the_container() {
 
 /// ネイティブ: 構造体に入れたクロージャを作って捨てる繰り返しで、生きている塊の数が
 /// 繰り返しの回数に比例して増えないこと（`SIGIL_RT_LIVE`。m5_free_strings の流儀）。
-fn live(src: &str, n: i64) -> (i64, i64, String) {
+fn live(src: &str, n: i64) -> (i64, String) {
     let dir = scratch("fnlive");
     let exe = dir.join("prog");
     try_build(&[src], "run", &exe, false).unwrap_or_else(|e| panic!("{e}\n{src}"));
@@ -281,10 +281,8 @@ fn live(src: &str, n: i64) -> (i64, i64, String) {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| panic!("{key} がない: {line}"))
     };
-    // 文字列は Sigil 製の確保器の塊になった（補足 D-5）ので、`strs=` は 0 固定で、文字列の漏れ・二重解放は
-    // `sigil_blocks=` の厳密一致で見る。返す 1 つ目は `sigil_blocks=`。
-    assert_eq!(num("strs="), 0, "strs= は 0 固定: {line}");
-    (num("sigil_blocks="), num("blocks="), got.stdout)
+    // 塊はすべて Sigil 製の確保器が数える。漏れ・二重解放は `sigil_blocks=` の厳密一致で見る（補足 G-7）。
+    (num("sigil_blocks="), got.stdout)
 }
 
 #[test]
@@ -297,17 +295,10 @@ fn stored_closure_drop_does_not_grow_with_the_iteration_count() {
             "  let mut i = 0;\n  let mut total = 0;\n  while i < n {\n    let base = \"  abcdef  \";\n    let s = base.trim();\n    let b = FnBox { f: move |x| x + s.len() };\n    total = total + b.f(1) + b.f(2);\n    let s2 = base.trim();\n    let e = Tag2.Pure(move |x| x + s2.len());\n    total = total + match e {\n      Tag2.Pure(f) => f(0),\n      Tag2.Empty => 0,\n    };\n    i = i + 1;\n  }\n  return total;"
         )
     );
-    let (s1, b1, out1) = live(&src, 1_000);
+    let (s1, out1) = live(&src, 1_000);
     assert!(out1.trim_end().ends_with("21000"), "{out1}");
-    let (s2, b2, out) = live(&src, 100_000);
+    let (s2, out) = live(&src, 100_000);
     assert!(out.trim_end().ends_with("2100000"), "{out}");
-    assert_eq!(
-        (s1, b1),
-        (s2, b2),
-        "1000 回と 100000 回で生きている数が違う"
-    );
-    assert!(
-        s2 < 100 && b2 < 100,
-        "生きている数が多い: sigil_blocks={s2} blocks={b2}"
-    );
+    assert_eq!(s1, s2, "1000 回と 100000 回で生きている数が違う");
+    assert!(s2 < 100, "生きている数が多い: sigil_blocks={s2}");
 }

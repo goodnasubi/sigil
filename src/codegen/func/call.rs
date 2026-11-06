@@ -1,4 +1,5 @@
 use super::{aggregate, strip, Fx, NOARGS};
+use crate::codegen::SFn;
 use crate::exec::StopKind;
 use crate::ir::{Builtin, Operand, Place, Ty};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -559,13 +560,14 @@ impl<'a, 'p> Fx<'a, 'p> {
                 (self.mk_enum(tag, &[n]), u)
             }
             ConsoleLog => {
+                // 表示は生成した `sigil_show_<k>` でバッファへ組み立て、文字列は作らない（補足 H-6）。
                 let (v, ty) = self.val(&args[0]);
-                let d = self.desc_addr(&strip(&ty));
+                self.scall(SFn::Begin, &[]);
                 let q = self.ic(0);
-                let s = self.rt("val_show", &[d, v, q]);
-                let (p, n) = (self.rt("str_data", &[s]), self.rt("str_bytes", &[s]));
+                self.show_gen(&ty, v, q);
+                let (p, n) = self.show_buf();
                 self.rt("console_log", &[p, n]);
-                self.rt("str_free", &[s]);
+                self.scall(SFn::End, &[]);
                 (self.ic(0), u)
             }
             FsRead => {
@@ -812,9 +814,11 @@ impl<'a, 'p> Fx<'a, 'p> {
                     |s| {
                         let up = s.ld(info, 0);
                         let el = s.ld(info, 8);
-                        let d = s.desc_addr(&Ty::Int);
+                        // 数の表示は生成した表示で組み立て、文字列として取り出す（補足 H-1）。
+                        s.scall(SFn::Begin, &[]);
                         let q = s.ic(0);
-                        let ups = s.rt("val_show", &[d, up, q]);
+                        s.show_gen(&Ty::Int, up, q);
+                        let ups = s.scall(SFn::EndStr, &[]);
                         let iszero = s.b.ins().icmp_imm_s(IntCC::Equal, el, 0);
                         let msg = s.branch(
                             iszero,
@@ -826,9 +830,10 @@ impl<'a, 'p> Fx<'a, 'p> {
                             },
                             |s| {
                                 let a = s.str_lit("invalid utf-8 sequence of ");
-                                let d = s.desc_addr(&Ty::Int);
+                                s.scall(SFn::Begin, &[]);
                                 let q = s.ic(0);
-                                let els = s.rt("val_show", &[d, el, q]);
+                                s.show_gen(&Ty::Int, el, q);
+                                let els = s.scall(SFn::EndStr, &[]);
                                 let m1 = s.rt("str_concat", &[a, els]);
                                 let c = s.str_lit(" bytes from index ");
                                 let m2 = s.rt("str_concat", &[m1, c]);

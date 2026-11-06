@@ -45,6 +45,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             Gk::Shadow => self.copy_body(false, ty),
             Gk::Drop => self.drop_body(ty),
             Gk::Dstep => self.dstep_body(ty),
+            Gk::Show => self.show_typed_body(ty),
         }
     }
 
@@ -417,8 +418,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let print = self.b.create_block();
         self.b.ins().brif(moved, end, NOARGS, print, NOARGS);
         self.b.switch_to_block(print);
-        let d = self.desc_addr(&Ty::Adt(id));
-        self.rt("trace_drop", &[d, w]);
+        self.show_trace_drop(&Ty::Adt(id), w);
         self.b.ins().jump(end, NOARGS);
         self.b.switch_to_block(end);
     }

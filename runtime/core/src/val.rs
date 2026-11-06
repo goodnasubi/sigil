@@ -1,4 +1,4 @@
-//! 型の記述子（descriptor）にもとづく値の表示・比較・複写（ADR 0015 の決定 4・6、PR4）。
+//! 型の記述子（descriptor）にもとづく入口の引数の解釈と、`Secret` の中身のゼロ化。
 //!
 //! 生成したコードの値は、どれも 8 バイトの語である。`Int`・`Bool` はそのまま、`Float` は 64 ビットの並び、
 //! `String`・`Path` は `RtStr*`、一覧は `RtList*`（要素は語）、組・構造体は語の並びの塊（フィールドは `8*i`）、
@@ -18,35 +18,20 @@
 //! 11 Ref  12 Shared  13 Cell   [1]=中身の記述子
 //! ```
 //!
-//! 表示・等しさ・順序・複写の規則は SIR の評価器（`src/ir_eval.rs`）と同じ。
+//! 記述子を読むのは入口の引数（3-5g まで）だけになった。表示は生成した `sigil_show_<k>` が担い、
+//! 等しさ・順序・複写・破棄も生成コードへ移行済み（ADR 0025 補足 G・H）。
 
-use super::{
-    bytes_data, bytes_len, bytes_slice, list_get, list_len, list_new, list_push, new_str, s, text,
-    RtBytes, RtList, RtStr,
-};
+use super::{bytes_data, bytes_len, list_new, list_push, new_str, RtBytes};
 use crate::args::{arg_name, parse_arg, Arg};
 use std::io::Write;
 
-const K_UNIT: i64 = 0;
 const K_INT: i64 = 1;
 const K_FLOAT: i64 = 2;
 const K_BOOL: i64 = 3;
 const K_STR: i64 = 4;
 const K_PATH: i64 = 5;
-const K_PARSE_ERROR: i64 = 6;
 const K_LIST: i64 = 7;
-const K_TUPLE: i64 = 8;
-const K_STRUCT: i64 = 9;
-const K_ENUM: i64 = 10;
 const K_REF: i64 = 11;
-const K_SHARED: i64 = 12;
-const K_CELL: i64 = 13;
-const K_FN: i64 = 14;
-const K_BYTES: i64 = 15;
-/// 秘密（ADR 0024、PR 6-1b）。レイアウトは構造体と同じ（中身の `Bytes` が
-/// フィールド 0）だが、破棄のときにバイト列の領域をゼロで上書きしてから
-/// 解放し、表示では中身を出さない。生成系が `Secret` 型の記述子にだけ付ける。
-const K_SECRET: i64 = 17;
 
 type D = *const i64;
 
@@ -56,157 +41,6 @@ unsafe fn rd(d: D, i: usize) -> i64 {
 
 unsafe fn dp(d: D, i: usize) -> D {
     rd(d, i) as D
-}
-
-unsafe fn name<'a>(d: D, i: usize) -> &'a str {
-    let p = rd(d, i) as *const u8;
-    let n = rd(d, i + 1) as usize;
-    if n == 0 || p.is_null() {
-        return "";
-    }
-    std::str::from_utf8_unchecked(std::slice::from_raw_parts(p, n))
-}
-
-unsafe fn word(p: *const u8) -> i64 {
-    *(p as *const i64)
-}
-
-unsafe fn list_items(l: *const RtList) -> Vec<i64> {
-    let n = list_len(l);
-    (0..n).map(|i| word(list_get(l, i) as *const u8)).collect()
-}
-
-/// 列挙型の腕の項（名前、フィールド数、フィールドの記述子の位置）と、次の腕の位置。
-unsafe fn variant(d: D, tag: i64) -> (&'static str, usize, usize) {
-    let mut pos = 5usize;
-    let n = rd(d, 4);
-    let mut i = 0;
-    loop {
-        let nf = rd(d, pos + 2) as usize;
-        if i == tag || i + 1 >= n {
-            return (name(d, pos), nf, pos + 3);
-        }
-        pos += 3 + nf;
-        i += 1;
-    }
-}
-
-/// 破棄の対象になる（見出しつきの塊や列を持つ）種類。
-fn owning_kind(k: i64) -> bool {
-    matches!(
-        k,
-        K_LIST | K_TUPLE | K_STRUCT | K_ENUM | K_SHARED | K_CELL | K_FN
-    )
-}
-
-unsafe fn show_into(d: D, w: i64, quote: bool, out: &mut String) {
-    // 移動済み（空）の値は、SIR の評価器と同じく `()` と表示する。
-    if w == 0 && (owning_kind(rd(d, 0)) || matches!(rd(d, 0), K_STR | K_PATH | K_BYTES)) {
-        out.push_str("()");
-        return;
-    }
-    match rd(d, 0) {
-        K_UNIT => out.push_str("()"),
-        K_INT => out.push_str(&w.to_string()),
-        K_FLOAT => out.push_str(&text::fmt_float(f64::from_bits(w as u64))),
-        K_BOOL => out.push_str(if w != 0 { "true" } else { "false" }),
-        K_STR | K_PATH => {
-            let t = s(w as *const RtStr);
-            if quote {
-                out.push_str(&text::quote(t));
-            } else {
-                out.push_str(t);
-            }
-        }
-        K_BYTES => {
-            let bytes = bytes_slice(w as *const RtBytes);
-            out.push_str(&format!("Bytes({:?})", bytes));
-        }
-        K_SECRET => {
-            // 中身は出さない（長さも含め、秘密に関わる情報は表示しない）。
-            out.push_str("Secret(***)");
-        }
-        K_PARSE_ERROR => out.push_str("ParseError"),
-        K_LIST => {
-            out.push('[');
-            for (i, x) in list_items(w as *const RtList).into_iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                show_into(dp(d, 1), x, true, out);
-            }
-            out.push(']');
-        }
-        K_TUPLE => {
-            let n = rd(d, 1) as usize;
-            let b = w as *const i64;
-            out.push('(');
-            for i in 0..n {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                show_into(dp(d, 2 + i), *b.add(i), true, out);
-            }
-            out.push(')');
-        }
-        K_STRUCT => {
-            let n = rd(d, 3) as usize;
-            let b = w as *const i64;
-            out.push_str(name(d, 1));
-            out.push_str(" { ");
-            for i in 0..n {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(name(d, 4 + 3 * i));
-                out.push_str(": ");
-                show_into(dp(d, 4 + 3 * i + 2), *b.add(i), true, out);
-            }
-            out.push_str(" }");
-        }
-        K_ENUM => {
-            let b = w as *const i64;
-            let (vname, nf, fpos) = variant(d, *b);
-            if rd(d, 3) == 0 {
-                out.push_str(name(d, 1));
-                out.push('.');
-            }
-            out.push_str(vname);
-            if nf > 0 {
-                out.push('(');
-                for i in 0..nf {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    show_into(dp(d, fpos + i), *b.add(1 + i), true, out);
-                }
-                out.push(')');
-            }
-        }
-        K_REF => show_into(dp(d, 1), *(w as *const i64), quote, out),
-        K_SHARED => {
-            out.push_str("Shared(");
-            show_into(dp(d, 1), *(w as *const i64), true, out);
-            out.push(')');
-        }
-        K_CELL => {
-            out.push_str("Cell(");
-            show_into(dp(d, 1), *(w as *const i64), true, out);
-            out.push(')');
-        }
-        _ => out.push_str("<関数>"),
-    }
-}
-
-/// 値の表示（`quote` が真なら文字列に引用符を付ける）。戻り値は `str_free` で解放する。
-///
-/// # Safety
-/// `d` は記述子、`w` はその型の値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_val_show(d: D, w: i64, quote: i32) -> *mut RtStr {
-    let mut o = String::new();
-    show_into(d, w, quote != 0, &mut o);
-    new_str(o)
 }
 
 /// `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes `b` のデータ領域を
@@ -228,18 +62,6 @@ pub unsafe extern "C" fn sigil_rt_zeroize_bytes(b: i64) {
             std::ptr::write_bytes(data, 0, len);
         }
     }
-}
-
-/// `--trace-drops`（補足 G-3）: 構造体の値 `w` を `drop: <表示>` として標準エラーへ 1 行出す。
-/// 表示は Rust の中で作る（Sigil 製の文字列を使わない。スタックの下限の付近でも、Sigil の関数を呼ばずに出せる）。
-///
-/// # Safety
-/// `d` は記述子、`w` はその型の値。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_trace_drop(d: D, w: i64) {
-    let mut t = String::new();
-    show_into(d, w, true, &mut t);
-    let _ = writeln!(std::io::stderr().lock(), "drop: {t}");
 }
 
 // ---------------------------------------------------------------------------
@@ -364,36 +186,10 @@ pub unsafe extern "C" fn sigil_rt_entry_args(
 mod tests {
     use super::*;
 
+    /// 破棄の段が呼ぶゼロ化で、`Secret` の中身のバイト列が消える（ADR 0024、PR 6-1b）。
+    /// 表示の秘匿（`Secret(***)`）は生成した表示の試験（`tests/show_35f.rs`）で確かめる。
     #[test]
-    fn show_and_compare_primitives() {
-        let int = [K_INT];
-        let float = [K_FLOAT];
-        let list = [K_LIST, int.as_ptr() as i64];
-        unsafe {
-            assert_eq!(s(sigil_rt_val_show(int.as_ptr(), -5, 1)), "-5");
-            assert_eq!(
-                s(sigil_rt_val_show(
-                    float.as_ptr(),
-                    1.5f64.to_bits() as i64,
-                    1
-                )),
-                "1.5"
-            );
-            let l = list_new();
-            for x in [3i64, 1, 2] {
-                list_push(l, x);
-            }
-            assert_eq!(
-                s(sigil_rt_val_show(list.as_ptr(), l as i64, 1)),
-                "[3, 1, 2]"
-            );
-        }
-    }
-
-    /// `Secret` の表示は中身を出さず、破棄の段が呼ぶゼロ化で中身のバイト列が
-    /// 消える（ADR 0024、PR 6-1b）。
-    #[test]
-    fn secret_drop_zeroizes_and_show_hides() {
+    fn secret_drop_zeroizes() {
         // テスト用のバイト列の頭（ptr・len・cap の 24B、本物と同じ配置）。
         // cap を 0 にすると、表側の free は領域を解放しないので、
         // 破棄のあとに中身を観察できる。
@@ -403,28 +199,15 @@ mod tests {
             len: i64,
             cap: i64,
         }
-        let bytes_desc = [K_BYTES];
-        let make = |kind: i64, buf: &mut Vec<u8>| -> ([i64; 7], i64) {
-            let head = Box::into_raw(Box::new(Head {
-                ptr: buf.as_mut_ptr(),
-                len: buf.len() as i64,
-                cap: 0,
-            }));
-            let desc = [kind, 0, 0, 1, 0, 0, bytes_desc.as_ptr() as i64];
-            let block = Box::into_raw(Box::new(0i64));
-            unsafe {
-                *block = head as i64;
-            }
-            (desc, block as i64)
-        };
+        let mut buf = vec![9u8, 8, 7];
+        let head = Box::into_raw(Box::new(Head {
+            ptr: buf.as_mut_ptr(),
+            len: buf.len() as i64,
+            cap: 0,
+        }));
         unsafe {
-            // 秘密: 表示は中身を出さない。
-            let mut buf = vec![9u8, 8, 7];
-            let (desc, w) = make(K_SECRET, &mut buf);
-            assert_eq!(s(sigil_rt_val_show(desc.as_ptr(), w, 1)), "Secret(***)");
-            // 破棄の段が解放前に呼ぶゼロ化（w のフィールド 0 が Bytes の頭）。
-            let head = *(w as *const i64);
-            sigil_rt_zeroize_bytes(head);
+            // 破棄の段が解放前に呼ぶゼロ化（Bytes の頭を渡す）。
+            sigil_rt_zeroize_bytes(head as i64);
             assert_eq!(buf, [0, 0, 0], "ゼロ化で中身が消えていない");
             // 0 は何もしない。
             sigil_rt_zeroize_bytes(0);

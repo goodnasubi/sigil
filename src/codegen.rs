@@ -146,12 +146,9 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "raw_syscall" => ("ppppppp", 'p'),
         "enter" => ("pp", 'i'),
         "console_log" | "os_buf_free" | "stop" => ("pp", 'v'),
-        // `--trace-drops` の 1 行（補足 G-3）: 構造体の値と記述子を取り、標準エラーへ書く。生成した破棄の段が呼ぶ。
-        "trace_drop" => ("pp", 'v'),
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
-        "val_show" => ("ppi", 'p'),
         "entry_args" => ("ippppppp", 'i'),
         "fs_read" | "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppppp", 'v'),
@@ -220,6 +217,8 @@ pub(crate) enum Gk {
     Drop,
     /// `sigil_dstep_<k>`: 破棄の 1 段（子を積み、自分の塊を解放する）
     Dstep,
+    /// `sigil_show_<k>`: 表示（共有バッファへ追記。補足 H-1）
+    Show,
 }
 
 impl Gk {
@@ -231,6 +230,7 @@ impl Gk {
             Gk::Shadow => "shadow",
             Gk::Drop => "drop",
             Gk::Dstep => "dstep",
+            Gk::Show => "show",
         }
     }
 
@@ -240,6 +240,7 @@ impl Gk {
             Gk::Eq | Gk::Cmp => (2, 'p'),
             Gk::Clone | Gk::Shadow => (1, 'p'),
             Gk::Drop | Gk::Dstep => (1, 'v'),
+            Gk::Show => (2, 'v'),
         }
     }
 }
@@ -252,7 +253,6 @@ pub(crate) enum SFn {
     /// `sigil_show_end()`: バッファを片付ける（伸ばした領域を返し、長さを 0 に戻す）。
     End,
     /// `sigil_show_end_str() -> p`: バッファの中身から文字列を作って片付ける。
-    #[allow(dead_code)] // 呼び出し側（UTF-8 のエラー報告）は 3-5f-ii で付け替える
     EndStr,
     /// `sigil_show_push(p, p)`: バッファへバイト列を足す。
     Push,
@@ -261,7 +261,6 @@ pub(crate) enum SFn {
     /// `sigil_show_float(f)`: `Float` の最短表現を足す。
     Float,
     /// `sigil_show_quote(p, p)`: 文字列の中身の引用（`"` で囲んだ並び）を足す。
-    #[allow(dead_code)] // 呼び出し側（`Str` の表示）は 3-5f-ii で付く
     Quote,
     /// `sigil_write_all(p, p, p)`: ファイル記述子へ全部書く。
     WriteAll,

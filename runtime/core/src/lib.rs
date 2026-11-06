@@ -723,16 +723,6 @@ pub(crate) mod tests {
         }
     }
 
-    unsafe fn st(s: &str) -> *mut RtStr {
-        str_new_raw(s.as_ptr(), s.len())
-    }
-
-    unsafe fn text(p: *mut RtStr) -> String {
-        let t = s(p).to_string();
-        str_free(p);
-        t
-    }
-
     #[test]
     fn entry_args() {
         unsafe {

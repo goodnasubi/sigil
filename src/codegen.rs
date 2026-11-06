@@ -150,7 +150,6 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "trace_drop" => ("pp", 'v'),
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
-        "print_result" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
         "val_show" => ("ppi", 'p'),
         "entry_args" => ("ippppppp", 'i'),
@@ -196,6 +195,14 @@ pub(crate) struct Cg<'p> {
     ws: Option<DataId>,
     /// 0 でなければ塊を解放する `sigil_blkfree_nz`（どのプログラムにも置く。子を持たない値の破棄が呼ぶ。補足 G-2）。
     pub blkfree_nz: Option<FuncId>,
+    /// 表示の補助（補足 H）。宣言したもの。
+    show_fns: HashMap<SFn, FuncId>,
+    /// まだ本体を作っていない表示の補助（本体が別の補助を求めることがあるので、空になるまで回す）。
+    show_q: Vec<(FuncId, SFn)>,
+    /// 表示バッファの静的な領域（補足 H-2）。`None` なら、この生成では使っていない。
+    show_buf: Option<DataId>,
+    /// 引用で逃がす符号点の範囲のデータ（補足 H-4）。`None` なら未作成で、値は（データ, 範囲の数）。
+    quote: Option<(DataId, usize)>,
 }
 
 /// 型ごとに生成する関数の種類（補足 G-1・G-2）。
@@ -236,6 +243,69 @@ impl Gk {
         }
     }
 }
+
+/// 表示の補助の種類（補足 H-1・H-2・H-3・H-4・H-6）。型ごとではなく、プログラムに 1 組だけ生成する。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum SFn {
+    /// `sigil_show_begin()`: バッファを空にする。
+    Begin,
+    /// `sigil_show_end()`: バッファを片付ける（伸ばした領域を返し、長さを 0 に戻す）。
+    End,
+    /// `sigil_show_end_str() -> p`: バッファの中身から文字列を作って片付ける。
+    #[allow(dead_code)] // 呼び出し側（UTF-8 のエラー報告）は 3-5f-ii で付け替える
+    EndStr,
+    /// `sigil_show_push(p, p)`: バッファへバイト列を足す。
+    Push,
+    /// `sigil_show_int(p)`: `Int` の 10 進の並びを足す。
+    Int,
+    /// `sigil_show_float(f)`: `Float` の最短表現を足す。
+    Float,
+    /// `sigil_show_quote(p, p)`: 文字列の中身の引用（`"` で囲んだ並び）を足す。
+    #[allow(dead_code)] // 呼び出し側（`Str` の表示）は 3-5f-ii で付く
+    Quote,
+    /// `sigil_write_all(p, p, p)`: ファイル記述子へ全部書く。
+    WriteAll,
+}
+
+impl SFn {
+    fn name(self) -> &'static str {
+        match self {
+            SFn::Begin => "sigil_show_begin",
+            SFn::End => "sigil_show_end",
+            SFn::EndStr => "sigil_show_end_str",
+            SFn::Push => "sigil_show_push",
+            SFn::Int => "sigil_show_int",
+            SFn::Float => "sigil_show_float",
+            SFn::Quote => "sigil_show_quote",
+            SFn::WriteAll => "sigil_write_all",
+        }
+    }
+
+    fn sig(self, cc: CallConv) -> Signature {
+        let mut s = Signature::new(cc);
+        match self {
+            SFn::Begin | SFn::End => {}
+            SFn::EndStr => s.returns.push(AbiParam::new(types::I64)),
+            SFn::Push | SFn::Quote => {
+                s.params.push(AbiParam::new(types::I64));
+                s.params.push(AbiParam::new(types::I64));
+            }
+            SFn::Int => s.params.push(AbiParam::new(types::I64)),
+            SFn::Float => s.params.push(AbiParam::new(types::F64)),
+            SFn::WriteAll => {
+                for _ in 0..3 {
+                    s.params.push(AbiParam::new(types::I64));
+                }
+            }
+        }
+        s
+    }
+}
+
+/// 表示バッファの静的な領域の大きさ（バイト）。補足 H-2。
+pub(crate) const SB_INLINE_BYTES: usize = 4096;
+/// 表示バッファのデータの大きさ（先頭の 24 バイトは状態: `[長さ][確保した領域][その容量]`）。
+pub(crate) const SB_BYTES: usize = 24 + SB_INLINE_BYTES;
 
 /// 作業の列の静的な領域の大きさ（項の数）。項は 16 バイト（`(段の関数の番地, 語)`）。補足 G-2。
 pub(crate) const WS_INLINE_ITEMS: usize = 4096;
@@ -323,6 +393,52 @@ impl<'p> Cg<'p> {
             .map_err(internal)?;
         self.ws = Some(d);
         Ok(d)
+    }
+
+    /// 表示の補助 `k`（補足 H）。宣言がなければ宣言して表に入れ、本体は待ち行列に積む。
+    pub fn show_fn(&mut self, k: SFn) -> Result<FuncId, CgError> {
+        if let Some(id) = self.show_fns.get(&k) {
+            return Ok(*id);
+        }
+        let id = self
+            .m
+            .declare_function(k.name(), Linkage::Local, &k.sig(self.cc))
+            .map_err(internal)?;
+        self.show_fns.insert(k, id);
+        self.show_q.push((id, k));
+        Ok(id)
+    }
+
+    /// 表示バッファの静的な領域のデータ（補足 H-2）。初めて使うときに宣言し、最後に 0 で定義する。
+    pub fn show_buf_data(&mut self) -> Result<DataId, CgError> {
+        if let Some(d) = self.show_buf {
+            return Ok(d);
+        }
+        let d = self
+            .m
+            .declare_anonymous_data(true, false)
+            .map_err(internal)?;
+        self.show_buf = Some(d);
+        Ok(d)
+    }
+
+    /// 引用で逃がす符号点の範囲のデータ（補足 H-4）。値は（データ, 範囲の数）。
+    /// 範囲は `[下限, 上限]` の 2 語ずつで、上限を含む。
+    pub fn quote_data(&mut self) -> Result<(DataId, usize), CgError> {
+        if let Some(v) = self.quote {
+            return Ok(v);
+        }
+        let ranges = quote_escape_ranges();
+        let mut ws: Vec<W> = Vec::with_capacity(ranges.len() * 2);
+        for &(lo, hi) in ranges {
+            ws.push(W::I(lo));
+            ws.push(W::I(hi));
+        }
+        let d = self.data_anon()?;
+        self.write_words(d, &ws)?;
+        let v = (d, ranges.len());
+        self.quote = Some(v);
+        Ok(v)
     }
 
     fn data_anon(&mut self) -> Result<DataId, CgError> {
@@ -635,6 +751,10 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         gen_n: 0,
         ws: None,
         blkfree_nz: None,
+        show_fns: HashMap::new(),
+        show_q: vec![],
+        show_buf: None,
+        quote: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
@@ -730,10 +850,25 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fx.blkfree_nz_body()
     })?;
 
+    // 表示の補助の本体（補足 H）。本体が別の補助を求めることがあるので、列が空になるまで回す。
+    while let Some((id, k)) = cg.show_q.pop() {
+        let idx = base + cg.gen_n as u32;
+        cg.gen_n += 1;
+        cg.define(id, idx, k.sig(cc), vec![], |fx| fx.show_body(k))?;
+    }
+
     // 作業の列の静的な領域（補足 G-2）。語は 0 で始まり、項の領域は後から確保した領域に替わる。
     if let Some(d) = cg.ws {
         let mut dd = DataDescription::new();
         dd.define(vec![0u8; WS_BYTES].into_boxed_slice());
+        dd.set_align(8);
+        cg.m.define_data(d, &dd).map_err(internal)?;
+    }
+
+    // 表示バッファの静的な領域（補足 H-2）。語は 0 で始まり、中身の領域は後から確保した領域に替わる。
+    if let Some(d) = cg.show_buf {
+        let mut dd = DataDescription::new();
+        dd.define(vec![0u8; SB_BYTES].into_boxed_slice());
         dd.set_align(8);
         cg.m.define_data(d, &dd).map_err(internal)?;
     }
@@ -760,6 +895,37 @@ type ShimRet = char;
 
 /// シム 1 つ（公開する関数, 呼ぶ Sigil の関数の番号, 引数の数, 戻り）。
 type Shim = (FuncId, usize, usize, ShimRet);
+
+/// 引用で `\u{...}` に逃がす符号点の範囲（両端含む、補足 H-4）。
+/// `str` の `Debug`（Rust の `char::escape_debug` のうち、引用符とバックスラッシュ以外）と同じ判定を
+/// 全符号点について調べて作る。コンパイラと評価器が同じ Rust に従うので、判定は一致する。
+/// プロセスで 1 回だけ作る。名前つきの逃がし（`\t`・`\n`・`\r`・`\\`・`\"`）は生成コードが直接見るので含めない。
+fn quote_escape_ranges() -> &'static [(i64, i64)] {
+    use std::sync::OnceLock;
+    static RANGES: OnceLock<Vec<(i64, i64)>> = OnceLock::new();
+    RANGES.get_or_init(|| {
+        let mut out: Vec<(i64, i64)> = vec![];
+        for cp in 0..0x110000u32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            if matches!(c, '\t' | '\n' | '\r' | '\\' | '"' | '\'') {
+                continue;
+            }
+            // `'` は `char::escape_debug` が逃がすが `str` の `Debug` は逃がさないので、上で除いた。
+            // それ以外は両者の判定が一致する（逃がすなら先頭が `\` になる）。
+            let mut it = c.escape_debug();
+            let escaped = it.next() == Some('\\');
+            if escaped {
+                match out.last_mut() {
+                    Some((_, hi)) if *hi + 1 == cp as i64 => *hi = cp as i64,
+                    _ => out.push((cp as i64, cp as i64)),
+                }
+            }
+        }
+        out
+    })
+}
 
 pub(crate) fn shim_sig(cc: CallConv, np: usize, ret: ShimRet) -> Signature {
     let mut s = Signature::new(cc);

@@ -1,5 +1,6 @@
-//! ADR 0015 の決定 6（PR3）: 暫定ランタイム（`runtime/core`・`runtime/os`）の表示・文字列・パスの関数が、
+//! ADR 0015 の決定 6（PR3）: 暫定ランタイム（`runtime/core`・`runtime/os`）の文字列・パスの関数が、
 //! SIR の評価器と同じ結果を返すこと。
+//! （値の表示は生成したコードへ移ったので、突き合わせは `tests/show_35f.rs` が担う。ADR 0025 補足 H。）
 //!
 //! 埋め込んだ `.a`（`sigil::runtime_lib`）を、C の小さなドライバと `cc -static -no-pie` でリンクして走らせ、
 //! 同じ入力を SIR の評価器で評価した結果と突き合わせる。`cc` がなければ飛ばす。
@@ -20,10 +21,6 @@ const DRIVER: &str = r#"
 typedef struct RtStr RtStr;
 void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
                           const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
-RtStr* sigil_rt_show_int(int64_t);
-RtStr* sigil_rt_show_float(double);
-RtStr* sigil_rt_show_str(const RtStr*);
-void sigil_rt_print_result(const RtStr*);
 void sigil_rt_path_join(const uint8_t*, size_t, const uint8_t*, size_t, uint8_t**, size_t*);
 int32_t sigil_rt_path_file_name(const uint8_t*, size_t, uint8_t**, size_t*);
 int32_t sigil_rt_path_parent(const uint8_t*, size_t, uint8_t**, size_t*);
@@ -47,21 +44,28 @@ static int64_t sigil_rt_str_bytes(const RtStr* s) { return ((const Head*)s)->len
 
 static void put(RtStr* s) { fwrite(sigil_rt_str_data(s), 1, sigil_rt_str_bytes(s), stdout); sigil_rt_str_free(s); }
 
+/* 引用つきで出す（このドライバの入力は `"` と `\` を含まないパスだけなので、その 2 つを逃がせば評価器の表示と一致する）。 */
+static void putq(RtStr* s) {
+  const uint8_t* p = sigil_rt_str_data(s); int64_t n = sigil_rt_str_bytes(s);
+  putchar('"');
+  for (int64_t i = 0; i < n; i++) { if (p[i] == '"' || p[i] == '\\') putchar('\\'); putchar(p[i]); }
+  putchar('"');
+  sigil_rt_str_free(s);
+}
+
 int main(int argc, char** argv) {
   const char* cmd = argv[1];
   const char* a = argc > 2 ? argv[2] : "";
   const char* b = argc > 3 ? argv[3] : "";
   sigil_rt_set_str_ops(sigil_rt_str_new, sigil_rt_str_free, sigil_rt_str_clone, sigil_rt_str_data, sigil_rt_str_bytes);
-  if (!strcmp(cmd, "float")) {
-    put(sigil_rt_show_float(strtod(a, NULL)));
-  } else if (!strcmp(cmd, "join")) {
+  if (!strcmp(cmd, "join")) {
     uint8_t* p; size_t n; sigil_rt_path_join((const uint8_t*)a, strlen(a), (const uint8_t*)b, strlen(b), &p, &n);
-    RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); put(sigil_rt_show_str(t));
+    RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); putq(t);
   } else if (!strcmp(cmd, "file_name") || !strcmp(cmd, "parent")) {
     uint8_t* p; size_t n;
     int32_t some = cmd[0] == 'f' ? sigil_rt_path_file_name((const uint8_t*)a, strlen(a), &p, &n)
                                  : sigil_rt_path_parent((const uint8_t*)a, strlen(a), &p, &n);
-    if (some) { RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); printf("Some("); put(sigil_rt_show_str(t)); printf(")"); }
+    if (some) { RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); printf("Some("); putq(t); printf(")"); }
     else printf("None");
   } else if (!strcmp(cmd, "log")) {
     sigil_rt_console_log((const uint8_t*)a, strlen(a)); return 0;
@@ -164,21 +168,6 @@ fn rt(exe: &PathBuf, args: &[&str]) -> String {
 }
 
 fn check_all(exe: &PathBuf) {
-    for f in [
-        "1.5",
-        "3.0",
-        "-0.25",
-        "0.1",
-        "100000.0",
-        "2.5",
-        "1234567.125",
-    ] {
-        assert_eq!(
-            rt(exe, &["float", f]),
-            ev("Float", &format!("return {f};")),
-            "float {f}"
-        );
-    }
     for (a, b) in [
         ("/etc/app", "conf.toml"),
         ("a", "b"),
@@ -268,11 +257,16 @@ fn core_alone_links_without_os() {
     // 文字列の関数表（補足 D-3）が要る。ここでは最小の表（24B の頭を malloc で作る）を登録する。
     let src = r#"#include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 typedef struct RtStr RtStr;
-RtStr* sigil_rt_show_int(int64_t);
-void sigil_rt_print_result(const RtStr*);
+typedef struct RtArg RtArg;
+RtArg* sigil_rt_arg_parse(const uint8_t*, size_t, RtStr**);
+void sigil_rt_arg_free(RtArg*);
+int64_t sigil_rt_arg_list_len(const RtArg*);
+const RtArg* sigil_rt_arg_list_get(const RtArg*, int64_t);
+int64_t sigil_rt_arg_int(const RtArg*);
 void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
                           const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
 typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } Head;
@@ -287,7 +281,16 @@ static void s_free(RtStr* s) { Head* h = (Head*)s; if (!h) return; free(h->ptr);
 static RtStr* s_clone(const RtStr* s) { const Head* h = (const Head*)s; return s_new(h->ptr, h->len); }
 static const uint8_t* s_data(const RtStr* s) { return ((const Head*)s)->ptr; }
 static int64_t s_bytes(const RtStr* s) { return ((const Head*)s)->len; }
-int main(void){ sigil_rt_set_str_ops(s_new, s_free, s_clone, s_data, s_bytes); sigil_rt_print_result(sigil_rt_show_int(42)); return 0; }
+int main(void){
+  sigil_rt_set_str_ops(s_new, s_free, s_clone, s_data, s_bytes);
+  RtStr* err = NULL;
+  RtArg* a = sigil_rt_arg_parse((const uint8_t*)"[42]", 4, &err);
+  if (!a) return 1;
+  if (sigil_rt_arg_list_len(a) != 1) return 2;
+  printf("%lld\n", (long long)sigil_rt_arg_int(sigil_rt_arg_list_get(a, 0)));
+  sigil_rt_arg_free(a);
+  return 0;
+}
 "#;
     std::fs::write(dir.join("d.c"), src).unwrap();
     let o = Command::new("cc")

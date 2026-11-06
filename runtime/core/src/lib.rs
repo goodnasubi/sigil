@@ -308,55 +308,6 @@ pub(crate) fn list_len(l: *const RtList) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// 値の表示（`sigil run` の戻り値の表示と同じ書き方。合成は生成したコードが行う）
-
-#[no_mangle]
-pub extern "C" fn sigil_rt_show_int(n: i64) -> *mut RtStr {
-    new_str(n.to_string())
-}
-
-#[no_mangle]
-pub extern "C" fn sigil_rt_show_float(f: f64) -> *mut RtStr {
-    new_str(text::fmt_float(f))
-}
-
-#[no_mangle]
-pub extern "C" fn sigil_rt_show_bool(b: i32) -> *mut RtStr {
-    new_str((b != 0).to_string())
-}
-
-#[no_mangle]
-pub extern "C" fn sigil_rt_show_unit() -> *mut RtStr {
-    new_str("()".to_string())
-}
-
-/// 引用符つきの文字列（`{:?}` と同じ）。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_show_str(p: *const RtStr) -> *mut RtStr {
-    new_str(text::quote(s(p)))
-}
-
-fn write_out(bytes: &[u8]) {
-    let mut o = std::io::stdout().lock();
-    let _ = o.write_all(bytes);
-    let _ = o.flush();
-}
-
-/// 入口の戻り値の表示を標準出力に 1 行出す。
-///
-/// # Safety
-/// `p` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_print_result(p: *const RtStr) {
-    let mut line = s(p).to_string();
-    line.push('\n');
-    write_out(line.as_bytes());
-}
-
-// ---------------------------------------------------------------------------
 // 異常停止の報告と終了
 
 fn flush_out() {
@@ -780,21 +731,6 @@ pub(crate) mod tests {
         let t = s(p).to_string();
         str_free(p);
         t
-    }
-
-    #[test]
-    fn show_and_strings() {
-        unsafe {
-            assert_eq!(text(sigil_rt_show_int(-3)), "-3");
-            assert_eq!(text(sigil_rt_show_float(1.5)), "1.5");
-            assert_eq!(text(sigil_rt_show_float(3.0)), "3.0");
-            assert_eq!(text(sigil_rt_show_float(f64::NAN)), "NaN");
-            assert_eq!(text(sigil_rt_show_float(f64::NEG_INFINITY)), "-inf");
-            assert_eq!(text(sigil_rt_show_bool(1)), "true");
-            assert_eq!(text(sigil_rt_show_unit()), "()");
-            let q = st("a\"\n");
-            assert_eq!(text(sigil_rt_show_str(q)), "\"a\\\"\\n\"");
-        }
     }
 
     #[test]

@@ -418,6 +418,11 @@ impl<'a, 'p> Fx<'a, 'p> {
         let print = self.b.create_block();
         self.b.ins().brif(moved, end, NOARGS, print, NOARGS);
         self.b.switch_to_block(print);
+        // 破棄の記録は型を特定して出すものなので、その型の記述子もオブジェクトに残す
+        // （秘密の種類 17 のように、実行時に型を見分ける印を残すため。tests/ct_rules.rs が担保）。
+        if let Err(e) = self.cg.desc(&Ty::Adt(id)) {
+            self.fail(e);
+        }
         self.show_trace_drop(&Ty::Adt(id), w);
         self.b.ins().jump(end, NOARGS);
         self.b.switch_to_block(end);

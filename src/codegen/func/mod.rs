@@ -4,6 +4,7 @@ mod call;
 mod drop;
 mod eqcmp;
 mod expr;
+mod show;
 mod stmt;
 mod valops;
 
@@ -666,11 +667,7 @@ impl<'a, 'p> Fx<'a, 'p> {
 
         self.b.switch_to_block(showb);
         let rt = strip(&norm(&f.ret));
-        let d = self.desc_addr(&rt);
-        let q = self.ic(1);
-        let s = self.rt("val_show", &[d, r[0], q]);
-        self.rt("print_result", &[s]);
-        self.rt("str_free", &[s]);
+        self.show_entry_result(&rt, r[0]);
         self.drop_val(&rt, r[0]);
         self.drop_globals();
         let z = self.b.ins().iconst(types::I32, 0);

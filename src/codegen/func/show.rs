@@ -1,14 +1,18 @@
-//! 表示の土台（ADR 0025 補足 H-1・H-2・H-3・H-4・H-5・H-6）。
+//! 表示の生成（ADR 0025 補足 H-1・H-2・H-3・H-4・H-5・H-6）。
 //!
-//! 型ごとの表示（3-5f-ii の `sigil_show_<k>`）が使う共通の補助を、プログラムに 1 組だけ生成する。
+//! 共通の補助（バッファ・書き出し・`Int`・`Float`・引用）をプログラムに 1 組だけ生成し、
+//! 型ごとの表示 `sigil_show_<k>(w, quote)` はその上に組み立てる。表示は記述子を読まず、
+//! 構造体名・フィールド名・列挙型名・腕名は型定義から生成時に埋める（補足 H-1・H-7）。
 //! バッファは静的な 4096 バイトから始まり、足りなければ Sigil 製の確保器で 2 倍に伸ばし、
 //! 使い終わったら返して静的な領域に戻す（補足 G-2 の破棄の作業の列と同じ作り）。
 //! `Float` の最短表現は正確な多倍長演算による区間方式（Steele & White）で作り、
 //! 評価器（共有の `fmt_float`、Rust の `{}`）と一致させる。引用は Rust の `char::escape_debug` と同じ規則。
+//! 規則の正は評価器の `show_val`（`src/ir_eval/value.rs`）で、移行前の Rust の `show_into` と一致する
+//! （`Addr` だけは補足 H-10 で評価器に合わせて直した）。
 
-use super::{Fx, NOARGS};
-use crate::codegen::{SFn, SB_INLINE_BYTES};
-use crate::ir::Ty;
+use super::{strip, Fx, NOARGS};
+use crate::codegen::{norm_with, Gk, SFn, SB_INLINE_BYTES};
+use crate::ir::{Ty, TypeKind};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, Value};
 use cranelift_module::Module;
@@ -54,6 +58,226 @@ impl<'a, 'p> Fx<'a, 'p> {
             SFn::Quote => self.show_quote_body(),
             SFn::WriteAll => self.show_write_all_body(),
         }
+    }
+
+    /// 移動済み（語が 0）の値なら `()` を足して戻り、そうでなければ続きのブロックへ進む
+    /// （補足 H-1。移行前の `show_into` の先頭の判定と同じ対象: 所有する種類と `String`・`Path`・`Bytes`）。
+    fn moved_guard(&mut self, w: Value) {
+        let (moved, body) = (self.b.create_block(), self.b.create_block());
+        let zero = self.b.ins().icmp_imm_s(IntCC::Equal, w, 0);
+        self.b.ins().brif(zero, moved, NOARGS, body, NOARGS);
+        self.b.switch_to_block(moved);
+        self.sb_lit(b"()");
+        self.b.ins().return_(&[]);
+        self.b.switch_to_block(body);
+    }
+
+    /// 繰り返しの要素の前（最初でなければ `, ` を足す）。
+    fn show_sep(&mut self, i: Value) {
+        let (sep, cont) = (self.b.create_block(), self.b.create_block());
+        let first = self.b.ins().icmp_imm_s(IntCC::Equal, i, 0);
+        self.b.ins().brif(first, cont, NOARGS, sep, NOARGS);
+        self.b.switch_to_block(sep);
+        self.sb_lit(b", ");
+        self.b.ins().jump(cont, NOARGS);
+        self.b.switch_to_block(cont);
+    }
+
+    /// `sigil_show_<k>(w, quote)` の本体（補足 H-1）。`ty` は鍵（参照を外し正規化済み）。
+    /// 値の入れ子に沿って再帰し、深さの検査はしない（評価器の `show_val` と同じ方針）。
+    pub(crate) fn show_typed_body(&mut self, ty: &Ty) {
+        let ps = self.body_head();
+        let (w, q) = (ps[0], ps[1]);
+        let one = self.ic(1);
+        let p = self.cg.p;
+        match ty {
+            Ty::Unit => self.sb_lit(b"()"),
+            Ty::ParseError => self.sb_lit(b"ParseError"),
+            Ty::Int => {
+                self.scall(SFn::Int, &[w]);
+            }
+            Ty::Addr => {
+                // 評価器に合わせる（補足 H-10。移行前のネイティブは `<関数>` だった不具合の修正）。
+                self.sb_lit(b"Addr(");
+                self.scall(SFn::Int, &[w]);
+                self.sb_lit(b")");
+            }
+            Ty::Float => {
+                self.scall(SFn::Float, &[w]);
+            }
+            Ty::Bool => {
+                let nz = self.b.ins().icmp_imm_s(IntCC::NotEqual, w, 0);
+                let (tp, tl) = self.lit_ref(b"true");
+                let (fp, fl) = self.lit_ref(b"false");
+                let ptr = self.b.ins().select(nz, tp, fp);
+                let len = self.b.ins().select(nz, tl, fl);
+                self.scall(SFn::Push, &[ptr, len]);
+            }
+            Ty::FnRef(..) => {
+                self.moved_guard(w);
+                self.sb_lit("<関数>".as_bytes());
+            }
+            Ty::Str | Ty::Path => {
+                self.moved_guard(w);
+                let ptr = self.rt("str_data", &[w]);
+                let len = self.rt("str_bytes", &[w]);
+                let (qb, nb, end) = (
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                );
+                let isq = self.b.ins().icmp_imm_s(IntCC::NotEqual, q, 0);
+                self.b.ins().brif(isq, qb, NOARGS, nb, NOARGS);
+                self.b.switch_to_block(qb);
+                self.scall(SFn::Quote, &[ptr, len]);
+                self.b.ins().jump(end, NOARGS);
+                self.b.switch_to_block(nb);
+                self.scall(SFn::Push, &[ptr, len]);
+                self.b.ins().jump(end, NOARGS);
+                self.b.switch_to_block(end);
+            }
+            Ty::Bytes => {
+                self.moved_guard(w);
+                self.sb_lit(b"Bytes([");
+                let data = self.rt("bytes_data", &[w]);
+                let len = self.rt("bytes_len", &[w]);
+                self.show_loop(len, |s, i| {
+                    s.show_sep(i);
+                    let at = s.b.ins().iadd(data, i);
+                    let byte = s.ld8(at);
+                    s.scall(SFn::Int, &[byte]);
+                });
+                self.sb_lit(b"])");
+            }
+            Ty::List(e) => {
+                self.moved_guard(w);
+                self.sb_lit(b"[");
+                let len = self.rt("list_len", &[w]);
+                let e = (**e).clone();
+                self.show_loop(len, |s, i| {
+                    s.show_sep(i);
+                    let pa = s.rt("list_get", &[w, i]);
+                    let x = s.ld(pa, 0);
+                    let one = s.ic(1);
+                    s.show_gen(&e, x, one);
+                });
+                self.sb_lit(b"]");
+            }
+            Ty::Tuple(ts) => {
+                self.moved_guard(w);
+                self.sb_lit(b"(");
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 {
+                        self.sb_lit(b", ");
+                    }
+                    let x = self.ld(w, 8 * i as i32);
+                    self.show_gen(t, x, one);
+                }
+                self.sb_lit(b")");
+            }
+            Ty::Adt(t) => {
+                let def = &p.types[*t];
+                match &def.kind {
+                    TypeKind::Struct { fields } => {
+                        if def.secret {
+                            // 秘密は中身も長さも出さない（補足 H-1。移行前の種類 17 と同じ）。
+                            self.sb_lit(b"Secret(***)");
+                        } else {
+                            self.moved_guard(w);
+                            self.sb_lit(def.name.as_bytes());
+                            self.sb_lit(b" { ");
+                            for (i, (name, ft)) in fields.iter().enumerate() {
+                                if i > 0 {
+                                    self.sb_lit(b", ");
+                                }
+                                self.sb_lit(name.as_bytes());
+                                self.sb_lit(b": ");
+                                let x = self.ld(w, 8 * i as i32);
+                                self.show_gen(ft, x, one);
+                            }
+                            self.sb_lit(b" }");
+                        }
+                    }
+                    TypeKind::Enum { variants } => {
+                        self.moved_guard(w);
+                        let tag = self.ld(w, 0);
+                        let end = self.b.create_block();
+                        let bare = def.name == "Option" || def.name == "Result";
+                        for (vi, v) in variants.iter().enumerate() {
+                            let (arm, next) = (self.b.create_block(), self.b.create_block());
+                            let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, vi as i64);
+                            self.b.ins().brif(is, arm, NOARGS, next, NOARGS);
+                            self.b.switch_to_block(arm);
+                            if !bare {
+                                self.sb_lit(def.name.as_bytes());
+                                self.sb_lit(b".");
+                            }
+                            self.sb_lit(v.name.as_bytes());
+                            if !v.fields.is_empty() {
+                                self.sb_lit(b"(");
+                                for (i, ft) in v.fields.iter().enumerate() {
+                                    if i > 0 {
+                                        self.sb_lit(b", ");
+                                    }
+                                    let x = self.ld(w, 8 + 8 * i as i32);
+                                    self.show_gen(ft, x, one);
+                                }
+                                self.sb_lit(b")");
+                            }
+                            self.b.ins().jump(end, NOARGS);
+                            self.b.switch_to_block(next);
+                        }
+                        self.b.ins().jump(end, NOARGS);
+                        self.b.switch_to_block(end);
+                    }
+                }
+            }
+            Ty::Shared(i) => {
+                self.moved_guard(w);
+                self.sb_lit(b"Shared(");
+                let x = self.ld(w, 0);
+                let i = (**i).clone();
+                self.show_gen(&i, x, one);
+                self.sb_lit(b")");
+            }
+            Ty::Cell(i) => {
+                self.moved_guard(w);
+                self.sb_lit(b"Cell(");
+                let x = self.ld(w, 0);
+                let i = (**i).clone();
+                self.show_gen(&i, x, one);
+                self.sb_lit(b")");
+            }
+            Ty::Ref(i) | Ty::MutRef(i) => {
+                // 鍵では参照を外すので通常は来ない。来た場合は指す先を表示する（`quote` のまま）。
+                let x = self.ld(w, 0);
+                let i = (**i).clone();
+                self.show_gen(&i, x, q);
+            }
+        }
+        self.b.ins().return_(&[]);
+    }
+
+    /// `0..len` の繰り返し。各要素について `f(自分, 添字)` を呼ぶ。
+    fn show_loop<F: FnMut(&mut Self, Value)>(&mut self, len: Value, mut f: F) {
+        let head = self.b.create_block();
+        self.b.append_block_param(head, types::I64);
+        let z = self.ic(0);
+        self.b.ins().jump(head, &[BlockArg::Value(z)]);
+        self.b.switch_to_block(head);
+        let i = self.b.block_params(head)[0];
+        let (body, done) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(body, types::I64);
+        let more = self.b.ins().icmp(IntCC::SignedLessThan, i, len);
+        self.b
+            .ins()
+            .brif(more, body, &[BlockArg::Value(i)], done, NOARGS);
+        self.b.switch_to_block(body);
+        let i = self.b.block_params(body)[0];
+        f(self, i);
+        let next = self.b.ins().iadd_imm_s(i, 1);
+        self.b.ins().jump(head, &[BlockArg::Value(next)]);
+        self.b.switch_to_block(done);
     }
 
     /// 生成した関数の本体の入口。ブロックを作って切り替え、引数の語を返す。
@@ -117,50 +341,66 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.scall(SFn::WriteAll, &[fd, ptr, one]);
     }
 
-    /// 入口の戻り値の表示（補足 H-6）。スカラーは生成した補助で組み立てて書き出し、
-    /// それ以外は `val_show` の文字列を書き出す（付け替えは 3-5f-ii）。
-    pub(super) fn show_entry_result(&mut self, ty: &Ty, w: Value) {
-        match ty {
-            Ty::Unit | Ty::Int | Ty::Float | Ty::Bool => {
-                self.scall(SFn::Begin, &[]);
-                match ty {
-                    Ty::Unit => self.sb_lit(b"()"),
-                    Ty::Int => {
-                        self.scall(SFn::Int, &[w]);
-                    }
-                    Ty::Float => {
-                        self.scall(SFn::Float, &[w]);
-                    }
-                    _ => {
-                        // Bool: 0 でなければ `true`。
-                        let nz = self.b.ins().icmp_imm_s(IntCC::NotEqual, w, 0);
-                        let (tp, tl) = self.lit_ref(b"true");
-                        let (fp, fl) = self.lit_ref(b"false");
-                        let ptr = self.b.ins().select(nz, tp, fp);
-                        let len = self.b.ins().select(nz, tl, fl);
-                        self.scall(SFn::Push, &[ptr, len]);
-                    }
-                }
-                let sb = self.sb_base();
-                let (buf, _) = self.sb_area(sb);
-                let len = self.ld(sb, 0);
-                let fd = self.ic(1);
-                self.scall(SFn::WriteAll, &[fd, buf, len]);
-                self.sb_newline_out();
-                self.scall(SFn::End, &[]);
+    /// 型の鍵（補足 G-1 と同じ）: 参照を外し、関数の型の中身を消して正規化する。
+    fn skey(t: &Ty) -> Ty {
+        norm_with(&strip(t), true)
+    }
+
+    /// 値の表示をバッファへ足す（呼び出し側の口。補足 H-1）。
+    /// 参照は指す先の語を読んでから進み、`quote` はそのまま渡す（評価器の `show_val` と同じ）。
+    pub(super) fn show_gen(&mut self, t: &Ty, w: Value, q: Value) {
+        match t {
+            Ty::Ref(i) | Ty::MutRef(i) => {
+                let x = self.ld(w, 0);
+                self.show_gen(i, x, q);
             }
             _ => {
-                let d = self.desc_addr(ty);
-                let q = self.ic(1);
-                let s = self.rt("val_show", &[d, w, q]);
-                let p = self.rt("str_data", &[s]);
-                let n = self.rt("str_bytes", &[s]);
-                let fd = self.ic(1);
-                self.scall(SFn::WriteAll, &[fd, p, n]);
-                self.sb_newline_out();
-                self.rt("str_free", &[s]);
+                let id = match self.cg.gen_fn(Gk::Show, &Self::skey(t)) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.fail(e);
+                        return;
+                    }
+                };
+                let fr = self.cg.m.declare_func_in_func(id, self.b.func);
+                self.b.ins().call(fr, &[w, q]);
             }
         }
+    }
+
+    /// バッファの（番地, 長さ）。`sigil_show_begin` の後、`sigil_show_end` の前に使う。
+    pub(super) fn show_buf(&mut self) -> (Value, Value) {
+        let sb = self.sb_base();
+        let (buf, _) = self.sb_area(sb);
+        let len = self.ld(sb, 0);
+        (buf, len)
+    }
+
+    /// 入口の戻り値の表示（補足 H-6）: 生成した表示で組み立て、標準出力へ書く。
+    pub(super) fn show_entry_result(&mut self, ty: &Ty, w: Value) {
+        self.scall(SFn::Begin, &[]);
+        let one = self.ic(1);
+        self.show_gen(ty, w, one);
+        let (buf, len) = self.show_buf();
+        let fd = self.ic(1);
+        self.scall(SFn::WriteAll, &[fd, buf, len]);
+        self.sb_newline_out();
+        self.scall(SFn::End, &[]);
+    }
+
+    /// 破棄の記録（補足 H-6）: `drop: <表示>` を標準エラーへ 1 行書く。生成した破棄の段が呼ぶ。
+    pub(super) fn show_trace_drop(&mut self, ty: &Ty, w: Value) {
+        self.scall(SFn::Begin, &[]);
+        let one = self.ic(1);
+        self.show_gen(ty, w, one);
+        let (buf, len) = self.show_buf();
+        let fd = self.ic(2);
+        let (hp, hl) = self.lit_ref(b"drop: ");
+        self.scall(SFn::WriteAll, &[fd, hp, hl]);
+        self.scall(SFn::WriteAll, &[fd, buf, len]);
+        let (np, nl) = self.lit_ref(b"\n");
+        self.scall(SFn::WriteAll, &[fd, np, nl]);
+        self.scall(SFn::End, &[]);
     }
 
     /// リテラルの（番地, 長さ）。

@@ -140,13 +140,6 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().symbol_value(types::I64, gv)
     }
 
-    fn desc_addr(&mut self, t: &Ty) -> Value {
-        match self.cg.desc(t) {
-            Ok(d) => self.data_addr(d),
-            Err(e) => self.fail(e),
-        }
-    }
-
     fn rt(&mut self, name: &'static str, args: &[Value]) -> Value {
         let Some((ps, r)) = rt_spec(name).or_else(|| shim_spec(name)) else {
             return self.fail(CgError::Internal(format!("ランタイム関数 {name}")));

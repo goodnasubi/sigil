@@ -1,6 +1,6 @@
 //! Sigil の暫定ランタイムの核（ADR 0015 の決定 6）。
 //!
-//! 確保と解放、`String`・`List`・`Shared` の操作、値の表示、異常停止の報告、スタックの下限、入口の引数の読み取り。
+//! 確保と解放、`String`・`List`・`Shared` の操作、異常停止の報告、スタックの下限、入口の引数の読み取り。
 //! OS の機能（`console.log`・`fs`・`Path`）は `runtime/os` にある。関数の名前は `sigil_rt_` で始め、`extern "C"` とする。
 //! 境界は ADR 0014 の決定 2 の宣言で、Sigil のプログラムから名前で呼ぶ手段は作らない（ADR 0006 の「境界」）。
 //!
@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[path = "../../../src/shared/args.rs"]
 mod args;
-#[path = "../../../src/shared/text.rs"]
-mod text;
 mod val;
 
 /// 異常停止の終了コード（ADR 0006 の M3 の記録）。
@@ -220,15 +218,6 @@ pub(crate) fn bytes_len(b: *const RtBytes) -> usize {
     f(b) as usize
 }
 
-/// 中身の読み取り。長さ 0 では `data` を読まない（空番地のことがある）。
-pub(crate) unsafe fn bytes_slice<'a>(p: *const RtBytes) -> &'a [u8] {
-    let n = bytes_len(p);
-    if n == 0 {
-        return &[];
-    }
-    std::slice::from_raw_parts(bytes_data(p), n)
-}
-
 // ---------------------------------------------------------------------------
 // List（24B の頭の塊。表現は Sigil 製の `std.core.list` が持つ。補足 E。要素は 8B の語）
 
@@ -294,17 +283,6 @@ pub(crate) fn list_new() -> *mut RtList {
 pub(crate) fn list_push(l: *mut RtList, w: i64) {
     let f: ListPush = unsafe { std::mem::transmute(list_op(2)) };
     f(l, &w as *const i64 as *const u8)
-}
-
-/// 位置 `i` の要素の番地。範囲外は null。
-pub(crate) fn list_get(l: *const RtList, i: i64) -> *mut u8 {
-    let f: ListGet = unsafe { std::mem::transmute(list_op(3)) };
-    f(l, i)
-}
-
-pub(crate) fn list_len(l: *const RtList) -> i64 {
-    let f: ListLen = unsafe { std::mem::transmute(list_op(4)) };
-    f(l)
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +524,15 @@ pub unsafe extern "C" fn sigil_rt_arg_name(a: *const RtArg) -> *mut RtStr {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// 中身の読み取り（単体試験用）。長さ 0 では `data` を読まない（空番地のことがある）。
+    unsafe fn bytes_slice<'a>(p: *const RtBytes) -> &'a [u8] {
+        let n = bytes_len(p);
+        if n == 0 {
+            return &[];
+        }
+        std::slice::from_raw_parts(bytes_data(p), n)
+    }
 
     /// テスト用の関数表。頭は Rust の確保（ptr・len・cap の 24B）で、本物（Sigil 製）と同じ配置にする。
     pub(crate) mod table {

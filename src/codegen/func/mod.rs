@@ -608,6 +608,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().brif(neq, badc, NOARGS, coerceb, NOARGS);
         self.b.switch_to_block(badc);
         self.entry_err_count(&f.name, n as i64, given);
+        self.entry_free_args(lits, given);
         let one = self.b.ins().iconst(types::I32, 1);
         self.b.ins().return_(&[one]);
         self.b.switch_to_block(coerceb);
@@ -620,11 +621,15 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.b.ins().brif(ok, next, NOARGS, badm, NOARGS);
             self.b.switch_to_block(badm);
             self.entry_err_mismatch(&f.locals[pl].name);
+            self.entry_free_args(lits, given);
             let one = self.b.ins().iconst(types::I32, 1);
             self.b.ins().return_(&[one]);
             self.b.switch_to_block(next);
         }
 
+        // リテラル値の塊は入口の間だけ生きる（補足 I-1）。合わせ込みは塊を借りない
+        // （数値はコピー、文字列・一覧は新しく作られる）ので、ここで全部片づける。
+        self.entry_free_args(lits, given);
         self.init_globals();
         let mut vs = vec![];
         for (i, &pl) in f.params.iter().enumerate() {

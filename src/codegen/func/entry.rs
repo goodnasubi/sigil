@@ -459,6 +459,42 @@ impl<'a, 'p> Fx<'a, 'p> {
     // -----------------------------------------------------------------------
     // 第 1 段: リテラルの読み取り（補足 I-2）
 
+    /// `sigil_arg_free(lit)`: リテラル値の塊を片づける。一覧は要素の塊を先に再帰で
+    /// 片づけてから、塊そのものを返す。大きさは読み取りで取った語数と一致させる
+    /// （真偽値・整数・小数は 2 語、文字列は 3 語、一覧は要素数 + 2 語）。
+    /// 合わせ込みは塊の中身を借りない（数値はコピー、文字列と一覧は新しく作られる）
+    /// ので、合わせ込みが終わった後に呼んでよい（補足 I-1「入口の間だけ生きる」）。
+    pub(crate) fn arg_free_body(&mut self) {
+        let ps = self.ehead();
+        let lit = ps[0];
+        let kind = self.ld(lit, 0);
+        let is_list = self.cmpi_imm(IntCC::Equal, kind, LK_LIST);
+        let bytes = self.branch(
+            is_list,
+            |s| {
+                let cnt = s.ld(lit, 8);
+                s.loop_range(cnt, |s2, i| {
+                    let off8 = s2.b.ins().imul_imm_s(i, 8);
+                    let off = s2.b.ins().iadd_imm_s(off8, 16);
+                    let addr = s2.b.ins().iadd(lit, off);
+                    let elit = s2.ld(addr, 0);
+                    s2.scall(SFn::ArgFree, &[elit]);
+                });
+                let nw = s.b.ins().iadd_imm_s(cnt, 2);
+                s.b.ins().imul_imm_s(nw, 8)
+            },
+            |s| {
+                let is_str = s.cmpi_imm(IntCC::Equal, kind, LK_STR);
+                let b24 = s.ic(24);
+                let b16 = s.ic(16);
+                s.b.ins().select(is_str, b24, b16)
+            },
+        );
+        let eight = self.ic(8);
+        self.rt("raw_free", &[lit, bytes, eight]);
+        self.b.ins().return_(&[]);
+    }
+
     /// `sigil_arg_parse(ptr, len, err) -> lit`: 引数 1 つをリテラル値の塊に読む。
     /// 範囲外の誤りなら 0 を返し、`err` の 2 語へ対象のバイト列を書く。
     pub(crate) fn arg_parse_body(&mut self) {
@@ -1934,5 +1970,26 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().jump(head, &[BlockArg::Value(next)]);
         self.b.switch_to_block(done);
         (lits, self.ld(faila, 0))
+    }
+
+    /// 読み終わったリテラル値の並びと、その置き場（`lits`）を片づける。
+    /// 置き場の語数は読み取りで取った数と同じ（引数が 0 個でも 1 語取る）。
+    /// 合わせ込みが終わった後（成功の経路）と、個数・型の不一致の経路で呼ぶ。
+    /// 読み取りの失敗の経路では呼ばない（読めた分が置き場に残るが、プロセスは
+    /// そのまま終了コード 1 で終わる。合わせ込みの不一致でも、途中で作った
+    /// 合わせ込み済みの値までは片づけないのは移行前と同じ）。
+    pub(super) fn entry_free_args(&mut self, lits: Value, given: Value) {
+        self.loop_range(given, |s, i| {
+            let off = s.b.ins().imul_imm_s(i, 8);
+            let addr = s.b.ins().iadd(lits, off);
+            let lit = s.ld(addr, 0);
+            s.scall(SFn::ArgFree, &[lit]);
+        });
+        let one = self.ic(1);
+        let is0 = self.cmpi_imm(IntCC::Equal, given, 0);
+        let cnt = self.b.ins().select(is0, one, given);
+        let bytes = self.b.ins().imul_imm_s(cnt, 8);
+        let eight = self.ic(8);
+        self.rt("raw_free", &[lits, bytes, eight]);
     }
 }

@@ -278,6 +278,8 @@ pub(crate) enum SFn {
     /// `sigil_arg_float(p, p, p) -> p`: バイト列を `Float` として読めるか確かめ、ビット列を書く（補足 I-3）。
     /// 引数は（バイト列の番地, 長さ, ビット列を書く先）で、戻りは成否（1/0）。
     ArgFloat,
+    /// `sigil_arg_free(p)`: リテラル値の塊を片づける（一覧なら要素の塊も再帰に。補足 I-1）。
+    ArgFree,
 }
 
 impl SFn {
@@ -294,6 +296,7 @@ impl SFn {
             SFn::ReportStop => "sigil_report_stop",
             SFn::ArgParse => "sigil_arg_parse",
             SFn::ArgFloat => "sigil_arg_float",
+            SFn::ArgFree => "sigil_arg_free",
         }
     }
 
@@ -306,7 +309,7 @@ impl SFn {
                 s.params.push(AbiParam::new(types::I64));
                 s.params.push(AbiParam::new(types::I64));
             }
-            SFn::Int => s.params.push(AbiParam::new(types::I64)),
+            SFn::Int | SFn::ArgFree => s.params.push(AbiParam::new(types::I64)),
             SFn::Float => s.params.push(AbiParam::new(types::F64)),
             SFn::WriteAll | SFn::ArgParse | SFn::ArgFloat => {
                 for _ in 0..3 {

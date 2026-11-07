@@ -60,6 +60,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             SFn::ReportStop => self.show_report_stop_body(),
             SFn::ArgParse => self.arg_parse_body(),
             SFn::ArgFloat => self.arg_float_body(),
+            SFn::ArgFree => self.arg_free_body(),
         }
     }
 

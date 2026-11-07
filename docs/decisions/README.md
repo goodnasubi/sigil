@@ -48,3 +48,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0026](0026-p1a-concurrency.md) | 並行処理 P1-a（SIR 評価器での構造化並行処理・性質の手付け・要求の隔離） | 提案 |
 | [0027](0027-ai-era-security-design-principles.md) | AI が書く前提の安全設計原則（攻撃側 AI の実証知見に基づく） | 承認 |
 | [0028](0028-task-suspend-on-bare.md) | bare における task.suspend の許可（task.yield の協調点） | 承認 |
+| [0029](0029-scope-arena-allocation.md) | 生成コードの値の確保にスコープアリーナ（データスタック）を導入する検討 | 承認 |

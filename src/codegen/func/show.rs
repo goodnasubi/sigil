@@ -408,7 +408,7 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     /// リテラルの（番地, 長さ）。
-    fn lit_ref(&mut self, s: &[u8]) -> (Value, Value) {
+    pub(super) fn lit_ref(&mut self, s: &[u8]) -> (Value, Value) {
         let ptr = match self.cg.bytes_data(s) {
             Ok(d) => self.data_addr(d),
             Err(e) => self.fail(e),
@@ -541,7 +541,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.switch_to_block(body);
         let one = self.ic(1);
         let z = self.ic(0);
-        let r = self.rt("raw_syscall", &[one, fd, p, n, z, z, z]);
+        let r = self.rt("syscall6", &[one, fd, p, n, z, z, z]);
         let eintr = self.b.ins().icmp_imm_s(IntCC::Equal, r, -4);
         let (retry, check) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(eintr, retry, NOARGS, check, NOARGS);
@@ -576,7 +576,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let n = self.ic(231);
         let code = self.ic(70);
         let z = self.ic(0);
-        self.rt("raw_syscall", &[n, code, z, z, z, z, z]);
+        self.rt("syscall6", &[n, code, z, z, z, z, z]);
         // `exit_group` は戻らない。ここは到達しないが、ブロックの終わりが要る。
         self.b.ins().trap(TrapCode::unwrap_user(1));
     }
@@ -652,7 +652,7 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     /// 1 バイトを書く（下位 8 ビット）。
-    fn st8(&mut self, v: Value, addr: Value) {
+    pub(super) fn st8(&mut self, v: Value, addr: Value) {
         self.b.ins().istore8(MemFlagsData::trusted(), v, addr, 0);
     }
 

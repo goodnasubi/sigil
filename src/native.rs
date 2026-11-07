@@ -51,6 +51,11 @@ pub fn build_project(
 
 /// SIR から実行ファイルを作る。
 pub fn build_program(p: &Program, opts: &Opts, out: &Path) -> Result<(), BuildError> {
+    if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        return Err(BuildError::Toolchain(
+            "ネイティブ出力は Linux x86_64 のみ対応".into(),
+        ));
+    }
     let obj = codegen::compile(p, opts).map_err(|e| match e {
         CgError::Entry(m) => BuildError::Run(RunError::Entry(m)),
         CgError::Internal(m) => BuildError::Internal(m),
@@ -83,7 +88,8 @@ fn link(dir: &Path, obj: &[u8], core_only: bool, out: &Path) -> Result<(), Build
     std::fs::write(&o, obj).map_err(|e| io("オブジェクトを書けない", e))?;
     std::fs::write(&core, crate::runtime_lib::core_a()).map_err(|e| io("core.a を書けない", e))?;
     let mut cmd = Command::new("cc");
-    cmd.arg("-static")
+    cmd.arg("-nostartfiles")
+        .arg("-static")
         .arg("-no-pie")
         .arg("-o")
         .arg(out)

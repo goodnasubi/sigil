@@ -6,6 +6,7 @@ mod entry;
 mod eqcmp;
 mod expr;
 mod show;
+mod start;
 mod stmt;
 mod valops;
 
@@ -316,17 +317,12 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     // --- 入口 ---
 
-    pub fn c_main(&mut self, thunk: cranelift_module::FuncId) {
+    pub fn run_start(&mut self, thunk: cranelift_module::FuncId) {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
-        let ps = self.b.block_params(entry).to_vec();
-        let argc = self.b.ins().sextend(types::I64, ps[0]);
-        let a = self.zero_tmp(16);
-        self.st(argc, a, 0);
-        self.st(ps[1], a, 8);
+        let a = self.b.block_params(entry)[0];
         let fr = self.cg.m.declare_func_in_func(thunk, self.b.func);
-        let fa = self.b.ins().func_addr(types::I64, fr);
         // 確保器を結んだときは、生存数のシムをランタイムに登録する（`SIGIL_RT_LIVE` の `sigil_blocks=`。補足 B-5）。
         if let Some(l) = self.cg.live_shim {
             let lr = self.cg.m.declare_func_in_func(l, self.b.func);
@@ -344,7 +340,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 .collect();
             self.rt("set_str_ops", &addrs);
         }
-        // 一覧の関数表も同じ（入口の引数の `List` を `coerce` が作るので、`enter` より前。補足 E-3）。
+        // 一覧の関数表も同じ（入口の引数の `List` を `coerce` が作るので、thunk より前。補足 E-3）。
         if let Some(ids) = self.cg.list_ops {
             let addrs: Vec<Value> = ids
                 .iter()
@@ -355,7 +351,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 .collect();
             self.rt("set_list_ops", &addrs);
         }
-        // バイト列の関数表は一覧の次（`set_str_ops` → `set_list_ops` → `set_bytes_ops` → `enter`。補足 F-4）。
+        // バイト列の関数表は一覧の次（`set_str_ops` → `set_list_ops` → `set_bytes_ops` → thunk。補足 F-4）。
         if let Some(ids) = self.cg.bytes_ops {
             let addrs: Vec<Value> = ids
                 .iter()
@@ -366,9 +362,11 @@ impl<'a, 'p> Fx<'a, 'p> {
                 .collect();
             self.rt("set_bytes_ops", &addrs);
         }
-        let r = self.rt("enter", &[fa, a]);
-        let r32 = self.b.ins().ireduce(types::I32, r);
-        self.b.ins().return_(&[r32]);
+        let call = self.b.ins().call(fr, &[a]);
+        let code = self.b.inst_results(call)[0];
+        let code = self.b.ins().uextend(types::I64, code);
+        self.live_at_exit(a);
+        self.start_exit(code);
     }
 
     /// 組・構造体の大域の塊を作って、静的データの語に入れる（スカラーは静的データがすでに初期値を持つ）。

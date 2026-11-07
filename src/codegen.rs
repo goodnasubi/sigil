@@ -16,6 +16,7 @@
 //! 出せない構文・組み込みはない（SIR の不変条件が崩れたときだけ `CgError::Internal`）。
 
 mod func;
+mod start;
 
 use crate::exec::StopKind;
 use crate::ir::{Func, GlobalInit, Program, Ty};
@@ -97,10 +98,12 @@ pub(crate) fn norm(ty: &Ty) -> Ty {
     norm_with(ty, false)
 }
 
-/// 生成コードの中で定義する文字列の関数（`std.core.string` を呼ぶシム。補足 D-3）の、呼び出し側から見た引数と戻りの形。
+/// 生成コードの中で定義する関数（標準ライブラリのシム・起動処理）の、呼び出し側から見た引数と戻りの形。
 /// Rust ランタイムの関数ではないので `rt_spec` には置かない。形は `rt_spec` と同じ（`i` の戻りは 32 ビット）。
 pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
+        "syscall6" => ("ppppppp", 'p'),
+        "stack_limit" => ("", 'p'),
         "str_new" | "str_concat" => ("pp", 'p'),
         "str_clone" | "str_data" | "str_bytes" | "str_len" | "str_trim" | "str_lines" => ("p", 'p'),
         "str_free" => ("p", 'v'),
@@ -143,12 +146,9 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
         "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
-        "raw_syscall" => ("ppppppp", 'p'),
-        "enter" => ("pp", 'i'),
         "console_log" | "os_buf_free" => ("pp", 'v'),
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
-        "stack_limit" => ("", 'p'),
         "fs_read" | "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppppp", 'v'),
         "path_file_name" | "path_parent" => ("pppp", 'i'),
@@ -724,6 +724,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(bytes_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
+    start::syscall(&mut cg)?;
+    let stack_limit = start::prepare(&mut cg)?;
     // 0 でなければ塊を解放する共通の関数（補足 G-2）。使わないプログラムでも置く（比べる試験の分岐の数を揃えるため）。
     let blkfree =
         cg.m.declare_function("sigil_blkfree_nz", Linkage::Local, &shim_sig(cc, 1, 'v'))
@@ -756,7 +758,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         })?;
     }
 
-    // 入口: スレッドの本体（引数を読み、入口の関数を呼び、値を表示する）と C の main。
+    // 入口: thunk（引数を読み、入口の関数を呼び、値を表示する）と専用スタックの起動処理。
     let thunk =
         cg.m.declare_function("sigil_thunk", Linkage::Local, &{
             let mut s = Signature::new(cc);
@@ -777,19 +779,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         vec![],
         |fx| fx.thunk(),
     )?;
-    let main_sig = {
-        let mut s = Signature::new(cc);
-        s.params.push(AbiParam::new(types::I32));
-        s.params.push(AbiParam::new(types::I64));
-        s.returns.push(AbiParam::new(types::I32));
-        s
-    };
-    let main =
-        cg.m.declare_function("main", Linkage::Export, &main_sig)
-            .map_err(internal)?;
-    cg.define(main, p.funcs.len() as u32 + 2, main_sig, vec![], |fx| {
-        fx.c_main(thunk)
-    })?;
+    start::define(&mut cg, thunk, stack_limit)?;
 
     // 型ごとの生成の関数の本体（補足 G-1・G-2）。本体が新しい鍵を求めるので、待ち行列が空になるまで回す。
     let base = p.funcs.len() as u32 + 3 + shims.len() as u32 + mem.len() as u32;

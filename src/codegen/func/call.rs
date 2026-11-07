@@ -967,7 +967,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (a3, _) = self.val(&args[4]);
                 let (a4, _) = self.val(&args[5]);
                 let (a5, _) = self.val(&args[6]);
-                (self.rt("raw_syscall", &[n, a0, a1, a2, a3, a4, a5]), u)
+                (self.rt("syscall6", &[n, a0, a1, a2, a3, a4, a5]), u)
             }
             // `task.yield` は協調点（ADR 0028）: ネイティブ出力にはスケジューラが
             // 無いため、bare の意味づけどおり何もしない。他の並行操作（生成・合流・

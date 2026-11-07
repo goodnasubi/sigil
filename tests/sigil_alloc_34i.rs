@@ -533,10 +533,12 @@ fn mutations_of_reuse_and_boundaries_are_caught() {
 fn mutation_of_large_double_free_table_is_caught_natively_as_crash() {
     // 表で引かずに頭を読む変異: 解放済みの大ブロックの頭を読みに行き、ネイティブは 70 ではなくなる
     // （評価器も munmap 済みの塊の読みで別の停止になる）。本番は表で検出して 70 で止まる。
+    // 頭の読みは種別で大ブロックだけに絞る。3-5g-ii から入口がリテラル値の置き場（小ブロック）を
+    // raw_free するので、`!= 0` では小さい解放まで大解放へ回って 70 で止まり、二重解放に届かない。
     let body = "  let p = alloc(5000, 8);\n  free(p, 5000, 8);\n  free(p, 5000, 8);\n  return 0;";
     let m = mutate(
         "  let i = tbl_find(ai, true);\n  if i >= 0 {",
-        "  let i = 0;\n  if raw.load_i64(raw.int_to_addr(ai - 16)) != 0 {",
+        "  let i = 0;\n  let w = raw.load_i64(raw.int_to_addr(ai - 16));\n  if w == MAGIC + CLASS_LARGE || w == MAGIC + CLASS_LARGE_ALIGNED {",
     );
     assert_eq!(native_driver(body, None).code, Some(70));
     let got = native_driver(body, Some(m.clone()));

@@ -258,12 +258,7 @@ fn core_alone_links_without_os() {
 #include <stdlib.h>
 #include <string.h>
 typedef struct RtStr RtStr;
-typedef struct RtArg RtArg;
-RtArg* sigil_rt_arg_parse(const uint8_t*, size_t, RtStr**);
-void sigil_rt_arg_free(RtArg*);
-int64_t sigil_rt_arg_list_len(const RtArg*);
-const RtArg* sigil_rt_arg_list_get(const RtArg*, int64_t);
-int64_t sigil_rt_arg_int(const RtArg*);
+int32_t sigil_rt_enter(int32_t (*)(uint8_t*), uint8_t*);
 void sigil_rt_set_str_ops(RtStr* (*)(const uint8_t*, int64_t), void (*)(RtStr*), RtStr* (*)(const RtStr*),
                           const uint8_t* (*)(const RtStr*), int64_t (*)(const RtStr*));
 typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } Head;
@@ -278,14 +273,13 @@ static void s_free(RtStr* s) { Head* h = (Head*)s; if (!h) return; free(h->ptr);
 static RtStr* s_clone(const RtStr* s) { const Head* h = (const Head*)s; return s_new(h->ptr, h->len); }
 static const uint8_t* s_data(const RtStr* s) { return ((const Head*)s)->ptr; }
 static int64_t s_bytes(const RtStr* s) { return ((const Head*)s)->len; }
+static int32_t entry(uint8_t* arg) {
+  (void)arg;
+  return 42;
+}
 int main(void){
   sigil_rt_set_str_ops(s_new, s_free, s_clone, s_data, s_bytes);
-  RtStr* err = NULL;
-  RtArg* a = sigil_rt_arg_parse((const uint8_t*)"[42]", 4, &err);
-  if (!a) return 1;
-  if (sigil_rt_arg_list_len(a) != 1) return 2;
-  printf("%lld\n", (long long)sigil_rt_arg_int(sigil_rt_arg_list_get(a, 0)));
-  sigil_rt_arg_free(a);
+  printf("%lld\n", (long long)sigil_rt_enter(entry, NULL));
   return 0;
 }
 "#;

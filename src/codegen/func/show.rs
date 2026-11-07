@@ -58,6 +58,9 @@ impl<'a, 'p> Fx<'a, 'p> {
             SFn::Quote => self.show_quote_body(),
             SFn::WriteAll => self.show_write_all_body(),
             SFn::ReportStop => self.show_report_stop_body(),
+            SFn::ArgParse => self.arg_parse_body(),
+            SFn::ArgFloat => self.arg_float_body(),
+            SFn::ArgFree => self.arg_free_body(),
         }
     }
 

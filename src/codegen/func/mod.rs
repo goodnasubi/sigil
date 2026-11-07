@@ -2,13 +2,14 @@
 
 mod call;
 mod drop;
+mod entry;
 mod eqcmp;
 mod expr;
 mod show;
 mod stmt;
 mod valops;
 
-use super::{norm, rt_spec, shim_spec, Cg, CgError, SFn, W};
+use super::{norm, rt_spec, shim_spec, Cg, CgError, SFn};
 use crate::ir::{Func, GlobalInit, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::Block as CBlock;
@@ -587,53 +588,48 @@ impl<'a, 'p> Fx<'a, 'p> {
         let n = f.params.len();
         let out = self.zero_tmp(8 * std::cmp::max(n, 1) as u32);
 
-        // 引数の記述子と名前の表。
-        let mut dws: Vec<W> = vec![];
-        let mut nws: Vec<W> = vec![];
-        for &pl in &f.params {
-            let t = strip(&norm(&f.locals[pl].ty));
-            match self.cg.desc(&t) {
-                Ok(d) => dws.push(W::D(d)),
-                Err(e) => {
-                    self.fail(e);
-                }
-            }
-            match self.cg.name_words(&f.locals[pl].name) {
-                Ok(w) => nws.extend(w),
-                Err(e) => {
-                    self.fail(e);
-                }
-            }
-        }
-        if dws.is_empty() {
-            dws.push(W::I(0));
-            nws.push(W::I(0));
-            nws.push(W::I(0));
-        }
-        let table = |this: &mut Self, ws: &[W]| -> Value {
-            match this.cg.m.declare_anonymous_data(false, false) {
-                Ok(id) => match this.cg.write_words(id, ws) {
-                    Ok(()) => this.data_addr(id),
-                    Err(e) => this.fail(e),
-                },
-                Err(e) => this.fail(CgError::Internal(e.to_string())),
-            }
-        };
-        let dtab = table(self, &dws);
-        let ntab = table(self, &nws);
-        let (fp, fl) = match self.cg.bytes_data(f.name.as_bytes()) {
-            Ok(d) => (self.data_addr(d), self.ic(f.name.len() as i64)),
-            Err(e) => (self.fail(e), self.ic(0)),
-        };
-        let np = self.ic(n as i64);
-        let rc = self.rt("entry_args", &[argc, argv, fp, fl, np, dtab, ntab, out]);
-        let (bad, ok) = (self.b.create_block(), self.b.create_block());
-        self.b.ins().brif(rc, bad, NOARGS, ok, NOARGS);
+        // 入口の引数は生成側で扱う（ADR 0025 補足 I-2・I-4）: 全部をリテラル値に読み、
+        // 個数を確かめ、宣言の型へ合わせ込む。誤りの文言・順序・終了コード 1 は
+        // 移行前の `sigil_rt_entry_args` と同じ。
+        let (lits, failed) = self.entry_parse_args(argc, argv);
+        let (bad, countb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(failed, bad, NOARGS, countb, NOARGS);
         self.b.switch_to_block(bad);
         let one = self.b.ins().iconst(types::I32, 1);
         self.b.ins().return_(&[one]);
-        self.b.switch_to_block(ok);
+        self.b.switch_to_block(countb);
+        let one_v = self.ic(1);
+        let gm1 = self.b.ins().isub(argc, one_v);
+        let z = self.ic(0);
+        let negc = self.b.ins().icmp(IntCC::SignedLessThan, gm1, z);
+        let given = self.b.ins().select(negc, z, gm1);
+        let neq = self.b.ins().icmp_imm_s(IntCC::NotEqual, given, n as i64);
+        let (badc, coerceb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(neq, badc, NOARGS, coerceb, NOARGS);
+        self.b.switch_to_block(badc);
+        self.entry_err_count(&f.name, n as i64, given);
+        self.entry_free_args(lits, given);
+        let one = self.b.ins().iconst(types::I32, 1);
+        self.b.ins().return_(&[one]);
+        self.b.switch_to_block(coerceb);
+        for (i, &pl) in f.params.iter().enumerate() {
+            let t = strip(&norm(&f.locals[pl].ty));
+            let lit = self.ld(lits, 8 * i as i32);
+            let dst = self.b.ins().iadd_imm_s(out, 8 * i as i64);
+            let ok = self.coerce_call(&t, lit, dst);
+            let (badm, next) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(ok, next, NOARGS, badm, NOARGS);
+            self.b.switch_to_block(badm);
+            self.entry_err_mismatch(&f.locals[pl].name);
+            self.entry_free_args(lits, given);
+            let one = self.b.ins().iconst(types::I32, 1);
+            self.b.ins().return_(&[one]);
+            self.b.switch_to_block(next);
+        }
 
+        // リテラル値の塊は入口の間だけ生きる（補足 I-1）。合わせ込みは塊を借りない
+        // （数値はコピー、文字列・一覧は新しく作られる）ので、ここで全部片づける。
+        self.entry_free_args(lits, given);
         self.init_globals();
         let mut vs = vec![];
         for (i, &pl) in f.params.iter().enumerate() {

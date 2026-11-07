@@ -1,6 +1,6 @@
 //! Sigil の暫定ランタイムの核（ADR 0015 の決定 6）。
 //!
-//! 確保と解放、`String`・`List`・`Shared` の操作、スタックの下限、入口の引数の読み取り。
+//! 確保と解放、`String`・`List`・`Shared` の操作、スタックの下限。
 //! OS の機能（`console.log`・`fs`・`Path`）は `runtime/os` にある。関数の名前は `sigil_rt_` で始め、`extern "C"` とする。
 //! 境界は ADR 0014 の決定 2 の宣言で、Sigil のプログラムから名前で呼ぶ手段は作らない（ADR 0006 の「境界」）。
 //!
@@ -10,8 +10,6 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[path = "../../../src/shared/args.rs"]
-mod args;
 mod val;
 
 /// 入口を実行するスレッドのスタックの大きさ（SIR の評価器と同じ）。
@@ -61,6 +59,7 @@ pub extern "C" fn sigil_rt_set_str_ops(
 }
 
 /// 関数表の `i` 番目。未登録なら異常停止（exit_group(70) と同じ終了コード）。
+#[allow(dead_code)] // 補足 I で入口の引数の読み取りが生成側へ移り、以下の包みの利用者はこのクレートの試験だけになった
 fn str_op(i: usize) -> usize {
     // 試験では自動で登録する。ただし未登録の試験（子プロセス）では登録しない。
     #[cfg(test)]
@@ -75,24 +74,20 @@ fn str_op(i: usize) -> usize {
     p
 }
 
-// SAFETY（以下の 5 つ）: `str_op` が返す値は `sigil_rt_set_str_ops` が受け取った、対応する型の関数ポインタだけ。
+// SAFETY（以下の 3 つ）: `str_op` が返す値は `sigil_rt_set_str_ops` が受け取った、対応する型の関数ポインタだけ。
+#[allow(dead_code)] // 利用者はこのクレートの試験だけ（補足 I）
 fn str_new_raw(ptr: *const u8, len: usize) -> *mut RtStr {
     let f: StrNew = unsafe { std::mem::transmute(str_op(0)) };
     f(ptr, len as i64)
 }
 
-pub(crate) fn str_free(p: *mut RtStr) {
-    if !p.is_null() {
-        let f: StrFree = unsafe { std::mem::transmute(str_op(1)) };
-        f(p)
-    }
-}
-
+#[allow(dead_code)] // 利用者はこのクレートの試験だけ（補足 I）
 fn str_data(p: *const RtStr) -> *const u8 {
     let f: StrData = unsafe { std::mem::transmute(str_op(3)) };
     f(p)
 }
 
+#[allow(dead_code)] // 利用者はこのクレートの試験だけ（補足 I）
 fn str_bytes(p: *const RtStr) -> usize {
     let f: StrBytes = unsafe { std::mem::transmute(str_op(4)) };
     f(p) as usize
@@ -124,12 +119,8 @@ fn sigil_live_blocks() -> Option<i64> {
     Some(f())
 }
 
-/// Rust の文字列から作る（正しい UTF-8 なので `new_lossy` は複写と同じ）。
-fn new_str(s: String) -> *mut RtStr {
-    str_new_raw(s.as_ptr(), s.len())
-}
-
 /// 中身を読む。正しい UTF-8 でなければ（表現が壊れている）異常停止する。
+#[allow(dead_code)] // 利用者はこのクレートの試験だけ（補足 I）
 unsafe fn s<'a>(p: *const RtStr) -> &'a str {
     let n = str_bytes(p);
     if n == 0 {
@@ -257,6 +248,7 @@ pub extern "C" fn sigil_rt_set_list_ops(
 }
 
 /// 関数表の `i` 番目。未登録なら異常停止（exit_group(70) と同じ終了コード）。
+#[allow(dead_code)] // 補足 I で入口の引数の読み取りが生成側へ移り、以下の包みの利用者はこのクレートの試験だけになった
 fn list_op(i: usize) -> usize {
     #[cfg(test)]
     if std::env::var("SIGIL_TEST_STR_MODE").as_deref() != Ok("unregistered") {
@@ -270,17 +262,12 @@ fn list_op(i: usize) -> usize {
     p
 }
 
-// SAFETY（以下の 5 つ）: `list_op` が返す値は `sigil_rt_set_list_ops` が受け取った、対応する型の関数ポインタだけ。
+// SAFETY: `list_op` が返す値は `sigil_rt_set_list_ops` が受け取った、対応する型の関数ポインタだけ。
 /// 空の一覧を作る（要素は 8B の語）。
+#[allow(dead_code)] // 利用者はこのクレートの試験だけ（補足 I）
 pub(crate) fn list_new() -> *mut RtList {
     let f: ListNew = unsafe { std::mem::transmute(list_op(0)) };
     f(8)
-}
-
-/// 語 `w` を末尾へ写す。
-pub(crate) fn list_push(l: *mut RtList, w: i64) {
-    let f: ListPush = unsafe { std::mem::transmute(list_op(2)) };
-    f(l, &w as *const i64 as *const u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -349,132 +336,6 @@ pub unsafe extern "C" fn sigil_rt_enter_with(
 #[no_mangle]
 pub unsafe extern "C" fn sigil_rt_enter(entry: extern "C" fn(*mut u8) -> i32, arg: *mut u8) -> i32 {
     sigil_rt_enter_with(entry, arg, STACK_BYTES)
-}
-
-// ---------------------------------------------------------------------------
-// 入口の引数の読み取り（`sigil run` と同じ書き方。宣言の型への合わせ込みは生成したコードが行う）
-
-#[repr(transparent)]
-pub struct RtArg(args::Arg);
-
-/// 引数 1 つを読む。誤りなら null を返し、`*err` に説明（`str_free` で解放）を書く。
-///
-/// # Safety
-/// `ptr` は `len` バイト読める。`err` は書ける。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_parse(
-    ptr: *const u8,
-    len: usize,
-    err: *mut *mut RtStr,
-) -> *mut RtArg {
-    let src = str_new_raw(ptr, len);
-    let r = args::parse_arg(s(src));
-    str_free(src);
-    match r {
-        Ok(a) => Box::into_raw(Box::new(RtArg(a))),
-        Err(m) => {
-            *err = new_str(m);
-            std::ptr::null_mut()
-        }
-    }
-}
-
-/// # Safety
-/// `a` は `sigil_rt_arg_parse` の戻り値（または null）。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_free(a: *mut RtArg) {
-    if !a.is_null() {
-        drop(Box::from_raw(a));
-    }
-}
-
-/// 種類: 0 Bool・1 Int・2 Float・3 String・4 List。
-///
-/// # Safety
-/// `a` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_kind(a: *const RtArg) -> i32 {
-    match (*a).0 {
-        args::Arg::Bool(_) => 0,
-        args::Arg::Int(_) => 1,
-        args::Arg::Float(_) => 2,
-        args::Arg::Str(_) => 3,
-        args::Arg::List(_) => 4,
-    }
-}
-
-/// # Safety
-/// `a` は有効で種類が Bool。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_bool(a: *const RtArg) -> i32 {
-    matches!((*a).0, args::Arg::Bool(true)) as i32
-}
-
-/// # Safety
-/// `a` は有効で種類が Int。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_int(a: *const RtArg) -> i64 {
-    match (*a).0 {
-        args::Arg::Int(n) => n,
-        _ => 0,
-    }
-}
-
-/// `Float` の位置の整数は `Float` として読める（`coerce` と同じ規則）。
-///
-/// # Safety
-/// `a` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_float(a: *const RtArg) -> f64 {
-    match (*a).0 {
-        args::Arg::Float(x) => x,
-        args::Arg::Int(n) => n as f64,
-        _ => 0.0,
-    }
-}
-
-/// # Safety
-/// `a` は有効で種類が String。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_str(a: *const RtArg) -> *mut RtStr {
-    match &(*a).0 {
-        args::Arg::Str(x) => new_str(x.clone()),
-        _ => new_str(String::new()),
-    }
-}
-
-/// # Safety
-/// `a` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_list_len(a: *const RtArg) -> i64 {
-    match &(*a).0 {
-        args::Arg::List(xs) => xs.len() as i64,
-        _ => 0,
-    }
-}
-
-/// 一覧の要素（借用。`a` が生きている間だけ有効）。範囲外は null。
-///
-/// # Safety
-/// `a` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_list_get(a: *const RtArg, i: i64) -> *const RtArg {
-    match &(*a).0 {
-        // `RtArg` は `Arg` と同じ並びの 1 欄の構造体（repr(transparent)）
-        args::Arg::List(xs) if i >= 0 && (i as usize) < xs.len() => {
-            &xs[i as usize] as *const args::Arg as *const RtArg
-        }
-        _ => std::ptr::null(),
-    }
-}
-
-/// 型の合わない引数の説明に出す名前（`整数`・`小数`・`真偽値`・`文字列`・`一覧`）。
-///
-/// # Safety
-/// `a` は有効。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_arg_name(a: *const RtArg) -> *mut RtStr {
-    new_str(args::arg_name(&(*a).0).to_string())
 }
 
 #[cfg(test)]
@@ -663,20 +524,6 @@ pub(crate) mod tests {
                 sigil_rt_set_list_ops(l_new, l_free, l_push, l_get, l_len);
                 sigil_rt_set_bytes_ops(b_from_raw, b_free, b_clone, b_data, b_len);
             });
-        }
-    }
-
-    #[test]
-    fn entry_args() {
-        unsafe {
-            let mut err = std::ptr::null_mut();
-            let a = sigil_rt_arg_parse(b"[1, 2]".as_ptr(), 6, &mut err);
-            assert!(!a.is_null());
-            assert_eq!(sigil_rt_arg_list_len(a), 2);
-            sigil_rt_arg_free(a);
-            let bad = sigil_rt_arg_parse(b"99999999999999999999".as_ptr(), 20, &mut err);
-            assert!(bad.is_null());
-            assert!(!s(err).is_empty());
         }
     }
 

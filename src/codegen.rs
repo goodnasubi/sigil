@@ -18,7 +18,7 @@
 mod func;
 
 use crate::exec::StopKind;
-use crate::ir::{Func, GlobalInit, Program, Ty, TypeKind};
+use crate::ir::{Func, GlobalInit, Program, Ty};
 use cranelift_codegen::ir::{types, AbiParam, Function, Signature, UserFuncName};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -149,7 +149,6 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
-        "entry_args" => ("ippppppp", 'i'),
         "fs_read" | "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppppp", 'v'),
         "path_file_name" | "path_parent" => ("pppp", 'i'),
@@ -164,7 +163,6 @@ pub(crate) struct Cg<'p> {
     pub cc: CallConv,
     fe: cranelift_codegen::isa::TargetFrontendConfig,
     rt: HashMap<&'static str, FuncId>,
-    descs: HashMap<Ty, DataId>,
     bytes: HashMap<Vec<u8>, DataId>,
     fnblocks: HashMap<usize, DataId>,
     msgs: Vec<String>,
@@ -200,6 +198,9 @@ pub(crate) struct Cg<'p> {
     show_buf: Option<DataId>,
     /// 引用で逃がす符号点の範囲のデータ（補足 H-4）。`None` なら未作成で、値は（データ, 範囲の数）。
     quote: Option<(DataId, usize)>,
+    /// 合わせ込みの失敗の内訳（補足 I-4）: `[要る型の名前の番地, 長さ, 渡された値の名前の番地, 長さ]`。
+    /// `sigil_coerce_<k>` が失敗の箇所で書き、thunk が誤りの文言を組み立てるときに読む。
+    coerce_err: Option<DataId>,
 }
 
 /// 型ごとに生成する関数の種類（補足 G-1・G-2）。
@@ -219,6 +220,9 @@ pub(crate) enum Gk {
     Dstep,
     /// `sigil_show_<k>`: 表示（共有バッファへ追記。補足 H-1）
     Show,
+    /// `sigil_coerce_<k>`: 入口の引数の合わせ込み（リテラル値を型の語に変える。補足 I-4）。
+    /// 引数は（リテラル値の塊, 語を書く先）で、戻りは成否（1/0）。
+    Coerce,
 }
 
 impl Gk {
@@ -231,6 +235,7 @@ impl Gk {
             Gk::Drop => "drop",
             Gk::Dstep => "dstep",
             Gk::Show => "show",
+            Gk::Coerce => "coerce",
         }
     }
 
@@ -241,6 +246,7 @@ impl Gk {
             Gk::Clone | Gk::Shadow => (1, 'p'),
             Gk::Drop | Gk::Dstep => (1, 'v'),
             Gk::Show => (2, 'v'),
+            Gk::Coerce => (2, 'p'),
         }
     }
 }
@@ -266,6 +272,12 @@ pub(crate) enum SFn {
     WriteAll,
     /// `sigil_report_stop(p, p)`: 停止の報告を fd 2 へ出し、終了コード 70 で終わる（補足 I-6）。戻らない。
     ReportStop,
+    /// `sigil_arg_parse(p, p, p) -> p`: コマンドラインの引数 1 つをリテラル値の塊に読む（補足 I-2）。
+    /// 引数は（バイト列の番地, 長さ, 誤りの {s} を書く先 2 語）で、戻りは塊の番地（誤りなら 0）。
+    ArgParse,
+    /// `sigil_arg_float(p, p, p) -> p`: バイト列を `Float` として読めるか確かめ、ビット列を書く（補足 I-3）。
+    /// 引数は（バイト列の番地, 長さ, ビット列を書く先）で、戻りは成否（1/0）。
+    ArgFloat,
 }
 
 impl SFn {
@@ -280,6 +292,8 @@ impl SFn {
             SFn::Quote => "sigil_show_quote",
             SFn::WriteAll => "sigil_write_all",
             SFn::ReportStop => "sigil_report_stop",
+            SFn::ArgParse => "sigil_arg_parse",
+            SFn::ArgFloat => "sigil_arg_float",
         }
     }
 
@@ -294,9 +308,12 @@ impl SFn {
             }
             SFn::Int => s.params.push(AbiParam::new(types::I64)),
             SFn::Float => s.params.push(AbiParam::new(types::F64)),
-            SFn::WriteAll => {
+            SFn::WriteAll | SFn::ArgParse | SFn::ArgFloat => {
                 for _ in 0..3 {
                     s.params.push(AbiParam::new(types::I64));
+                }
+                if !matches!(self, SFn::WriteAll) {
+                    s.returns.push(AbiParam::new(types::I64));
                 }
             }
         }
@@ -494,88 +511,22 @@ impl<'p> Cg<'p> {
         Ok([W::D(d), W::I(s.len() as i64)])
     }
 
-    /// 型の記述子のデータ。
-    pub fn desc(&mut self, ty: &Ty) -> Result<DataId, CgError> {
-        self.desc_n(&norm_with(ty, true))
-    }
-
-    fn desc_n(&mut self, ty: &Ty) -> Result<DataId, CgError> {
-        if let Some(d) = self.descs.get(ty) {
-            return Ok(*d);
+    /// 合わせ込みの失敗の内訳を置く領域（補足 I-4）。4 語（要る型の名前 2 語＋
+    /// 渡された値の名前 2 語）で、最初はゼロ。`sigil_coerce_<k>` が失敗の箇所で書き、
+    /// thunk が誤りの文言を組み立てるときに読む。
+    pub fn coerce_err_data(&mut self) -> DataId {
+        if let Some(d) = self.coerce_err {
+            return d;
         }
-        let id = self.data_anon()?;
-        self.descs.insert(ty.clone(), id);
-        let p = self.p;
-        let mut ws: Vec<W> = vec![];
-        match ty {
-            Ty::Unit => ws.push(W::I(0)),
-            Ty::Int => ws.push(W::I(1)),
-            Ty::Float => ws.push(W::I(2)),
-            Ty::Bool => ws.push(W::I(3)),
-            Ty::Str => ws.push(W::I(4)),
-            Ty::Bytes => ws.push(W::I(15)),
-            Ty::Addr => ws.push(W::I(16)),
-            Ty::Path => ws.push(W::I(5)),
-            Ty::ParseError => ws.push(W::I(6)),
-            Ty::List(e) => {
-                ws.push(W::I(7));
-                ws.push(W::D(self.desc(e)?));
-            }
-            Ty::Tuple(ts) => {
-                ws.push(W::I(8));
-                ws.push(W::I(ts.len() as i64));
-                for t in ts {
-                    ws.push(W::D(self.desc(t)?));
-                }
-            }
-            Ty::Adt(t) => {
-                let def = &p.types[*t];
-                match &def.kind {
-                    TypeKind::Struct { fields } => {
-                        // `Secret`（ADR 0024、PR 6-1b）は秘密の種類（17）にする:
-                        // ランタイムの破棄が中身のバイト列をゼロ化してから解放する。
-                        // 判定は lower が付けた同一性の印（`secret`）だけを見る。
-                        // 名前で決めると利用者の同名の型を誤って秘密扱いにする。
-                        let kind = if def.secret { 17 } else { 9 };
-                        ws.push(W::I(kind));
-                        ws.extend(self.name_words(&def.name)?);
-                        ws.push(W::I(fields.len() as i64));
-                        for (n, ft) in fields {
-                            ws.extend(self.name_words(n)?);
-                            ws.push(W::D(self.desc(ft)?));
-                        }
-                    }
-                    TypeKind::Enum { variants } => {
-                        ws.push(W::I(10));
-                        ws.extend(self.name_words(&def.name)?);
-                        ws.push(W::I((def.name == "Option" || def.name == "Result") as i64));
-                        ws.push(W::I(variants.len() as i64));
-                        for v in variants {
-                            ws.extend(self.name_words(&v.name)?);
-                            ws.push(W::I(v.fields.len() as i64));
-                            for ft in &v.fields {
-                                ws.push(W::D(self.desc(ft)?));
-                            }
-                        }
-                    }
-                }
-            }
-            Ty::Ref(i) | Ty::MutRef(i) => {
-                ws.push(W::I(11));
-                ws.push(W::D(self.desc(i)?));
-            }
-            Ty::Shared(i) => {
-                ws.push(W::I(12));
-                ws.push(W::D(self.desc(i)?));
-            }
-            Ty::Cell(i) => {
-                ws.push(W::I(13));
-                ws.push(W::D(self.desc(i)?));
-            }
-            Ty::FnRef(..) => ws.push(W::I(14)),
-        }
-        self.write_words(id, &ws)?;
-        Ok(id)
+        let d = self
+            .m
+            .declare_data("sigil_coerce_err", Linkage::Local, true, false)
+            .expect("coerce err decl");
+        let mut dd = DataDescription::new();
+        dd.define_zeroinit(32);
+        self.m.define_data(d, &dd).expect("coerce err def");
+        self.coerce_err = Some(d);
+        d
     }
 
     /// 環境を持たない関数の値（`[関数の番地][0]`）の静的な塊。
@@ -735,7 +686,6 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         cc,
         fe,
         rt: HashMap::new(),
-        descs: HashMap::new(),
         bytes: HashMap::new(),
         fnblocks: HashMap::new(),
         msgs: vec![],
@@ -757,6 +707,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         show_q: vec![],
         show_buf: None,
         quote: None,
+        coerce_err: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。

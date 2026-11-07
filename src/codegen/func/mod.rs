@@ -8,7 +8,7 @@ mod show;
 mod stmt;
 mod valops;
 
-use super::{norm, rt_spec, shim_spec, Cg, CgError, W};
+use super::{norm, rt_spec, shim_spec, Cg, CgError, SFn, W};
 use crate::ir::{Func, GlobalInit, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::Block as CBlock;
@@ -417,18 +417,19 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
     }
 
-    /// 停止の状態（1 始まりの番号）に対応する停止の報告を出す。
+    /// 停止の状態（1 始まりの番号）に対応する停止の報告を出す（補足 I-6: 生成側の `sigil_report_stop`）。
     fn report_stop(&mut self, st: Value) {
         let base = self.data_addr(self.cg.msg_table);
         let idx = self.b.ins().iadd_imm_s(st, -1);
         let off = self.b.ins().imul_imm_s(idx, 16);
         let ent = self.b.ins().iadd(base, off);
         let (mp, ml) = (self.ld(ent, 0), self.ld(ent, 8));
-        self.rt("stop", &[mp, ml]);
+        self.scall(SFn::ReportStop, &[mp, ml]);
     }
 
     /// 確保器のシムの本体（ADR 0025 補足 B-2）: Sigil の関数 `target` を呼び、値を返す。
-    /// 確保器の中の停止（算術のあふれなど）は、報告を出して `exit_group(70)` で止める（補足 A-4）。
+    /// 確保器の中の停止（算術のあふれなど）は、生成側の `sigil_report_stop` が報告を出して
+    /// `exit_group(70)` で止める（補足 A-4・I-6）。戻らない。
     pub fn alloc_shim(&mut self, target: usize, ret: char) {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
@@ -444,11 +445,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().brif(r[1], stopb, NOARGS, okb, NOARGS);
 
         self.b.switch_to_block(stopb);
+        // `report_stop` は戻らない。この先の `return_` はブロックの終わりのためだけにある。
         self.report_stop(r[1]);
-        let n = self.ic(231);
-        let code = self.ic(70);
         let z = self.ic(0);
-        self.rt("raw_syscall", &[n, code, z, z, z, z, z]);
         match ret {
             'p' => {
                 self.b.ins().return_(&[z]);

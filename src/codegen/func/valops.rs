@@ -8,7 +8,7 @@
 //! 塊は `raw_alloc(16 + n, 8)` で取る。頭は `[n | SILENT][参照の数]` で、中身の番地（頭 + 16）が値の語になる。
 
 use super::{aggregate, strip, Fx, NOARGS};
-use crate::codegen::{norm_with, shim_sig, Gk, WS_INLINE_ITEMS};
+use crate::codegen::{norm_with, shim_sig, Gk, SFn, WS_INLINE_ITEMS};
 use crate::ir::{Ty, TypeKind};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block as CBlock, BlockArg, InstBuilder, Value};
@@ -380,7 +380,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             Ok(d) => {
                 let mp = self.data_addr(d);
                 let ml = self.ic(STOP_FREED.len() as i64);
-                self.rt("stop", &[mp, ml]);
+                self.scall(SFn::ReportStop, &[mp, ml]);
             }
             Err(e) => {
                 self.fail(e);

@@ -26,7 +26,6 @@ int32_t sigil_rt_path_file_name(const uint8_t*, size_t, uint8_t**, size_t*);
 int32_t sigil_rt_path_parent(const uint8_t*, size_t, uint8_t**, size_t*);
 void sigil_rt_os_buf_free(uint8_t*, size_t);
 void sigil_rt_console_log(const uint8_t*, size_t);
-void sigil_rt_stop(const uint8_t*, size_t);
 
 /* 文字列の関数表（補足 D-3）。本物は Sigil 製（std.core.string）で、ここでは同じ配置の 24B の頭を malloc で作る。 */
 typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } Head;
@@ -69,8 +68,6 @@ int main(int argc, char** argv) {
     else printf("None");
   } else if (!strcmp(cmd, "log")) {
     sigil_rt_console_log((const uint8_t*)a, strlen(a)); return 0;
-  } else if (!strcmp(cmd, "stop")) {
-    printf("before"); sigil_rt_stop((const uint8_t*)a, strlen(a));
   } else { return 2; }
   printf("\n");
   return 0;
@@ -306,20 +303,10 @@ int main(void){
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `console_log` が標準出力へ書く（停止の報告は生成側の `sigil_report_stop` へ移ったので、
+/// ここでは扱わない。補足 I-6。停止の文言と終了コード 70 は `tests/m5_native.rs` が担う）。
 #[test]
-fn console_log_and_stop_exit_code() {
-    if !have_cc() {
-        return;
-    }
-    let exe = build_driver("d", false);
-    let o = Command::new(&exe)
-        .args(["stop", "停止: x"])
-        .output()
-        .unwrap();
-    assert_eq!(o.status.code(), Some(70));
-    assert_eq!(String::from_utf8_lossy(&o.stdout), "before");
-    assert_eq!(String::from_utf8_lossy(&o.stderr), "停止: x\n");
-    cleanup(&exe);
+fn console_log_writes_to_stdout() {
     console_log_only();
 }
 

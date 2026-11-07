@@ -1,6 +1,6 @@
 //! Sigil の暫定ランタイムの核（ADR 0015 の決定 6）。
 //!
-//! 確保と解放、`String`・`List`・`Shared` の操作、異常停止の報告、スタックの下限、入口の引数の読み取り。
+//! 確保と解放、`String`・`List`・`Shared` の操作、スタックの下限、入口の引数の読み取り。
 //! OS の機能（`console.log`・`fs`・`Path`）は `runtime/os` にある。関数の名前は `sigil_rt_` で始め、`extern "C"` とする。
 //! 境界は ADR 0014 の決定 2 の宣言で、Sigil のプログラムから名前で呼ぶ手段は作らない（ADR 0006 の「境界」）。
 //!
@@ -14,8 +14,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod args;
 mod val;
 
-/// 異常停止の終了コード（ADR 0006 の M3 の記録）。
-pub const EXIT_ABNORMAL_STOP: i32 = 70;
 /// 入口を実行するスレッドのスタックの大きさ（SIR の評価器と同じ）。
 pub const STACK_BYTES: usize = 256 * 1024 * 1024;
 
@@ -283,48 +281,6 @@ pub(crate) fn list_new() -> *mut RtList {
 pub(crate) fn list_push(l: *mut RtList, w: i64) {
     let f: ListPush = unsafe { std::mem::transmute(list_op(2)) };
     f(l, &w as *const i64 as *const u8)
-}
-
-// ---------------------------------------------------------------------------
-// 異常停止の報告と終了
-
-fn flush_out() {
-    let _ = std::io::stdout().flush();
-}
-
-/// 標準出力を書き出し切ってから、停止の報告を標準エラーに 1 行出す。
-///
-/// # Safety
-/// `ptr` は `len` バイト読める。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_report(ptr: *const u8, len: usize) {
-    flush_out();
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ptr, len)
-    };
-    let mut e = std::io::stderr().lock();
-    let _ = e.write_all(bytes);
-    let _ = e.write_all(b"\n");
-    let _ = e.flush();
-}
-
-/// 異常停止: 報告を出して終了コード 70 で終わる。
-///
-/// # Safety
-/// `ptr` は `len` バイト読める。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_stop(ptr: *const u8, len: usize) -> ! {
-    sigil_rt_report(ptr, len);
-    std::process::exit(EXIT_ABNORMAL_STOP)
-}
-
-/// 標準出力を書き出し切って終わる。
-#[no_mangle]
-pub extern "C" fn sigil_rt_exit(code: i32) -> ! {
-    flush_out();
-    std::process::exit(code)
 }
 
 // ---------------------------------------------------------------------------

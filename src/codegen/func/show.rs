@@ -14,7 +14,7 @@ use super::{strip, Fx, NOARGS};
 use crate::codegen::{norm_with, Gk, SFn, SB_INLINE_BYTES};
 use crate::ir::{Ty, TypeKind};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, Value};
+use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
 use cranelift_module::Module;
 
 /// 多倍長演算の語の数（64 ビット × 24 = 1536 ビット。補足 H-3）。
@@ -57,6 +57,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             SFn::Float => self.show_float_body(),
             SFn::Quote => self.show_quote_body(),
             SFn::WriteAll => self.show_write_all_body(),
+            SFn::ReportStop => self.show_report_stop_body(),
         }
     }
 
@@ -555,6 +556,26 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b
             .ins()
             .jump(head, &[BlockArg::Value(p2), BlockArg::Value(n2)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // 停止の報告（補足 I-6）
+
+    /// `sigil_report_stop(msg, len)`: 文言と改行を fd 2 へ出し、`exit_group` で 70 を返す。戻らない。
+    /// 標準出力の flush はしない（`console_log` は呼び出しごとに flush 済み）。
+    fn show_report_stop_body(&mut self) {
+        let ps = self.body_head();
+        let (msg, len) = (ps[0], ps[1]);
+        let two = self.ic(2);
+        self.scall(SFn::WriteAll, &[two, msg, len]);
+        let (np, nl) = self.lit_ref(b"\n");
+        self.scall(SFn::WriteAll, &[two, np, nl]);
+        let n = self.ic(231);
+        let code = self.ic(70);
+        let z = self.ic(0);
+        self.rt("raw_syscall", &[n, code, z, z, z, z, z]);
+        // `exit_group` は戻らない。ここは到達しないが、ブロックの終わりが要る。
+        self.b.ins().trap(TrapCode::unwrap_user(1));
     }
 
     // -----------------------------------------------------------------------

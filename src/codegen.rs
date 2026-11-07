@@ -145,7 +145,7 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
         "raw_syscall" => ("ppppppp", 'p'),
         "enter" => ("pp", 'i'),
-        "console_log" | "os_buf_free" | "stop" => ("pp", 'v'),
+        "console_log" | "os_buf_free" => ("pp", 'v'),
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
         "stack_limit" => ("", 'p'),
@@ -245,7 +245,7 @@ impl Gk {
     }
 }
 
-/// 表示の補助の種類（補足 H-1・H-2・H-3・H-4・H-6）。型ごとではなく、プログラムに 1 組だけ生成する。
+/// 表示の補助の種類（補足 H-1・H-2・H-3・H-4・H-6）と停止の報告（補足 I-6）。型ごとではなく、プログラムに 1 組だけ生成する。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum SFn {
     /// `sigil_show_begin()`: バッファを空にする。
@@ -264,6 +264,8 @@ pub(crate) enum SFn {
     Quote,
     /// `sigil_write_all(p, p, p)`: ファイル記述子へ全部書く。
     WriteAll,
+    /// `sigil_report_stop(p, p)`: 停止の報告を fd 2 へ出し、終了コード 70 で終わる（補足 I-6）。戻らない。
+    ReportStop,
 }
 
 impl SFn {
@@ -277,6 +279,7 @@ impl SFn {
             SFn::Float => "sigil_show_float",
             SFn::Quote => "sigil_show_quote",
             SFn::WriteAll => "sigil_write_all",
+            SFn::ReportStop => "sigil_report_stop",
         }
     }
 
@@ -285,7 +288,7 @@ impl SFn {
         match self {
             SFn::Begin | SFn::End => {}
             SFn::EndStr => s.returns.push(AbiParam::new(types::I64)),
-            SFn::Push | SFn::Quote => {
+            SFn::Push | SFn::Quote | SFn::ReportStop => {
                 s.params.push(AbiParam::new(types::I64));
                 s.params.push(AbiParam::new(types::I64));
             }

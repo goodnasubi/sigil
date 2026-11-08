@@ -25,7 +25,6 @@ void sigil_rt_path_join(const uint8_t*, size_t, const uint8_t*, size_t, uint8_t*
 int32_t sigil_rt_path_file_name(const uint8_t*, size_t, uint8_t**, size_t*);
 int32_t sigil_rt_path_parent(const uint8_t*, size_t, uint8_t**, size_t*);
 void sigil_rt_os_buf_free(uint8_t*, size_t);
-void sigil_rt_console_log(const uint8_t*, size_t);
 
 /* 文字列の関数表（補足 D-3）。本物は Sigil 製（std.core.string）で、ここでは同じ配置の 24B の頭を malloc で作る。 */
 typedef struct { uint8_t* ptr; int64_t len; int64_t cap; } Head;
@@ -66,8 +65,6 @@ int main(int argc, char** argv) {
                                  : sigil_rt_path_parent((const uint8_t*)a, strlen(a), &p, &n);
     if (some) { RtStr* t = sigil_rt_str_new(p, (int64_t)n); sigil_rt_os_buf_free(p, n); printf("Some("); putq(t); printf(")"); }
     else printf("None");
-  } else if (!strcmp(cmd, "log")) {
-    sigil_rt_console_log((const uint8_t*)a, strlen(a)); return 0;
   } else { return 2; }
   printf("\n");
   return 0;
@@ -295,22 +292,6 @@ int main(void){
     let r = Command::new(dir.join("d")).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&r.stdout), "42\n");
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// `console_log` が標準出力へ書く（停止の報告は生成側の `sigil_report_stop` へ移ったので、
-/// ここでは扱わない。補足 I-6。停止の文言と終了コード 70 は `tests/m5_native.rs` が担う）。
-#[test]
-fn console_log_writes_to_stdout() {
-    console_log_only();
-}
-
-fn console_log_only() {
-    if !have_cc() {
-        return;
-    }
-    let exe = build_driver("c", false);
-    assert_eq!(rt(&exe, &["log", "こんにちは"]), "こんにちは");
-    cleanup(&exe);
 }
 
 #[test]

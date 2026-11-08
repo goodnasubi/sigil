@@ -1223,6 +1223,28 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 3. **分割**（I-9）: 停止の報告（i）と入口の引数（ii）の 2 段（**推奨**。i は小さく、ii は `Float` の解析を単独でレビューできる）／1 つの PR にまとめる（入口まわりが一度に替わり、問題があったときに切り分けにくい）。
 4. **`ct_rules` の記述子の試験**（I-7）: 記述子の廃止と一緒に消す（**推奨**。仕組みの監査だったため。ゼロ化の担保の置き場所は I-7）／残す（記述子を残す理由になり、G-3・H-7 の予定と食い違う。採らない）。
 
+### 補足 J（PR 3-6a の実装中）: `std.os.console` への targets 照合の免除と C-7 の訂正
+
+- **日付**: 2026-11-08
+- **状態**: 所有者承認済み（Issue #318 の判断）。本文・補足 A〜I と食い違う箇所は、本補足が置き換える。
+- 3-6a（`console.log` の Sigil 実装。C-7）の実装中に、暗黙に結ぶ `std.os.console` が入口の `targets` との照合に掛かること、C-7 の 3-6a の行が `os_buf_free` の廃止まで含めていることの 2 点が、実装と食い違うと分かった。2 件を決める。
+
+#### J-1. `std.os.console` への入口の `targets` との照合の免除
+
+- **決定**: C-2 が確保器（`std.os.alloc`）に決めた免除を、`std.os.console` へ広げる。理由は C-2 と同じ境界である: console は処理系が暗黙に結ぶプラットフォーム層のモジュールで、実体は出力先（常に Linux）が与えるため、入口の `targets` との照合の対象ではない。照合は次の 2 か所にあり、どちらも免除する。
+  - (a) **プロジェクトの読み込み時の、入口の `targets` との照合**（`TargetMismatch`。`src/project/embedded.rs` の `visit_embedded_roots`）: 暗黙に結ぶ埋め込みモジュールのうち、`ALLOC_MODULE` に加えて `CONSOLE_MODULE` も、入口の `targets` に対する `targets` の包含の確認を飛ばす。
+  - (b) **結合後の検査での、効果の実行対象の照合**（`EffectTarget`。`src/check/effects.rs` の `match_effects`）: プロジェクトは全モジュールを 1 つの `File` に結合し、入口の `targets` で全項目を検査するので、暗黙に結ばれた `std.os.console` の関数（`write_all` の `effects console` など）まで、入口の `targets`（例: `bare`）に対する効果の照合を受けてしまう。確保器は効果を持たないので表面化しなかっただけである。`src/check/items.rs` の `check_fn_origin` で、埋め込み由来の項目（`item_embedded`）を検査する間だけ `self.targets` を退避して空にし、終わったら戻す（`OsItemInCore` に対する `self.core` の一時的な解除と同じ形）。`self.targets` の読み手は `match_effects` の `EffectTarget` の照合だけである。
+- **変わらないもの**:
+  - console 自身の `targets`・層の検査は通常どおり行う。埋め込みモジュール自身の検査は、読み込み時の `check_module_embedded` が自分の `targets`（`server`）で行っており、(b) はそれを崩さない。
+  - 利用者が OS 層の項目（`raw.*` など）を直接呼べないことは変わらない（`OsItemInCore`、`use std.*` の拒否。ADR 0016 決定 3）。
+  - 利用者の関数への `EffectTarget`（`bare` のモジュールで `console` 効果を使う、など）は従来どおり拒否する。免除は `item_embedded` の項目に限る。
+
+#### J-2. C-7 の 3-6a の行の訂正（`os_buf_free` の廃止は 3-6b へ）
+
+- **決定**: 補足 C-7 の表の 3-6a の行にある「`os_buf_free` を廃止」を、3-6b へ移す。C-7 の表自体は書き換えず、本補足がその一点を置き換える。
+- **理由**: `os_buf_free` の使用者として残るのは、fs・path の経路（3-6b の範囲）である。廃止は、使用者の移行と同時に行う。3-6a の時点で廃止すると、まだ移行していない使用者が壊れる。
+- 3-6a の行のほかの内容（`write` を全部書き終えるまで繰り返す、末尾の改行を書く、など）と、依存（3-5b・3-7a。D-6 で置換）は変えない。
+
 ---
 
 ## 影響

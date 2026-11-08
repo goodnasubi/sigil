@@ -333,13 +333,25 @@ impl Ck {
     /// 入口の `targets` に `bare` があっても「核のモジュールでの OS 層の項目の使用」の規則（`OsItemInCore`）をかけない。
     /// 確保器は出力先のプラットフォーム層が与えるもので、利用者のモジュールの検査の対象ではない
     /// （ADR 0025 補足 C-2）。埋め込みモジュール自身の検査は、自分の `targets`（`server`）で通常どおり行う。
+    ///
+    /// 同じ理由で、効果の実行対象の照合（`EffectTarget`。`match_effects`）も、埋め込み由来の関数では入口の `targets` を
+    /// 空にして外す（補足 C-2・補足 J）。結合後の検査は入口の `targets` で全項目を照合するが、暗黙に結ばれる
+    /// `std.os.console` などのプラットフォーム層は、実体を出力先が与えるので入口の `targets` の対象ではない。
+    /// 埋め込みモジュール自身の `targets` での照合は、読み込み時の `check_module_embedded` が既に行っている。
+    /// 利用者の関数（`item_embedded` でないもの）への照合は従来どおり行う。
     fn check_fn_origin(&mut self, f: &FnDecl, sig: &crate::check::Sig) -> R<()> {
         let core = self.core;
-        if self.item_embedded {
+        let targets = if self.item_embedded {
             self.core = false;
-        }
+            std::mem::take(&mut self.targets)
+        } else {
+            Vec::new()
+        };
         let r = self.check_fn(f, sig);
         self.core = core;
+        if self.item_embedded {
+            self.targets = targets;
+        }
         r
     }
 

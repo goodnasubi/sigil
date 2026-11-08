@@ -23,6 +23,11 @@ pub const ALLOC_FN: &str = "std.os.alloc.alloc";
 pub const FREE_FN: &str = "std.os.alloc.free";
 pub const LIVE_FN: &str = "std.os.alloc.live_blocks";
 
+/// `console.log` の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 C-7、PR 3-6a）。
+/// lowering は入口から辿れなくても SIR に入れ、ネイティブは `sigil_rt_console_log` のシムから呼ぶ。
+pub const CONSOLE_MODULE: &str = "std.os.console";
+pub const CONSOLE_LOG_FN: &str = "std.os.console.log";
+
 /// `Float` の余り（fmod）の Sigil 版のモジュール名と関数名（結合後の名前。ADR 0025 補足 C-3）。
 /// 言語に `Float` の `%` はない（ADR 0011 の決定。検査器が拒否する）ので、プログラムには暗黙に結ばない。
 /// 後続の PR で Sigil 製の標準ライブラリ（`Float` の表示・解析）が `use` して使う。
@@ -103,6 +108,7 @@ pub const BYTES_CMP_FN: &str = "std.core.bytes.cmp";
 /// 埋め込みモジュールの一覧（モジュール名, Sigil のソース）。
 pub const EMBEDDED: &[(&str, &str)] = &[
     (ALLOC_MODULE, include_str!("os_alloc.sigil")),
+    (CONSOLE_MODULE, include_str!("os_console.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
     (FLOAT_MODULE, include_str!("core_float.sigil")),
@@ -129,6 +135,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
     } else {
         vec![
             ALLOC_MODULE,
+            CONSOLE_MODULE,
             STRING_MODULE,
             LIST_MODULE,
             INT_MODULE,

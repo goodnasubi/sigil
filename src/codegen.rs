@@ -113,6 +113,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_cmp" | "bytes_cmp" => ("pp", 'p'),
         "str_parse_int" => ("pp", 'i'),
         "str_from_utf8" => ("ppp", 'p'),
+        // `console.log` の書き出し（`std.os.console.log`。補足 C-7 の 3-6a）。引数は（バッファの番地, 長さ）
+        "console_log" => ("pp", 'v'),
         // `Int` の回転（`std.core.int`。補足 F-3）。`Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。F-0・F-4）
         "int_rotl" | "int_rotr" => ("ppp", 'p'),
         "int_rotr32" => ("pp", 'p'),
@@ -146,7 +148,7 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
         "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
-        "console_log" | "os_buf_free" => ("pp", 'v'),
+        "os_buf_free" => ("pp", 'v'),
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
         "fs_read" | "fs_write" => ("ppppp", 'i'),
@@ -720,6 +722,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     // 一覧の表現（`std.core.list`）のシム（補足 E-3）。同じく常に必要。
     shims.extend(list_shims(&mut cg)?);
     shims.extend(int_shims(&mut cg)?);
+    // `console.log`（`std.os.console`）のシム（補足 C-7 の 3-6a）。結ばれていなければ作らない（確保器と同じ）。
+    shims.extend(console_shims(&mut cg)?);
     // バイト列の表現（`std.core.bytes`）のシム（補足 F-4）。同じく常に必要。
     shims.extend(bytes_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
@@ -1063,6 +1067,25 @@ fn int_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         out.push((id, target, np, 'p'));
     }
     Ok(out)
+}
+
+/// `console.log`（`std.os.console`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する（補足 C-7 の 3-6a）。
+/// 生成コードの呼び出し先の名前と形（`console_log(番地, 長さ)`）は変えない。シムは公開しない（`Linkage::Local`）。
+/// モジュールが結ばれていないプログラム（試験用に `raw.alloc` を差し替えたもの）では作らない。
+fn console_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::CONSOLE_LOG_FN;
+    let Some(target) = cg.p.funcs.iter().position(|f| f.name == CONSOLE_LOG_FN) else {
+        return Ok(vec![]);
+    };
+    let id =
+        cg.m.declare_function(
+            "sigil_rt_console_log",
+            Linkage::Local,
+            &shim_sig(cg.cc, 2, 'v'),
+        )
+        .map_err(internal)?;
+    cg.rt.insert("console_log", id);
+    Ok(vec![(id, target, 2, 'v')])
 }
 
 /// 生成コードの中で定義する関数（`memmove`・`memset`）。

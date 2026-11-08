@@ -65,7 +65,10 @@ impl Proj<'_> {
             self.visit_embedded(r)?;
             // 確保器と console は処理系が暗黙に結ぶプラットフォーム層で、実体は出力先が与えるため、入口の `targets` との照合の対象ではない
             // （補足 C-2・補足 J）。
-            if r == embedded::ALLOC_MODULE || r == embedded::CONSOLE_MODULE {
+            if r == embedded::ALLOC_MODULE
+                || r == embedded::CONSOLE_MODULE
+                || r == embedded::FS_MODULE
+            {
                 continue;
             }
             let (path, target) = &self.mods[r];

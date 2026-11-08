@@ -7,7 +7,7 @@ mod common;
 use common::native::{arg_text, exec, scratch, try_build};
 use sigil::codegen::Opts;
 use sigil::exec::Arg;
-use sigil::native::{self, BuildError};
+use sigil::native;
 use std::process::Command;
 
 fn example(path: &str) -> String {
@@ -92,16 +92,12 @@ fn core_function_links_with_allocator_os_runtime() {
 }
 
 #[test]
-fn core_only_rejects_os_link() {
-    // console を使うプログラムを core_only と偽ると、os.a がなくてリンクに失敗する（失敗が黙って通らない）。
+fn console_program_is_not_core_only() {
+    // 3-6a で console が os.a 依存を失い、リンク失敗に依存した旧テスト（core_only_rejects_os_link）の
+    // 前提が崩れたため、拒否の実体である lowering の分類を確認する形へ移した（Issue #321）。
     let own = example("03-ownership/ownership.sigil");
-    let mut p = sigil::ir_eval::lower_sources(&[&own], "main").unwrap();
+    let p = sigil::ir_eval::lower_sources(&[&own], "main").unwrap();
     assert!(!p.core_only);
-    p.core_only = true;
-    let dir = scratch("reject");
-    let r = native::build_program(&p, &Opts::default(), &dir.join("prog"));
-    assert!(matches!(r, Err(BuildError::Toolchain(_))), "{r:?}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// ELF のプログラムヘッダに `PT_INTERP`・`PT_DYNAMIC` がない（動的リンクでない）。

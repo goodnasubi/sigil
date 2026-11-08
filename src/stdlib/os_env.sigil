@@ -1,0 +1,87 @@
+module std.os.env
+  targets server
+  trust base
+
+// `env`（環境変数を読む）の Sigil 実装（ADR 0025 補足 C-7 の 3-6c、補足 L）。ネイティブの実体。
+// 評価器の `env` は Rust の組み込みのまま（補足 C-7）で、`ENVP` は使わない。ネイティブの起動の処理（`_start`）が、
+// 入口を呼ぶ前に、`envp` をこのモジュールの大域 `ENVP` へ書く（補足 C-4。名前 `std.os.env.ENVP` で探す）。
+//
+// - `envp` は NULL で終わる、`NAME=VALUE` の NUL 終端の列の配列（要素は 8 バイトの番地）。
+// - 同じ名前が複数あれば、最初の一致を返す（glibc の `getenv`、Rust の `std::env::var` と同じ）。
+// - 分割は最初の `=` で行う。値は `=` を含んでよい（`A=b=c` の `A` の値は `b=c`）。`=` のない項は読み飛ばす。
+// - 名前が空、または `=`・NUL を含むときは、見つからないものとして扱う（`getenv` と同じ。システムコールも読みも発行しない）。
+// - 値は `std.core.string.new_lossy` で文字列にする。不正な UTF-8 は U+FFFD にする（補足 D-6。入口の引数の
+//   `to_string_lossy` と同じ。`valid_utf8` は使わない）。
+// - 戻りは、見つからなければ空番地、あれば `std.core.string` の頭（空の値でも空番地ではない）。呼び出し側が所有する。
+// 宣言する効果は `none`: 効果の検査は宣言と推論の一致を求め、`raw.load_*` は効果を起こさないので、`env` と宣言すると拒否される
+// （補足 L）。`env` は、言語側の入口（評価器と同じ組み込みの表面）が持つ。
+// 入口の `targets` との照合は、console・fs と同じく免除する（補足 L）。単一スレッド前提（補足 A-5）。
+// 利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
+
+use std.core.string.new_lossy;
+
+global mut ENVP: Addr = raw.addr_null()
+
+fn name_ok(np: Addr, nl: Int) -> Bool
+  intent "名前（np..np+nl）が空でなく、'=' と NUL を含まないか"
+  requires none
+  ensures none
+  effects none
+  unchecked "np..np+nl は読める（nl <= 0 なら np は読まない）"
+{
+  if nl <= 0 {
+    return false;
+  }
+  let mut i = 0;
+  while i < nl {
+    let c = raw.load_u8(raw.offset(np, i));
+    if c == 0 || c == 61 {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+pub fn lookup(envp: Addr, np: Addr, nl: Int) -> Addr
+  intent "envp の配列から名前 np..np+nl の最初の一致の値を、文字列（不正な UTF-8 は U+FFFD）にして返す。無ければ空番地"
+  requires none
+  ensures none
+  effects none
+  unchecked "envp は空番地か、NULL で終わる NUL 終端の文字列の番地の配列。np..np+nl は読める。戻りは std.core.string の頭（呼び出し側が所有）"
+{
+  if raw.addr_to_int(envp) == 0 || !name_ok(np, nl) {
+    return raw.addr_null();
+  }
+  let mut i = 0;
+  while true {
+    let ent = raw.load_addr(raw.offset(envp, i * 8));
+    if raw.addr_to_int(ent) == 0 {
+      return raw.addr_null();
+    }
+    let mut j = 0;
+    while j < nl && raw.load_u8(raw.offset(ent, j)) == raw.load_u8(raw.offset(np, j)) {
+      j = j + 1;
+    }
+    if j == nl && raw.load_u8(raw.offset(ent, nl)) == 61 {
+      let vp = raw.offset(ent, nl + 1);
+      let mut n = 0;
+      while raw.load_u8(raw.offset(vp, n)) != 0 {
+        n = n + 1;
+      }
+      return new_lossy(vp, n);
+    }
+    i = i + 1;
+  }
+  return raw.addr_null();
+}
+
+pub fn get(np: Addr, nl: Int) -> Addr
+  intent "環境変数 np..np+nl の値を文字列にして返す。無ければ空番地。起動の処理が書いた ENVP を読む"
+  requires none
+  ensures none
+  effects none
+  unchecked "ENVP は起動の処理が書いた、NULL で終わる envp の配列を指す。起動の後は書き換えない。np..np+nl は読める"
+{
+  return lookup(ENVP, np, nl);
+}

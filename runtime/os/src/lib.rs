@@ -1,10 +1,8 @@
 //! Sigil の暫定ランタイムの OS 部（ADR 0015 の決定 6）。
 //!
-//! `console.log`・`fs.read`・`fs.write`・`Path` の操作と `IoError` の分類。`runtime/core` には依存せず、
+//! `fs.read`・`fs.write`・`Path` の操作と `IoError` の分類。`runtime/core` には依存せず、
 //! 文字列は `(ptr, len)` の UTF-8 で受け渡す。返す文字列の領域はこの crate の `sigil_rt_os_buf_free` で解放する。
 //! `Path` の意味と `IoError` の分類は `src/shared/path.rs` を SIR の評価器と共有する。
-
-use std::io::Write;
 
 #[path = "../../../src/shared/path.rs"]
 mod path;
@@ -37,23 +35,6 @@ pub unsafe extern "C" fn sigil_rt_os_buf_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
     }
-}
-
-/// `console.log`: 1 行を標準出力に書く（呼び出しごとに書き出す）。
-///
-/// # Safety
-/// `ptr` は `len` バイト読める。
-#[no_mangle]
-pub unsafe extern "C" fn sigil_rt_console_log(ptr: *const u8, len: usize) {
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ptr, len)
-    };
-    let mut o = std::io::stdout().lock();
-    let _ = o.write_all(bytes);
-    let _ = o.write_all(b"\n");
-    let _ = o.flush();
 }
 
 /// `fs.read`: 成功なら 0 を返し `(out_ptr, out_len)` に内容を渡す。失敗なら 1 を返し `out_kind` に

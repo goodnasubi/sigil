@@ -1,0 +1,54 @@
+module std.os.console
+  targets server
+  trust base
+
+// `console.log` の Sigil 実装（ADR 0025 補足 C-7 の 3-6a）。ネイティブの `console.log` の書き出しの実体。
+// 評価器の `console.log` は Rust の組み込みのまま（補足 C-7）で、ここは呼ばない。ネイティブはシムから呼ぶ。
+//
+// 書き出しは、今の Rust 版（`write_all` + 失敗を捨てる）と同じ意味にする。
+// - `write`（番号 1）は全部を書き終えるまで繰り返す。部分書き込み（戻り値が正で残りがある）は残りから続ける。
+// - 戻り値が -4（EINTR）なら、同じ位置から再試行する。
+// - 0 とそれ以外の負の値は、そこで書くのをやめる（失敗は呼び出し側へ返さない）。
+// - `log` は本文を書いた後、本文の書き込みが途中でやめても、末尾の改行を書く（Rust 版の `write_all(bytes)` と
+//   `write_all("\n")` を続けて呼び、結果を捨てる形と同じ）。
+// `raw.syscall` は OS 層の項目なので、`bare` を含められない（`OsItemInCore`）。確保器と同じく `targets server` だけにする。
+// 入口の `targets` との照合（`TargetMismatch`・`EffectTarget`）は、ADR 0025 補足 J で、確保器と同じく免除すると決めた（自分の `targets` での検査は通常どおり行う）。
+// 排他を持たない単一スレッド前提（補足 A-5）。利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
+// ほかの埋め込みモジュールを `use` しない。改行の 1 バイトは `raw.alloc` で確保して `raw.free` で返す（塊の数は増えない）。
+
+fn write_all(fd: Int, buf: Addr, len: Int)
+  intent "fd へ buf から len バイトを、全部書き終えるまで繰り返し書く。失敗は返さない"
+  requires none
+  ensures none
+  effects console
+  unchecked "buf は len バイト読める有効な領域を指す。呼び出し側（log と、生成コードの console.log）が保証する。SYS_write（1）だけを発行する"
+{
+  let mut p = raw.addr_to_int(buf);
+  let mut n = len;
+  let mut go = true;
+  while go && n > 0 {
+    let r = raw.syscall(1, fd, p, n, 0, 0, 0);
+    if r > 0 {
+      p = p + r;
+      n = n - r;
+    } else {
+      if r != -4 {
+        go = false;
+      }
+    }
+  }
+}
+
+pub fn log(buf: Addr, len: Int)
+  intent "標準出力（fd 1）へ buf の len バイトと改行を書く。失敗は返さない"
+  requires none
+  ensures none
+  effects console
+  unchecked "buf は len バイト読める有効な領域を指す（空なら len = 0）。改行 1 バイトの領域は raw.alloc(1, 1) で得て書いたあと raw.free で返す"
+{
+  write_all(1, buf, len);
+  let nl = raw.alloc(1, 1);
+  raw.set(nl, 10, 1);
+  write_all(1, nl, 1);
+  raw.free(nl, 1, 1);
+}

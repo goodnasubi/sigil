@@ -54,7 +54,7 @@ impl Proj<'_> {
     /// 暗黙に結ぶ埋め込みモジュール（名指しされたものと `implicit_roots`）を、入口より先に読む。入口の `targets` の全てで使えなければならない
     /// （`use` と同じ規則。取り込む側の出力先のすべてで、取り込まれる側が使える）。
     pub(super) fn visit_embedded_roots(&mut self, entry: &File) -> R<()> {
-        // 名指しされたものに、暗黙に結ぶもの（すべてのプログラムに確保器。補足 C-2）を足す。
+        // 名指しされたものに、暗黙に結ぶもの（すべてのプログラムに確保器と console。補足 C-2・補足 J）を足す。
         let mut roots = self.opts.embedded_roots.clone();
         for r in embedded::implicit_roots(self.opts) {
             if !roots.iter().any(|x| x == r) {
@@ -63,8 +63,9 @@ impl Proj<'_> {
         }
         for r in &roots {
             self.visit_embedded(r)?;
-            // 確保器は出力先のプラットフォーム層が与えるもので、入口の `targets` との照合の対象ではない（補足 C-2）。
-            if r == embedded::ALLOC_MODULE {
+            // 確保器と console は処理系が暗黙に結ぶプラットフォーム層で、実体は出力先が与えるため、入口の `targets` との照合の対象ではない
+            // （補足 C-2・補足 J）。
+            if r == embedded::ALLOC_MODULE || r == embedded::CONSOLE_MODULE {
                 continue;
             }
             let (path, target) = &self.mods[r];

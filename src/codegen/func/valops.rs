@@ -504,8 +504,30 @@ impl<'a, 'p> Fx<'a, 'p> {
                     // データ領域をゼロ化する。判定は記述子の種類と同じく、
                     // lower が付けた同一性の印（`secret`）だけを見る。
                     if p.types[*id].secret {
+                        // 生成コードの `memset` で上書きする（Rust ランタイムの `zeroize_bytes` は廃止。補足 C-7 の 3-7c）。
+                        // 空番地の頭・空番地のデータ・長さ 0 は何もしない。
                         let b = self.ld(w, 0);
-                        self.rt("zeroize_bytes", &[b]);
+                        let live = self.b.ins().icmp_imm_s(IntCC::NotEqual, b, 0);
+                        self.branch(
+                            live,
+                            |s| {
+                                let d = s.rt("bytes_data", &[b]);
+                                let n = s.rt("bytes_len", &[b]);
+                                let has = s.b.ins().icmp_imm_s(IntCC::NotEqual, d, 0);
+                                let pos = s.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, n, 0);
+                                let both = s.b.ins().band(has, pos);
+                                s.branch(
+                                    both,
+                                    |s| {
+                                        let z = s.ic(0);
+                                        s.rt("memset", &[d, z, n]);
+                                        s.ic(0)
+                                    },
+                                    |s| s.ic(0),
+                                )
+                            },
+                            |s| s.ic(0),
+                        );
                     }
                     if self.cg.trace {
                         let tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();

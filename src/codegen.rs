@@ -151,10 +151,6 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
     Some(match name {
         "memmove" | "memset" | "raw_free" => ("ppp", 'v'),
         "raw_alloc" => ("pp", 'p'),
-        "set_sigil_live" => ("p", 'v'),
-        "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
-        // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
-        "zeroize_bytes" => ("p", 'v'),
         "fmod" => ("ff", 'f'),
         _ => return None,
     })

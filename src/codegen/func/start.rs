@@ -11,11 +11,6 @@ impl Fx<'_, '_> {
         self.b.block_params(b).to_vec()
     }
 
-    pub(crate) fn start_noop(&mut self) {
-        self.start_head();
-        self.b.ins().return_(&[]);
-    }
-
     pub(crate) fn start_limit(&mut self, limit: DataId) {
         self.start_head();
         let p = self.data_addr(limit);
@@ -23,16 +18,18 @@ impl Fx<'_, '_> {
         self.b.ins().return_(&[v]);
     }
 
-    pub(crate) fn start_boot(&mut self, entry: FuncId, libc: FuncId) {
+    /// `_start` から入る。glibc の `__libc_start_main` を経ず、入口（`sigil_start`）を直接呼ぶ（補足 C-7 の 3-7c）。
+    /// TLS・IFUNC・stdio は無い（生成コードはどれも使わない）。入口は戻らない（`exit_group` で終わる）。
+    pub(crate) fn start_boot(&mut self, entry: FuncId) {
         let ps = self.start_head();
         let sp = ps[0];
         let argc = self.ld(sp, 0);
+        let argc = self.b.ins().ireduce(types::I32, argc);
         let argv = self.b.ins().iadd_imm_s(sp, 8);
         let fr = self.cg.m.declare_func_in_func(entry, self.b.func);
-        let addr = self.b.ins().func_addr(types::I64, fr);
-        let libc = self.cg.m.declare_func_in_func(libc, self.b.func);
+        // 第 3 引数（envp）は入口が自分で `argv` の後ろから求める（`start_stack`）ので 0 を渡す。
         let z = self.ic(0);
-        self.b.ins().call(libc, &[addr, argc, argv, z, z, z, sp]);
+        self.b.ins().call(fr, &[argc, argv, z]);
         self.b.ins().trap(TrapCode::unwrap_user(1));
     }
 

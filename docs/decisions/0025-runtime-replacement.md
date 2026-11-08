@@ -1245,6 +1245,40 @@ A-4 は「頭は 16B（`magic|class` と `size`）」と「align > 16 の頭に 
 - **理由**: `os_buf_free` の使用者として残るのは、fs・path の経路（3-6b の範囲）である。廃止は、使用者の移行と同時に行う。3-6a の時点で廃止すると、まだ移行していない使用者が壊れる。
 - 3-6a の行のほかの内容（`write` を全部書き終えるまで繰り返す、末尾の改行を書く、など）と、依存（3-5b・3-7a。D-6 で置換）は変えない。
 
+### 補足 K（PR 3-6b の実装中）: `fs.read`/`fs.write` と `Path` の Sigil 実装、`os_buf_free` の廃止
+
+- **日付**: 2026-11-08
+- **状態**: 実装と同時に記録する（Issue #322）。仕様（言語の振る舞い・`sigil spec` の出力）は変えない。本文・補足 A〜J と食い違う箇所は、本補足が置き換える。
+- 3-6b（C-7。補足 J-2 で `os_buf_free` の廃止を加えた）の実装中に決めた点を記録する。判断の軸は、ADR 0027 の安全設計原則（宣言と検査系の推論が一致すること、外から来る入力は黙って解釈を変えずに拒否すること）である。
+
+#### K-1. モジュールの置き方
+
+- **決定**: `Path` の操作は純粋な核のモジュール `std.core.path`（`targets bare, browser, server`、`src/stdlib/core_path.sigil`）、`fs.read`/`fs.write` は OS 層の `std.os.fs`（`targets server`、`src/stdlib/os_fs.sigil`）に置く。どちらもすべてのプログラムに暗黙に結ぶ（`implicit_roots`）。lowering は入口から辿れなくても SIR に入れる。評価器の `Path`・`fs` は Rust の組み込みのまま（C-7 の最後の項）で、これらの関数は呼ばない。
+- **理由**: `Path` の操作は効果を持たない純粋な関数なので、`fs` と同じ OS 層に置くより、効果の宣言（`effects none`）と置き場所が一致する（宣言と推論の一致）。`fs` は `syscall` を使うので OS 層で、`std.os.console` と同じく入口の `targets` との照合（`TargetMismatch`・`EffectTarget`）を免除する（補足 J-1 の `CONSOLE_MODULE` と並べて `FS_MODULE` を `project::embedded` の免除に加える。`EffectTarget` の免除は `item_embedded` の項目すべてに既にかかる）。
+- **シム**: 生成コードの呼び出し先は `fs_read(パス, 長さ, 種類の番地) -> 文字列の頭か 0`、`fs_write(パス, 長さ, 内容, 長さ, 種類の番地) -> 0 か 1`、`path_join(a, 長さ, b, 長さ) -> 頭`、`path_file_name`・`path_parent(パス, 長さ) -> 頭か 0` とし、`std.core.string` の頭をそのまま受け渡す。今までの「Rust が確保した `(ptr, len)` を `str_new` で複写してから `os_buf_free` で返す」二重の確保は無くなる。
+
+#### K-2. `os_buf_free` の廃止
+
+- **決定**: `runtime/os` の `sigil_rt_os_buf_free`・`sigil_rt_fs_read`・`sigil_rt_fs_write`・`sigil_rt_path_*` と、`rt_spec` の `os_buf_free`・`fs_read`・`fs_write`・`path_*` を削除する。`runtime/os` に残るのは `sigil_rt_raw_syscall` だけ（3-7b で生成コードへ移る）。下書き `src/stdlib/os_sigil.rs`（`FS_PATH_SIGIL`）とその構文試験 `tests/os_sigil_test.rs` も、置き換え済みなので消す（D の「下書きは置き換える PR で消す」）。`tests/runtime_parity.rs` の `Path` の突き合わせは `tests/fs_path_36b.rs`（評価器とネイティブの突き合わせ + Rust の `std::path::Path` との比較）へ移す。
+
+#### K-3. `valid_utf8` と UTF-8 の扱い
+
+- **決定**: `valid_utf8(p, n) -> Bool` は 3-5b-i（D-2・F-10 の 3）で `std.core.string` に追加済みなので、本 PR は新しい関数を足さず、`fs.read` が使う。読んだバイト列は `valid_utf8` で検証してから検証なしの `new` で文字列にし、不正なら `Other`（Rust 版の `read_to_string` の `InvalidData` が `io_arm` で `Other` になるのと同じ結果）。`new_lossy` は使わない: ファイルの中身を黙って置換文字へ変えると、読んだ値と実際のファイルが食い違うまま先へ進むため（ADR 0027。拒否して呼び出し側に見せる）。
+- パスの引数は言語の `String` なので、常に正しい UTF-8 である。
+
+#### K-4. パスに NUL を含む場合
+
+- **決定**: パスに NUL（0）バイトを含むときは、システムコールを発行せず `Other` にする。Rust の `std::fs` の `InvalidInput`（`Other` の腕）と同じ結果である。
+- **理由**: 構文上 C の文字列として渡す都合で、そのまま渡すとカーネルは最初の NUL までのパスを開く。意図と違うファイルを黙って開く経路（パスの切り詰め）を作らない。
+
+#### K-5. 細目（C-7 の 3-6b の細目に対する確定）
+
+- `fs.read`: 最初の領域は 4096 バイトで、満杯になるたびに倍にして複写する（`raw.alloc` / `raw.free`）。`read` の −4（EINTR）は再試行し、0 が終わり、その他の負の値は失敗（errno から分類）。失敗した場合も `close` は必ず呼び、領域は返す。
+- `fs.write`: `write` が 0 を返したら（進まない）`Other`（errno が無いため EIO 相当）。その他は C-7 のとおり。`close` の失敗は無視する。
+- errno の分類は ENOENT→NotFound、EACCES・EPERM→PermissionDenied、それ以外→Other（`io_arm` と同じ）。
+- `Path` の意味は Rust の `std::path::Path`（Linux）と同じ: 連続する `/` は 1 つ、先頭以外の `.` の成分は無いものとして扱い、先頭の `.` と `..` は成分として残る。`file_name` は根・空・`.`・`..` で `None`、`parent` は根と空で `None`（成分が 1 つの相対パスは空文字列）。実装は 2 つの補助（末尾の `/` と先頭以外の `.` を取り除く `trim_end`、最後の成分の開始位置を探す `last_start`）で、成分の列を作らない。
+- 完了基準: `os_buf_free` が `src/`・`runtime/`・`tests/` のどこにも無い。
+
 ---
 
 ## 影響

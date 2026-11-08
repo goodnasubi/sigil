@@ -132,18 +132,13 @@ fn live_line_has_only_sigil_blocks() {
     assert_eq!(lines, ["live: sigil_blocks=0"], "{}", got.stderr);
 }
 
-/// 3-5e-iii: Rust のランタイムから、旧書式の `strs=`・`blocks=` の数え（`sigil_rt_live_strs`・`sigil_rt_live_blocks`）が消えている。
+/// 3-7d: 旧書式の数えを持っていた暫定の Rust ランタイム自体が消えている。
 #[test]
-fn old_live_counters_are_gone_from_the_rust_runtime() {
-    let rt = include_str!("../runtime/core/src/lib.rs");
-    for name in ["sigil_rt_live_strs", "sigil_rt_live_blocks"] {
-        assert!(
-            !rt.contains(name),
-            "{name} が Rust のランタイムに残っている"
-        );
-    }
+fn the_rust_runtime_with_old_live_counters_is_gone() {
     assert!(
-        !rt.contains("live: strs="),
-        "旧書式 `live: strs=` が残っている"
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime")
+            .exists(),
+        "暫定の Rust ランタイムが残っている"
     );
 }

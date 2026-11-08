@@ -44,9 +44,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            runtime/core/target
-            runtime/os/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'runtime/core/Cargo.lock', 'runtime/os/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-
 
@@ -64,17 +62,3 @@ jobs:
         env:
           SIGIL_NATIVE_MAX_SKIP: "10"
           SIGIL_NATIVE_MIN_CHECKED: "400"
-
-      - name: runtime/core
-        working-directory: runtime/core
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
-
-      - name: runtime/os
-        working-directory: runtime/os
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test

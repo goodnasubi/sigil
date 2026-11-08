@@ -169,13 +169,21 @@ const READ: &str = "t(a: String) -> Result<String, IoError>";
 #[test]
 fn fs_read_sizes_around_the_growth_boundary() {
     let d = dir("sizes");
-    // 4096 は最初の領域の大きさ。ちょうど・前後・倍・複数回の拡張を通す。
-    for n in [0usize, 1, 4095, 4096, 4097, 8192, 8193, 70_000] {
+    // 実装の拡張境界はバイト数（最初の領域は 4096 バイト）。ASCII で境界の前後・倍・複数回の拡張を通す。
+    for n in [0usize, 1, 4095, 4096, 4097, 8191, 8192, 8193, 70_000] {
         let f = d.join(format!("f{n}.txt"));
-        let body: String = "あaé".chars().cycle().take(n).collect();
+        let body: String = "abcdefg\n".chars().cycle().take(n).collect();
         std::fs::write(&f, &body).unwrap();
         let got = out(READ, "fs.read", "return fs.read(&Path.new(&a));", &[p(&f)]);
         assert_eq!(got, format!("Ok({body:?})"), "n={n}");
+    }
+    // 多バイト文字（読んだバイト列の途中で領域が満杯になる）は別事例にする
+    for n in [1366usize, 1367, 1368, 2731, 20_000] {
+        let f = d.join(format!("m{n}.txt"));
+        let body: String = "あaé".chars().cycle().take(n).collect();
+        std::fs::write(&f, &body).unwrap();
+        let got = out(READ, "fs.read", "return fs.read(&Path.new(&a));", &[p(&f)]);
+        assert_eq!(got, format!("Ok({body:?})"), "multibyte n={n}");
     }
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -200,20 +208,37 @@ fn fs_read_invalid_utf8_is_other_and_missing_is_not_found() {
 }
 
 #[test]
-fn fs_read_and_write_path_with_nul_are_other() {
-    // コマンドライン引数に NUL は渡せないので、プログラムの中で作る
-    let src = format!(
-        "{HEAD}{}",
-        f(
-            "t() -> Bool",
-            "fs.read, fs.write",
-            "let p = Path.new(&\"/tmp/a\\u{0}b\");\nlet w = match fs.write(&p, &\"x\") {\n  Ok(_) => false,\n  Err(_) => true,\n};\nlet r = match fs.read(&p) {\n  Ok(_) => false,\n  Err(_) => true,\n};\nreturn w && r;"
-        )
+fn fs_read_and_write_path_with_nul_are_other_and_do_not_touch_the_prefix() {
+    // NUL より前のパス（<dir>/a）が実在しても、切り詰めて開かないこと（K-4）。
+    // コマンドライン引数に NUL は渡せないので、プログラムの中で作る。
+    let d = dir("nul");
+    let victim = d.join("a");
+    std::fs::write(&victim, "orig").unwrap();
+    let l = lit(&victim.to_string_lossy());
+    let base = format!("{}\\u{{0}}b\"", &l[..l.len() - 1]);
+    let prog = |call: &str, ty: &str, eff: &str| {
+        let src = format!(
+            "{HEAD}{}",
+            f(
+                &format!("t() -> {ty}"),
+                eff,
+                &format!("let p = Path.new(&{base});\nreturn {call};")
+            )
+        );
+        run_with(&src, "t", &[], &Options::default())
+            .unwrap_or_else(|e| panic!("{e}\n{src}"))
+            .value
+    };
+    let r = prog("fs.read(&p)", "Result<String, IoError>", "fs.read");
+    assert!(r.starts_with("Err(IoError.Other"), "{r}");
+    let w = prog(
+        "fs.write(&p, &\"changed\")",
+        "Result<Unit, IoError>",
+        "fs.write",
     );
-    let v = run_with(&src, "t", &[], &Options::default())
-        .unwrap_or_else(|e| panic!("{e}\n{src}"))
-        .value;
-    assert_eq!(v, "true");
+    assert!(w.starts_with("Err(IoError.Other"), "{w}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "orig");
+    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]

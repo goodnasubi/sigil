@@ -107,6 +107,10 @@ fn driver(entries: Option<&[&[u8]]>, call_get: bool) -> String {
     let mut free = String::new();
     let call = if call_get {
         "  let r = get(np, nl);\n".to_string()
+    } else if entries.is_none() {
+        // `envp` に空番地を直接渡す（`ENVP` が未設定の評価器と同じ形）。
+        body.push_str("  let envp = raw.addr_null();\n");
+        "  let r = lookup(envp, np, nl);\n".to_string()
     } else {
         let es = entries.unwrap();
         let n = es.len();
@@ -242,9 +246,24 @@ fn lookup_reference_decisions() {
 
 #[test]
 fn empty_and_null_envp() {
-    let drv = driver(Some(&[]), false);
-    for k in 0..NAMES.len() as i64 {
-        assert_eq!(eval(drv.clone(), k).unwrap(), "-1");
+    // 空の配列（NULL だけ）と、空番地そのもの。評価器とネイティブの両方で、どの名前も「無い」。
+    for entries in [Some(&[][..]), None] {
+        let drv = driver(entries, false);
+        let exe = build(drv.clone());
+        for k in 0..NAMES.len() as i64 {
+            assert_eq!(eval(drv.clone(), k).unwrap(), "-1");
+            let r = exec_envp(&exe, k, &[]);
+            assert_eq!(r.code, Some(0), "{}", r.stderr);
+            assert_eq!(r.stdout.trim(), "-1");
+        }
+    }
+}
+
+#[test]
+fn names_with_nul_are_absent() {
+    // 項に同じ前置きの名前があっても、NUL を含む名前は「無い」。項の NUL 終端を越えて読まない。
+    for (k, n) in NAMES.iter().enumerate().filter(|(_, n)| n.contains(&0)) {
+        assert_eq!(reference(ENTRIES, n), None, "{k}");
     }
 }
 

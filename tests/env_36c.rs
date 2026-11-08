@@ -54,6 +54,10 @@ const NAMES: &[&[u8]] = &[
     b"=EMPTYNAME",
     b"NOE",
     b"AB=",
+    b"A\0",
+    b"\0",
+    b"\0A",
+    b"B\0x",
 ];
 
 /// 参照実装: 最初の一致の値を `from_utf8_lossy` にしたもの。
@@ -262,8 +266,10 @@ fn empty_and_null_envp() {
 #[test]
 fn names_with_nul_are_absent() {
     // 項に同じ前置きの名前があっても、NUL を含む名前は「無い」。項の NUL 終端を越えて読まない。
-    for (k, n) in NAMES.iter().enumerate().filter(|(_, n)| n.contains(&0)) {
-        assert_eq!(reference(ENTRIES, n), None, "{k}");
+    let nul: Vec<_> = NAMES.iter().filter(|n| n.contains(&0)).collect();
+    assert!(nul.len() >= 4, "NUL を含む名前が NAMES に無い");
+    for n in nul {
+        assert_eq!(reference(ENTRIES, n), None);
     }
 }
 

@@ -75,27 +75,11 @@ pub(super) fn define(cg: &mut Cg<'_>, thunk: FuncId, limit: DataId) -> Result<()
     cg.define(entry, entry.as_u32(), entry_sig, vec![], |fx| {
         fx.start_stack(limit, run, switch)
     })?;
-    // -nostartfiles で外れる crt の空のフック。静的・非 PIE なので自己再配置も不要。
-    for symbol in ["_init", "_fini", "_dl_relocate_static_pie"] {
-        let sig = shim_sig(cg.cc, 0, 'v');
-        let id =
-            cg.m.declare_function(symbol, Linkage::Export, &sig)
-                .map_err(internal)?;
-        cg.define(id, id.as_u32(), sig, vec![], |fx| fx.start_noop())?;
-    }
-    // 3-7c まで glibc を残す。TLS・IFUNC・Rust の消費者を初期化してから Sigil の起動へ入る。
-    let libc =
-        cg.m.declare_function(
-            "__libc_start_main",
-            Linkage::Import,
-            &shim_sig(cg.cc, 7, 'i'),
-        )
-        .map_err(internal)?;
     let boot =
         cg.m.declare_function("sigil_boot", Linkage::Local, &shim_sig(cg.cc, 1, 'v'))
             .map_err(internal)?;
     cg.define(boot, boot.as_u32(), shim_sig(cg.cc, 1, 'v'), vec![], |fx| {
-        fx.start_boot(entry, libc)
+        fx.start_boot(entry)
     })?;
     let start =
         cg.m.declare_function("_start", Linkage::Export, &shim_sig(cg.cc, 0, 'v'))

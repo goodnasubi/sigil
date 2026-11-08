@@ -323,45 +323,6 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.switch_to_block(entry);
         let a = self.b.block_params(entry)[0];
         let fr = self.cg.m.declare_func_in_func(thunk, self.b.func);
-        // 確保器を結んだときは、生存数のシムをランタイムに登録する（`SIGIL_RT_LIVE` の `sigil_blocks=`。補足 B-5）。
-        if let Some(l) = self.cg.live_shim {
-            let lr = self.cg.m.declare_func_in_func(l, self.b.func);
-            let la = self.b.ins().func_addr(types::I64, lr);
-            self.rt("set_sigil_live", &[la]);
-        }
-        // 文字列の関数表を Rust ランタイムに登録する（補足 D-3。入口を呼ぶ前に文字列を作らせない）。
-        if let Some(ids) = self.cg.str_ops {
-            let addrs: Vec<Value> = ids
-                .iter()
-                .map(|&id| {
-                    let r = self.cg.m.declare_func_in_func(id, self.b.func);
-                    self.b.ins().func_addr(types::I64, r)
-                })
-                .collect();
-            self.rt("set_str_ops", &addrs);
-        }
-        // 一覧の関数表も同じ（入口の引数の `List` を `coerce` が作るので、thunk より前。補足 E-3）。
-        if let Some(ids) = self.cg.list_ops {
-            let addrs: Vec<Value> = ids
-                .iter()
-                .map(|&id| {
-                    let r = self.cg.m.declare_func_in_func(id, self.b.func);
-                    self.b.ins().func_addr(types::I64, r)
-                })
-                .collect();
-            self.rt("set_list_ops", &addrs);
-        }
-        // バイト列の関数表は一覧の次（`set_str_ops` → `set_list_ops` → `set_bytes_ops` → thunk。補足 F-4）。
-        if let Some(ids) = self.cg.bytes_ops {
-            let addrs: Vec<Value> = ids
-                .iter()
-                .map(|&id| {
-                    let r = self.cg.m.declare_func_in_func(id, self.b.func);
-                    self.b.ins().func_addr(types::I64, r)
-                })
-                .collect();
-            self.rt("set_bytes_ops", &addrs);
-        }
         let call = self.b.ins().call(fr, &[a]);
         let code = self.b.inst_results(call)[0];
         let code = self.b.ins().uextend(types::I64, code);

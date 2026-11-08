@@ -1,7 +1,8 @@
 //! ネイティブ実行ファイルの出力（ADR 0015 の決定 4・6・7）。
 //!
-//! SIR を `codegen` でオブジェクトにし、埋め込みのランタイム（`runtime_lib`）を一時ディレクトリに
-//! 書き出して、`cc -static -no-pie` でリンクする。一時ディレクトリは終わりに自分で消す。
+//! SIR を `codegen` でオブジェクトにし、一時ディレクトリに書き出して、`cc -nostdlib -static -no-pie` で
+//! リンクする（ADR 0025 補足 C-7 の 3-7c）。glibc も暫定ランタイム（`runtime_lib`）も結ばない。`_start` から
+//! システムコールまで生成コードが持つ。一時ディレクトリは終わりに自分で消す。
 
 use crate::codegen::{self, CgError, Opts};
 use crate::exec::RunError;
@@ -62,7 +63,7 @@ pub fn build_program(p: &Program, opts: &Opts, out: &Path) -> Result<(), BuildEr
     })?;
     let dir = fresh_dir()
         .map_err(|e| BuildError::Internal(format!("作業ディレクトリを作れない: {e}")))?;
-    let r = link(&dir, &obj, p.core_only, out);
+    let r = link(&dir, &obj, out);
     let _ = std::fs::remove_dir_all(&dir);
     r
 }
@@ -81,34 +82,27 @@ fn fresh_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-fn link(dir: &Path, obj: &[u8], core_only: bool, out: &Path) -> Result<(), BuildError> {
-    let io = |what: &str, e: std::io::Error| BuildError::Internal(format!("{what}: {e}"));
+fn link(dir: &Path, obj: &[u8], out: &Path) -> Result<(), BuildError> {
     let o = dir.join("out.o");
-    let core = dir.join("core.a");
-    std::fs::write(&o, obj).map_err(|e| io("オブジェクトを書けない", e))?;
-    std::fs::write(&core, crate::runtime_lib::core_a()).map_err(|e| io("core.a を書けない", e))?;
+    std::fs::write(&o, obj)
+        .map_err(|e| BuildError::Internal(format!("オブジェクトを書けない: {e}")))?;
+    // 暫定ランタイム（`core.a`・`os.a`）も glibc も結ばない。`_start` からシステムコールまで生成コードが持つ
+    // （ADR 0025 補足 C-4・C-7 の 3-7c）。`cc` はリンカの起動役にだけ使う。
     let mut cmd = Command::new("cc");
-    cmd.arg("-nostartfiles")
+    cmd.arg("-nostdlib")
         .arg("-static")
         .arg("-no-pie")
         .arg("-o")
         .arg(out)
-        .arg(&o)
-        .arg(&core);
-    if !core_only {
-        let os = dir.join("os.a");
-        std::fs::write(&os, crate::runtime_lib::os_a()).map_err(|e| io("os.a を書けない", e))?;
-        cmd.arg(&os);
-    }
-    cmd.args(crate::runtime_lib::native_libs());
+        .arg(&o);
     let res = cmd.output();
     match res {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(BuildError::Toolchain(
-            "リンカ cc が見つからない。ビルドには cc（gcc か clang）と glibc の静的ライブラリ（libc.a）が要る".into(),
+            "リンカ cc が見つからない。ビルドには cc（gcc か clang）が要る".into(),
         )),
         Err(e) => Err(BuildError::Toolchain(format!("cc を実行できない: {e}"))),
         Ok(o) if !o.status.success() => Err(BuildError::Toolchain(format!(
-            "リンクに失敗した（glibc の静的ライブラリ libc.a が要る）:\n{}",
+            "リンクに失敗した:\n{}",
             String::from_utf8_lossy(&o.stderr)
         ))),
         Ok(_) => Ok(()),

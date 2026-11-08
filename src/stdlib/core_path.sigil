@@ -1,0 +1,127 @@
+module std.core.path
+  targets bare, browser, server
+  trust base
+
+// `Path` の操作の Sigil 実装（ADR 0025 補足 C-7 の 3-6b、補足 K）。`Addr`・`Int` だけを受け渡す。
+// 意味は Rust の `std::path::Path`（Linux。区切りは '/'。`src/shared/path.rs`）と同じ純粋な関数。評価器の `Path` は
+// Rust の組み込みのまま（補足 C-7）で、ここは呼ばない。ネイティブはシムから呼ぶ。
+// 戻りの文字列は `std.core.string` の頭で、呼び出し側（生成コード）が所有する。入力が正しい UTF-8 なら、出力は入力の
+// 部分列の連結（'/' を含む）なので、構成上正しい UTF-8 になる（区切りの 1 バイトは ASCII）。
+// 成分の規則（Rust の `components` と同じ）: 連続する '/' は 1 つ、先頭以外の "." は無いものとして扱い、先頭の "." は
+// 成分として残る。".." は成分。先頭の '/' は根。
+
+use std.core.string.new;
+
+fn trim_end(p: Addr, n: Int) -> Int
+  intent "p の先頭 n バイトから、末尾の '/' と、先頭以外の \".\" の成分を取り除いた長さを返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める（n <= 0 なら p は読まない）"
+{
+  let mut e = n;
+  let mut go = true;
+  while go {
+    while e > 0 && raw.load_u8(raw.offset(p, e - 1)) == 47 {
+      e = e - 1;
+    }
+    let mut s = e;
+    while s > 0 && raw.load_u8(raw.offset(p, s - 1)) != 47 {
+      s = s - 1;
+    }
+    if e - s == 1 && s > 0 && raw.load_u8(raw.offset(p, s)) == 46 {
+      e = s;
+    } else {
+      go = false;
+    }
+  }
+  return e;
+}
+
+fn last_start(p: Addr, e: Int) -> Int
+  intent "p の先頭 e バイトの最後の成分の開始位置を返す（e は trim_end の結果）"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+e は読める（e <= 0 なら p は読まない）"
+{
+  let mut s = e;
+  while s > 0 && raw.load_u8(raw.offset(p, s - 1)) != 47 {
+    s = s - 1;
+  }
+  return s;
+}
+
+pub fn join(ap: Addr, al: Int, bp: Addr, bl: Int) -> Addr
+  intent "Path.join: b が根（'/' で始まる）なら b、a が空なら b、そうでなければ a と b を '/' で（a が '/' で終わるなら区切りを足さずに）つなぐ"
+  requires none
+  ensures none
+  effects none
+  unchecked "ap..ap+al と bp..bp+bl は読める正しい UTF-8（長さ 0 ならその番地は読まない）。戻りは std.core.string の頭（呼び出し側が所有）"
+{
+  if bl > 0 && raw.load_u8(bp) == 47 {
+    return new(bp, bl);
+  }
+  if al == 0 {
+    return new(bp, bl);
+  }
+  let need = raw.load_u8(raw.offset(ap, al - 1)) != 47;
+  let mut total = al + bl;
+  if need {
+    total = total + 1;
+  }
+  let tmp = raw.alloc(total, 1);
+  raw.copy(tmp, ap, al);
+  let mut at = al;
+  if need {
+    raw.store_u8(raw.offset(tmp, at), 47);
+    at = at + 1;
+  }
+  if bl > 0 {
+    raw.copy(raw.offset(tmp, at), bp, bl);
+  }
+  let r = new(tmp, total);
+  raw.free(tmp, total, 1);
+  return r;
+}
+
+pub fn file_name(p: Addr, n: Int) -> Addr
+  intent "Path.file_name: 最後の成分が通常の名前ならその文字列、根・空・\".\"・\"..\" なら空番地"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める正しい UTF-8（n <= 0 なら p は読まない）。戻りは std.core.string の頭か空番地"
+{
+  let e = trim_end(p, n);
+  let s = last_start(p, e);
+  let len = e - s;
+  if len == 0 {
+    return raw.addr_null();
+  }
+  if len == 1 && raw.load_u8(raw.offset(p, s)) == 46 {
+    return raw.addr_null();
+  }
+  if len == 2 && raw.load_u8(raw.offset(p, s)) == 46 && raw.load_u8(raw.offset(p, s + 1)) == 46 {
+    return raw.addr_null();
+  }
+  return new(raw.offset(p, s), len);
+}
+
+pub fn parent(p: Addr, n: Int) -> Addr
+  intent "Path.parent: 最後の成分を取り除いた文字列。根と空は空番地（親なし）。成分が 1 つだけの相対パスは空文字列"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+n は読める正しい UTF-8（n <= 0 なら p は読まない）。戻りは std.core.string の頭か空番地"
+{
+  let e = trim_end(p, n);
+  let s = last_start(p, e);
+  if e == s {
+    return raw.addr_null();
+  }
+  let r = trim_end(p, s);
+  if r == 0 && n > 0 && raw.load_u8(p) == 47 {
+    return new(p, 1);
+  }
+  return new(p, r);
+}

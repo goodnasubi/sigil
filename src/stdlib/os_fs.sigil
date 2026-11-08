@@ -1,0 +1,154 @@
+module std.os.fs
+  targets server
+  trust base
+
+// `fs.read`・`fs.write` の Sigil 実装（ADR 0025 補足 C-7 の 3-6b、補足 K）。ネイティブの実体。
+// 評価器の `fs.read`/`fs.write` は Rust の組み込みのまま（補足 C-7）で、ここは呼ばない。ネイティブはシムから呼ぶ。
+//
+// - `read`: openat(AT_FDCWD, path, O_RDONLY|O_CLOEXEC) → read を 0（終わり）が返るまで繰り返す（-4 EINTR は再試行）→ close。
+//   読んだバイト列は `std.core.string.valid_utf8` で検証し、不正なら Other（`new` は検証しないので、必ず検証してから呼ぶ）。
+// - `write`: openat(…, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0o666) → write を全部書き終えるまで繰り返す
+//   （部分書き込みは残りから、-4 は同じ位置から再試行、0 は Other）→ close（失敗は無視する）。
+// - openat の -4 も再試行する。パスに NUL を含む場合は Rust の `std::fs` と同じく Other（システムコールを発行しない）。
+// - errno の分類: ENOENT(2)→NotFound(0)、EACCES(13)・EPERM(1)→PermissionDenied(1)、それ以外→Other(2)（`src/shared/path.rs` の `io_arm`）。
+// 失敗の種類は `kind` の番地（8 バイト）に書く。`std.os.console` と同じく入口の `targets` との照合は免除する（補足 J・K）。
+// 排他を持たない単一スレッド前提（補足 A-5）。利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
+
+use std.core.string.new;
+use std.core.string.valid_utf8;
+
+fn classify(r: Int) -> Int
+  intent "負の errno（-r）を IoError の腕の番号（0 NotFound, 1 PermissionDenied, 2 Other）にする"
+  requires none
+  ensures none
+  effects none
+  unchecked "なし（整数の分類だけ）"
+{
+  if r == -2 {
+    return 0;
+  }
+  if r == -13 || r == -1 {
+    return 1;
+  }
+  return 2;
+}
+
+fn open(pp: Addr, pl: Int, flags: Int, mode: Int) -> Int
+  intent "path（pp..pp+pl）を NUL 終端にして openat する。fd か負の errno を返す。NUL を含むなら -22（Other）"
+  requires none
+  ensures none
+  effects fs
+  unchecked "pp..pp+pl は読める（pl == 0 なら pp は読まない）。システムコールは SYS_openat（257）だけを発行する"
+{
+  let mut i = 0;
+  while i < pl {
+    if raw.load_u8(raw.offset(pp, i)) == 0 {
+      return -22;
+    }
+    i = i + 1;
+  }
+  let buf = raw.alloc(pl + 1, 1);
+  if pl > 0 {
+    raw.copy(buf, pp, pl);
+  }
+  raw.store_u8(raw.offset(buf, pl), 0);
+  let mut fd = -4;
+  while fd == -4 {
+    fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, mode, 0, 0);
+  }
+  raw.free(buf, pl + 1, 1);
+  return fd;
+}
+
+pub fn read(pp: Addr, pl: Int, kind: Addr) -> Addr
+  intent "path のファイルを全部読んで文字列にする。失敗なら空番地を返し、kind に IoError の腕の番号を書く。UTF-8 でなければ Other"
+  requires none
+  ensures none
+  effects fs
+  unchecked "pp..pp+pl は読める正しい UTF-8、kind は 8 バイト書ける。戻りは std.core.string の頭（呼び出し側が所有）"
+{
+  let fd = open(pp, pl, 524288, 0);
+  if fd < 0 {
+    raw.store_i64(kind, classify(fd));
+    return raw.addr_null();
+  }
+  let mut cap = 4096;
+  let mut buf = raw.alloc(cap, 1);
+  let mut n = 0;
+  let mut err = 0;
+  let mut go = true;
+  while go {
+    if n == cap {
+      let bigger = raw.alloc(cap * 2, 1);
+      raw.copy(bigger, buf, n);
+      raw.free(buf, cap, 1);
+      buf = bigger;
+      cap = cap * 2;
+    }
+    let r = raw.syscall(0, fd, raw.addr_to_int(raw.offset(buf, n)), cap - n, 0, 0, 0);
+    if r > 0 {
+      n = n + r;
+    } else {
+      if r != -4 {
+        go = false;
+        if r < 0 {
+          err = r;
+        }
+      }
+    }
+  }
+  raw.syscall(3, fd, 0, 0, 0, 0, 0);
+  if err < 0 {
+    raw.free(buf, cap, 1);
+    raw.store_i64(kind, classify(err));
+    return raw.addr_null();
+  }
+  if !valid_utf8(buf, n) {
+    raw.free(buf, cap, 1);
+    raw.store_i64(kind, 2);
+    return raw.addr_null();
+  }
+  let s = new(buf, n);
+  raw.free(buf, cap, 1);
+  return s;
+}
+
+pub fn write(pp: Addr, pl: Int, dp: Addr, dl: Int, kind: Addr) -> Int
+  intent "path のファイルを作る（あれば切り詰める）。data の dl バイトを全部書く。成功は 0、失敗は 1 で kind に IoError の腕の番号を書く"
+  requires none
+  ensures none
+  effects fs
+  unchecked "pp..pp+pl と dp..dp+dl は読める（長さ 0 ならその番地は読まない）、kind は 8 バイト書ける"
+{
+  let fd = open(pp, pl, 524865, 438);
+  if fd < 0 {
+    raw.store_i64(kind, classify(fd));
+    return 1;
+  }
+  let mut at = raw.addr_to_int(dp);
+  let mut left = dl;
+  let mut err = 0;
+  let mut go = true;
+  while go && left > 0 {
+    let r = raw.syscall(1, fd, at, left, 0, 0, 0);
+    if r > 0 {
+      at = at + r;
+      left = left - r;
+    } else {
+      if r != -4 {
+        go = false;
+        if r < 0 {
+          err = r;
+        } else {
+          err = -5;
+        }
+      }
+    }
+  }
+  raw.syscall(3, fd, 0, 0, 0, 0, 0);
+  if err < 0 {
+    raw.store_i64(kind, classify(err));
+    return 1;
+  }
+  return 0;
+}

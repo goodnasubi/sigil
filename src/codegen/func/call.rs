@@ -461,34 +461,23 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (c, _) = self.val(&args[1]);
                 let (ap, al) = (self.rt("str_data", &[a]), self.rt("str_bytes", &[a]));
                 let (cp, cl) = (self.rt("str_data", &[c]), self.rt("str_bytes", &[c]));
-                let op = self.zero_tmp(8);
-                let ol = self.zero_tmp(8);
-                self.rt("path_join", &[ap, al, cp, cl, op, ol]);
-                let (p, n) = (self.ld(op, 0), self.ld(ol, 0));
-                let s = self.rt("str_new", &[p, n]);
-                self.rt("os_buf_free", &[p, n]);
-                (s, u)
+                // `std.core.path.join` が文字列の頭をそのまま返す（補足 C-7 の 3-6b）
+                (self.rt("path_join", &[ap, al, cp, cl]), u)
             }
             PathFileName | PathParent => {
                 let (a, _) = self.val(&args[0]);
                 let (ap, al) = (self.rt("str_data", &[a]), self.rt("str_bytes", &[a]));
-                let op = self.zero_tmp(8);
-                let ol = self.zero_tmp(8);
                 let name = if b == PathFileName {
                     "path_file_name"
                 } else {
                     "path_parent"
                 };
-                let ok = self.rt(name, &[ap, al, op, ol]);
-                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                // 頭の番地か、なければ 0（空番地）
+                let st = self.rt(name, &[ap, al]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, st, 0);
                 let r = self.branch(
                     c,
-                    |s| {
-                        let (p, n) = (s.ld(op, 0), s.ld(ol, 0));
-                        let st = s.rt("str_new", &[p, n]);
-                        s.rt("os_buf_free", &[p, n]);
-                        s.mk_enum_c(0, &[st])
-                    },
+                    |s| s.mk_enum_c(0, &[st]),
                     |s| {
                         let z = s.ic(0);
                         s.mk_enum_c(1, &[z])
@@ -573,19 +562,13 @@ impl<'a, 'p> Fx<'a, 'p> {
             FsRead => {
                 let (path, _) = self.val(&args[0]);
                 let (pp, pl) = (self.rt("str_data", &[path]), self.rt("str_bytes", &[path]));
-                let op = self.zero_tmp(8);
-                let ol = self.zero_tmp(8);
                 let ok = self.zero_tmp(8);
-                let rc = self.rt("fs_read", &[pp, pl, op, ol, ok]);
-                let c = self.b.ins().icmp_imm_s(IntCC::Equal, rc, 0);
+                // 成功なら文字列の頭、失敗なら 0 と `ok` に `IoError` の腕の番号（`std.os.fs.read`）
+                let st = self.rt("fs_read", &[pp, pl, ok]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, st, 0);
                 let r = self.branch(
                     c,
-                    |s| {
-                        let (p, n) = (s.ld(op, 0), s.ld(ol, 0));
-                        let st = s.rt("str_new", &[p, n]);
-                        s.rt("os_buf_free", &[p, n]);
-                        s.mk_enum_c(0, &[st])
-                    },
+                    |s| s.mk_enum_c(0, &[st]),
                     |s| {
                         let io = s.io_error(ok, path);
                         s.mk_enum_c(1, &[io])

@@ -115,6 +115,11 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_from_utf8" => ("ppp", 'p'),
         // `console.log` の書き出し（`std.os.console.log`。補足 C-7 の 3-6a）。引数は（バッファの番地, 長さ）
         "console_log" => ("pp", 'v'),
+        // `fs.read`/`fs.write`/`Path`（`std.os.fs`・`std.core.path`。補足 C-7 の 3-6b）。文字列は頭の番地で受け渡す
+        "fs_read" => ("ppp", 'p'),
+        "fs_write" => ("ppppp", 'i'),
+        "path_join" => ("pppp", 'p'),
+        "path_file_name" | "path_parent" => ("pp", 'p'),
         // `Int` の回転（`std.core.int`。補足 F-3）。`Int` の値を返すので `'p'`（`'i'` は 32 ビットへ切り詰める。F-0・F-4）
         "int_rotl" | "int_rotr" => ("ppp", 'p'),
         "int_rotr32" => ("pp", 'p'),
@@ -148,12 +153,8 @@ pub(crate) fn rt_spec(name: &str) -> Option<(&'static str, char)> {
         "raw_alloc" => ("pp", 'p'),
         "set_sigil_live" => ("p", 'v'),
         "set_str_ops" | "set_list_ops" | "set_bytes_ops" => ("ppppp", 'v'),
-        "os_buf_free" => ("pp", 'v'),
         // `Secret` の中身のゼロ化（ADR 0024、PR 6-1b）: Bytes を取り、データ領域をゼロで上書きする。生成した破棄の段が呼ぶ。
         "zeroize_bytes" => ("p", 'v'),
-        "fs_read" | "fs_write" => ("ppppp", 'i'),
-        "path_join" => ("pppppp", 'v'),
-        "path_file_name" | "path_parent" => ("pppp", 'i'),
         "fmod" => ("ff", 'f'),
         _ => return None,
     })
@@ -724,6 +725,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(int_shims(&mut cg)?);
     // `console.log`（`std.os.console`）のシム（補足 C-7 の 3-6a）。結ばれていなければ作らない（確保器と同じ）。
     shims.extend(console_shims(&mut cg)?);
+    // `fs.read`/`fs.write`/`Path` のシム（補足 C-7 の 3-6b）。同じく結ばれていなければ作らない。
+    shims.extend(fs_path_shims(&mut cg)?);
     // バイト列の表現（`std.core.bytes`）のシム（補足 F-4）。同じく常に必要。
     shims.extend(bytes_shims(&mut cg)?);
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
@@ -1086,6 +1089,37 @@ fn console_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         .map_err(internal)?;
     cg.rt.insert("console_log", id);
     Ok(vec![(id, target, 2, 'v')])
+}
+
+/// `fs.read`/`fs.write`（`std.os.fs`）と `Path`（`std.core.path`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する
+/// （補足 C-7 の 3-6b）。シムは公開しない。モジュールが結ばれていないプログラム（`raw.alloc` を差し替えた試験）では作らない。
+fn fs_path_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::{
+        FS_READ_FN, FS_WRITE_FN, PATH_FILE_NAME_FN, PATH_JOIN_FN, PATH_PARENT_FN,
+    };
+    let mut out = vec![];
+    for (name, target_fn) in [
+        ("fs_read", FS_READ_FN),
+        ("fs_write", FS_WRITE_FN),
+        ("path_join", PATH_JOIN_FN),
+        ("path_file_name", PATH_FILE_NAME_FN),
+        ("path_parent", PATH_PARENT_FN),
+    ] {
+        let Some(target) = cg.p.funcs.iter().position(|f| f.name == target_fn) else {
+            return Ok(vec![]);
+        };
+        let (args, ret) = shim_spec(name).expect("shim_spec");
+        let id =
+            cg.m.declare_function(
+                &format!("sigil_rt_{name}"),
+                Linkage::Local,
+                &shim_sig(cg.cc, args.len(), ret),
+            )
+            .map_err(internal)?;
+        cg.rt.insert(name, id);
+        out.push((id, target, args.len(), ret));
+    }
+    Ok(out)
 }
 
 /// 生成コードの中で定義する関数（`memmove`・`memset`）。

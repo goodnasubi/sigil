@@ -28,6 +28,18 @@ pub const LIVE_FN: &str = "std.os.alloc.live_blocks";
 pub const CONSOLE_MODULE: &str = "std.os.console";
 pub const CONSOLE_LOG_FN: &str = "std.os.console.log";
 
+/// `fs.read`/`fs.write` の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 C-7、PR 3-6b）。
+/// `std.os.console` と同じく、暗黙に結ぶプラットフォーム層で、入口の `targets` との照合は免除する（補足 J・K）。
+pub const FS_MODULE: &str = "std.os.fs";
+pub const FS_READ_FN: &str = "std.os.fs.read";
+pub const FS_WRITE_FN: &str = "std.os.fs.write";
+
+/// `Path` の操作の Sigil 実装のモジュール名と入口の関数（結合後の名前。補足 C-7、PR 3-6b）。純粋な核のモジュール。
+pub const PATH_MODULE: &str = "std.core.path";
+pub const PATH_JOIN_FN: &str = "std.core.path.join";
+pub const PATH_FILE_NAME_FN: &str = "std.core.path.file_name";
+pub const PATH_PARENT_FN: &str = "std.core.path.parent";
+
 /// `Float` の余り（fmod）の Sigil 版のモジュール名と関数名（結合後の名前。ADR 0025 補足 C-3）。
 /// 言語に `Float` の `%` はない（ADR 0011 の決定。検査器が拒否する）ので、プログラムには暗黙に結ばない。
 /// 後続の PR で Sigil 製の標準ライブラリ（`Float` の表示・解析）が `use` して使う。
@@ -109,6 +121,8 @@ pub const BYTES_CMP_FN: &str = "std.core.bytes.cmp";
 pub const EMBEDDED: &[(&str, &str)] = &[
     (ALLOC_MODULE, include_str!("os_alloc.sigil")),
     (CONSOLE_MODULE, include_str!("os_console.sigil")),
+    (FS_MODULE, include_str!("os_fs.sigil")),
+    (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
     (FLOAT_MODULE, include_str!("core_float.sigil")),
@@ -136,6 +150,8 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
         vec![
             ALLOC_MODULE,
             CONSOLE_MODULE,
+            FS_MODULE,
+            PATH_MODULE,
             STRING_MODULE,
             LIST_MODULE,
             INT_MODULE,

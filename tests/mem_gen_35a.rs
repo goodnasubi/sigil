@@ -164,10 +164,9 @@ fn object_does_not_import_libc_mem_functions() {
         return;
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("sigil_rt_"),
-        "nm の出力が読めていない（ランタイムの記号がない）: {text}"
-    );
+    // 3-7c から暫定ランタイムを結ばないので、オブジェクトに未解決の記号は無い（`sigil_rt_*` も無い）。
+    assert!(out.status.success(), "nm が失敗した");
+    assert!(text.trim().is_empty(), "未解決の記号が残っている: {text}");
     for line in text.lines() {
         let name = line.split_whitespace().last().unwrap_or("");
         assert!(

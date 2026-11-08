@@ -178,15 +178,13 @@ fn envp_is_written_only_to_the_named_global() {
     let src = "module m.envstart\n  targets server\n  trust base\n\nglobal mut ENVP: Addr = raw.addr_null()\n\nfn main() -> Bool\n  intent \"envp の受け渡し\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"起動処理が書いた envp の番地を読む\"\n{\n  return raw.addr_to_int(ENVP) != 0;\n}\n";
     let trust_base = vec!["m.envstart".into()];
     let mut p = sigil::ir_eval::lower_sources_with(&[src], "main", &trust_base).unwrap();
-    let idx = p
-        .globals
-        .iter()
-        .position(|g| g.name.ends_with("ENVP"))
-        .unwrap();
-    for (name, expected) in [
-        ("m.envstart.ENVP", "false\n"),
-        ("std.os.env.ENVP", "true\n"),
-    ] {
+    // `std.os.env`（3-6c）は常に結ばれ、本物の `std.os.env.ENVP` を持つ。試験の大域だけが改名の対象になるよう、
+    // 本物は別の名前に退ける。
+    for g in p.globals.iter_mut().filter(|g| g.name == "std.os.env.ENVP") {
+        g.name = "std.os.env.ENVP_UNUSED".into();
+    }
+    let idx = p.globals.iter().position(|g| g.name == "ENVP").unwrap();
+    for (name, expected) in [("ENVP", "false\n"), ("std.os.env.ENVP", "true\n")] {
         p.globals[idx].name = name.into();
         let exe = scratch("envp37b").join("prog");
         sigil::native::build_program(

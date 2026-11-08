@@ -68,6 +68,7 @@ impl Proj<'_> {
             if r == embedded::ALLOC_MODULE
                 || r == embedded::CONSOLE_MODULE
                 || r == embedded::FS_MODULE
+                || r == embedded::ENV_MODULE
             {
                 continue;
             }

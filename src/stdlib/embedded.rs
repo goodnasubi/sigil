@@ -34,6 +34,13 @@ pub const FS_MODULE: &str = "std.os.fs";
 pub const FS_READ_FN: &str = "std.os.fs.read";
 pub const FS_WRITE_FN: &str = "std.os.fs.write";
 
+/// `env` の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 C-7、PR 3-6c、補足 L）。
+/// `std.os.console` と同じく、暗黙に結ぶプラットフォーム層で、入口の `targets` との照合は免除する。
+/// 大域 `std.os.env.ENVP` へは、ネイティブの起動の処理が `envp` を書く（補足 C-4。`src/codegen/func/start.rs`）。
+pub const ENV_MODULE: &str = "std.os.env";
+pub const ENV_GET_FN: &str = "std.os.env.get";
+pub const ENV_LOOKUP_FN: &str = "std.os.env.lookup";
+
 /// `Path` の操作の Sigil 実装のモジュール名と入口の関数（結合後の名前。補足 C-7、PR 3-6b）。純粋な核のモジュール。
 pub const PATH_MODULE: &str = "std.core.path";
 pub const PATH_JOIN_FN: &str = "std.core.path.join";
@@ -122,6 +129,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (ALLOC_MODULE, include_str!("os_alloc.sigil")),
     (CONSOLE_MODULE, include_str!("os_console.sigil")),
     (FS_MODULE, include_str!("os_fs.sigil")),
+    (ENV_MODULE, include_str!("os_env.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
@@ -151,6 +159,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             ALLOC_MODULE,
             CONSOLE_MODULE,
             FS_MODULE,
+            ENV_MODULE,
             PATH_MODULE,
             STRING_MODULE,
             LIST_MODULE,

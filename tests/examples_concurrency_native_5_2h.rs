@@ -120,3 +120,59 @@ fn task_free_program_does_not_depend_on_the_scheduler() {
     assert!(String::from_utf8_lossy(&o.stdout).contains("sched"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR 0007 決定 6 の条件 8 の P1-b: 借用の引数を持つ中断する関数が、借用を保ったまま `task.yield()` で
+/// 中断・再開し、別のタスクが動いたあとでも借用先の値が正しい（評価器と一致する）。
+#[test]
+fn borrow_is_kept_across_a_suspend_and_matches() {
+    let body = r#"module m.a
+  targets server
+  trust none
+
+fn fill(xs: &mut List<Int>, n: Int) -> Int
+  intent "xs に n を足し、譲ってから、もう一度足し、長さを返す"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  xs.push(n);
+  task.yield();
+  xs.push(n + 1);
+  task.yield();
+  return xs.len();
+}
+
+fn peek(xs: &List<Int>) -> Int
+  intent "譲ってから xs の長さを返す"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  task.yield();
+  return xs.len();
+}
+
+fn run(n: Int) -> Int
+  intent "借用を持つ中断する関数を、別のタスクと交互に動かす"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let a = s.spawn(move || {
+      let mut xs = List.new();
+      let k = fill(&mut xs, n);
+      return k * 100 + peek(&xs);
+    });
+    let b = s.spawn(move || {
+      let mut ys = List.new();
+      ys.push(1);
+      return fill(&mut ys, 7);
+    });
+    return a.join() * 10 + b.join();
+  });
+}
+"#;
+    let o = run(body, "run", &[Arg::Int(3)]).unwrap_or_else(|e| panic!("{:?}", e.error));
+    assert_eq!(o.value, "2023");
+}

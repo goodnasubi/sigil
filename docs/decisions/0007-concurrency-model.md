@@ -236,6 +236,16 @@ ADR 0004 の規則 7 の延長として、テスト用の実行環境では実�
 | 9 | `tests/test_env_virtual_clock_4_2e.rs`（取り消し時の破棄の順序） | 完了 |
 | 11 | 原子的な値を待つタスクと書くタスクの組（`examples/06-concurrency` の `handoff`。`Atomic` の `clone` は同じ実体を指す。ADR 0026 決定 3） | 完了。`tests/atomic_share_190.rs`・`tests/examples_concurrency_4_2g.rs`（実行順の種を変えても止まらず終わる）、誰も書かない場合のライブロック停止は `tests/eval_yield_livelock_193.rs`（[#190](https://github.com/goodnasubi/sigil/issues/190)・[#191](https://github.com/goodnasubi/sigil/issues/191)） |
 
+**P1-b の列の確かめの記録（[ADR 0030](0030-p1b-native-concurrency.md) PR 5-2h、段階 5 の締め）**: 上の表の「並行処理の実装とテスト」のうち P1-b の確かめ（条件 8・9・10）を、ADR 0030 の実装（5-2a〜5-2g）のコードとテストに当たって確かめた結果。条件 11 の P2 の確かめは、P2 の範囲でありここでは扱わない。表の本文（上の表）は書き換えない。
+
+| 条件 | P1-b の確かめ | 確かめた根拠 | 状況 |
+|---|---|---|---|
+| 8 | 中断をまたぐ値の計算が区間の部品を使う | `src/codegen/task.rs`（冒頭の方式の説明）、`tests/examples_concurrency_native_5_2h.rs`（`borrow_is_kept_across_a_suspend_and_matches`: `&mut List`・`&List` の引数を持つ中断する関数が、借用を保ったまま `task.yield()` で中断・再開し、別のタスクと交互に動いて、評価器と一致する。ミューテーションで落ちることを確認）。なお `native_tasks_5_2d.rs` の `&mut List` を使うテストは、借用が戻ってから `yield` するので、この根拠にしない | **文言どおりではない（別の方式で満たす）**。ネイティブの変換は、中断をまたいで生きる値を求める計算を持たず、**すべての局所を状態オブジェクト（固定番地の枠）に置く**（`Loans` などの区間の部品は呼ばない）。借用が中断で終わらないことは、検査器の区間の計算（P1-a で固定済み）と、枠が動かないことで成り立ち、ネイティブでの維持は上のテストで確かめた。ADR 0030 決定 1 は状態オブジェクトに「中断をまたいで生きる局所の値」を持つとするが、実装は生きているかを区別せず全局所を置くので、条件 8 の文言（区間の部品を使う）は文字どおりには満たされない。この表の文言を「全局所を枠に置く」に改めるか、生存の計算を足すかは、所有者の判断が要る（本記録は表を書き換えない。下の「要判断」） |
+| 9 | 取り消しの破棄の順序が、実行ファイルでも同じ | `tests/native_tasks_5_2d.rs`（`unjoined_results_and_unreceived_items_are_dropped_in_the_same_order`・`cancelled_receiver_drops_locals_before_the_handed_over_value`・`failing_scope_cancels_its_children_before_unwinding_the_caller`・`every_cancel_path_matches_the_evaluator`。`--trace-drops` の列を評価器と比べる）、`tests/native_stop_5_2g.rs`（停止・取り消し時の破棄の列） | 完了 |
+| 10 | 核の部分だけを使うプログラムが実行の割り当てに依存しない | `tests/examples_concurrency_native_5_2h.rs`（`task_free_program_does_not_depend_on_the_scheduler`: 並行処理を使わない `examples/05-control` の実行ファイルに、実行の割り当て・状態機械・I/O スレッドのシンボルが無い）。出力先 `bare` が `task.spawn` を拒むことは `tests/m4_core_split.rs`（`bare_rejects_task_spawn`）。生成側の分岐は `src/codegen/task.rs` の `analyse`（`sched_start` を使うときだけ変換する） | 完了（5-2h の実装 PR で固定） |
+
+**要判断（条件 8）**: 上の「文言どおりではない」の扱い。実装を直さない場合は、条件 8 の P1-b の文言を「中断をまたぐ値は、状態オブジェクトに置かれ、借用の区間の計算は検査器が行う」に改める ADR の改訂を、所有者が決める。この記録は、確かめの結果を書くだけで、ADR 0030 の判断点 3〜6 の承認を含まない（それらは未記録のまま）。
+
 条件の見直し（ADR 0006 の根拠の限界で求めた確認）: 11 条件はすべて必要だった。条件 6 は「`state` の下位に加える」ではなく別のカテゴリにしたので、下位カテゴリを加えられる実装は他の用途のための余地として残る。漏れていた条件として、次の 1 つを ADR 0006 に追加する。
 
 - **条件 12: 大域の可変な値を持たない**（決定 1 の規則 8）。P0 では無条件に禁止し、M1 で、大域の可変な値の宣言がエラーになることをテストで固定する。

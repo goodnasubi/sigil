@@ -103,6 +103,7 @@ pub fn exec(exe: &std::path::Path, args: &[Arg]) -> Ran {
 pub fn exec_env(exe: &std::path::Path, args: &[String], env: &[(&str, &str)]) -> Ran {
     let o = Command::new(exe)
         .args(args)
+        .env("SIGIL_WORKERS", "1")
         .envs(env.iter().copied())
         .output()
         .unwrap();

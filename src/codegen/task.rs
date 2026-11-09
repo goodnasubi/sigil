@@ -54,8 +54,7 @@ pub(crate) struct Plan {
     pub drain: FuncId,
     pub frame_fp: FuncId,
     pub sched_run: FuncId,
-    /// 取り消しの旗（8 バイトの静的データ）。
-    pub cancel_flag: DataId,
+    pub worker_run: FuncId,
 }
 
 /// ブロックしうる並行処理の操作か。
@@ -227,18 +226,16 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
     let sched_run =
         cg.m.declare_function("sigil_sched_run", Linkage::Local, &one)
             .map_err(internal)?;
+    let mut worker_sig = one.clone();
+    worker_sig.params.clear();
+    let worker_run =
+        cg.m.declare_function("sigil_worker_run", Linkage::Local, &worker_sig)
+            .map_err(internal)?;
     let fn_lookup = decl(cg, "sigil_fn_lookup", 2, 'p')?;
     let fn_start = decl(cg, "sigil_fn_start", 4, 'p')?;
     let frame_done = decl(cg, "sigil_frame_done", 1, 'v')?;
     let drain = decl(cg, "sigil_drain", 0, 'v')?;
     let frame_fp = decl(cg, "sigil_frame_fp", 1, 'p')?;
-    let cancel_flag =
-        cg.m.declare_data("sigil_cancel_flag", Linkage::Local, true, false)
-            .map_err(internal)?;
-    let mut dd = DataDescription::new();
-    dd.define_zeroinit(8);
-    dd.set_align(8);
-    cg.m.define_data(cancel_flag, &dd).map_err(internal)?;
     cg.task = Some(Plan {
         susp: susp.clone(),
         addr_taken: taken,
@@ -252,7 +249,7 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
         drain,
         frame_fp,
         sched_run,
-        cancel_flag,
+        worker_run,
     });
 
     let mut idx = 2_000_000u32;
@@ -291,6 +288,9 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
     })?;
     cg.define(frame_fp, next(), shim_sig(cc, 1, 'p'), vec![], |fx| {
         fx.frame_fp_body()
+    })?;
+    cg.define(worker_run, next(), worker_sig, vec![], |fx| {
+        fx.worker_run_body()
     })?;
     cg.define(sched_run, next(), one, vec![], |fx| fx.sched_run_body())?;
     Ok(())

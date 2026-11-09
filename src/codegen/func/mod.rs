@@ -276,6 +276,27 @@ impl<'a, 'p> Fx<'a, 'p> {
     // --- 関数 ---
 
     pub fn run(&mut self, f: &Func) {
+        // 新しい原始操作を増やさず、信頼基盤内の入口だけに整列スタックの番地と実行の輪を結ぶ。
+        if f.name == "std.os.sched.local" {
+            let entry = self.b.create_block();
+            self.b.switch_to_block(entry);
+            let base = self.region_base();
+            let local = self.b.ins().iadd_imm_s(base, crate::codegen::TCB_SCHED_OFF);
+            let z = self.ic(0);
+            self.b.ins().return_(&[local, z]);
+            return;
+        }
+        if f.name == "std.os.thread.body" && self.cg.task.is_some() {
+            let entry = self.b.create_block();
+            self.b.append_block_params_for_function_params(entry);
+            self.b.switch_to_block(entry);
+            let worker = self.cg.task.as_ref().expect("計画").worker_run;
+            let fr = self.cg.m.declare_func_in_func(worker, self.b.func);
+            self.b.ins().call(fr, &[]);
+            let z = self.ic(0);
+            self.b.ins().return_(&[z, z]);
+            return;
+        }
         let p = self.cg.p;
         self.line = f
             .blocks

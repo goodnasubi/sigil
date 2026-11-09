@@ -55,7 +55,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo-nextest の導入
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@7c48f0a661edab95fdc666d1526d9ef945205245 # nextest
+        with:
+          tool: nextest@0.9.151
 
       - name: test（検証器・SIR 評価器・ネイティブを突き合わせる）
         run: |

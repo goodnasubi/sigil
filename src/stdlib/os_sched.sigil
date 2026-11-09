@@ -2,7 +2,7 @@ module std.os.sched
   targets server
   trust base
 
-// タスクの実行の割り当て（ADR 0030 決定 1・2、PR 5-2d）。ネイティブの実体。評価器は呼ばない（評価器は
+// タスクの実行の割り当て（ADR 0030 決定 1・2、PR 5-2d・5-2e）。ネイティブの実体。評価器は呼ばない（評価器は
 // `src/ir_eval/sched.rs` が同じ意味を持つ）。ワーカー数 1 の決定的モード: 実行可能待ち行列は FIFO で、切り替えは
 // 中断点でだけ起こり、時計は仮想（`task.sleep` は実時間で待たず、時計を最も早い目覚めまで進める）。
 //
@@ -11,12 +11,18 @@ module std.os.sched
 //   （ごみの列）に積み、生成コードが取り出して破棄する。
 // - 状態の塊と各レコードは確保器から取る語の並び。添字（タスク・範囲・チャネル・`Lock` の番号）は評価器と同じく作った順の
 //   連番で、`Scope`・`TaskHandle`・`Sender`・`Receiver`・`Lock` の値（`Int`）になる。
-// - ブロックしうる操作（`join`・`recv`・`acquire`・`yield`・`sleep`・範囲の終わり）は、ブロックするとき大域の「ブロック中」
+// - ブロックしうる操作（`join`・`recv`・`acquire`・`yield`・`sleep`・範囲の終わり）は、ブロックするときワーカー専用の「ブロック中」
 //   の旗を立てて 0 を返す。生成コードは旗を見て、タスクの状態を保存して中断を返す。起こされるときの値は `take_resume` で渡る。
 // - `Lock` の解放は、評価器と同じく遅延して反映する（`lock_release` は事象を積むだけで、次の `lock_acquire` の入口と
 //   `next_task` の入口で `settle` が次の待機者へ渡す）。タスクの起こす順序が評価器と一致する。
 // - 範囲は通常の範囲（`task.scope`）だけ。`timeout`・`race`・`all_ok` は未対応（生成コードがビルドで止める）。
 // - 異常停止の隔離（ルートタスク単位）と `LockBroken` は、ルートタスクが 1 つの間は観測できないので持たない（5-2g）。
+// - 共有の表・待ち行列・通知の世代は 1 本の futex 排他で守り、タスク本体は排他の外で並列に実行する。
+// - 中断時の枠の保存が終わるまで T_ACTIVE を保ち、待機中に起こされても別ワーカーは枠を再開しない。
+// - S_CUR・S_BLOCKED・S_YIELDED と取り消しの走査位置は、生成コードが整列スタック内のワーカー専用領域へ振り分ける。
+// - 取り消しは対象を T_CANCEL で選択不能にし、T_ACTIVE が落ちるのを待ってから枠を巻き戻す。
+// - 既定の台数は sched_getaffinity の CPU 数。SIGIL_WORKERS の正の整数で上書きし、1 で従来の FIFO と仮想時計を選ぶ。
+// - 時計は 5-2d の仮想時計を引き継ぐ。実時間と epoll の統合は後続の 5-2f が担当する。
 //
 // 状態の塊 S の語: 0 タスク表, 1 数, 2 容量 / 3 範囲表, 4, 5 / 6 チャネル表, 7, 8 / 9 Lock 表, 10, 11 / 12 実行可能の先頭,
 // 13 末尾 / 14 眠りの先頭 / 15 時計 / 16 連番 / 17 現在のタスク / 18 ブロック中 / 19 ルート完了 / 20 ルートの結果 /
@@ -27,6 +33,11 @@ module std.os.sched
 // 範囲: 0 生きている子の数, 1 待っているタスク, 2 子の先頭, 3 子の末尾。
 // チャネル: 0 項の先頭, 1 項の末尾（項は [次][値][破棄]）, 2 待機の先頭, 3 待機の末尾。
 // Lock: 0 値（番地そのもの）, 1 保持者, 2 待機の先頭, 3 待機の末尾, 4 値の破棄。
+
+use std.core.string.free;
+use std.os.env.get;
+use std.os.thread.join;
+use std.os.thread.spawn;
 
 global mut SCHED: Int = 0
 
@@ -50,7 +61,9 @@ global T_HASRESUME: Int = 16
 global T_SPIN_FP: Int = 17
 global T_SPIN_VER: Int = 18
 global T_SPIN_FLAG: Int = 19
-global T_WORDS: Int = 20
+global T_ACTIVE: Int = 20
+global T_CANCEL: Int = 21
+global T_WORDS: Int = 22
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -83,16 +96,45 @@ global S_VER: Int = 26
 global S_YIELDED: Int = 27
 global S_SAVED: Int = 28
 global S_SCAN: Int = 29
-global S_WORDS: Int = 30
+global S_MUTEX: Int = 30
+global S_EVENT: Int = 31
+global S_ACTIVE: Int = 32
+global S_STOP: Int = 33
+global S_WORKERS: Int = 34
+global S_HANDLES: Int = 35
+global S_WORDS: Int = 36
+
+// 81920..82160 は作業の列・表示バッファの後の予約領域。生成コードが local の本体を置く。
+fn local() -> Int
+  intent "このワーカー専用の状態（生成コードが整列スタックから求める）"
+  requires none
+  ensures none
+  effects none
+{
+  return 0;
+}
+
+fn slot(p: Int, i: Int) -> Int
+  intent "共有レコードまたはワーカー専用の語の番地を求める"
+  requires none
+  ensures none
+  effects none
+  unchecked "SCHED は起動前に初期化され、全ワーカーの合流まで不変。local は生成コードが整列スタックから求める"
+{
+  if p == SCHED && (i == S_CUR || i == S_BLOCKED || i == S_YIELDED || i == S_SAVED || i == S_SCAN || i == S_CANCEL_I) {
+    return local() + 8 * i;
+  }
+  return p + 8 * i;
+}
 
 fn ld(p: Int, i: Int) -> Int
   intent "レコード p の i 番目の語を読む"
   requires none
   ensures none
   effects none
-  unchecked "p は rec が返した生きたレコードで、0 <= i はそのレコードの語数より小さい。同じ番地を別のスレッドが書かない（ワーカー数 1 の間）"
+  unchecked "p は rec が返した生きたレコードで、0 <= i はそのレコードの語数より小さい。共有の語はスケジューラの排他の下で読む。ワーカー専用の語は整列スタック内にあり、他のスレッドは触らない"
 {
-  return raw.load_i64(raw.int_to_addr(p + 8 * i));
+  return raw.load_i64(raw.int_to_addr(slot(p, i)));
 }
 
 fn st(p: Int, i: Int, v: Int)
@@ -100,9 +142,9 @@ fn st(p: Int, i: Int, v: Int)
   requires none
   ensures none
   effects none
-  unchecked "p は rec が返した生きたレコードで、0 <= i はそのレコードの語数より小さい。同じ番地を別のスレッドが読み書きしない（ワーカー数 1 の間）"
+  unchecked "p は rec が返した生きたレコードで、0 <= i はそのレコードの語数より小さい。共有の語はスケジューラの排他の下で書く。ワーカー専用の語は他のスレッドが触らない"
 {
-  raw.store_i64(raw.int_to_addr(p + 8 * i), v);
+  raw.store_i64(raw.int_to_addr(slot(p, i)), v);
 }
 
 fn rec(words: Int) -> Int
@@ -116,7 +158,7 @@ fn rec(words: Int) -> Int
   let p = raw.addr_to_int(a);
   let mut i = 0;
   while i < words {
-    raw.store_i64(raw.int_to_addr(p + 8 * i), 0);
+    raw.store_i64(raw.int_to_addr(slot(p, i)), 0);
     i = i + 1;
   }
   return p;
@@ -137,7 +179,7 @@ fn sched() -> Int
   requires none
   ensures none
   effects none
-  unchecked "大域 SCHED を読み書きする。ワーカー数 1 の間だけ呼ぶ。初回の呼び出しで作るので、同じ引数でも結果が変わる"
+  unchecked "大域 SCHED を読み書きする。初回はワーカー作成前に呼ぶ。その後は公開の入口の排他で守る。初回の呼び出しで作るので、同じ引数でも結果が変わる"
 {
   if SCHED == 0 {
     SCHED = rec(S_WORDS);
@@ -331,7 +373,7 @@ fn garbage_push(s: Int, v: Int, dropfn: Int)
   st(s, S_GTAIL, n);
 }
 
-pub fn garbage_pop() -> Int
+fn garbage_pop_locked() -> Int
   intent "ごみの列の先頭の項を取り出す（なければ 0）。項は [次][値][破棄の関数] で、呼び出し側が garbage_free で返す"
   requires none
   ensures none
@@ -350,7 +392,7 @@ pub fn garbage_pop() -> Int
   return n;
 }
 
-pub fn garbage_free(n: Int)
+fn garbage_free_locked(n: Int)
   intent "garbage_pop が返した項を返す"
   requires none
   ensures none
@@ -377,7 +419,7 @@ fn new_task(s: Int, frame: Int, retdrop: Int, sid: Int) -> Int
   return t;
 }
 
-pub fn start(frame: Int, retdrop: Int) -> Int
+fn start_locked(frame: Int, retdrop: Int) -> Int
   intent "ルートタスク（番号 0）を作り、実行可能待ち行列に積む"
   requires none
   ensures none
@@ -412,25 +454,40 @@ fn settle(s: Int)
   }
 }
 
-pub fn next_task() -> Int
+fn next_task_locked() -> Int
   intent "実行可能なタスクの先頭を取り出して現在のタスクにし、その枠を返す（なければ 0）"
   requires none
   ensures none
   effects none
 {
   let s = sched();
+  if ld(s, S_STOP) != 0 || ld(s, S_RDONE) != 0 { return 0; }
   settle(s);
   st(s, S_BLOCKED, 0);
-  let t = ready_pop(s);
+  let mut t = ld(s, S_RHEAD);
+  let mut prev = 0;
+  while t != 0 && (ld(t, T_ACTIVE) != 0 || ld(t, T_CANCEL) != 0) {
+    prev = t;
+    t = ld(t, T_NEXT);
+  }
   if t == 0 {
     return 0;
   }
+  if prev == 0 {
+    ready_pop(s);
+  } else {
+    st(prev, T_NEXT, ld(t, T_NEXT));
+    if ld(s, S_RTAIL) == t { st(s, S_RTAIL, prev); }
+    st(t, T_NEXT, 0);
+  }
+  st(t, T_ACTIVE, 1);
+  st(s, S_ACTIVE, ld(s, S_ACTIVE) + 1);
   st(s, S_CUR, t);
   st(t, T_STATE, ST_RUNNING);
   return ld(t, T_FRAME);
 }
 
-pub fn blocked() -> Int
+fn blocked_locked() -> Int
   intent "直前の操作が現在のタスクをブロックしたか（1 / 0）"
   requires none
   ensures none
@@ -439,7 +496,7 @@ pub fn blocked() -> Int
   return ld(sched(), S_BLOCKED);
 }
 
-pub fn take_resume() -> Int
+fn take_resume_locked() -> Int
   intent "現在のタスクの起床の値を返す"
   requires none
   ensures none
@@ -451,7 +508,7 @@ pub fn take_resume() -> Int
   return ld(t, T_RESUME);
 }
 
-pub fn has_resume() -> Int
+fn has_resume_locked() -> Int
   intent "現在のタスクが、まだ受け取っていない起床の値を持つか（1 / 0）。取り消しで、その値を破棄するために使う"
   requires none
   ensures none
@@ -500,33 +557,40 @@ fn advance_clock(s: Int)
   }
 }
 
-pub fn idle() -> Int
+fn idle_locked() -> Int
   intent "実行可能なタスクがないとき、時計を進めて眠りのタスクを起こす。眠りがなければ 0（デッドロック）"
   requires none
   ensures none
   effects none
 {
   let s = sched();
+  if ld(s, S_STOP) != 0 || ld(s, S_RDONE) != 0 { return 1; }
+  if ld(s, S_ACTIVE) != 0 {
+    wait_event(s);
+    return 1;
+  }
+  if ld(s, S_RHEAD) != 0 { return 1; }
   if ld(s, S_SLEEP) == 0 {
     // デッドロック: 最後にブロックしたタスクも取り消しの対象にする（枠はまだ片付けられていない）。
     st(s, S_CUR, 0);
     return 0;
   }
   advance_clock(s);
+  notify();
   return 1;
 }
 
-pub fn yield_plain()
-  intent "task.yield: yield_val(0) に、空転の検出の対象になる印を付ける"
+fn yield_plain_locked()
+  intent "task.yield: yield_val_locked(0) に、空転の検出の対象になる印を付ける"
   requires none
   ensures none
   effects none
 {
-  yield_val(0);
+  yield_val_locked(0);
   st(sched(), S_YIELDED, 1);
 }
 
-pub fn yielded() -> Int
+fn yielded_locked() -> Int
   intent "直前の中断が task.yield だったか（1 / 0）。読むと印を消す"
   requires none
   ensures none
@@ -538,7 +602,7 @@ pub fn yielded() -> Int
   return y;
 }
 
-pub fn note_yield(fp: Int)
+fn note_yield_locked(fp: Int)
   intent "task.yield で中断したタスクの枠の指紋を記録する。実行可能なタスクがすべて、状態の版も指紋も変わらないまま 2 回続けて譲っているなら（空転）、眠りのタスクがいれば時計を進める（評価器の yield_livelock と同じ。眠りがないときの停止は持たない）"
   requires none
   ensures none
@@ -588,7 +652,7 @@ fn sleep_unlink(s: Int, t: Int)
   st(t, T_SNEXT, 0);
 }
 
-pub fn root_done() -> Int
+fn root_done_locked() -> Int
   intent "ルートタスクが完了したか（1 / 0）"
   requires none
   ensures none
@@ -597,7 +661,7 @@ pub fn root_done() -> Int
   return ld(sched(), S_RDONE);
 }
 
-pub fn root_result() -> Int
+fn root_result_locked() -> Int
   intent "ルートタスクの結果の値"
   requires none
   ensures none
@@ -608,7 +672,7 @@ pub fn root_result() -> Int
 
 // --- 範囲・生成・合流 ---
 
-pub fn scope_begin() -> Int
+fn scope_begin_locked() -> Int
   intent "範囲を作って番号を返す"
   requires none
   ensures none
@@ -637,7 +701,7 @@ fn finish_scope(s: Int, sc: Int)
   }
 }
 
-pub fn scope_end(sid: Int) -> Int
+fn scope_end_locked(sid: Int) -> Int
   intent "範囲の本体が戻った。生きている子がいれば現在のタスクを待たせて 1、いなければ後始末をして 0"
   requires none
   ensures none
@@ -658,7 +722,7 @@ pub fn scope_end(sid: Int) -> Int
   return 0;
 }
 
-pub fn spawn(sid: Int, frame: Int, retdrop: Int) -> Int
+fn spawn_locked(sid: Int, frame: Int, retdrop: Int) -> Int
   intent "範囲 sid にタスクを起こす。枠は生成コードが用意したもの。タスクの番号を返す"
   requires none
   ensures none
@@ -680,7 +744,7 @@ pub fn spawn(sid: Int, frame: Int, retdrop: Int) -> Int
   return ld(t, T_ID);
 }
 
-pub fn join(tid: Int) -> Int
+fn join_locked(tid: Int) -> Int
   intent "タスクの結果を受け取る。まだ終わっていなければ現在のタスクを待たせて 0 を返す"
   requires none
   ensures none
@@ -701,7 +765,7 @@ pub fn join(tid: Int) -> Int
   return 0;
 }
 
-pub fn finish_task(v: Int)
+fn finish_task_locked(v: Int)
   intent "現在のタスクが値 v で完了した。合流待ちと範囲の待ち手を起こす"
   requires none
   ensures none
@@ -742,7 +806,7 @@ pub fn finish_task(v: Int)
   }
 }
 
-pub fn yield_val(v: Int)
+fn yield_val_locked(v: Int)
   intent "現在のタスクを実行可能待ち行列の末尾に戻して中断する。起床の値は v"
   requires none
   ensures none
@@ -757,7 +821,7 @@ pub fn yield_val(v: Int)
   st(s, S_BLOCKED, 1);
 }
 
-pub fn sleep(ms: Int)
+fn sleep_locked(ms: Int)
   intent "現在のタスクを仮想の時計で ms 待たせる（負は 0）"
   requires none
   ensures none
@@ -789,7 +853,7 @@ pub fn sleep(ms: Int)
 
 // --- チャネル ---
 
-pub fn chan_new() -> Int
+fn chan_new_locked() -> Int
   intent "チャネルを作って番号を返す"
   requires none
   ensures none
@@ -800,7 +864,7 @@ pub fn chan_new() -> Int
   return tab_push(s, S_CHANS, rec(4));
 }
 
-pub fn chan_send(id: Int, v: Int, dropfn: Int)
+fn chan_send_locked(id: Int, v: Int, dropfn: Int)
   intent "チャネルに値を送る。待っているタスクがいれば先頭に渡して起こし、いなければ項を積む。dropfn は値を破棄する関数の番地（0 なら不要）"
   requires none
   ensures none
@@ -826,7 +890,7 @@ pub fn chan_send(id: Int, v: Int, dropfn: Int)
   st(c, 1, n);
 }
 
-pub fn chan_recv(id: Int) -> Int
+fn chan_recv_locked(id: Int) -> Int
   intent "チャネルから値を受け取る。空なら現在のタスクを待たせて 0 を返す"
   requires none
   ensures none
@@ -855,7 +919,7 @@ pub fn chan_recv(id: Int) -> Int
 
 // --- Lock ---
 
-pub fn lock_new(v: Int, dropfn: Int) -> Int
+fn lock_new_locked(v: Int, dropfn: Int) -> Int
   intent "Lock を作って番号を返す。v は保護する値の語、dropfn はそれを破棄する関数の番地（0 なら不要）"
   requires none
   ensures none
@@ -869,7 +933,7 @@ pub fn lock_new(v: Int, dropfn: Int) -> Int
   return tab_push(s, S_LOCKS, l);
 }
 
-pub fn lock_acquire(id: Int) -> Int
+fn lock_acquire_locked(id: Int) -> Int
   intent "Lock を取る。取れたら Lock のレコードの番地、保持者がいれば現在のタスクを待たせて 0"
   requires none
   ensures none
@@ -890,7 +954,7 @@ pub fn lock_acquire(id: Int) -> Int
   return 0;
 }
 
-pub fn lock_release(l: Int)
+fn lock_release_locked(l: Int)
   intent "LockGuard の破棄の知らせ。反映は次の settle まで遅らせる（評価器と起こす順序を揃える）"
   requires none
   ensures none
@@ -910,7 +974,7 @@ pub fn lock_release(l: Int)
 
 // --- 取り消しと後始末 ---
 
-pub fn cancel_next() -> Int
+fn cancel_next_locked() -> Int
   intent "取り消すタスクの枠を、作った順の逆に 1 つ返す（現在のタスク・完了済み・枠のないものは飛ばす）。なければ 0"
   requires none
   ensures none
@@ -949,7 +1013,7 @@ pub fn cancel_next() -> Int
   return 0;
 }
 
-pub fn defer_drop(v: Int, dropfn: Int)
+fn defer_drop_locked(v: Int, dropfn: Int)
   intent "破棄する値を、ごみの列に積む（取り消しの途中で、局所の後に破棄させるため）"
   requires none
   ensures none
@@ -978,7 +1042,7 @@ fn in_scope(s: Int, t: Int, sid: Int) -> Bool
   return false;
 }
 
-pub fn scope_cancel_next(sid: Int) -> Int
+fn scope_cancel_next_locked(sid: Int) -> Int
   intent "範囲 sid の子孫のタスクを、作った順の逆に 1 つ取り消す。枠を返す（完了済みの未回収の結果は、積んで -1 を返す）。なければ 0 で、現在のタスクを元に戻す"
   requires none
   ensures none
@@ -997,6 +1061,8 @@ pub fn scope_cancel_next(sid: Int) -> Int
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
     if t != me && in_scope(s, t, sid) {
+      st(t, T_CANCEL, 1);
+      while ld(t, T_ACTIVE) != 0 { wait_event(s); }
       if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
         st(t, T_HASRES, 0);
         garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
@@ -1018,7 +1084,7 @@ pub fn scope_cancel_next(sid: Int) -> Int
   return 0;
 }
 
-pub fn collect_garbage()
+fn collect_garbage_locked()
   intent "残っている値（受け取られなかったタスクの結果・チャネルの項・Lock の値）をごみの列に積む"
   requires none
   ensures none
@@ -1056,7 +1122,7 @@ pub fn collect_garbage()
   }
 }
 
-pub fn release()
+fn release_locked()
   intent "すべてのレコードと状態の塊を返す。ごみの列は先に空にしておく"
   requires none
   ensures none
@@ -1101,4 +1167,558 @@ pub fn release()
   tab_free(s, S_LOCKS);
   rec_free(s, S_WORDS);
   clear_sched();
+}
+
+pub fn garbage_pop() -> Int
+  intent "排他の下で garbage_pop を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = garbage_pop_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn garbage_free(n: Int)
+  intent "排他の下で garbage_free を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  garbage_free_locked(n);
+  mutex_unlock();
+}
+
+pub fn start(frame: Int, retdrop: Int) -> Int
+  intent "排他の下で start を行う"
+  requires none
+  ensures none
+  effects none
+{
+  sched();
+  mutex_lock();
+  let outcome = start_locked(frame, retdrop);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn next_task() -> Int
+  intent "排他の下で next_task を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = next_task_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn blocked() -> Int
+  intent "排他の下で blocked を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = blocked_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn take_resume() -> Int
+  intent "排他の下で take_resume を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = take_resume_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn has_resume() -> Int
+  intent "排他の下で has_resume を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = has_resume_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn idle() -> Int
+  intent "排他の下で idle を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = idle_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn yield_plain()
+  intent "排他の下で yield_plain を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  yield_plain_locked();
+  mutex_unlock();
+}
+
+pub fn yielded() -> Int
+  intent "排他の下で yielded を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = yielded_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn note_yield(fp: Int)
+  intent "排他の下で note_yield を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  note_yield_locked(fp);
+  notify();
+  mutex_unlock();
+}
+
+pub fn root_done() -> Int
+  intent "排他の下で root_done を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = root_done_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn root_result() -> Int
+  intent "排他の下で root_result を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = root_result_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn scope_begin() -> Int
+  intent "排他の下で scope_begin を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = scope_begin_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn scope_end(sid: Int) -> Int
+  intent "排他の下で scope_end を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = scope_end_locked(sid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn task_spawn(sid: Int, frame: Int, retdrop: Int) -> Int
+  intent "排他の下で spawn を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = spawn_locked(sid, frame, retdrop);
+  notify();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn task_join(tid: Int) -> Int
+  intent "排他の下で join を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = join_locked(tid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn finish_task(v: Int)
+  intent "排他の下で finish_task を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  finish_task_locked(v);
+  notify();
+  mutex_unlock();
+}
+
+pub fn yield_val(v: Int)
+  intent "排他の下で yield_val を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  yield_val_locked(v);
+  mutex_unlock();
+}
+
+pub fn sleep(ms: Int)
+  intent "排他の下で sleep を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  sleep_locked(ms);
+  mutex_unlock();
+}
+
+pub fn chan_new() -> Int
+  intent "排他の下で chan_new を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = chan_new_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn chan_send(id: Int, v: Int, dropfn: Int)
+  intent "排他の下で chan_send を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  chan_send_locked(id, v, dropfn);
+  notify();
+  mutex_unlock();
+}
+
+pub fn chan_recv(id: Int) -> Int
+  intent "排他の下で chan_recv を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = chan_recv_locked(id);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn lock_new(v: Int, dropfn: Int) -> Int
+  intent "排他の下で lock_new を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = lock_new_locked(v, dropfn);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn lock_acquire(id: Int) -> Int
+  intent "排他の下で lock_acquire を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = lock_acquire_locked(id);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn lock_release(l: Int)
+  intent "排他の下で lock_release を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  lock_release_locked(l);
+  notify();
+  mutex_unlock();
+}
+
+pub fn cancel_next() -> Int
+  intent "排他の下で cancel_next を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = cancel_next_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn defer_drop(v: Int, dropfn: Int)
+  intent "排他の下で defer_drop を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  defer_drop_locked(v, dropfn);
+  mutex_unlock();
+}
+
+pub fn scope_cancel_next(sid: Int) -> Int
+  intent "排他の下で scope_cancel_next を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = scope_cancel_next_locked(sid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn collect_garbage()
+  intent "排他の下で collect_garbage を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  collect_garbage_locked();
+  mutex_unlock();
+}
+
+pub fn release()
+  intent "全ワーカー合流後、主スレッドが状態を返す"
+  requires none
+  ensures none
+  effects none
+{
+  release_locked();
+}
+
+fn mutex_lock()
+  intent "共有の状態と FIFO を futex の排他で守る"
+  requires none
+  ensures none
+  effects none
+  unchecked "SCHED はワーカー作成前に初期化済み。語は 8 バイト整列、再入しない。futex は下位 32 ビットを使う"
+{
+  let s = sched();
+  let a = raw.int_to_addr(s + 8 * S_MUTEX);
+  while raw.atomic_cas_i64(a, 0, 1) != 0 {
+    raw.syscall(202, raw.addr_to_int(a), 128, 1, 0, 0, 0);
+  }
+}
+
+fn mutex_unlock()
+  intent "排他を放して待ち手を起こす"
+  requires none
+  ensures none
+  effects none
+  unchecked "このワーカーが mutex_lock で取得済み"
+{
+  let a = raw.int_to_addr(SCHED + 8 * S_MUTEX);
+  raw.atomic_store_i64(a, 0);
+  raw.syscall(202, raw.addr_to_int(a), 129, 1, 0, 0, 0);
+}
+
+fn notify()
+  intent "状態の変化を待つワーカーを起こす（世代番号で通知の取りこぼしを防ぐ）"
+  requires none
+  ensures none
+  effects none
+  unchecked "SCHED の排他を取得済み。世代番号は 32 ビットで循環する"
+{
+  let a = raw.int_to_addr(SCHED + 8 * S_EVENT);
+  let next = (raw.atomic_load_i64(a) + 1) & 4294967295;
+  raw.atomic_store_i64(a, next);
+  raw.syscall(202, raw.addr_to_int(a), 129, 2147483647, 0, 0, 0);
+}
+
+fn wait_event(s: Int)
+  intent "世代を読んで排他を放し、変化まで futex で眠る。戻る前に排他を取り直す"
+  requires none
+  ensures none
+  effects none
+  unchecked "SCHED の排他を取得済み。比較と待機は futex が不可分に行い、割り込み・偽の起床では呼び出し側が条件を再確認する"
+{
+  let a = raw.int_to_addr(s + 8 * S_EVENT);
+  let version = raw.atomic_load_i64(a);
+  mutex_unlock();
+  raw.syscall(202, raw.addr_to_int(a), 128, version, 0, 0, 0);
+  mutex_lock();
+}
+
+pub fn step_end()
+  intent "枠の保存・破棄・指紋の計算が終わってから、他のワーカーへの受け渡しを許す"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let s = sched();
+  let t = ld(s, S_CUR);
+  if t != 0 && ld(t, T_ACTIVE) != 0 {
+    st(t, T_ACTIVE, 0);
+    st(s, S_ACTIVE, ld(s, S_ACTIVE) - 1);
+  }
+  st(s, S_CUR, 0);
+  notify();
+  mutex_unlock();
+}
+
+pub fn stopped() -> Int
+  intent "停止の符号、または正常完了なら -1 を返す。実行中は 0"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let s = sched();
+  let mut outcome = ld(s, S_STOP);
+  if outcome == 0 && ld(s, S_RDONE) != 0 { outcome = 0 - 1; }
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn fail(code: Int)
+  intent "最初の停止を記録し、ワーカー全員に知らせる。失敗した枠は生成コードが破棄済み"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let s = sched();
+  if ld(s, S_STOP) == 0 { st(s, S_STOP, code); }
+  let t = ld(s, S_CUR);
+  if t != 0 {
+    st(t, T_STATE, ST_DONE);
+    st(t, T_FRAME, 0);
+  }
+  notify();
+  mutex_unlock();
+}
+
+fn worker_count() -> Int
+  intent "sched_getaffinity の利用可能 CPU 数を既定とする。SIGIL_WORKERS の正の整数で上書きでき、1 は決定的モード"
+  requires none
+  ensures none
+  effects none
+  unchecked "sched_getaffinity は確保したビット集合だけに書く。EINVAL の間は容量を倍にし、その他の失敗なら 1。環境変数の頭は get が返した String"
+{
+  let name = rec(2);
+  // 小端の ASCII: SIGIL_WO と RKERS（終端は get に渡す長さで決まる）。
+  st(name, 0, 5717143033221695827);
+  st(name, 1, 357862558546);
+  let value = get(raw.int_to_addr(name), 13);
+  rec_free(name, 2);
+  let mut override = 0;
+  if raw.addr_to_int(value) != 0 {
+    let data = raw.load_addr(value);
+    let len = raw.load_i64(raw.offset(value, 8));
+    let mut i = 0;
+    let mut valid = len > 0;
+    while i < len && valid {
+      let c = raw.load_u8(raw.offset(data, i));
+      if c < 48 || c > 57 || override > (2147483647 - (c - 48)) / 10 {
+        valid = false;
+      } else { override = override * 10 + c - 48; }
+      i = i + 1;
+    }
+    free(value);
+    if valid && override > 0 { return override; }
+  }
+  let mut bytes = 128;
+  while true {
+    let mask = rec(bytes / 8);
+    let r = raw.syscall(204, 0, bytes, mask, 0, 0, 0);
+    let mut count = 0;
+    if r > 0 {
+      let mut i = 0;
+      while i < r {
+        let mut bits = raw.load_u8(raw.int_to_addr(mask + i));
+        while bits != 0 { count = count + (bits & 1); bits = bits >> 1; }
+        i = i + 1;
+      }
+    }
+    rec_free(mask, bytes / 8);
+    if count > 0 { return count; }
+    if r != 0 - 22 { return 1; }
+    bytes = bytes * 2;
+  }
+  return 1;
+}
+
+pub fn workers_start()
+  intent "主スレッドを含めて指定数のワーカーを起こす。作成失敗は exit_group(70)"
+  requires none
+  ensures none
+  effects none
+  unchecked "ルートタスクを積んだ後、他のワーカーを作る前に主スレッドだけが呼ぶ。領域は各 256MiB 固定（仮想領域）。上限は OS の資源制限、指定は最大 2147483647"
+{
+  let s = sched();
+  let count = worker_count();
+  st(s, S_WORKERS, count);
+  let handles = rec(count);
+  st(s, S_HANDLES, handles);
+  let mut i = 1;
+  while i < count {
+    let h = spawn(raw.addr_null());
+    if raw.addr_to_int(h) == 0 { raw.syscall(231, 70, 0, 0, 0, 0, 0); }
+    st(handles, i, raw.addr_to_int(h));
+    i = i + 1;
+  }
+}
+
+pub fn workers_join()
+  intent "全ワーカーが実行の輪を離れてからハンドルを回収する。共有状態の解放はこの後だけ"
+  requires none
+  ensures none
+  effects none
+  unchecked "handles は workers_start が確保した配列。各ハンドルを一度だけ join し、全員の終了後に配列を返す"
+{
+  let s = sched();
+  let count = ld(s, S_WORKERS);
+  let handles = ld(s, S_HANDLES);
+  let mut i = 1;
+  while i < count { join(raw.int_to_addr(ld(handles, i))); i = i + 1; }
+  rec_free(handles, count);
 }

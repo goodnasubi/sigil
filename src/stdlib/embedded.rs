@@ -57,6 +57,11 @@ pub const THREAD_MAIN_FN: &str = "std.os.thread.thread_main";
 pub const SCHED_MODULE: &str = "std.os.sched";
 /// 生成コードが呼ぶ `std.os.sched` の関数（関数名, シムの名前。結合後の名前は `std.os.sched.<関数名>`）。
 pub const SCHED_FNS: &[(&str, &str)] = &[
+    ("step_end", "sched_step_end"),
+    ("stopped", "sched_stopped"),
+    ("fail", "sched_fail"),
+    ("workers_start", "sched_workers_start"),
+    ("workers_join", "sched_workers_join"),
     ("blocked", "sched_blocked"),
     ("cancel_next", "sched_cancel_next"),
     ("chan_new", "sched_chan_new"),
@@ -73,7 +78,7 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("note_yield", "sched_note_yield"),
     ("yield_plain", "sched_yield_plain"),
     ("yielded", "sched_yielded"),
-    ("join", "sched_join"),
+    ("task_join", "sched_join"),
     ("lock_acquire", "sched_lock_acquire"),
     ("lock_new", "sched_lock_new"),
     ("lock_release", "sched_lock_release"),
@@ -84,7 +89,7 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("scope_begin", "sched_scope_begin"),
     ("scope_end", "sched_scope_end"),
     ("sleep", "sched_sleep"),
-    ("spawn", "sched_spawn"),
+    ("task_spawn", "sched_spawn"),
     ("start", "sched_start"),
     ("take_resume", "sched_take_resume"),
     ("yield_val", "sched_yield_val"),

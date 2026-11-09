@@ -122,9 +122,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "sched_start" | "sched_lock_new" => ("pp", 'p'),
         "sched_next_task" | "sched_yielded" | "sched_has_resume" | "sched_blocked"
         | "sched_take_resume" | "sched_idle" | "sched_root_done" | "sched_root_result"
-        | "sched_scope_begin" | "sched_chan_new" | "sched_cancel_next" | "sched_garbage_pop" => {
-            ("", 'p')
-        }
+        | "sched_stopped" | "sched_scope_begin" | "sched_chan_new" | "sched_cancel_next"
+        | "sched_garbage_pop" => ("", 'p'),
         "sched_scope_cancel_next"
         | "sched_scope_end"
         | "sched_join"
@@ -132,10 +131,15 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_lock_acquire" => ("p", 'p'),
         "sched_spawn" => ("ppp", 'p'),
         "sched_finish_task" | "sched_note_yield" | "sched_yield_val" | "sched_sleep"
-        | "sched_lock_release" | "sched_garbage_free" => ("p", 'v'),
+        | "sched_fail" | "sched_lock_release" | "sched_garbage_free" => ("p", 'v'),
         "sched_chan_send" => ("ppp", 'v'),
         "sched_defer_drop" => ("pp", 'v'),
-        "sched_collect_garbage" | "sched_release" | "sched_yield_plain" => ("", 'v'),
+        "sched_collect_garbage"
+        | "sched_release"
+        | "sched_yield_plain"
+        | "sched_step_end"
+        | "sched_workers_start"
+        | "sched_workers_join" => ("", 'v'),
         // `fs.read`/`fs.write`/`Path`（`std.os.fs`・`std.core.path`。補足 C-7 の 3-6b）。文字列は頭の番地で受け渡す
         "fs_read" => ("ppp", 'p'),
         "fs_write" => ("ppppp", 'i'),
@@ -362,9 +366,14 @@ pub(crate) const STACK_REGION: i64 = 256 * 1024 * 1024;
 pub(crate) const TCB_GUARD: i64 = 4096;
 pub(crate) const TCB_WS_OFF: i64 = TCB_GUARD;
 pub(crate) const TCB_SB_OFF: i64 = TCB_WS_OFF + WS_BYTES as i64;
+/// ワーカー専用のスケジューラ状態（30 語）と取り消しの旗。表示バッファの後の予約領域。
+pub(crate) const TCB_SCHED_OFF: i64 = 81920;
+pub(crate) const TCB_CANCEL_OFF: i64 = TCB_SCHED_OFF + 512;
 pub(crate) const STACK_LIMIT_OFF: i64 = STACK_REGION / 4;
 // 作業の列と表示バッファが、スタックの下限より下（スタックが届かない所）に収まる。
-const _: () = assert!(TCB_SB_OFF + SB_BYTES as i64 <= STACK_LIMIT_OFF);
+const _: () = assert!(TCB_SB_OFF + SB_BYTES as i64 <= TCB_SCHED_OFF);
+const _: () = assert!(TCB_SCHED_OFF + 30 * 8 <= TCB_CANCEL_OFF);
+const _: () = assert!(TCB_CANCEL_OFF + 8 <= STACK_LIMIT_OFF);
 
 impl<'p> Cg<'p> {
     pub fn sig(&self, n: usize) -> Signature {

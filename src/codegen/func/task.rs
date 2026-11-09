@@ -89,8 +89,11 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     fn cancelling(&mut self) -> Value {
-        let d = self.cg.task.as_ref().expect("変換の計画").cancel_flag;
-        let a = self.data_addr(d);
+        let base = self.region_base();
+        let a = self
+            .b
+            .ins()
+            .iadd_imm_s(base, crate::codegen::TCB_CANCEL_OFF);
         self.ld(a, 0)
     }
 
@@ -995,16 +998,36 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[]);
     }
 
-    /// `sigil_sched_run(ルートの枠) -> (値, 符号)`: 決定的な単一ワーカーの駆動の輪。実行可能なタスクを 1 つ取り、
-    /// 入口を呼ぶ。中断なら次へ、完了ならスケジューラに知らせ、停止なら残りのタスクを新しいものから取り消す。
+    /// 主スレッドが起動・合流・後始末を所有する。共有状態の解放前に全ワーカーを待つ。
     pub fn sched_run_body(&mut self) {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
         let root = self.b.block_params(entry)[0];
-        let (done, drain) = self.plan_ids();
         let rd = self.ld(root, 48);
         self.rt("sched_start", &[root, rd]);
+        self.rt("sched_workers_start", &[]);
+        let worker = self.cg.task.as_ref().expect("計画").worker_run;
+        self.plan_fn(worker, &[]);
+        self.rt("sched_workers_join", &[]);
+        let stopped = self.rt("sched_stopped", &[]);
+        let (ok, fail) = (self.b.create_block(), self.b.create_block());
+        let normal = self.b.ins().icmp_imm_s(IntCC::Equal, stopped, -1);
+        self.b.ins().brif(normal, ok, NOARGS, fail, NOARGS);
+        self.b.switch_to_block(ok);
+        let res = self.rt("sched_root_result", &[]);
+        self.finish_sched();
+        let z = self.ic(0);
+        self.b.ins().return_(&[res, z]);
+        self.b.switch_to_block(fail);
+        self.cancel_all_and_return(stopped);
+    }
+
+    /// 各ワーカーは同じ FIFO から取り出し、中断点まで枠を専有して実行する。
+    pub fn worker_run_body(&mut self) {
+        let entry = self.b.create_block();
+        self.b.switch_to_block(entry);
+        let (done, drain) = self.plan_ids();
         let (head, idle, run, deadlock) = (
             self.b.create_block(),
             self.b.create_block(),
@@ -1014,6 +1037,13 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().jump(head, NOARGS);
 
         self.b.switch_to_block(head);
+        let stopped = self.rt("sched_stopped", &[]);
+        let (take, leave) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(stopped, leave, NOARGS, take, NOARGS);
+        self.b.switch_to_block(leave);
+        let z = self.ic(0);
+        self.b.ins().return_(&[z, stopped]);
+        self.b.switch_to_block(take);
         let f = self.rt("sched_next_task", &[]);
         let none = self.b.ins().icmp_imm_s(IntCC::Equal, f, 0);
         self.b.ins().brif(none, idle, NOARGS, run, NOARGS);
@@ -1030,7 +1060,9 @@ impl<'a, 'p> Fx<'a, 'p> {
             Some("デッドロック（進行できるタスクがない）"),
         );
         let c = self.ic(code);
-        self.cancel_all_and_return(c);
+        self.rt("sched_fail", &[c]);
+        let z = self.ic(0);
+        self.b.ins().return_(&[z, c]);
 
         self.b.switch_to_block(run);
         let sig = self.sigref(1);
@@ -1053,6 +1085,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().jump(cont, NOARGS);
         self.b.switch_to_block(cont);
         self.plan_fn(drain, &[]);
+        self.rt("sched_step_end", &[]);
         self.b.ins().jump(head, NOARGS);
 
         self.b.switch_to_block(fin);
@@ -1063,20 +1096,15 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.plan_fn(done, &[f]);
         self.rt("sched_finish_task", &[r[0]]);
         self.plan_fn(drain, &[]);
-        let rdone = self.rt("sched_root_done", &[]);
-        let (fin_ok, again) = (self.b.create_block(), head);
-        self.b.ins().brif(rdone, fin_ok, NOARGS, again, NOARGS);
-        self.b.switch_to_block(fin_ok);
-        let res = self.rt("sched_root_result", &[]);
-        self.rt("sched_collect_garbage", &[]);
-        self.plan_fn(drain, &[]);
-        self.rt("sched_release", &[]);
-        let z = self.ic(0);
-        self.b.ins().return_(&[res, z]);
+        self.rt("sched_step_end", &[]);
+        self.b.ins().jump(head, NOARGS);
 
         self.b.switch_to_block(fail);
         self.plan_fn(done, &[f]);
-        self.cancel_all_and_return(r[1]);
+        self.rt("sched_fail", &[r[1]]);
+        self.rt("sched_step_end", &[]);
+        let z = self.ic(0);
+        self.b.ins().return_(&[z, r[1]]);
     }
 
     /// 残りのタスクを新しいものから順に取り消し、後始末をして、符号 `code` の停止を返す。
@@ -1095,8 +1123,11 @@ impl<'a, 'p> Fx<'a, 'p> {
     /// 局所・持ち主の後に破棄する。評価器の cancel_task の順序）。旗は元の値に戻す。
     fn cancel_loop(&mut self, scope: Option<Value>) {
         let (done, drain) = self.plan_ids();
-        let flag = self.cg.task.as_ref().expect("計画").cancel_flag;
-        let fa = self.data_addr(flag);
+        let base = self.region_base();
+        let fa = self
+            .b
+            .ins()
+            .iadd_imm_s(base, crate::codegen::TCB_CANCEL_OFF);
         let old = self.ld(fa, 0);
         let one = self.ic(1);
         self.st(one, fa, 0);
@@ -1128,7 +1159,11 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.plan_fn(drain, &[]);
         self.b.ins().jump(head, NOARGS);
         self.b.switch_to_block(end);
-        let fa = self.data_addr(flag);
+        let base = self.region_base();
+        let fa = self
+            .b
+            .ins()
+            .iadd_imm_s(base, crate::codegen::TCB_CANCEL_OFF);
         self.st(old, fa, 0);
     }
 

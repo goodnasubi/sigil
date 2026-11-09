@@ -3,7 +3,7 @@ use crate::codegen::SFn;
 use crate::exec::StopKind;
 use crate::ir::{Builtin, Operand, Place, Ty};
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Value};
+use cranelift_codegen::ir::{types, AtomicRmwOp, InstBuilder, MemFlagsData, Value};
 use cranelift_module::Module;
 
 impl<'a, 'p> Fx<'a, 'p> {
@@ -952,11 +952,49 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (a5, _) = self.val(&args[6]);
                 (self.rt("syscall6", &[n, a0, a1, a2, a3, a4, a5]), u)
             }
-            // 原子的な操作（ADR 0030 決定 5）。実装は PR 5-2a の実装 PR で入る。lowering はまだこの組み込みを生成しない。
-            RawAtomicLoadI64 | RawAtomicStoreI64 | RawAtomicAddI64 | RawAtomicSwapI64
-            | RawAtomicCasI64 | RawAtomicFence => {
-                let v = self.unsupported("原子的な操作は未実装（ADR 0030 決定 5、PR 5-2a）");
+            // 原子的な操作（ADR 0030 決定 5）。Cranelift の原子命令で直接生成する（逐次一貫）。
+            // 番地は 8 バイト整列の生きた領域であることを前提の文が課す（評価器は実行時に検査する）。
+            RawAtomicLoadI64 => {
+                let (a, _) = self.val(&args[0]);
+                let v = self
+                    .b
+                    .ins()
+                    .atomic_load(types::I64, MemFlagsData::trusted(), a);
                 (v, u)
+            }
+            RawAtomicStoreI64 => {
+                let (a, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                self.b.ins().atomic_store(MemFlagsData::trusted(), v, a);
+                (self.ic(0), u)
+            }
+            RawAtomicAddI64 | RawAtomicSwapI64 => {
+                let (a, _) = self.val(&args[0]);
+                let (v, _) = self.val(&args[1]);
+                let op = if b == RawAtomicAddI64 {
+                    AtomicRmwOp::Add
+                } else {
+                    AtomicRmwOp::Xchg
+                };
+                let old = self
+                    .b
+                    .ins()
+                    .atomic_rmw(types::I64, MemFlagsData::trusted(), op, a, v);
+                (old, u)
+            }
+            RawAtomicCasI64 => {
+                let (a, _) = self.val(&args[0]);
+                let (expected, _) = self.val(&args[1]);
+                let (new, _) = self.val(&args[2]);
+                let old = self
+                    .b
+                    .ins()
+                    .atomic_cas(MemFlagsData::trusted(), a, expected, new);
+                (old, u)
+            }
+            RawAtomicFence => {
+                self.b.ins().fence();
+                (self.ic(0), u)
             }
             // `task.yield` は協調点（ADR 0028）: ネイティブ出力にはスケジューラが
             // 無いため、bare の意味づけどおり何もしない。他の並行操作（生成・合流・

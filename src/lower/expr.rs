@@ -723,6 +723,12 @@ impl<'a> L<'a> {
                     "raw.set" => Builtin::RawSet,
                     "raw.alloc" => Builtin::RawAlloc,
                     "raw.free" => Builtin::RawFree,
+                    "raw.atomic_load_i64" => Builtin::RawAtomicLoadI64,
+                    "raw.atomic_store_i64" => Builtin::RawAtomicStoreI64,
+                    "raw.atomic_add_i64" => Builtin::RawAtomicAddI64,
+                    "raw.atomic_swap_i64" => Builtin::RawAtomicSwapI64,
+                    "raw.atomic_cas_i64" => Builtin::RawAtomicCasI64,
+                    "raw.atomic_fence" => Builtin::RawAtomicFence,
                     "raw.syscall" => {
                         self.core_only = false;
                         Builtin::RawSyscall

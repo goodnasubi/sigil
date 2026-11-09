@@ -55,6 +55,10 @@ pub const THREAD_MAIN_FN: &str = "std.os.thread.thread_main";
 /// このモジュールの関数で動かす。`std.os.thread` などと同じく暗黙に結ぶプラットフォーム層で、入口の `targets` との照合は免除する。
 /// 入口の関数は、プログラムが並行処理の操作（`task.scope` など）を使うときだけ SIR に入れる（`lower`）。
 pub const SCHED_MODULE: &str = "std.os.sched";
+
+/// 入出力の準備完了と時間の待機（`epoll`・期限の一覧）の Sigil 実装のモジュール名（ADR 0030 決定 3、PR 5-2f）。
+/// 機構だけで、言語の API は持たない（段階 6）。評価器は呼ばない。暗黙には結ばない（`use` した試験や後続の PR が結ぶ）。
+pub const IO_MODULE: &str = "std.os.io";
 /// 生成コードが呼ぶ `std.os.sched` の関数（関数名, シムの名前。結合後の名前は `std.os.sched.<関数名>`）。
 pub const SCHED_FNS: &[(&str, &str)] = &[
     ("step_end", "sched_step_end"),
@@ -186,6 +190,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (ENV_MODULE, include_str!("os_env.sigil")),
     (THREAD_MODULE, include_str!("os_thread.sigil")),
     (SCHED_MODULE, include_str!("os_sched.sigil")),
+    (IO_MODULE, include_str!("os_io.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),

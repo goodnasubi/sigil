@@ -16,7 +16,11 @@ module std.os.alloc
 //   印はクラス）。解放時に番地を表で引いてから頭を読むので、解放済みの大ブロックや確保器の外の番地の頭を読まない
 //   （SIGSEGV に頼らない。A-4）。
 // - 異常停止はすべて exit_group(70)（A-4）。検査は状態の書き換えより前に終える。
-// - 排他を持たない。単一スレッド前提（A-5）。
+// - 排他（ADR 0030 決定 6、PR 5-2b）: 公開の入口（`alloc`・`free`・`live_blocks`）は、状態のページの最後の語（4088）に置いた
+//   ロックの語を `atomic_cas_i64` で取り、`atomic_store_i64` で放して、内側の `*_locked` を囲む。ロックは 1 本で、回転して待つ
+//   （競合するのは複数の OS スレッドが動いてから。`futex` で眠る待機は 5-2e で入れる）。ロックの語は状態のページの中にあるので、
+//   状態のページを作る最初の呼び出しだけは排他の外で起こる。**最初の呼び出しは、最初のスレッドを作るより前に行う**（前提。5-2c の
+//   スレッドの作成が、作る前に確保器を一度呼ぶ）。`halt()`（`exit_group(70)`）はプロセス全体を終えるので、ロックを放さなくてよい。
 
 global MAGIC: Int = 0x5349474C414C0000
 global FREED: Int = 0x5349474C46520000
@@ -25,6 +29,7 @@ global CLASS_LARGE_ALIGNED: Int = 9
 global MAX_SIZE: Int = 0x400000000000
 global mut STATE: Addr = raw.addr_null()
 global mut LIVE: Int = 0
+global LOCK_AT: Int = 4088
 
 fn halt()
   intent "異常停止する（exit_group(70)）"
@@ -100,7 +105,7 @@ fn state() -> Addr
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域 STATE を読み書きするため、同じ引数でも初回かどうかで動作が変わる"
+  unchecked "確保器の排他の下で呼ばれ（公開の入口がロックを取る。ADR 0030 決定 6）、中断点を持たない。大域 STATE を読み書きするため、同じ引数でも初回かどうかで動作が変わる"
 {
   if raw.addr_to_int(STATE) == 0 {
     STATE = raw.int_to_addr(map(4096));
@@ -298,7 +303,7 @@ fn refill(k: Int)
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。ページは表に印 k で登録し、返さない"
+  unchecked "確保器の排他の下で呼ばれ（公開の入口がロックを取る。ADR 0030 決定 6）、中断点を持たない。ページは表に印 k で登録し、返さない"
 {
   let st = state();
   let bs = (16 << k) + 16;
@@ -321,7 +326,7 @@ fn small_alloc(size: Int) -> Addr
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域 LIVE を書き換えるため非決定的"
+  unchecked "確保器の排他の下で呼ばれ（公開の入口がロックを取る。ADR 0030 決定 6）、中断点を持たない。大域 LIVE を書き換えるため非決定的"
 {
   let k = class_of(size);
   let st = state();
@@ -347,7 +352,7 @@ fn large_alloc(size: Int, align: Int) -> Addr
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域 LIVE を書き換えるため非決定的"
+  unchecked "確保器の排他の下で呼ばれ（公開の入口がロックを取る。ADR 0030 決定 6）、中断点を持たない。大域 LIVE を書き換えるため非決定的"
 {
   let mut ret = 0;
   if align <= 16 {
@@ -372,12 +377,12 @@ fn large_alloc(size: Int, align: Int) -> Addr
   return raw.int_to_addr(ret);
 }
 
-pub fn alloc(size: Int, align: Int) -> Addr
-  intent "size バイト・align 境界の領域を確保する（ネイティブの raw.alloc の実体）"
+fn alloc_locked(size: Int, align: Int) -> Addr
+  intent "size バイト・align 境界の領域を確保する（排他の下で呼ぶ本体）"
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。大域の状態を書き換えるため、同じ引数でも返る番地は呼び出しの履歴による"
+  unchecked "確保器の排他の下で呼ばれ（公開の入口がロックを取る。ADR 0030 決定 6）、中断点を持たない。大域の状態を書き換えるため、同じ引数でも返る番地は呼び出しの履歴による"
 {
   if size <= 0 || size > MAX_SIZE {
     halt();
@@ -482,12 +487,12 @@ fn small_free(a: Int, size: Int)
   LIVE = LIVE - 1;
 }
 
-pub fn free(a: Addr, size: Int, align: Int)
-  intent "alloc で得た領域を返す（ネイティブの raw.free の実体）"
+fn free_locked(a: Addr, size: Int, align: Int)
+  intent "alloc で得た領域を返す（排他の下で呼ぶ本体）"
   requires none
   ensures none
   effects none
-  unchecked "単一スレッドで、中断点を持たない（補足 A-5）。align は範囲と 2 の冪だけを検査し、確保時の align とは突き合わせない（補足 A-4・B-1）"
+  unchecked "確保器の排他の下で呼ばれ（公開の入口がロックを取る。ADR 0030 決定 6）、中断点を持たない。align は範囲と 2 の冪だけを検査し、確保時の align とは突き合わせない（補足 A-4・B-1）"
 {
   let ai = raw.addr_to_int(a);
   if ai == 0 || size <= 0 || size > MAX_SIZE {
@@ -506,12 +511,77 @@ pub fn free(a: Addr, size: Int, align: Int)
   small_free(ai, size);
 }
 
-pub fn live_blocks() -> Int
-  intent "生きているブロックの数（SIGIL_RT_LIVE の sigil_blocks=）"
+fn lock_addr() -> Addr
+  intent "ロックの語の番地（状態のページの最後の語）"
   requires none
   ensures none
   effects none
-  unchecked "単一スレッド（補足 A-5）。大域 LIVE を読むため非決定的"
+  unchecked "状態のページは state() が返す 4096 バイトの領域で、LOCK_AT（4088）の語は他の用途に使わない。state() の初回だけは排他の外で起こる（最初の呼び出しはスレッドを作る前。ADR 0030 決定 6）"
 {
-  return LIVE;
+  return raw.offset(state(), LOCK_AT);
+}
+
+fn lock()
+  intent "確保器のロックを取る（回転して待つ。逐次一貫の比較交換）"
+  requires none
+  ensures none
+  effects none
+  unchecked "lock_addr() の語は 8 バイト整列で、0（空き）か 1（取得済み）だけが入る。取ったら必ず unlock() で放す（halt() で終える経路を除く）。同じスレッドでの再入は回転して戻らない（入口は alloc・free・live_blocks だけで、内側から呼ばない）"
+{
+  let l = lock_addr();
+  while raw.atomic_cas_i64(l, 0, 1) != 0 {
+  }
+}
+
+fn unlock()
+  intent "確保器のロックを放す"
+  requires none
+  ensures none
+  effects none
+  unchecked "lock() で取ったスレッドだけが呼ぶ。lock_addr() の語は 8 バイト整列で、書くのは 0（空き）だけ"
+{
+  raw.atomic_store_i64(lock_addr(), 0);
+}
+
+pub fn alloc(size: Int, align: Int) -> Addr
+  intent "size バイト・align 境界の領域を確保する（ネイティブの raw.alloc の実体）。排他の下で行う"
+  requires none
+  ensures none
+  effects none
+  unchecked "ロックを取って alloc_locked を呼び、放してから戻す。最初の呼び出しはスレッドを作る前に行う（ADR 0030 決定 6）。大域の状態を書き換えるため、同じ引数でも返る番地は呼び出しの履歴による"
+{
+  state();
+  lock();
+  let r = alloc_locked(size, align);
+  unlock();
+  return r;
+}
+
+pub fn free(a: Addr, size: Int, align: Int)
+  intent "alloc で得た領域を返す（ネイティブの raw.free の実体）。排他の下で行う"
+  requires none
+  ensures none
+  effects none
+  unchecked "ロックを取って free_locked を呼び、放してから戻す。align は範囲と 2 の冪だけを検査し、確保時の align とは突き合わせない（補足 A-4・B-1）"
+{
+  state();
+  lock();
+  free_locked(a, size, align);
+  unlock();
+}
+
+pub fn live_blocks() -> Int
+  intent "生きているブロックの数（SIGIL_RT_LIVE の sigil_blocks=）。排他の下で読む"
+  requires none
+  ensures none
+  effects none
+  unchecked "状態のページがまだ無ければ（一度も確保していない）LIVE は 0 のままなので、ロックを取らずに LIVE を返す（状態のページを作らない）。あれば lock() で守って LIVE を読む。大域 LIVE を読むため非決定的"
+{
+  if raw.addr_to_int(STATE) == 0 {
+    return LIVE;
+  }
+  lock();
+  let n = LIVE;
+  unlock();
+  return n;
 }

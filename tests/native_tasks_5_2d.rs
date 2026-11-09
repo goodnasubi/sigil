@@ -467,3 +467,147 @@ fn run() -> Int
     let v = go(body, "run", &[]);
     assert!(v.starts_with("2450"), "{v}");
 }
+
+// ---- 決定性・ヒープとスタックの返却 ----
+
+use common::native::{exec_env, scratch, try_build};
+
+/// 実行ファイルを作って走らせ、（標準出力, 終了時の `sigil_blocks=` の数）を返す。同じ実行ファイルを `times` 回走らせ、
+/// 出力が毎回一致すること（決定性。同じ入力で同じ順序）と、終了時に確保した塊がすべて返っていること（0）を確かめる。
+fn run_native(body: &str, f: &str, args: &[String], times: usize) -> String {
+    let src = prog(body);
+    let dir = scratch("tasks-5-2d");
+    let exe = dir.join("prog");
+    try_build(&[src.as_str()], f, &exe, false).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    let mut first: Option<String> = None;
+    for _ in 0..times {
+        let got = exec_env(&exe, args, &[("SIGIL_RT_LIVE", "1")]);
+        assert_eq!(got.code, Some(0), "終了コード\n{}\n{src}", got.stderr);
+        let line = got
+            .stderr
+            .lines()
+            .find_map(|l| l.strip_prefix("live: "))
+            .unwrap_or_else(|| panic!("live の行がない: {}", got.stderr));
+        assert!(line.contains("sigil_blocks=0"), "塊が返っていない: {line}");
+        match &first {
+            None => first = Some(got.stdout),
+            Some(s) => assert_eq!(s, &got.stdout, "同じ入力で出力が変わった"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    first.unwrap()
+}
+
+const PIPELINE: &str = r#"
+struct Job {
+  id: Int,
+  label: String,
+}
+
+fn stage(n: Int, tx: &Sender<Job>) -> Int
+  intent "s"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let mut i = 0;
+  while i < n {
+    tx.send(Job { id: i, label: "job" });
+    if i % 3 == 0 {
+      task.yield();
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+fn run(n: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let producer = s.spawn(move || stage(n, &tx));
+    let mut sum = 0;
+    let mut k = 0;
+    while k < n {
+      let j = rx.recv();
+      sum = sum + j.id + j.label.len();
+      k = k + 1;
+    }
+    return sum + producer.join();
+  });
+}
+"#;
+
+#[test]
+fn native_is_deterministic_and_returns_every_block() {
+    // 20 件と 2000 件で、確保した塊（枠・文字列・構造体・スケジューラの記録）がすべて返る。
+    let small = run_native(PIPELINE, "run", &["20".into()], 3);
+    let big = run_native(PIPELINE, "run", &["2000".into()], 2);
+    let want = |n: i64| (0..n).map(|i| i + 3).sum::<i64>() + n;
+    assert_eq!(small.trim(), want(20).to_string());
+    assert_eq!(big.trim(), want(2000).to_string());
+}
+
+#[test]
+fn eval_and_native_agree_on_the_pipeline() {
+    let v = go(PIPELINE, "run", &[Arg::Int(30)]);
+    assert!(v.starts_with(&((0..30).map(|i| i + 3).sum::<i64>() + 30).to_string()));
+}
+
+#[test]
+fn many_tasks_do_not_grow_the_stack() {
+    // 1 万個のタスクを順に起こして待つ。再開は枠の連鎖を再入するだけで、ネイティブのスタックは増え続けない。
+    let body = r#"
+fn work(n: Int) -> Int
+  intent "w"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  task.yield();
+  task.yield();
+  return n;
+}
+
+fn run(n: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let mut total = 0;
+    let mut i = 0;
+    while i < n {
+      let h = s.spawn(move || work(i));
+      total = total + h.join();
+      i = i + 1;
+    }
+    return total;
+  });
+}
+"#;
+    let out = run_native(body, "run", &["10000".into()], 1);
+    assert_eq!(out.trim(), "49995000");
+}
+
+#[test]
+fn root_task_can_sleep_alone() {
+    let body = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task.suspend
+{
+  task.sleep(5);
+  task.sleep(7);
+  return 12;
+}
+"#;
+    assert!(go(body, "run", &[]).starts_with("12"));
+}

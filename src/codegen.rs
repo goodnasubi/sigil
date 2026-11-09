@@ -120,9 +120,9 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "thread_main" => ("p", 'v'),
         // タスクの実行の割り当て `std.os.sched`（ADR 0030 決定 1・2、PR 5-2d）。値は語で受け渡す
         "sched_start" | "sched_lock_new" => ("pp", 'p'),
-        "sched_next_task" | "sched_blocked" | "sched_take_resume" | "sched_idle"
-        | "sched_root_done" | "sched_root_result" | "sched_scope_begin" | "sched_chan_new"
-        | "sched_cancel_next" | "sched_garbage_pop" => ("", 'p'),
+        "sched_next_task" | "sched_has_resume" | "sched_blocked" | "sched_take_resume"
+        | "sched_idle" | "sched_root_done" | "sched_root_result" | "sched_scope_begin"
+        | "sched_chan_new" | "sched_cancel_next" | "sched_garbage_pop" => ("", 'p'),
         "sched_scope_end" | "sched_join" | "sched_chan_recv" | "sched_lock_acquire" => ("p", 'p'),
         "sched_spawn" => ("ppp", 'p'),
         "sched_finish_task" | "sched_yield_val" | "sched_sleep" | "sched_lock_release"

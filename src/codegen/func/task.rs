@@ -417,6 +417,17 @@ impl<'a, 'p> Fx<'a, 'p> {
         let (cb, rb) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(can, cb, NOARGS, rb, NOARGS);
         self.b.switch_to_block(cb);
+        // 起こされたが再開前に取り消された: 渡された所有値を破棄する（評価器の cancel_task が resume を捨てるのと同じ）。
+        if matches!(b, TaskJoin | ChanRecv | AtomicLoad) {
+            let has = self.rt("sched_has_resume", &[]);
+            let (dropb, after) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(has, dropb, NOARGS, after, NOARGS);
+            self.b.switch_to_block(dropb);
+            let w = self.rt("sched_take_resume", &[]);
+            self.drop_val(dty, w);
+            self.b.ins().jump(after, NOARGS);
+            self.b.switch_to_block(after);
+        }
         let c = self.ic(CANCEL_CODE);
         self.jump_cleanup(c);
         self.b.switch_to_block(rb);

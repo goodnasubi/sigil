@@ -655,3 +655,85 @@ fn run() -> Int
     let v = go(body, "run", &[]);
     assert!(v.starts_with("10|0\n1\n2\n3\n4\n"), "{v}");
 }
+
+#[test]
+fn deadlock_cancels_the_blocked_task_and_drops_its_locals() {
+    // Codex 指摘 1: デッドロックで止まるとき、最後にブロックしたタスクも取り消す（局所の構造体の破棄が評価器と揃う）。
+    let body = r#"
+struct Tok {
+  id: Int,
+}
+
+fn waiter(rx: &Receiver<Int>) -> Int
+  intent "w"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let t = Tok { id: 5 };
+  let x = rx.recv();
+  return t.id + x;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let t0 = Tok { id: 1 };
+    let h = s.spawn(move || waiter(&rx));
+    return h.join() + t0.id;
+  });
+}
+"#;
+    let opts = Options {
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let e = run_with(&prog(body), "run", &[], &opts).unwrap_err();
+    assert!(!e.drops.is_empty(), "{:?} {:?}", e.drops, e.error);
+}
+
+#[test]
+fn value_handed_to_a_receiver_is_dropped_when_another_task_stops() {
+    // Codex 指摘 2: 受信側へ渡した所有値が、受信側の再開前に別のタスクの停止で取り消されても漏れない。
+    let body = r#"
+struct Tok {
+  id: Int,
+}
+
+fn run(z: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let a = s.spawn(move || {
+      let t: Tok = rx.recv();
+      return t.id;
+    });
+    let b = s.spawn(move || {
+      tx.send(Tok { id: 7 });
+      return 10 / z;
+    });
+    return a.join() + b.join();
+  });
+}
+"#;
+    let opts = Options {
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let e = run_with(&prog(body), "run", &[Arg::Int(0)], &opts).unwrap_err();
+    assert!(
+        e.drops.iter().any(|d| d.contains("Tok")),
+        "{:?} {:?}",
+        e.drops,
+        e.error
+    );
+}

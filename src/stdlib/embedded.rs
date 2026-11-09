@@ -66,6 +66,7 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("finish_task", "sched_finish_task"),
     ("garbage_free", "sched_garbage_free"),
     ("garbage_pop", "sched_garbage_pop"),
+    ("has_resume", "sched_has_resume"),
     ("idle", "sched_idle"),
     ("join", "sched_join"),
     ("lock_acquire", "sched_lock_acquire"),

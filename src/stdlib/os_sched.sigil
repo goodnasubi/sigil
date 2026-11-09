@@ -46,7 +46,8 @@ global T_SNEXT: Int = 12
 global T_WAITSCOPE: Int = 13
 global T_HASRES: Int = 14
 global T_SIB: Int = 15
-global T_WORDS: Int = 16
+global T_HASRESUME: Int = 16
+global T_WORDS: Int = 17
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -284,6 +285,7 @@ fn wake(s: Int, t: Int, v: Int, has: Bool)
 {
   if has {
     st(t, T_RESUME, v);
+    st(t, T_HASRESUME, 1);
   }
   st(t, T_STATE, ST_READY);
   ready_push(s, t);
@@ -427,7 +429,19 @@ pub fn take_resume() -> Int
   effects none
 {
   let s = sched();
-  return ld(ld(s, S_CUR), T_RESUME);
+  let t = ld(s, S_CUR);
+  st(t, T_HASRESUME, 0);
+  return ld(t, T_RESUME);
+}
+
+pub fn has_resume() -> Int
+  intent "現在のタスクが、まだ受け取っていない起床の値を持つか（1 / 0）。取り消しで、その値を破棄するために使う"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  return ld(ld(s, S_CUR), T_HASRESUME);
 }
 
 pub fn idle() -> Int
@@ -439,6 +453,8 @@ pub fn idle() -> Int
   let s = sched();
   let mut best = ld(s, S_SLEEP);
   if best == 0 {
+    // デッドロック: 最後にブロックしたタスクも取り消しの対象にする（枠はまだ片付けられていない）。
+    st(s, S_CUR, 0);
     return 0;
   }
   let mut t = ld(best, T_SNEXT);
@@ -652,6 +668,7 @@ pub fn yield_val(v: Int)
   let s = sched();
   let t = ld(s, S_CUR);
   st(t, T_RESUME, v);
+  st(t, T_HASRESUME, 1);
   st(t, T_STATE, ST_READY);
   ready_push(s, t);
   st(s, S_BLOCKED, 1);
@@ -805,16 +822,21 @@ pub fn cancel_next() -> Int
   effects none
 {
   let s = sched();
-  let cur = ld(s, S_CUR);
   let mut i = ld(s, S_CANCEL_I);
   if i == 0 {
+    // 失敗した現在のタスクは、枠を呼び出し側が片付け済みなので対象にしない（デッドロックでは現在のタスクが空）。
+    let cur = ld(s, S_CUR);
+    if cur != 0 {
+      st(cur, T_STATE, ST_DONE);
+    }
     i = ld(s, S_TASKS + 1);
   }
   while i > 0 {
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
-    if t != cur && ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
+    if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
       st(s, S_CANCEL_I, i);
+      st(s, S_CUR, t);
       st(t, T_STATE, ST_DONE);
       let f = ld(t, T_FRAME);
       st(t, T_FRAME, 0);

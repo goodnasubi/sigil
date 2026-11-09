@@ -1,0 +1,883 @@
+module std.os.io
+  targets server
+  trust base
+
+// 入出力の準備完了と時間の待機（ADR 0030 決定 3、PR 5-2f）。ネイティブの実体。評価器は呼ばない（評価器は I/O スレッドを
+// 動かせない。`std.os.thread` などと同じ作法）。**機構だけ**で、ソケットなどの言語の API は段階 6 で決める。暗黙には結ばない
+// （`use` した試験や、後続の PR が結ぶ）。`std.os.thread` に依らないので、スレッドの本体（`io_loop`）は呼び出し側が
+// `std.os.thread.spawn` の本体として渡す。
+//
+// - **専用の I/O スレッド 1 本**が `io_loop` で `epoll_wait`（番号 232）を回す。待つ相手は、登録した記述子（`EPOLLONESHOT`）と、
+//   期限の一覧（最小ヒープ）の最も近い期限（`epoll_wait` のタイムアウト）と、他のスレッドから起こすための `eventfd`
+//   （`eventfd2`、番号 290）の三つ。
+// - 時刻は `clock_gettime`（番号 228、CLOCK_MONOTONIC）で読む（`-nostdlib` なので vDSO は使わない）。**決定的モードの仮想の
+//   時計（`std.os.sched` の S_CLOCK）とは別の経路**で、`task.sleep` の意味は変えない。実時間の待機は、この期限の一覧だけが持つ。
+// - 期限の一覧は (期限, 連番) の最小ヒープ。同じ期限は登録の順に起きる。**期限より前に I/O スレッドが起きても（`eventfd` や
+//   他の記述子で）、現在の時刻が期限に届くまでは起こさない**。
+// - 記述子の登録は 1 回きり（`EPOLLONESHOT`）。準備完了を 1 度知らせたら、`io_wait_fd` で登録し直すまで、同じ記述子は
+//   何も知らせない。登録は記述子の表に残る（`EPOLL_CTL_MOD` で登録し直す）。
+// - 準備ができた印は「完了の列」に積む。取り出すのは `io_take`（待たない）か `io_take_wait`（来るまで `futex` で眠る）。
+//   完了の列から先は、実行可能待ち行列にタスクを積んでワーカーを起こす役目で、最初の待ちの操作（段階 6）と一緒に結ぶ。
+// - 取り消し（`io_cancel`）は、トークンの登録・期限・取り出していない完了を外す。I/O スレッドが `epoll_wait` から受け取った後で
+//   取り消された準備完了は、排他の下で登録を引き直して捨てる（取り消されたタスクを起こさない）。
+// - 終了は `io_stop`（旗を立てて起こす）→ スレッドの `join` → `io_free`（記述子・ヒープ・表・完了の列を返す）。
+//
+// トークンは 1 以上 2147483646 以下の整数（`epoll_event` のデータの下位 32 ビットに入れる。0 は `eventfd` の印）。
+// 同じトークンで複数の記述子を登録してもよい（`io_cancel` はそのすべてを外す）。通知は (トークン, 世代) の両方で登録を引く。
+// データの上位 32 ビットには「登録の世代」を入れる（登録・登録し直しのたびに 1 進める）。取り消しや登録し直しの前に
+// `epoll_wait` が受け取った古い通知は、同じトークンで登録し直されていても世代が違うので捨てる。
+//
+// 状態の塊 S の語: 0 epoll の記述子, 1 eventfd, 2 停止の旗, 3 排他（futex）, 4 完了の世代, 5 ヒープの配列, 6 ヒープの数,
+// 7 ヒープの容量, 8 連番, 9 登録の表, 10 登録の数, 11 登録の容量, 12 完了の先頭, 13 完了の末尾, 14 完了の数,
+// 15 イベントの受け取り領域（16 件 × 12 バイト）, 16 登録の世代の計数。
+// ヒープの要素は [期限, 連番, トークン]、登録は [記述子, トークン, 世代]、完了は [次, トークン, 種類, 値, 時刻]。
+
+global S_EP: Int = 0
+global S_EV: Int = 1
+global S_STOP: Int = 2
+global S_MUTEX: Int = 3
+global S_GEN: Int = 4
+global S_HEAP: Int = 5
+global S_HLEN: Int = 6
+global S_HCAP: Int = 7
+global S_SEQ: Int = 8
+global S_REGS: Int = 9
+global S_RLEN: Int = 10
+global S_RCAP: Int = 11
+global S_CHEAD: Int = 12
+global S_CTAIL: Int = 13
+global S_CLEN: Int = 14
+global S_EVBUF: Int = 15
+global S_GENCTR: Int = 16
+global S_WORDS: Int = 17
+
+global EV_MAX: Int = 16
+global EV_BYTES: Int = 192
+
+global KIND_FD: Int = 1
+global KIND_TIMER: Int = 2
+
+global EPOLLIN: Int = 1
+global EPOLLOUT: Int = 4
+global EPOLLONESHOT: Int = 1073741824
+
+// --- 語と原始操作の薄い包み ---
+
+fn ld(p: Int, i: Int) -> Int
+  intent "レコード p の i 番目の語を読む"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は rec が返した生きたレコードで、0 <= i はそのレコードの語数より小さい。共有の語は io の排他の下で読む"
+{
+  return raw.load_i64(raw.int_to_addr(p + 8 * i));
+}
+
+fn st(p: Int, i: Int, v: Int)
+  intent "レコード p の i 番目の語に v を書く"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は rec が返した生きたレコードで、0 <= i はそのレコードの語数より小さい。共有の語は io の排他の下で書く"
+{
+  raw.store_i64(raw.int_to_addr(p + 8 * i), v);
+}
+
+fn rec(words: Int) -> Int
+  intent "words 語のレコードを確保し、0 で埋めて番地を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "確保器から取った領域を返す前に 0 で埋める。words >= 1。rec_free で同じ語数を渡して返す"
+{
+  let a = raw.alloc(8 * words, 8);
+  let p = raw.addr_to_int(a);
+  let mut i = 0;
+  while i < words {
+    raw.store_i64(raw.int_to_addr(p + 8 * i), 0);
+    i = i + 1;
+  }
+  return p;
+}
+
+fn rec_free(p: Int, words: Int)
+  intent "rec が返したレコードを返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は rec(words) が返し、まだ返していないレコード"
+{
+  raw.free(raw.int_to_addr(p), 8 * words, 8);
+}
+
+fn byte_at(p: Int, i: Int) -> Int
+  intent "p の i バイト目を読む"
+  requires none
+  ensures none
+  effects none
+  unchecked "p..p+i は生きた領域（epoll の受け取り領域）の中"
+{
+  return raw.load_u8(raw.int_to_addr(p + i));
+}
+
+fn u32_at(p: Int, i: Int) -> Int
+  intent "p の i バイト目からの 4 バイトを小端の整数として読む（epoll_event は詰めた並びで、境界に揃わない）"
+  requires none
+  ensures none
+  effects none
+{
+  return byte_at(p, i) + byte_at(p, i + 1) * 256 + byte_at(p, i + 2) * 65536 + byte_at(p, i + 3) * 16777216;
+}
+
+fn clock_ns() -> Int
+  intent "CLOCK_MONOTONIC の現在の時刻をナノ秒で返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "clock_gettime(CLOCK_MONOTONIC, ts) だけを発行する。ts は自分で確保した 16 バイトで、すぐ返す"
+{
+  let ts = rec(2);
+  raw.syscall(228, 1, ts, 0, 0, 0, 0);
+  let t = ld(ts, 0) * 1000000000 + ld(ts, 1);
+  rec_free(ts, 2);
+  return t;
+}
+
+fn ep_ctl(ep: Int, op: Int, fd: Int, events: Int, token: Int, gen: Int) -> Int
+  intent "epoll_ctl を発行する。成功は 0、失敗は負の errno"
+  requires none
+  ensures none
+  effects none
+  unchecked "ep は epoll の記述子。epoll_event は自分で確保した 16 バイト（events の下位 4 バイト、データの 8 バイト = トークンの 4 バイトと世代の 4 バイトの並び）で、呼び出しの間だけ生きる。0 <= token < 2147483647 なので、語の上位 32 ビットに入れてもあふれない"
+{
+  let ev = rec(2);
+  st(ev, 0, events + token * 4294967296);
+  st(ev, 1, gen);
+  let r = raw.syscall(233, ep, op, fd, ev, 0, 0);
+  rec_free(ev, 2);
+  return r;
+}
+
+fn fd_close(fd: Int)
+  intent "記述子を閉じる"
+  requires none
+  ensures none
+  effects none
+  unchecked "fd はこのモジュールが作って、まだ閉じていない記述子"
+{
+  raw.syscall(3, fd, 0, 0, 0, 0, 0);
+}
+
+fn ev_kick(fd: Int)
+  intent "eventfd に 1 を足して、epoll_wait を起こす"
+  requires none
+  ensures none
+  effects none
+  unchecked "fd は io_new が作った eventfd。8 バイトの値は自分で確保して、すぐ返す。満杯（EAGAIN）でも、すでに読める状態なので失ってよい"
+{
+  let b = rec(1);
+  st(b, 0, 1);
+  raw.syscall(1, fd, b, 8, 0, 0, 0);
+  rec_free(b, 1);
+}
+
+fn ev_drain(fd: Int)
+  intent "eventfd の値を読んで 0 に戻す（読める状態を解く）"
+  requires none
+  ensures none
+  effects none
+  unchecked "fd は io_new が作った非ブロックの eventfd。8 バイトの値は自分で確保して、すぐ返す"
+{
+  let b = rec(1);
+  raw.syscall(0, fd, b, 8, 0, 0, 0);
+  rec_free(b, 1);
+}
+
+fn ep_wait(ep: Int, buf: Int, timeout_ms: Int) -> Int
+  intent "epoll_wait を発行し、受け取った件数（失敗は負の errno）を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "buf は EV_BYTES バイトの生きた領域で、最大 EV_MAX 件を書く。timeout_ms が負なら無期限"
+{
+  return raw.syscall(232, ep, buf, 16, timeout_ms, 0, 0);
+}
+
+fn futex_wait(p: Int, i: Int, expect: Int)
+  intent "語 i が expect（下位 32 ビット）のままなら、起こされるまで眠る"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は生きた状態の塊で、語は 8 バイト整列。futex は下位 32 ビットを比べる。偽の起床や値の変化は呼び出し側が再確認する"
+{
+  raw.syscall(202, p + 8 * i, 128, expect, 0, 0, 0);
+}
+
+fn futex_wake(p: Int, i: Int)
+  intent "語 i で眠っている全員を起こす"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は生きた状態の塊で、語は 8 バイト整列"
+{
+  raw.syscall(202, p + 8 * i, 129, 2147483647, 0, 0, 0);
+}
+
+fn aload(p: Int, i: Int) -> Int
+  intent "語 i を原子的に読む"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は生きた状態の塊で、語は 8 バイト整列。他のスレッドが並行に書きうる"
+{
+  return raw.atomic_load_i64(raw.int_to_addr(p + 8 * i));
+}
+
+fn astore(p: Int, i: Int, v: Int)
+  intent "語 i へ原子的に書く"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は生きた状態の塊で、語は 8 バイト整列。他のスレッドが並行に読みうる"
+{
+  raw.atomic_store_i64(raw.int_to_addr(p + 8 * i), v);
+}
+
+fn lock(s: Int)
+  intent "状態の塊の排他（futex の 3 状態の排他）を取る"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は生きた状態の塊。語は 8 バイト整列、再入しない。futex は下位 32 ビットを使う"
+{
+  let a = raw.int_to_addr(s + 8 * S_MUTEX);
+  if raw.atomic_cas_i64(a, 0, 1) == 0 { return; }
+  while raw.atomic_swap_i64(a, 2) != 0 {
+    raw.syscall(202, raw.addr_to_int(a), 128, 2, 0, 0, 0);
+  }
+}
+
+fn unlock(s: Int)
+  intent "排他を放して、待ち手がいれば起こす"
+  requires none
+  ensures none
+  effects none
+  unchecked "呼んだスレッドが lock で取得済み"
+{
+  let a = raw.int_to_addr(s + 8 * S_MUTEX);
+  if raw.atomic_swap_i64(a, 0) == 2 {
+    raw.syscall(202, raw.addr_to_int(a), 129, 1, 0, 0, 0);
+  }
+}
+
+fn announce(s: Int)
+  intent "完了の世代を進めて、io_take_wait で眠っている全員を起こす"
+  requires none
+  ensures none
+  effects none
+{
+  astore(s, S_GEN, (aload(s, S_GEN) + 1) & 4294967295);
+  futex_wake(s, S_GEN);
+}
+
+// --- 期限の一覧（最小ヒープ） ---
+
+fn h_less(h: Int, i: Int, j: Int) -> Bool
+  intent "ヒープの i 番目が j 番目より先に起きるか（期限、同じなら連番の小さい方）"
+  requires none
+  ensures none
+  effects none
+{
+  let di = ld(h, 3 * i);
+  let dj = ld(h, 3 * j);
+  if di != dj { return di < dj; }
+  return ld(h, 3 * i + 1) < ld(h, 3 * j + 1);
+}
+
+fn h_swap(h: Int, i: Int, j: Int)
+  intent "ヒープの i 番目と j 番目の要素を入れ替える"
+  requires none
+  ensures none
+  effects none
+{
+  let mut k = 0;
+  while k < 3 {
+    let t = ld(h, 3 * i + k);
+    st(h, 3 * i + k, ld(h, 3 * j + k));
+    st(h, 3 * j + k, t);
+    k = k + 1;
+  }
+}
+
+fn h_up(h: Int, start: Int)
+  intent "start 番目の要素を、親より先に起きるあいだ上へ上げる"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = start;
+  let mut go = true;
+  while go && i > 0 {
+    let p = (i - 1) / 2;
+    if h_less(h, i, p) {
+      h_swap(h, i, p);
+      i = p;
+    } else {
+      go = false;
+    }
+  }
+}
+
+fn h_down(h: Int, n: Int, start: Int)
+  intent "start 番目の要素を、子より後に起きるあいだ下へ下げる（要素は n 個）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = start;
+  let mut go = true;
+  while go {
+    let l = 2 * i + 1;
+    let r = l + 1;
+    let mut m = i;
+    if l < n && h_less(h, l, m) { m = l; }
+    if r < n && h_less(h, r, m) { m = r; }
+    if m == i {
+      go = false;
+    } else {
+      h_swap(h, i, m);
+      i = m;
+    }
+  }
+}
+
+fn heap_push(s: Int, deadline: Int, token: Int) -> Int
+  intent "期限 deadline・トークン token の要素を足し、その連番を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let len = ld(s, S_HLEN);
+  let cap = ld(s, S_HCAP);
+  if len == cap {
+    let mut ncap = 8;
+    if cap > 0 { ncap = cap * 2; }
+    let nh = rec(3 * ncap);
+    let prev = ld(s, S_HEAP);
+    let mut i = 0;
+    while i < 3 * len {
+      st(nh, i, ld(prev, i));
+      i = i + 1;
+    }
+    if cap > 0 { rec_free(prev, 3 * cap); }
+    st(s, S_HEAP, nh);
+    st(s, S_HCAP, ncap);
+  }
+  let seq = ld(s, S_SEQ) + 1;
+  st(s, S_SEQ, seq);
+  let h = ld(s, S_HEAP);
+  st(h, 3 * len, deadline);
+  st(h, 3 * len + 1, seq);
+  st(h, 3 * len + 2, token);
+  st(s, S_HLEN, len + 1);
+  h_up(h, len);
+  return seq;
+}
+
+fn heap_remove_at(s: Int, i: Int)
+  intent "ヒープの i 番目の要素を外す"
+  requires none
+  ensures none
+  effects none
+{
+  let h = ld(s, S_HEAP);
+  let last = ld(s, S_HLEN) - 1;
+  st(s, S_HLEN, last);
+  if i != last {
+    let mut k = 0;
+    while k < 3 {
+      st(h, 3 * i + k, ld(h, 3 * last + k));
+      k = k + 1;
+    }
+    h_up(h, i);
+    h_down(h, last, i);
+  }
+}
+
+// --- 登録の表（記述子 → トークン） ---
+
+fn reg_find_fd(s: Int, fd: Int) -> Int
+  intent "記述子 fd の登録の添字を返す（なければ -1）"
+  requires none
+  ensures none
+  effects none
+{
+  let r = ld(s, S_REGS);
+  let n = ld(s, S_RLEN);
+  let mut i = 0;
+  while i < n {
+    if ld(r, 3 * i) == fd { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+fn reg_find_token(s: Int, token: Int) -> Int
+  intent "トークン token の登録の添字を返す（なければ -1）"
+  requires none
+  ensures none
+  effects none
+{
+  let r = ld(s, S_REGS);
+  let n = ld(s, S_RLEN);
+  let mut i = 0;
+  while i < n {
+    if ld(r, 3 * i + 1) == token { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+fn reg_find_exact(s: Int, token: Int, gen: Int) -> Int
+  intent "トークンと世代の両方が合う登録の添字を返す（なければ -1）。同じトークンの登録が複数あってもよい"
+  requires none
+  ensures none
+  effects none
+{
+  let r = ld(s, S_REGS);
+  let n = ld(s, S_RLEN);
+  let mut i = 0;
+  while i < n {
+    if ld(r, 3 * i + 1) == token && ld(r, 3 * i + 2) == gen { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
+fn reg_add(s: Int, fd: Int, token: Int, gen: Int)
+  intent "登録を足す"
+  requires none
+  ensures none
+  effects none
+{
+  let len = ld(s, S_RLEN);
+  let cap = ld(s, S_RCAP);
+  if len == cap {
+    let mut ncap = 8;
+    if cap > 0 { ncap = cap * 2; }
+    let nr = rec(3 * ncap);
+    let prev = ld(s, S_REGS);
+    let mut i = 0;
+    while i < 3 * len {
+      st(nr, i, ld(prev, i));
+      i = i + 1;
+    }
+    if cap > 0 { rec_free(prev, 3 * cap); }
+    st(s, S_REGS, nr);
+    st(s, S_RCAP, ncap);
+  }
+  let r = ld(s, S_REGS);
+  st(r, 3 * len, fd);
+  st(r, 3 * len + 1, token);
+  st(r, 3 * len + 2, gen);
+  st(s, S_RLEN, len + 1);
+}
+
+fn reg_remove_at(s: Int, i: Int)
+  intent "登録を外す（最後の要素を空いた所へ移す）"
+  requires none
+  ensures none
+  effects none
+{
+  let r = ld(s, S_REGS);
+  let last = ld(s, S_RLEN) - 1;
+  if i != last {
+    st(r, 3 * i, ld(r, 3 * last));
+    st(r, 3 * i + 1, ld(r, 3 * last + 1));
+    st(r, 3 * i + 2, ld(r, 3 * last + 2));
+  }
+  st(s, S_RLEN, last);
+}
+
+// --- 完了の列 ---
+
+fn cq_push(s: Int, token: Int, kind: Int, value: Int, at: Int)
+  intent "完了の列の末尾に（トークン・種類・値・時刻）を足す"
+  requires none
+  ensures none
+  effects none
+{
+  let c = rec(5);
+  st(c, 1, token);
+  st(c, 2, kind);
+  st(c, 3, value);
+  st(c, 4, at);
+  let tail = ld(s, S_CTAIL);
+  if tail == 0 {
+    st(s, S_CHEAD, c);
+  } else {
+    st(tail, 0, c);
+  }
+  st(s, S_CTAIL, c);
+  st(s, S_CLEN, ld(s, S_CLEN) + 1);
+}
+
+fn cq_pop(s: Int, out: Int) -> Int
+  intent "完了の列の先頭を out（4 語: トークン・種類・値・時刻）に書いて外す。なければ 0、あれば 1"
+  requires none
+  ensures none
+  effects none
+{
+  let c = ld(s, S_CHEAD);
+  if c == 0 { return 0; }
+  let n = ld(c, 0);
+  st(s, S_CHEAD, n);
+  if n == 0 { st(s, S_CTAIL, 0); }
+  st(s, S_CLEN, ld(s, S_CLEN) - 1);
+  st(out, 0, ld(c, 1));
+  st(out, 1, ld(c, 2));
+  st(out, 2, ld(c, 3));
+  st(out, 3, ld(c, 4));
+  rec_free(c, 5);
+  return 1;
+}
+
+fn cq_purge(s: Int, token: Int) -> Int
+  intent "完了の列から token のものを外して返し、その数を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut removed = 0;
+  let mut prev = 0;
+  let mut c = ld(s, S_CHEAD);
+  while c != 0 {
+    let n = ld(c, 0);
+    if ld(c, 1) == token {
+      if prev == 0 {
+        st(s, S_CHEAD, n);
+      } else {
+        st(prev, 0, n);
+      }
+      if n == 0 { st(s, S_CTAIL, prev); }
+      st(s, S_CLEN, ld(s, S_CLEN) - 1);
+      rec_free(c, 5);
+      removed = removed + 1;
+    } else {
+      prev = c;
+    }
+    c = n;
+  }
+  return removed;
+}
+
+// --- 公開の入口 ---
+
+pub fn io_new() -> Int
+  intent "I/O の状態を作る（epoll と eventfd を作り、eventfd を epoll に結ぶ）。失敗なら 0"
+  requires none
+  ensures none
+  effects none
+  unchecked "epoll_create1(EPOLL_CLOEXEC) と eventfd2(0, EFD_NONBLOCK|EFD_CLOEXEC) だけを発行する。失敗したら、作ったものを閉じて返す"
+{
+  let ep = raw.syscall(291, 524288, 0, 0, 0, 0, 0);
+  if ep < 0 { return 0; }
+  let ev = raw.syscall(290, 0, 526336, 0, 0, 0, 0);
+  if ev < 0 {
+    fd_close(ep);
+    return 0;
+  }
+  if ep_ctl(ep, 1, ev, EPOLLIN, 0, 0) < 0 {
+    fd_close(ev);
+    fd_close(ep);
+    return 0;
+  }
+  let s = rec(S_WORDS);
+  st(s, S_EP, ep);
+  st(s, S_EV, ev);
+  st(s, S_EVBUF, rec(EV_BYTES / 8));
+  return s;
+}
+
+pub fn io_free(s: Int)
+  intent "I/O の状態を返す（記述子を閉じ、ヒープ・登録の表・完了の列・受け取り領域を返す）"
+  requires none
+  ensures none
+  effects none
+  unchecked "s は io_new が返した状態で、I/O スレッドは io_stop の後で join 済み。他のスレッドはもう使わない。登録した記述子はこのモジュールのものではないので閉じない"
+{
+  let out = rec(4);
+  while cq_pop(s, out) == 1 { }
+  rec_free(out, 4);
+  if ld(s, S_HCAP) > 0 { rec_free(ld(s, S_HEAP), 3 * ld(s, S_HCAP)); }
+  if ld(s, S_RCAP) > 0 { rec_free(ld(s, S_REGS), 3 * ld(s, S_RCAP)); }
+  rec_free(ld(s, S_EVBUF), EV_BYTES / 8);
+  fd_close(ld(s, S_EV));
+  fd_close(ld(s, S_EP));
+  rec_free(s, S_WORDS);
+}
+
+pub fn io_now() -> Int
+  intent "実時間の単調な時計（ナノ秒）。決定的モードの仮想の時計とは別"
+  requires none
+  ensures none
+  effects none
+{
+  return clock_ns();
+}
+
+pub fn io_wait_fd(s: Int, fd: Int, events: Int, token: Int) -> Int
+  intent "記述子 fd が events（EPOLLIN=1・EPOLLOUT=4）の準備完了になったら、token を完了の列に 1 度だけ積む（EPOLLONESHOT）。登録し直しもこれで行う。成功は 0、失敗は負の errno"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let ep = ld(s, S_EP);
+  let gen = (ld(s, S_GENCTR) + 1) & 4294967295;
+  st(s, S_GENCTR, gen);
+  let i = reg_find_fd(s, fd);
+  let mut r = 0;
+  if i >= 0 {
+    r = ep_ctl(ep, 3, fd, events + EPOLLONESHOT, token, gen);
+    if r == 0 {
+      st(ld(s, S_REGS), 3 * i + 1, token);
+      st(ld(s, S_REGS), 3 * i + 2, gen);
+    }
+  } else {
+    r = ep_ctl(ep, 1, fd, events + EPOLLONESHOT, token, gen);
+    if r == 0 { reg_add(s, fd, token, gen); }
+  }
+  unlock(s);
+  return r;
+}
+
+pub fn io_forget_fd(s: Int, fd: Int) -> Int
+  intent "記述子 fd の登録を外す（記述子を閉じる前に呼ぶ）。外したら 1、登録がなければ 0"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let i = reg_find_fd(s, fd);
+  let mut found = 0;
+  if i >= 0 {
+    ep_ctl(ld(s, S_EP), 2, fd, 0, 0, 0);
+    reg_remove_at(s, i);
+    found = 1;
+  }
+  unlock(s);
+  return found;
+}
+
+pub fn io_sleep_until(s: Int, deadline: Int, token: Int)
+  intent "実時間の時刻 deadline（io_now の単位）に token を完了の列へ積む期限を足す。最も近い期限になるなら I/O スレッドを起こす"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let seq = heap_push(s, deadline, token);
+  let h = ld(s, S_HEAP);
+  let first = ld(h, 1) == seq;
+  unlock(s);
+  if first { ev_kick(ld(s, S_EV)); }
+}
+
+pub fn io_sleep(s: Int, ms: Int, token: Int) -> Int
+  intent "いまから ms ミリ秒後に token を起こす期限を足し、その期限を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let deadline = clock_ns() + ms * 1000000;
+  io_sleep_until(s, deadline, token);
+  return deadline;
+}
+
+pub fn io_cancel(s: Int, token: Int) -> Int
+  intent "token の登録（記述子は epoll から外す）・期限・取り出していない完了を外す。外した数を返す"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let mut removed = 0;
+  let mut i = reg_find_token(s, token);
+  while i >= 0 {
+    ep_ctl(ld(s, S_EP), 2, ld(ld(s, S_REGS), 3 * i), 0, 0, 0);
+    reg_remove_at(s, i);
+    removed = removed + 1;
+    i = reg_find_token(s, token);
+  }
+  removed = removed + heap_drop_token(s, token);
+  removed = removed + cq_purge(s, token);
+  unlock(s);
+  return removed;
+}
+
+fn heap_drop_token(s: Int, token: Int) -> Int
+  intent "ヒープから token の要素をすべて外し、ヒープを作り直す。外した数を返す（1 つずつ外すと、末尾から移した要素が走査済みの位置へ上がり、取り残される）"
+  requires none
+  ensures none
+  effects none
+{
+  let h = ld(s, S_HEAP);
+  let n = ld(s, S_HLEN);
+  let mut w = 0;
+  let mut i = 0;
+  while i < n {
+    if ld(h, 3 * i + 2) != token {
+      if w != i {
+        let mut k = 0;
+        while k < 3 {
+          st(h, 3 * w + k, ld(h, 3 * i + k));
+          k = k + 1;
+        }
+      }
+      w = w + 1;
+    }
+    i = i + 1;
+  }
+  st(s, S_HLEN, w);
+  let mut j = w / 2;
+  while j > 0 {
+    j = j - 1;
+    h_down(h, w, j);
+  }
+  return n - w;
+}
+
+pub fn io_take(s: Int, out: Int) -> Int
+  intent "完了の列の先頭を out（4 語: トークン・種類 1=記述子 2=期限・値 = 準備完了の印・時刻）に書いて外す。待たない。なければ 0、あれば 1"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let r = cq_pop(s, out);
+  unlock(s);
+  return r;
+}
+
+pub fn io_take_wait(s: Int, out: Int) -> Int
+  intent "完了が来るまで futex で眠り、先頭を out に書いて外す。io_stop の後で列が空なら 0、取れたら 1"
+  requires none
+  ensures none
+  effects none
+{
+  while true {
+    let gen = aload(s, S_GEN);
+    if io_take(s, out) == 1 { return 1; }
+    if aload(s, S_STOP) != 0 { return 0; }
+    futex_wait(s, S_GEN, gen);
+  }
+  return 0;
+}
+
+pub fn io_count(s: Int, which: Int) -> Int
+  intent "数を返す（0 期限の数・1 記述子の登録の数・2 取り出していない完了の数・3 epoll の記述子・4 eventfd）"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let mut n = 0 - 1;
+  if which == 0 { n = ld(s, S_HLEN); }
+  if which == 1 { n = ld(s, S_RLEN); }
+  if which == 2 { n = ld(s, S_CLEN); }
+  if which == 3 { n = ld(s, S_EP); }
+  if which == 4 { n = ld(s, S_EV); }
+  unlock(s);
+  return n;
+}
+
+pub fn io_stop(s: Int)
+  intent "I/O スレッドと io_take_wait に停止を知らせる（その後 I/O スレッドを join し、io_free を呼ぶ）"
+  requires none
+  ensures none
+  effects none
+{
+  astore(s, S_STOP, 1);
+  ev_kick(ld(s, S_EV));
+  announce(s);
+}
+
+fn next_timeout(s: Int) -> Int
+  intent "epoll_wait のタイムアウト（ミリ秒）を返す。期限がなければ -1、すでに届いていれば 0（切り上げる）"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  let mut ms = 0 - 1;
+  if ld(s, S_HLEN) > 0 {
+    let now = clock_ns();
+    let d = ld(ld(s, S_HEAP), 0);
+    if d <= now {
+      ms = 0;
+    } else {
+      ms = (d - now + 999999) / 1000000;
+      if ms > 3600000 { ms = 3600000; }
+    }
+  }
+  unlock(s);
+  return ms;
+}
+
+fn dispatch(s: Int, n: Int) -> Bool
+  intent "epoll_wait が返した n 件と、届いた期限を、排他の下で完了の列へ積む。積んだら true。eventfd だけなら false"
+  requires none
+  ensures none
+  effects none
+{
+  let buf = ld(s, S_EVBUF);
+  let mut kicked = false;
+  let mut pushed = false;
+  lock(s);
+  let now = clock_ns();
+  let mut i = 0;
+  while i < n {
+    let token = u32_at(buf, 12 * i + 4);
+    if token == 0 {
+      kicked = true;
+    } else {
+      // 取り消しや登録し直しの後に届いた古い準備完了は、登録を引き直し、トークンと世代が合わなければ捨てる。
+      let k = reg_find_exact(s, token, u32_at(buf, 12 * i + 8));
+      if k >= 0 {
+        cq_push(s, token, KIND_FD, u32_at(buf, 12 * i), now);
+        pushed = true;
+      }
+    }
+    i = i + 1;
+  }
+  // 現在の時刻が期限に届いたものだけを、(期限, 連番) の順に起こす。早く起きても、届くまでは起こさない。
+  while ld(s, S_HLEN) > 0 && ld(ld(s, S_HEAP), 0) <= now {
+    let h = ld(s, S_HEAP);
+    cq_push(s, ld(h, 2), KIND_TIMER, 0, now);
+    heap_remove_at(s, 0);
+    pushed = true;
+  }
+  if pushed { announce(s); }
+  unlock(s);
+  if kicked { ev_drain(ld(s, S_EV)); }
+  return pushed;
+}
+
+pub fn io_loop(s: Int)
+  intent "I/O スレッドの本体。io_stop が呼ばれるまで epoll_wait を回し、準備完了と届いた期限を完了の列へ積む"
+  requires none
+  ensures none
+  effects none
+{
+  while aload(s, S_STOP) == 0 {
+    let timeout = next_timeout(s);
+    let n = ep_wait(ld(s, S_EP), ld(s, S_EVBUF), timeout);
+    // -EINTR（-4）は再試行する。ほかの失敗でも、停止の旗を見て回り続ける（停止の旗が立てば抜ける）。
+    if n > 0 {
+      dispatch(s, n);
+    } else {
+      if n == 0 { dispatch(s, 0); }
+    }
+  }
+}

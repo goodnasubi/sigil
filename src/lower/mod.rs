@@ -326,7 +326,8 @@ impl<'a> L<'a> {
             LIST_PUSH_FN, LIST_SUM_FLOAT_FN, LIST_SUM_INT_FN, LIVE_FN, PATH_FILE_NAME_FN,
             PATH_JOIN_FN, PATH_PARENT_FN, STR_BYTES_FN, STR_CLONE_FN, STR_CMP_FN, STR_CONCAT_FN,
             STR_DATA_FN, STR_EQ_FN, STR_FREE_FN, STR_FROM_UTF8_FN, STR_IS_EMPTY_FN, STR_LEN_FN,
-            STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN,
+            STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN, THREAD_JOIN_FN,
+            THREAD_MAIN_FN, THREAD_SPAWN_FN,
         };
         for n in [
             BYTES_EMPTY_FN,
@@ -367,6 +368,9 @@ impl<'a> L<'a> {
             LIVE_FN,
             CONSOLE_LOG_FN,
             ENV_GET_FN,
+            THREAD_SPAWN_FN,
+            THREAD_JOIN_FN,
+            THREAD_MAIN_FN,
             FS_READ_FN,
             FS_WRITE_FN,
             PATH_JOIN_FN,

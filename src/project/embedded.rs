@@ -69,6 +69,7 @@ impl Proj<'_> {
                 || r == embedded::CONSOLE_MODULE
                 || r == embedded::FS_MODULE
                 || r == embedded::ENV_MODULE
+                || r == embedded::THREAD_MODULE
             {
                 continue;
             }

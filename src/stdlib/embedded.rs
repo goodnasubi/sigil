@@ -41,6 +41,15 @@ pub const ENV_MODULE: &str = "std.os.env";
 pub const ENV_GET_FN: &str = "std.os.env.get";
 pub const ENV_LOOKUP_FN: &str = "std.os.env.lookup";
 
+/// スレッドの作成・終了・待ち合わせの Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0030 決定 4、PR 5-2c）。
+/// `std.os.fs` などと同じく、暫定でなく暗黙に結ぶプラットフォーム層で、入口の `targets` との照合は免除する。
+/// 評価器は複数の OS スレッドを動かさないので呼ばない。ネイティブの起動の処理が、大域 `std.os.thread.ENTRY` に
+/// 生成コードの `sigil_thread_entry` の番地を書き、`sigil_thread_entry` が `thread_main` を呼ぶ。
+pub const THREAD_MODULE: &str = "std.os.thread";
+pub const THREAD_SPAWN_FN: &str = "std.os.thread.spawn";
+pub const THREAD_JOIN_FN: &str = "std.os.thread.join";
+pub const THREAD_MAIN_FN: &str = "std.os.thread.thread_main";
+
 /// `Path` の操作の Sigil 実装のモジュール名と入口の関数（結合後の名前。補足 C-7、PR 3-6b）。純粋な核のモジュール。
 pub const PATH_MODULE: &str = "std.core.path";
 pub const PATH_JOIN_FN: &str = "std.core.path.join";
@@ -130,6 +139,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (CONSOLE_MODULE, include_str!("os_console.sigil")),
     (FS_MODULE, include_str!("os_fs.sigil")),
     (ENV_MODULE, include_str!("os_env.sigil")),
+    (THREAD_MODULE, include_str!("os_thread.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
@@ -160,6 +170,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             CONSOLE_MODULE,
             FS_MODULE,
             ENV_MODULE,
+            THREAD_MODULE,
             PATH_MODULE,
             STRING_MODULE,
             LIST_MODULE,

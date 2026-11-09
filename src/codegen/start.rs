@@ -25,12 +25,8 @@ pub(super) fn syscall(cg: &mut Cg<'_>) -> Result<(), CgError> {
     Ok(())
 }
 
-pub(super) fn prepare(cg: &mut Cg<'_>) -> Result<DataId, CgError> {
-    let limit = cg.m.declare_anonymous_data(true, false).map_err(internal)?;
-    let mut data = DataDescription::new();
-    data.define_zeroinit(8);
-    data.set_align(8);
-    cg.m.define_data(limit, &data).map_err(internal)?;
+pub(super) fn prepare(cg: &mut Cg<'_>) -> Result<(), CgError> {
+    // スタックの下限は、スタックポインタから求める（スレッドごとの領域。`STACK_REGION`）。静的データは持たない。
     let lim =
         cg.m.declare_function(
             "sigil_stack_limit",
@@ -41,12 +37,12 @@ pub(super) fn prepare(cg: &mut Cg<'_>) -> Result<DataId, CgError> {
     cg.rt.insert("stack_limit", lim);
     // 番号は宣言された FuncId を使う（通常の SIR 関数の番号より後）。
     cg.define(lim, lim.as_u32(), shim_sig(cg.cc, 0, 'p'), vec![], |fx| {
-        fx.start_limit(limit)
+        fx.start_limit()
     })?;
-    Ok(limit)
+    Ok(())
 }
 
-pub(super) fn define(cg: &mut Cg<'_>, thunk: FuncId, limit: DataId) -> Result<(), CgError> {
+pub(super) fn define(cg: &mut Cg<'_>, thunk: FuncId) -> Result<(), CgError> {
     let run =
         cg.m.declare_function("sigil_run", Linkage::Local, &shim_sig(cg.cc, 1, 'v'))
             .map_err(internal)?;
@@ -62,6 +58,19 @@ pub(super) fn define(cg: &mut Cg<'_>, thunk: FuncId, limit: DataId) -> Result<()
         .map_err(internal)?;
     cg.m.define_function_bytes(switch, 1, SWITCH, &[])
         .map_err(internal)?;
+    // 新しいスレッドの入口（ADR 0030 決定 4）。`std.os.thread` が結ばれているときだけ作る。番地は起動の処理が
+    // 大域 `std.os.thread.ENTRY` に書く。スレッドは `sigil_syscall6` の `ret` でここに入る（`std.os.thread` の注記）。
+    let thread_entry = if cg.rt.contains_key("thread_main") {
+        let mut sig = Signature::new(cg.cc);
+        sig.params = vec![AbiParam::new(types::I64), AbiParam::new(types::I64)];
+        let id =
+            cg.m.declare_function("sigil_thread_entry", Linkage::Local, &sig)
+                .map_err(internal)?;
+        cg.define(id, id.as_u32(), sig, vec![], |fx| fx.start_thread_entry())?;
+        Some(id)
+    } else {
+        None
+    };
     let mut entry_sig = Signature::new(cg.cc);
     entry_sig.params = vec![
         AbiParam::new(types::I32),
@@ -73,7 +82,7 @@ pub(super) fn define(cg: &mut Cg<'_>, thunk: FuncId, limit: DataId) -> Result<()
         cg.m.declare_function("sigil_start", Linkage::Local, &entry_sig)
             .map_err(internal)?;
     cg.define(entry, entry.as_u32(), entry_sig, vec![], |fx| {
-        fx.start_stack(limit, run, switch)
+        fx.start_stack(run, switch, thread_entry)
     })?;
     let boot =
         cg.m.declare_function("sigil_boot", Linkage::Local, &shim_sig(cg.cc, 1, 'v'))

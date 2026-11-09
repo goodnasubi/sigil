@@ -115,6 +115,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_from_utf8" => ("ppp", 'p'),
         // `console.log` の書き出し（`std.os.console.log`。補足 C-7 の 3-6a）。引数は（バッファの番地, 長さ）
         "console_log" => ("pp", 'v'),
+        // 新しいスレッドの入口 `std.os.thread.thread_main(ハンドル)`（ADR 0030 決定 4、PR 5-2c）
+        "thread_main" => ("p", 'v'),
         // `fs.read`/`fs.write`/`Path`（`std.os.fs`・`std.core.path`。補足 C-7 の 3-6b）。文字列は頭の番地で受け渡す
         "fs_read" => ("ppp", 'p'),
         "fs_write" => ("ppppp", 'i'),
@@ -185,16 +187,12 @@ pub(crate) struct Cg<'p> {
     gen_q: Vec<(FuncId, Gk, Ty, usize)>,
     /// 生成の関数の通し番号の次の値（`sigil_<種類>_<k>` の `<k>` と、関数の番号の添字に使う）。
     gen_n: usize,
-    /// 作業の列の静的な領域（補足 G-2）。`None` なら、この生成では使っていない。
-    ws: Option<DataId>,
     /// 0 でなければ塊を解放する `sigil_blkfree_nz`（どのプログラムにも置く。子を持たない値の破棄が呼ぶ。補足 G-2）。
     pub blkfree_nz: Option<FuncId>,
     /// 表示の補助（補足 H）。宣言したもの。
     show_fns: HashMap<SFn, FuncId>,
     /// まだ本体を作っていない表示の補助（本体が別の補助を求めることがあるので、空になるまで回す）。
     show_q: Vec<(FuncId, SFn)>,
-    /// 表示バッファの静的な領域（補足 H-2）。`None` なら、この生成では使っていない。
-    show_buf: Option<DataId>,
     /// 引用で逃がす符号点の範囲のデータ（補足 H-4）。`None` なら未作成で、値は（データ, 範囲の数）。
     quote: Option<(DataId, usize)>,
     /// 合わせ込みの失敗の内訳（補足 I-4）: `[要る型の名前の番地, 長さ, 渡された値の名前の番地, 長さ]`。
@@ -333,6 +331,20 @@ pub(crate) const WS_INLINE_ITEMS: usize = 4096;
 /// 作業の列の静的な領域の 1 つ分の大きさ（バイト）。先頭の 24 バイトは `[項の数][確保した領域][その項の数]`。
 pub(crate) const WS_BYTES: usize = 24 + WS_INLINE_ITEMS * 16;
 
+/// スレッドごとの領域（ADR 0030 補足 A・B）。実行する各スレッドのスタックは、この大きさ（2 の冪）に整列した領域の中にあり、
+/// スタックポインタの下位ビットを落とすと領域の先頭（`region_base`）が分かる。TLS は要らない。
+/// 領域の並び: `[0, 4096)` ガードページ（読み書き不可）、`[TCB_WS_OFF, ..)` 作業の列（破棄の積み）、
+/// `[TCB_SB_OFF, ..)` 表示バッファ、`[STACK_LIMIT_OFF, STACK_REGION)` スタック（上端から下へ伸びる）。
+/// スタックの下限は `region_base + STACK_LIMIT_OFF`（上端から 3/4 下。補足 C-6 の 192MiB と同じ）。
+/// 領域は `mmap` が返すゼロの領域なので、作業の列・表示バッファの状態の語は 0 で始まる。
+pub(crate) const STACK_REGION: i64 = 256 * 1024 * 1024;
+pub(crate) const TCB_GUARD: i64 = 4096;
+pub(crate) const TCB_WS_OFF: i64 = TCB_GUARD;
+pub(crate) const TCB_SB_OFF: i64 = TCB_WS_OFF + WS_BYTES as i64;
+pub(crate) const STACK_LIMIT_OFF: i64 = STACK_REGION / 4;
+// 作業の列と表示バッファが、スタックの下限より下（スタックが届かない所）に収まる。
+const _: () = assert!(TCB_SB_OFF + SB_BYTES as i64 <= STACK_LIMIT_OFF);
+
 impl<'p> Cg<'p> {
     pub fn sig(&self, n: usize) -> Signature {
         let mut s = Signature::new(self.cc);
@@ -403,19 +415,6 @@ impl<'p> Cg<'p> {
         Ok(id)
     }
 
-    /// 作業の列の静的な領域のデータ（補足 G-2）。初めて使うときに宣言し、最後に 0 で定義する。
-    pub fn ws_data(&mut self) -> Result<DataId, CgError> {
-        if let Some(d) = self.ws {
-            return Ok(d);
-        }
-        let d = self
-            .m
-            .declare_anonymous_data(true, false)
-            .map_err(internal)?;
-        self.ws = Some(d);
-        Ok(d)
-    }
-
     /// 表示の補助 `k`（補足 H）。宣言がなければ宣言して表に入れ、本体は待ち行列に積む。
     pub fn show_fn(&mut self, k: SFn) -> Result<FuncId, CgError> {
         if let Some(id) = self.show_fns.get(&k) {
@@ -428,19 +427,6 @@ impl<'p> Cg<'p> {
         self.show_fns.insert(k, id);
         self.show_q.push((id, k));
         Ok(id)
-    }
-
-    /// 表示バッファの静的な領域のデータ（補足 H-2）。初めて使うときに宣言し、最後に 0 で定義する。
-    pub fn show_buf_data(&mut self) -> Result<DataId, CgError> {
-        if let Some(d) = self.show_buf {
-            return Ok(d);
-        }
-        let d = self
-            .m
-            .declare_anonymous_data(true, false)
-            .map_err(internal)?;
-        self.show_buf = Some(d);
-        Ok(d)
     }
 
     /// 引用で逃がす符号点の範囲のデータ（補足 H-4）。値は（データ, 範囲の数）。
@@ -703,11 +689,9 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         gen: HashMap::new(),
         gen_q: vec![],
         gen_n: 0,
-        ws: None,
         blkfree_nz: None,
         show_fns: HashMap::new(),
         show_q: vec![],
-        show_buf: None,
         quote: None,
         coerce_err: None,
     };
@@ -721,6 +705,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(int_shims(&mut cg)?);
     // `console.log`（`std.os.console`）のシム（補足 C-7 の 3-6a）。結ばれていなければ作らない（確保器と同じ）。
     shims.extend(console_shims(&mut cg)?);
+    // 新しいスレッドの入口のシム（ADR 0030 決定 4）。結ばれていなければ作らない。
+    shims.extend(thread_shims(&mut cg)?);
     // `fs.read`/`fs.write`/`Path` のシム（補足 C-7 の 3-6b）。同じく結ばれていなければ作らない。
     shims.extend(fs_path_shims(&mut cg)?);
     // バイト列の表現（`std.core.bytes`）のシム（補足 F-4）。同じく常に必要。
@@ -728,7 +714,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     // `memmove`・`memset`（補足 C-3）。libc のものは使わず、同じオブジェクトの中で定義する。
     let mem = mem_fns(&mut cg)?;
     start::syscall(&mut cg)?;
-    let stack_limit = start::prepare(&mut cg)?;
+    start::prepare(&mut cg)?;
     // 0 でなければ塊を解放する共通の関数（補足 G-2）。使わないプログラムでも置く（比べる試験の分岐の数を揃えるため）。
     let blkfree =
         cg.m.declare_function("sigil_blkfree_nz", Linkage::Local, &shim_sig(cc, 1, 'v'))
@@ -782,7 +768,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         vec![],
         |fx| fx.thunk(),
     )?;
-    start::define(&mut cg, thunk, stack_limit)?;
+    start::define(&mut cg, thunk)?;
 
     // 型ごとの生成の関数の本体（補足 G-1・G-2）。本体が新しい鍵を求めるので、待ち行列が空になるまで回す。
     let base = p.funcs.len() as u32 + 3 + shims.len() as u32 + mem.len() as u32;
@@ -804,22 +790,6 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         let idx = base + cg.gen_n as u32;
         cg.gen_n += 1;
         cg.define(id, idx, k.sig(cc), vec![], |fx| fx.show_body(k))?;
-    }
-
-    // 作業の列の静的な領域（補足 G-2）。語は 0 で始まり、項の領域は後から確保した領域に替わる。
-    if let Some(d) = cg.ws {
-        let mut dd = DataDescription::new();
-        dd.define(vec![0u8; WS_BYTES].into_boxed_slice());
-        dd.set_align(8);
-        cg.m.define_data(d, &dd).map_err(internal)?;
-    }
-
-    // 表示バッファの静的な領域（補足 H-2）。語は 0 で始まり、中身の領域は後から確保した領域に替わる。
-    if let Some(d) = cg.show_buf {
-        let mut dd = DataDescription::new();
-        dd.define(vec![0u8; SB_BYTES].into_boxed_slice());
-        dd.set_align(8);
-        cg.m.define_data(d, &dd).map_err(internal)?;
     }
 
     // 停止の報告の表（16 バイトずつ: 文字列の番地, 長さ）。
@@ -1085,6 +1055,24 @@ fn console_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         .map_err(internal)?;
     cg.rt.insert("console_log", id);
     Ok(vec![(id, target, 2, 'v')])
+}
+
+/// 新しいスレッドの入口 `std.os.thread.thread_main` を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する
+/// （ADR 0030 決定 4、PR 5-2c）。生成コードの `sigil_thread_entry` が呼ぶ。結ばれていないプログラムでは作らない。
+fn thread_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::THREAD_MAIN_FN;
+    let Some(target) = cg.p.funcs.iter().position(|f| f.name == THREAD_MAIN_FN) else {
+        return Ok(vec![]);
+    };
+    let id =
+        cg.m.declare_function(
+            "sigil_rt_thread_main",
+            Linkage::Local,
+            &shim_sig(cg.cc, 1, 'v'),
+        )
+        .map_err(internal)?;
+    cg.rt.insert("thread_main", id);
+    Ok(vec![(id, target, 1, 'v')])
 }
 
 /// `fs.read`/`fs.write`（`std.os.fs`）と `Path`（`std.core.path`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する

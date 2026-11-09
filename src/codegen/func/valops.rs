@@ -8,7 +8,7 @@
 //! 塊は `raw_alloc(16 + n, 8)` で取る。頭は `[n | SILENT][参照の数]` で、中身の番地（頭 + 16）が値の語になる。
 
 use super::{aggregate, strip, Fx, NOARGS};
-use crate::codegen::{norm_with, shim_sig, Gk, SFn, WS_INLINE_ITEMS};
+use crate::codegen::{norm_with, shim_sig, Gk, SFn, TCB_WS_OFF, WS_INLINE_ITEMS};
 use crate::ir::{Ty, TypeKind};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, Block as CBlock, BlockArg, InstBuilder, Value};
@@ -279,10 +279,9 @@ impl<'a, 'p> Fx<'a, 'p> {
 
     /// 作業の列の状態の番地。語: `[0]` 項の数、`[8]` 確保した領域（0 なら静的な領域）、`[16]` その項の数、`[24..]` 静的な領域。
     fn ws_base(&mut self) -> Value {
-        match self.cg.ws_data() {
-            Ok(d) => self.data_addr(d),
-            Err(e) => self.fail(e),
-        }
+        // スレッドごとの領域の中（`TCB_WS_OFF`）。静的データは持たない。
+        let base = self.region_base();
+        self.b.ins().iadd_imm_s(base, TCB_WS_OFF)
     }
 
     /// 今の領域の番地と項の数（確保した領域がなければ静的な領域。項の数は `WS_INLINE_ITEMS`）。

@@ -23,11 +23,13 @@ module std.os.io
 // - 終了は `io_stop`（旗を立てて起こす）→ スレッドの `join` → `io_free`（記述子・ヒープ・表・完了の列を返す）。
 //
 // トークンは 1 以上 2147483646 以下の整数（`epoll_event` のデータの下位 32 ビットに入れる。0 は `eventfd` の印）。
+// データの上位 32 ビットには「登録の世代」を入れる（登録・登録し直しのたびに 1 進める）。取り消しや登録し直しの前に
+// `epoll_wait` が受け取った古い通知は、同じトークンで登録し直されていても世代が違うので捨てる。
 //
 // 状態の塊 S の語: 0 epoll の記述子, 1 eventfd, 2 停止の旗, 3 排他（futex）, 4 完了の世代, 5 ヒープの配列, 6 ヒープの数,
 // 7 ヒープの容量, 8 連番, 9 登録の表, 10 登録の数, 11 登録の容量, 12 完了の先頭, 13 完了の末尾, 14 完了の数,
-// 15 イベントの受け取り領域（16 件 × 12 バイト）。
-// ヒープの要素は [期限, 連番, トークン]、登録は [記述子, トークン]、完了は [次, トークン, 種類, 値, 時刻]。
+// 15 イベントの受け取り領域（16 件 × 12 バイト）, 16 登録の世代の計数。
+// ヒープの要素は [期限, 連番, トークン]、登録は [記述子, トークン, 世代]、完了は [次, トークン, 種類, 値, 時刻]。
 
 global S_EP: Int = 0
 global S_EV: Int = 1
@@ -45,7 +47,8 @@ global S_CHEAD: Int = 12
 global S_CTAIL: Int = 13
 global S_CLEN: Int = 14
 global S_EVBUF: Int = 15
-global S_WORDS: Int = 16
+global S_GENCTR: Int = 16
+global S_WORDS: Int = 17
 
 global EV_MAX: Int = 16
 global EV_BYTES: Int = 192
@@ -139,15 +142,16 @@ fn clock_ns() -> Int
   return t;
 }
 
-fn ep_ctl(ep: Int, op: Int, fd: Int, events: Int, token: Int) -> Int
+fn ep_ctl(ep: Int, op: Int, fd: Int, events: Int, token: Int, gen: Int) -> Int
   intent "epoll_ctl を発行する。成功は 0、失敗は負の errno"
   requires none
   ensures none
   effects none
-  unchecked "ep は epoll の記述子。epoll_event は自分で確保した 16 バイト（events の下位 4 バイト、データの 8 バイトの並び）で、呼び出しの間だけ生きる。0 <= token < 2147483647 なので、語の上位 32 ビットに入れてもあふれない"
+  unchecked "ep は epoll の記述子。epoll_event は自分で確保した 16 バイト（events の下位 4 バイト、データの 8 バイト = トークンの 4 バイトと世代の 4 バイトの並び）で、呼び出しの間だけ生きる。0 <= token < 2147483647 なので、語の上位 32 ビットに入れてもあふれない"
 {
   let ev = rec(2);
   st(ev, 0, events + token * 4294967296);
+  st(ev, 1, gen);
   let r = raw.syscall(233, ep, op, fd, ev, 0, 0);
   rec_free(ev, 2);
   return r;
@@ -411,7 +415,7 @@ fn reg_find_fd(s: Int, fd: Int) -> Int
   let n = ld(s, S_RLEN);
   let mut i = 0;
   while i < n {
-    if ld(r, 2 * i) == fd { return i; }
+    if ld(r, 3 * i) == fd { return i; }
     i = i + 1;
   }
   return 0 - 1;
@@ -427,13 +431,13 @@ fn reg_find_token(s: Int, token: Int) -> Int
   let n = ld(s, S_RLEN);
   let mut i = 0;
   while i < n {
-    if ld(r, 2 * i + 1) == token { return i; }
+    if ld(r, 3 * i + 1) == token { return i; }
     i = i + 1;
   }
   return 0 - 1;
 }
 
-fn reg_add(s: Int, fd: Int, token: Int)
+fn reg_add(s: Int, fd: Int, token: Int, gen: Int)
   intent "登録を足す"
   requires none
   ensures none
@@ -444,20 +448,21 @@ fn reg_add(s: Int, fd: Int, token: Int)
   if len == cap {
     let mut ncap = 8;
     if cap > 0 { ncap = cap * 2; }
-    let nr = rec(2 * ncap);
+    let nr = rec(3 * ncap);
     let prev = ld(s, S_REGS);
     let mut i = 0;
-    while i < 2 * len {
+    while i < 3 * len {
       st(nr, i, ld(prev, i));
       i = i + 1;
     }
-    if cap > 0 { rec_free(prev, 2 * cap); }
+    if cap > 0 { rec_free(prev, 3 * cap); }
     st(s, S_REGS, nr);
     st(s, S_RCAP, ncap);
   }
   let r = ld(s, S_REGS);
-  st(r, 2 * len, fd);
-  st(r, 2 * len + 1, token);
+  st(r, 3 * len, fd);
+  st(r, 3 * len + 1, token);
+  st(r, 3 * len + 2, gen);
   st(s, S_RLEN, len + 1);
 }
 
@@ -470,8 +475,9 @@ fn reg_remove_at(s: Int, i: Int)
   let r = ld(s, S_REGS);
   let last = ld(s, S_RLEN) - 1;
   if i != last {
-    st(r, 2 * i, ld(r, 2 * last));
-    st(r, 2 * i + 1, ld(r, 2 * last + 1));
+    st(r, 3 * i, ld(r, 3 * last));
+    st(r, 3 * i + 1, ld(r, 3 * last + 1));
+    st(r, 3 * i + 2, ld(r, 3 * last + 2));
   }
   st(s, S_RLEN, last);
 }
@@ -564,7 +570,7 @@ pub fn io_new() -> Int
     fd_close(ep);
     return 0;
   }
-  if ep_ctl(ep, 1, ev, EPOLLIN, 0) < 0 {
+  if ep_ctl(ep, 1, ev, EPOLLIN, 0, 0) < 0 {
     fd_close(ev);
     fd_close(ep);
     return 0;
@@ -587,7 +593,7 @@ pub fn io_free(s: Int)
   while cq_pop(s, out) == 1 { }
   rec_free(out, 4);
   if ld(s, S_HCAP) > 0 { rec_free(ld(s, S_HEAP), 3 * ld(s, S_HCAP)); }
-  if ld(s, S_RCAP) > 0 { rec_free(ld(s, S_REGS), 2 * ld(s, S_RCAP)); }
+  if ld(s, S_RCAP) > 0 { rec_free(ld(s, S_REGS), 3 * ld(s, S_RCAP)); }
   rec_free(ld(s, S_EVBUF), EV_BYTES / 8);
   fd_close(ld(s, S_EV));
   fd_close(ld(s, S_EP));
@@ -611,14 +617,19 @@ pub fn io_wait_fd(s: Int, fd: Int, events: Int, token: Int) -> Int
 {
   lock(s);
   let ep = ld(s, S_EP);
+  let gen = (ld(s, S_GENCTR) + 1) & 4294967295;
+  st(s, S_GENCTR, gen);
   let i = reg_find_fd(s, fd);
   let mut r = 0;
   if i >= 0 {
-    r = ep_ctl(ep, 3, fd, events + EPOLLONESHOT, token);
-    if r == 0 { st(ld(s, S_REGS), 2 * i + 1, token); }
+    r = ep_ctl(ep, 3, fd, events + EPOLLONESHOT, token, gen);
+    if r == 0 {
+      st(ld(s, S_REGS), 3 * i + 1, token);
+      st(ld(s, S_REGS), 3 * i + 2, gen);
+    }
   } else {
-    r = ep_ctl(ep, 1, fd, events + EPOLLONESHOT, token);
-    if r == 0 { reg_add(s, fd, token); }
+    r = ep_ctl(ep, 1, fd, events + EPOLLONESHOT, token, gen);
+    if r == 0 { reg_add(s, fd, token, gen); }
   }
   unlock(s);
   return r;
@@ -634,7 +645,7 @@ pub fn io_forget_fd(s: Int, fd: Int) -> Int
   let i = reg_find_fd(s, fd);
   let mut found = 0;
   if i >= 0 {
-    ep_ctl(ld(s, S_EP), 2, fd, 0, 0);
+    ep_ctl(ld(s, S_EP), 2, fd, 0, 0, 0);
     reg_remove_at(s, i);
     found = 1;
   }
@@ -677,24 +688,47 @@ pub fn io_cancel(s: Int, token: Int) -> Int
   let mut removed = 0;
   let mut i = reg_find_token(s, token);
   while i >= 0 {
-    ep_ctl(ld(s, S_EP), 2, ld(ld(s, S_REGS), 2 * i), 0, 0);
+    ep_ctl(ld(s, S_EP), 2, ld(ld(s, S_REGS), 3 * i), 0, 0, 0);
     reg_remove_at(s, i);
     removed = removed + 1;
     i = reg_find_token(s, token);
   }
-  let h = ld(s, S_HEAP);
-  let mut k = 0;
-  while k < ld(s, S_HLEN) {
-    if ld(h, 3 * k + 2) == token {
-      heap_remove_at(s, k);
-      removed = removed + 1;
-    } else {
-      k = k + 1;
-    }
-  }
+  removed = removed + heap_drop_token(s, token);
   removed = removed + cq_purge(s, token);
   unlock(s);
   return removed;
+}
+
+fn heap_drop_token(s: Int, token: Int) -> Int
+  intent "ヒープから token の要素をすべて外し、ヒープを作り直す。外した数を返す（1 つずつ外すと、末尾から移した要素が走査済みの位置へ上がり、取り残される）"
+  requires none
+  ensures none
+  effects none
+{
+  let h = ld(s, S_HEAP);
+  let n = ld(s, S_HLEN);
+  let mut w = 0;
+  let mut i = 0;
+  while i < n {
+    if ld(h, 3 * i + 2) != token {
+      if w != i {
+        let mut k = 0;
+        while k < 3 {
+          st(h, 3 * w + k, ld(h, 3 * i + k));
+          k = k + 1;
+        }
+      }
+      w = w + 1;
+    }
+    i = i + 1;
+  }
+  st(s, S_HLEN, w);
+  let mut j = w / 2;
+  while j > 0 {
+    j = j - 1;
+    h_down(h, w, j);
+  }
+  return n - w;
 }
 
 pub fn io_take(s: Int, out: Int) -> Int
@@ -791,9 +825,9 @@ fn dispatch(s: Int, n: Int) -> Bool
     if token == 0 {
       kicked = true;
     } else {
-      // 取り消しや登録し直しの後に届いた古い準備完了は、登録を引き直して捨てる。
+      // 取り消しや登録し直しの後に届いた古い準備完了は、登録を引き直し、トークンと世代が合わなければ捨てる。
       let k = reg_find_token(s, token);
-      if k >= 0 {
+      if k >= 0 && ld(ld(s, S_REGS), 3 * k + 2) == u32_at(buf, 12 * i + 8) {
         cq_push(s, token, KIND_FD, u32_at(buf, 12 * i), now);
         pushed = true;
       }

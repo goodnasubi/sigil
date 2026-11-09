@@ -389,6 +389,9 @@ pub enum Builtin {
     RawAtomicSwapI64,
     RawAtomicCasI64,
     RawAtomicFence,
+    /// fd の準備完了を待つ内部の原始操作 `io.wait_fd(fd: Int, events: Int) -> Int`（ADR 0031 決定 1-1）。
+    /// 効果は `task.suspend`。`trust base` のモジュールからだけ呼べる。戻り値は準備のできたイベントの印（負の値はエラー）。
+    IoWaitFd,
     /// 並行処理（ADR 0026 決定 3）
     TaskScope,
     TaskAllOk,

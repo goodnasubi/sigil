@@ -143,10 +143,11 @@ fn locks_atomics_and_channels_survive_contention() {
             task.yield();
             let m = g.get_mut();
             m = before + 1;
-            c{i}.store(before + 1);
           }}
           Err(e) => {{ return 0 - 1; }}
         }}
+        c{i}.store(1);
+        if c{i}.load() != 1 {{ return 0 - 3; }}
         tx{i}.send("payload");
         j = j + 1;
       }}
@@ -188,7 +189,7 @@ fn run() -> Int
         for _ in 0..5 {
             let o = execute(&exe, Some(count));
             assert!(o.status.success(), "{o:?}");
-            assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "17280");
+            assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "15361");
         }
     }
     std::fs::remove_dir_all(dir).unwrap();

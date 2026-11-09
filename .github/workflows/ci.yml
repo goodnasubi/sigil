@@ -54,8 +54,13 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: cargo-nextest の導入
+        uses: taiki-e/install-action@nextest
+
       - name: test（検証器・SIR 評価器・ネイティブを突き合わせる）
-        run: cargo test
+        run: |
+          cargo nextest run --no-fail-fast
+          cargo test --doc
 
       - name: ネイティブの突き合わせ件数（飛ばしの上限を検査）
         run: scripts/native-report.sh

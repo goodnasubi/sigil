@@ -50,6 +50,46 @@ pub const THREAD_SPAWN_FN: &str = "std.os.thread.spawn";
 pub const THREAD_JOIN_FN: &str = "std.os.thread.join";
 pub const THREAD_MAIN_FN: &str = "std.os.thread.thread_main";
 
+/// タスクの実行の割り当ての Sigil 実装のモジュール名（ADR 0030 決定 1・2、PR 5-2d）。評価器は呼ばない
+/// （評価器は `ir_eval/sched.rs` が同じ意味を持つ）。ネイティブの生成コードが、状態機械に変換したタスクを
+/// このモジュールの関数で動かす。`std.os.thread` などと同じく暗黙に結ぶプラットフォーム層で、入口の `targets` との照合は免除する。
+/// 入口の関数は、プログラムが並行処理の操作（`task.scope` など）を使うときだけ SIR に入れる（`lower`）。
+pub const SCHED_MODULE: &str = "std.os.sched";
+/// 生成コードが呼ぶ `std.os.sched` の関数（関数名, シムの名前。結合後の名前は `std.os.sched.<関数名>`）。
+pub const SCHED_FNS: &[(&str, &str)] = &[
+    ("blocked", "sched_blocked"),
+    ("cancel_next", "sched_cancel_next"),
+    ("chan_new", "sched_chan_new"),
+    ("chan_recv", "sched_chan_recv"),
+    ("chan_send", "sched_chan_send"),
+    ("collect_garbage", "sched_collect_garbage"),
+    ("finish_task", "sched_finish_task"),
+    ("garbage_free", "sched_garbage_free"),
+    ("garbage_pop", "sched_garbage_pop"),
+    ("has_resume", "sched_has_resume"),
+    ("defer_drop", "sched_defer_drop"),
+    ("idle", "sched_idle"),
+    ("scope_cancel_next", "sched_scope_cancel_next"),
+    ("note_yield", "sched_note_yield"),
+    ("yield_plain", "sched_yield_plain"),
+    ("yielded", "sched_yielded"),
+    ("join", "sched_join"),
+    ("lock_acquire", "sched_lock_acquire"),
+    ("lock_new", "sched_lock_new"),
+    ("lock_release", "sched_lock_release"),
+    ("next_task", "sched_next_task"),
+    ("release", "sched_release"),
+    ("root_done", "sched_root_done"),
+    ("root_result", "sched_root_result"),
+    ("scope_begin", "sched_scope_begin"),
+    ("scope_end", "sched_scope_end"),
+    ("sleep", "sched_sleep"),
+    ("spawn", "sched_spawn"),
+    ("start", "sched_start"),
+    ("take_resume", "sched_take_resume"),
+    ("yield_val", "sched_yield_val"),
+];
+
 /// `Path` の操作の Sigil 実装のモジュール名と入口の関数（結合後の名前。補足 C-7、PR 3-6b）。純粋な核のモジュール。
 pub const PATH_MODULE: &str = "std.core.path";
 pub const PATH_JOIN_FN: &str = "std.core.path.join";
@@ -140,6 +180,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (FS_MODULE, include_str!("os_fs.sigil")),
     (ENV_MODULE, include_str!("os_env.sigil")),
     (THREAD_MODULE, include_str!("os_thread.sigil")),
+    (SCHED_MODULE, include_str!("os_sched.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
@@ -171,6 +212,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             FS_MODULE,
             ENV_MODULE,
             THREAD_MODULE,
+            SCHED_MODULE,
             PATH_MODULE,
             STRING_MODULE,
             LIST_MODULE,

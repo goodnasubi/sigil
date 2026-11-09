@@ -23,6 +23,13 @@ impl<'a, 'p> Fx<'a, 'p> {
     /// 関数の値（`[関数の番地][環境の語]` の塊）を呼ぶ。
     pub(super) fn call_fnref(&mut self, fv: Value, args: &[Value]) -> Value {
         self.guard_stack();
+        let (v, code) = self.call_fnref_raw(fv, args);
+        self.after_call(code);
+        v
+    }
+
+    /// 関数の値を呼んで（値, 符号）を返す（符号の確かめは呼び出し側）。
+    pub(super) fn call_fnref_raw(&mut self, fv: Value, args: &[Value]) -> (Value, Value) {
         let fp = self.ld(fv, 0);
         let env = self.ld(fv, 8);
         let res = self.tmp(16);
@@ -56,8 +63,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let a = self.saddr(res);
         let v = self.ld(a, 0);
         let code = self.ld(a, 8);
-        self.after_call(code);
-        v
+        (v, code)
     }
 
     pub(super) fn finish_call(&mut self, v: Value, rty: &Ty, dty: &Ty, dest: &Place, next: usize) {
@@ -491,7 +497,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.st(x, blk, 0);
                 (blk, u)
             }
-            SharedGet => {
+            SharedGet | SyncSharedGet => {
                 let (v, ty) = self.val(&args[0]);
                 let (w, inner) = match strip(&ty) {
                     Ty::Shared(i) => match *i {
@@ -513,7 +519,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                 };
                 (w, inner)
             }
-            SharedSet => {
+            SharedSet | AtomicStore => {
                 let (v, ty) = self.val(&args[0]);
                 let (n, _) = self.own(&args[1]);
                 let (cell, inner) = match strip(&ty) {
@@ -996,16 +1002,12 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.b.ins().fence();
                 (self.ic(0), u)
             }
-            // `task.yield` は協調点（ADR 0028）: ネイティブ出力にはスケジューラが
-            // 無いため、bare の意味づけどおり何もしない。他の並行操作（生成・合流・
-            // チャネル等）は値と意味を持つため、従来どおり未対応のまま。
-            TaskYield => (self.ic(0), u),
-            TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskSleep | TaskChannel
-            | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew | SyncSharedGet
-            | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut | AtomicNew | AtomicLoad
-            | AtomicStore => {
-                let v = self.unsupported("並行処理の操作はネイティブ出力未対応");
-                (v, u)
+            // 並行処理の操作（ADR 0030 決定 1、PR 5-2d）。中断点は `func/task.rs` が作る（再開可能な入口の中）。
+            // ここへ来るのは、中断しない操作と、入れ子の呼び出しの中の中断点（評価器と同じ停止）。
+            TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
+            | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
+            | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut | AtomicNew | AtomicLoad => {
+                self.task_builtin(b, args, stop).expect("並行処理の操作")
             }
         }
     }

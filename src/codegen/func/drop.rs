@@ -33,8 +33,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.fail(CgError::Internal("cleanup がない".into()));
             return;
         };
-        let p = self.pending.expect("pending");
-        let a = self.saddr(p);
+        let a = self.pending_addr();
         self.st(code, a, 0);
         self.b.ins().jump(c, NOARGS);
     }

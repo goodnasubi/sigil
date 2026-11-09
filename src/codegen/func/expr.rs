@@ -16,7 +16,7 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     pub(super) fn place(&mut self, pl: &Place) -> (Value, Cur) {
-        let mut addr = self.saddr(self.slots[pl.base]);
+        let mut addr = self.local_addr(pl.base);
         let mut cur = Cur::T(self.lt[pl.base].clone());
         for pj in &pl.proj {
             match *pj {

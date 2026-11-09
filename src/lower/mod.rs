@@ -401,6 +401,21 @@ impl<'a> L<'a> {
             let f = self.lower_fn(job)?;
             self.funcs[fid] = Some(f);
         }
+        // 並行処理の操作を使うプログラムには、タスクの実行の割り当て（`std.os.sched`。ADR 0030 決定 1・2、PR 5-2d）を
+        // SIR に入れる。ネイティブの生成コードが呼び、評価器は呼ばない。使わないプログラムには入れない（SIR を肥やさない）。
+        if self.uses_sched() {
+            use crate::stdlib::embedded::{SCHED_FNS, SCHED_MODULE};
+            for (n, _) in SCHED_FNS {
+                if let Some(&d) = self.fns.get(format!("{SCHED_MODULE}.{n}").as_str()) {
+                    self.instance(d, HashMap::new(), vec![]);
+                }
+            }
+            while let Some(job) = self.queue.pop() {
+                let fid = job.fid;
+                let f = self.lower_fn(job)?;
+                self.funcs[fid] = Some(f);
+            }
+        }
         let funcs = std::mem::take(&mut self.funcs)
             .into_iter()
             .map(|f| f.ok_or_else(|| LowerError("未生成の関数".into())))
@@ -414,6 +429,37 @@ impl<'a> L<'a> {
             entry: fid,
             core_only: self.core_only,
             exit_line: decl.span.line,
+        })
+    }
+
+    /// 生成した関数が、実行の割り当てを要る並行処理の操作を呼んでいるか。`task.yield` と、割り当てを使わない
+    /// `Atomic.new`・`Atomic.store`・`SyncShared` は含まない（ネイティブでは通常の呼び出しで済む）。
+    fn uses_sched(&self) -> bool {
+        use ir::Builtin::*;
+        self.funcs.iter().flatten().any(|f| {
+            f.blocks.iter().any(|b| {
+                matches!(
+                    &b.term,
+                    Term::Call {
+                        func: ir::Callee::Builtin(
+                            TaskScope
+                                | TaskAllOk
+                                | TaskRace
+                                | TaskTimeout
+                                | TaskSleep
+                                | TaskChannel
+                                | ScopeSpawn
+                                | TaskJoin
+                                | ChanSend
+                                | ChanRecv
+                                | LockNew
+                                | LockAcquire
+                                | AtomicLoad
+                        ),
+                        ..
+                    }
+                )
+            })
         })
     }
 

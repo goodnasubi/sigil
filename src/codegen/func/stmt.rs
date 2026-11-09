@@ -54,21 +54,20 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.b.ins().jump(self.blocks[*d], NOARGS);
             }
             Term::Return => {
-                let a = self.saddr(self.slots[0]);
+                let a = self.local_addr(0);
                 let v = self.ld(a, 0);
                 let z = self.ic(0);
                 self.b.ins().return_(&[v, z]);
             }
             // 来ない基本ブロック。形を保つために戻りと同じ命令にする。
             Term::Unreachable => {
-                let a = self.saddr(self.slots[0]);
+                let a = self.local_addr(0);
                 let v = self.ld(a, 0);
                 let z = self.ic(0);
                 self.b.ins().return_(&[v, z]);
             }
             Term::Resume => {
-                let ps = self.pending.expect("pending");
-                let a = self.saddr(ps);
+                let a = self.pending_addr();
                 let c = self.ld(a, 0);
                 let z = self.ic(0);
                 self.b.ins().return_(&[z, c]);
@@ -178,6 +177,15 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.stack_code = self
                     .cg
                     .code_for(*stop, Some(StopKind::StackExhausted), Some(""));
+                // 再開可能な入口の中断点（ADR 0030 決定 1）。
+                if let Some(si) = self
+                    .rs
+                    .as_ref()
+                    .and_then(|rs| rs.sites.get(&self.cur_bb).cloned())
+                {
+                    self.site_call(si, func, args, dest, *next, *stop);
+                    return;
+                }
                 let (_, dc) = self.place(dest);
                 let dty = Self::cur_ty(&dc);
                 let (v, rty) = match func {

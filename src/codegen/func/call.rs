@@ -952,6 +952,12 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (a5, _) = self.val(&args[6]);
                 (self.rt("syscall6", &[n, a0, a1, a2, a3, a4, a5]), u)
             }
+            // 原子的な操作（ADR 0030 決定 5）。実装は PR 5-2a の実装 PR で入る。lowering はまだこの組み込みを生成しない。
+            RawAtomicLoadI64 | RawAtomicStoreI64 | RawAtomicAddI64 | RawAtomicSwapI64
+            | RawAtomicCasI64 | RawAtomicFence => {
+                let v = self.unsupported("原子的な操作は未実装（ADR 0030 決定 5、PR 5-2a）");
+                (v, u)
+            }
             // `task.yield` は協調点（ADR 0028）: ネイティブ出力にはスケジューラが
             // 無いため、bare の意味づけどおり何もしない。他の並行操作（生成・合流・
             // チャネル等）は値と意味を持つため、従来どおり未対応のまま。

@@ -381,6 +381,14 @@ pub enum Builtin {
     RawAlloc,
     RawFree,
     RawSyscall,
+    /// 原子的な操作の原始操作（ADR 0030 決定 5）。メモリ順序は逐次一貫のみ。8 バイト整列の番地を取る。
+    /// `RawAtomicAddI64`・`RawAtomicSwapI64`・`RawAtomicCasI64` は、操作の前の値を返す。
+    RawAtomicLoadI64,
+    RawAtomicStoreI64,
+    RawAtomicAddI64,
+    RawAtomicSwapI64,
+    RawAtomicCasI64,
+    RawAtomicFence,
     /// 並行処理（ADR 0026 決定 3）
     TaskScope,
     TaskAllOk,

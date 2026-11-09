@@ -1110,6 +1110,11 @@ impl<'p> M<'p> {
                 }
                 Val::Int(ret)
             }
+            // 原子的な操作（ADR 0030 決定 5）。実装は PR 5-2a の実装 PR で入る。lowering はまだこの組み込みを生成しない。
+            RawAtomicLoadI64 | RawAtomicStoreI64 | RawAtomicAddI64 | RawAtomicSwapI64
+            | RawAtomicCasI64 | RawAtomicFence => {
+                unreachable!("原子的な操作は未実装（ADR 0030 決定 5、PR 5-2a）")
+            }
             TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
             | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
             | SyncSharedGet | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut

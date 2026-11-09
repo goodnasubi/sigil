@@ -52,6 +52,7 @@ pub(crate) struct Plan {
     pub frame_done: FuncId,
     pub plain_step: FuncId,
     pub drain: FuncId,
+    pub frame_fp: FuncId,
     pub sched_run: FuncId,
     /// 取り消しの旗（8 バイトの静的データ）。
     pub cancel_flag: DataId,
@@ -189,7 +190,9 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
     let p = cg.p;
     let cc = cg.cc;
     let (susp, taken, indirect) = analyse(p, cg.rt.contains_key("sched_start"));
-    if !susp.iter().any(|&s| s) {
+    // 並行処理の操作を使うプログラム（実行の割り当てが結ばれている）には、中断しうる関数がなくても補助関数を作る
+    // （入口が `Lock.new` やチャネルだけを使うときの後始末が、`sigil_drain` を使う）。
+    if !cg.rt.contains_key("sched_start") {
         return Ok(());
     }
     let decl = |cg: &mut Cg<'_>, name: &str, np: usize, ret: char| -> Result<FuncId, CgError> {
@@ -228,6 +231,7 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
     let fn_start = decl(cg, "sigil_fn_start", 4, 'p')?;
     let frame_done = decl(cg, "sigil_frame_done", 1, 'v')?;
     let drain = decl(cg, "sigil_drain", 0, 'v')?;
+    let frame_fp = decl(cg, "sigil_frame_fp", 1, 'p')?;
     let cancel_flag =
         cg.m.declare_data("sigil_cancel_flag", Linkage::Local, true, false)
             .map_err(internal)?;
@@ -246,6 +250,7 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
         frame_done,
         plain_step,
         drain,
+        frame_fp,
         sched_run,
         cancel_flag,
     });
@@ -283,6 +288,9 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
     })?;
     cg.define(drain, next(), shim_sig(cc, 0, 'v'), vec![], |fx| {
         fx.drain_body()
+    })?;
+    cg.define(frame_fp, next(), shim_sig(cc, 1, 'p'), vec![], |fx| {
+        fx.frame_fp_body()
     })?;
     cg.define(sched_run, next(), one, vec![], |fx| fx.sched_run_body())?;
     Ok(())

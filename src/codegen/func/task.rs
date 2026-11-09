@@ -233,6 +233,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         let sa = self.b.ins().func_addr(types::I64, sr);
         self.st(sa, fr, 0);
         self.st(sz, fr, 32);
+        // 子の枠の位置の始まり（空転の検出の指紋が、局所と子を分けて辿る）。
+        let cb = self.ic(HDR as i64 + 8 * f.locals.len() as i64);
+        self.st(cb, fr, 8);
         let rd = self.drop_addr(&norm(&f.ret));
         self.st(rd, fr, 48);
         for (i, &pl) in f.params.iter().enumerate() {
@@ -365,8 +368,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         // 操作を起こして、ブロックしなかったときの値（ブロックしたときは意味がない）を作る。
         let (r, force) = match b {
             TaskYield => {
-                let z = self.ic(0);
-                self.rt("sched_yield_val", &[z]);
+                self.rt("sched_yield_plain", &[]);
                 (self.ic(0), true)
             }
             TaskSleep => {
@@ -765,6 +767,167 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[]);
     }
 
+    /// `sigil_frame_fp(枠) -> 指紋`: 枠の連鎖（状態番号と局所の語）の FNV 風の指紋。枠が指す先の中身は見ない。
+    pub fn frame_fp_body(&mut self) {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        let frame = self.b.block_params(entry)[0];
+        let (outer, lhead, lbody, sbody, shead, step_done, fin) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        // outer(cur, h) / lhead(cur, h, i) / lbody(cur, h, i) / shead(cur, h, j, child) / sbody(cur, h, j, child) / step_done(h, child)
+        self.b.append_block_param(outer, types::I64);
+        self.b.append_block_param(outer, types::I64);
+        for b in [lhead, lbody] {
+            for _ in 0..3 {
+                self.b.append_block_param(b, types::I64);
+            }
+        }
+        for b in [shead, sbody] {
+            for _ in 0..4 {
+                self.b.append_block_param(b, types::I64);
+            }
+        }
+        for _ in 0..2 {
+            self.b.append_block_param(step_done, types::I64);
+        }
+        self.b.append_block_param(fin, types::I64);
+        let h0 = self.ic(0xcbf29ce484222325u64 as i64);
+        self.b
+            .ins()
+            .jump(outer, &[BlockArg::Value(frame), BlockArg::Value(h0)]);
+        let mix = |s: &mut Self, h: Value, w: Value| {
+            let x = s.b.ins().bxor(h, w);
+            s.b.ins().imul_imm_s(x, 0x100000001b3)
+        };
+
+        self.b.switch_to_block(outer);
+        let (cur, h) = (self.b.block_params(outer)[0], self.b.block_params(outer)[1]);
+        let nz = self.b.ins().icmp_imm_s(IntCC::NotEqual, cur, 0);
+        let go = self.b.create_block();
+        self.b
+            .ins()
+            .brif(nz, go, NOARGS, fin, &[BlockArg::Value(h)]);
+        self.b.switch_to_block(go);
+        let state = self.ld(cur, 16);
+        let h = mix(self, h, state);
+        let i0 = self.ic(HDR as i64);
+        self.b.ins().jump(
+            lhead,
+            &[
+                BlockArg::Value(cur),
+                BlockArg::Value(h),
+                BlockArg::Value(i0),
+            ],
+        );
+
+        self.b.switch_to_block(lhead);
+        let ps = self.b.block_params(lhead).to_vec();
+        let (cur, h, i) = (ps[0], ps[1], ps[2]);
+        let cbv = self.ld(cur, 8);
+        let c = self.b.ins().icmp(IntCC::SignedLessThan, i, cbv);
+        let sstart = self.b.create_block();
+        self.b.ins().brif(
+            c,
+            lbody,
+            &[BlockArg::Value(cur), BlockArg::Value(h), BlockArg::Value(i)],
+            sstart,
+            NOARGS,
+        );
+        self.b.switch_to_block(lbody);
+        let ps = self.b.block_params(lbody).to_vec();
+        let (cur, h, i) = (ps[0], ps[1], ps[2]);
+        let a = self.b.ins().iadd(cur, i);
+        let w = self.ld(a, 0);
+        let h = mix(self, h, w);
+        let i2 = self.b.ins().iadd_imm_s(i, 8);
+        self.b.ins().jump(
+            lhead,
+            &[
+                BlockArg::Value(cur),
+                BlockArg::Value(h),
+                BlockArg::Value(i2),
+            ],
+        );
+
+        // 子の枠の位置（局所の後ろ）を 3 語ずつ見て、0 でない最後の語を子とする。
+        self.b.switch_to_block(sstart);
+        // lhead から来るので cur・h は直前の値を引き直せない: 値は lhead のブロック引数。
+        let ps = self.b.block_params(lhead).to_vec();
+        let (cur, h) = (ps[0], ps[1]);
+        let cbw = self.ld(cur, 8);
+        let szw = self.ld(cur, 32);
+        let nocb = self.b.ins().icmp_imm_s(IntCC::Equal, cbw, 0);
+        let j0 = self.b.ins().select(nocb, szw, cbw);
+        let z = self.ic(0);
+        self.b.ins().jump(
+            shead,
+            &[
+                BlockArg::Value(cur),
+                BlockArg::Value(h),
+                BlockArg::Value(j0),
+                BlockArg::Value(z),
+            ],
+        );
+        self.b.switch_to_block(shead);
+        let ps = self.b.block_params(shead).to_vec();
+        let (cur, h, j, child) = (ps[0], ps[1], ps[2], ps[3]);
+        let sz = self.ld(cur, 32);
+        let c = self.b.ins().icmp(IntCC::SignedLessThan, j, sz);
+        self.b.ins().brif(
+            c,
+            sbody,
+            &[
+                BlockArg::Value(cur),
+                BlockArg::Value(h),
+                BlockArg::Value(j),
+                BlockArg::Value(child),
+            ],
+            step_done,
+            &[BlockArg::Value(h), BlockArg::Value(child)],
+        );
+        self.b.switch_to_block(sbody);
+        let ps = self.b.block_params(sbody).to_vec();
+        let (cur, h, j, child) = (ps[0], ps[1], ps[2], ps[3]);
+        let a = self.b.ins().iadd(cur, j);
+        let w = self.ld(a, 0);
+        let has = self.b.ins().icmp_imm_s(IntCC::NotEqual, w, 0);
+        let child2 = self.b.ins().select(has, w, child);
+        let j2 = self.b.ins().iadd_imm_s(j, 8 * SITE_W as i64);
+        self.b.ins().jump(
+            shead,
+            &[
+                BlockArg::Value(cur),
+                BlockArg::Value(h),
+                BlockArg::Value(j2),
+                BlockArg::Value(child2),
+            ],
+        );
+        self.b.switch_to_block(step_done);
+        let ps = self.b.block_params(step_done).to_vec();
+        self.b
+            .ins()
+            .jump(outer, &[BlockArg::Value(ps[1]), BlockArg::Value(ps[0])]);
+        self.b.switch_to_block(fin);
+        let h = self.b.block_params(fin)[0];
+        self.b.ins().return_(&[h]);
+    }
+
+    /// 実行の割り当てに残った値（チャネルの項・`Lock` の値）を破棄し、記録を返す。
+    pub(super) fn finish_sched(&mut self) {
+        let drain = self.cg.task.as_ref().expect("計画").drain;
+        self.rt("sched_collect_garbage", &[]);
+        self.plan_fn(drain, &[]);
+        self.rt("sched_release", &[]);
+    }
+
     /// `sigil_drain()`: スケジューラが積んだ「捨てる値」を取り出して破棄する。
     pub fn drain_body(&mut self) {
         let entry = self.b.create_block();
@@ -837,6 +1000,16 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().brif(is_susp, susp, NOARGS, fin, NOARGS);
 
         self.b.switch_to_block(susp);
+        // `task.yield` で中断したら、枠の指紋を記録して空転を調べる（眠りがあれば時計を進める）。
+        let y = self.rt("sched_yielded", &[]);
+        let (chk, cont) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(y, chk, NOARGS, cont, NOARGS);
+        self.b.switch_to_block(chk);
+        let fpf = self.cg.task.as_ref().expect("計画").frame_fp;
+        let fp = self.plan_fn(fpf, &[f])[0];
+        self.rt("sched_note_yield", &[fp]);
+        self.b.ins().jump(cont, NOARGS);
+        self.b.switch_to_block(cont);
         self.plan_fn(drain, &[]);
         self.b.ins().jump(head, NOARGS);
 

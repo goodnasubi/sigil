@@ -806,3 +806,104 @@ fn run(z: Int) -> Int
     let e = run_with(&prog(body), "run", &[Arg::Int(0)], &opts).unwrap_err();
     assert!(e.drops.len() >= 2, "{:?} {:?}", e.drops, e.error);
 }
+
+#[test]
+fn spinner_waiting_for_a_sleeper_lets_the_clock_advance() {
+    // Codex 指摘 5（tests/eval_yield_livelock_193.rs の SLEEPER_WRITES）: 実行可能なタスクがすべて空転しているときは、
+    // 評価器と同じく仮想の時計を進めて眠りのタスクを起こす。
+    let body = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task
+{
+  return task.scope(|s| {
+    let flag = Atomic.new(0);
+    let w = flag.clone();
+    let r = flag.clone();
+    let sleeper = s.spawn(move || {
+      task.sleep(50);
+      w.store(7);
+      return 0;
+    });
+    let waiter = s.spawn(move || {
+      while r.load() == 0 {
+        task.yield();
+      }
+      return r.load();
+    });
+    return waiter.join() + sleeper.join();
+  });
+}
+"#;
+    assert!(go(body, "run", &[]).starts_with("7"));
+}
+
+#[test]
+fn local_progress_with_yield_does_not_advance_the_clock_early() {
+    // 局所が進む空転でない繰り返しの間は、時計は進まない（眠りのタスクは繰り返しの後に起きる）。
+    let body = r#"
+fn say(n: Int) -> Int
+  intent "s"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&n);
+  return n;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, console, task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let sleeper = s.spawn(move || {
+      task.sleep(50);
+      say(2);
+      return 0;
+    });
+    let counter = s.spawn(move || {
+      let mut i = 0;
+      while i < 500 {
+        i = i + 1;
+        task.yield();
+      }
+      say(1);
+      return i;
+    });
+    return counter.join() + sleeper.join();
+  });
+}
+"#;
+    assert!(go(body, "run", &[]).starts_with("500|1\n2\n"));
+}
+
+#[test]
+fn values_left_in_the_scheduler_are_dropped_without_a_blocking_entry() {
+    // Codex 指摘 6: 中断する操作を持たない入口でも、チャネルに残した値は終了時に破棄され、塊が返る。
+    let body = r#"
+struct Tok {
+  id: Int,
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let (tx, rx) = task.channel();
+  tx.send(Tok { id: 3 });
+  let l = Lock.new(Tok { id: 4 });
+  return 1;
+}
+"#;
+    let v = go_drops(body, "run", &[]);
+    assert!(v.starts_with("1|"), "{v}");
+    let out = run_native(body, "run", &[], 1);
+    assert_eq!(out.trim(), "1");
+}

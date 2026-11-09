@@ -47,7 +47,10 @@ global T_WAITSCOPE: Int = 13
 global T_HASRES: Int = 14
 global T_SIB: Int = 15
 global T_HASRESUME: Int = 16
-global T_WORDS: Int = 17
+global T_SPIN_FP: Int = 17
+global T_SPIN_VER: Int = 18
+global T_SPIN_FLAG: Int = 19
+global T_WORDS: Int = 20
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -76,7 +79,9 @@ global S_GTAIL: Int = 22
 global S_EHEAD: Int = 23
 global S_ETAIL: Int = 24
 global S_CANCEL_I: Int = 25
-global S_WORDS: Int = 26
+global S_VER: Int = 26
+global S_YIELDED: Int = 27
+global S_WORDS: Int = 28
 
 fn ld(p: Int, i: Int) -> Int
   intent "レコード p の i 番目の語を読む"
@@ -146,6 +151,15 @@ fn clear_sched()
   unchecked "大域 SCHED を書く。塊は呼び出し側が先に返している"
 {
   SCHED = 0;
+}
+
+fn bump(s: Int)
+  intent "共有の状態の版を進める（空転の検出が、状態が変わっていないかを見る）"
+  requires none
+  ensures none
+  effects none
+{
+  st(s, S_VER, ld(s, S_VER) + 1);
 }
 
 // --- 表 ---
@@ -283,6 +297,7 @@ fn wake(s: Int, t: Int, v: Int, has: Bool)
   ensures none
   effects none
 {
+  bump(s);
   if has {
     st(t, T_RESUME, v);
     st(t, T_HASRESUME, 1);
@@ -444,19 +459,13 @@ pub fn has_resume() -> Int
   return ld(ld(s, S_CUR), T_HASRESUME);
 }
 
-pub fn idle() -> Int
-  intent "実行可能なタスクがないとき、時計を最も早い目覚めまで進めて眠りのタスクを連番順に起こす。眠りがなければ 0（デッドロック）"
+fn advance_clock(s: Int)
+  intent "時計を最も早い目覚めまで進め、その時刻の眠りのタスクを連番の小さい順に起こす（眠りがあること）"
   requires none
   ensures none
   effects none
 {
-  let s = sched();
   let mut best = ld(s, S_SLEEP);
-  if best == 0 {
-    // デッドロック: 最後にブロックしたタスクも取り消しの対象にする（枠はまだ片付けられていない）。
-    st(s, S_CUR, 0);
-    return 0;
-  }
   let mut t = ld(best, T_SNEXT);
   while t != 0 {
     let a = ld(t, T_SLEEP_AT);
@@ -468,7 +477,6 @@ pub fn idle() -> Int
   }
   let at = ld(best, T_SLEEP_AT);
   st(s, S_CLOCK, at);
-  // at の時刻の眠りを連番の小さい順に起こす
   let mut go = true;
   while go {
     let mut pick = 0;
@@ -488,7 +496,73 @@ pub fn idle() -> Int
       wake(s, pick, 0, true);
     }
   }
+}
+
+pub fn idle() -> Int
+  intent "実行可能なタスクがないとき、時計を進めて眠りのタスクを起こす。眠りがなければ 0（デッドロック）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  if ld(s, S_SLEEP) == 0 {
+    // デッドロック: 最後にブロックしたタスクも取り消しの対象にする（枠はまだ片付けられていない）。
+    st(s, S_CUR, 0);
+    return 0;
+  }
+  advance_clock(s);
   return 1;
+}
+
+pub fn yield_plain()
+  intent "task.yield: yield_val(0) に、空転の検出の対象になる印を付ける"
+  requires none
+  ensures none
+  effects none
+{
+  yield_val(0);
+  st(sched(), S_YIELDED, 1);
+}
+
+pub fn yielded() -> Int
+  intent "直前の中断が task.yield だったか（1 / 0）。読むと印を消す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let y = ld(s, S_YIELDED);
+  st(s, S_YIELDED, 0);
+  return y;
+}
+
+pub fn note_yield(fp: Int)
+  intent "task.yield で中断したタスクの枠の指紋を記録する。実行可能なタスクがすべて、状態の版も指紋も変わらないまま 2 回続けて譲っているなら（空転）、眠りのタスクがいれば時計を進める（評価器の yield_livelock と同じ。眠りがないときの停止は持たない）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  let ver = ld(s, S_VER);
+  let mut same = 0;
+  if ld(t, T_SPIN_FP) == fp && ld(t, T_SPIN_VER) == ver {
+    same = 1;
+  }
+  st(t, T_SPIN_FP, fp);
+  st(t, T_SPIN_VER, ver);
+  st(t, T_SPIN_FLAG, same);
+  let mut all = true;
+  let mut r = ld(s, S_RHEAD);
+  while r != 0 {
+    if ld(r, T_SPIN_FLAG) == 0 || ld(r, T_SPIN_VER) != ver {
+      all = false;
+    }
+    r = ld(r, T_NEXT);
+  }
+  if all && ld(s, S_SLEEP) != 0 {
+    advance_clock(s);
+  }
 }
 
 fn sleep_unlink(s: Int, t: Int)
@@ -539,6 +613,7 @@ pub fn scope_begin() -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   return tab_push(s, S_SCOPES, rec(4));
 }
 
@@ -565,6 +640,7 @@ pub fn scope_end(sid: Int) -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   let sc = tab_get(s, S_SCOPES, sid);
   let t = ld(s, S_CUR);
   if ld(sc, 0) > 0 {
@@ -585,6 +661,7 @@ pub fn spawn(sid: Int, frame: Int, retdrop: Int) -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   let sc = tab_get(s, S_SCOPES, sid);
   let t = new_task(s, frame, retdrop, sid);
   st(sc, 0, ld(sc, 0) + 1);
@@ -606,6 +683,7 @@ pub fn join(tid: Int) -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   let t = tab_get(s, S_TASKS, tid);
   let cur = ld(s, S_CUR);
   if ld(t, T_STATE) == ST_DONE {
@@ -626,6 +704,7 @@ pub fn finish_task(v: Int)
   effects none
 {
   let s = sched();
+  bump(s);
   let t = ld(s, S_CUR);
   st(t, T_STATE, ST_DONE);
   st(t, T_FRAME, 0);
@@ -686,6 +765,7 @@ pub fn sleep(ms: Int)
   if d < 0 {
     d = 0;
   }
+  bump(s);
   let seq = ld(s, S_SEQ) + 1;
   st(s, S_SEQ, seq);
   // 飽和加算（評価器の saturating_add と同じ）。
@@ -712,6 +792,7 @@ pub fn chan_new() -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   return tab_push(s, S_CHANS, rec(4));
 }
 
@@ -722,6 +803,7 @@ pub fn chan_send(id: Int, v: Int, dropfn: Int)
   effects none
 {
   let s = sched();
+  bump(s);
   let c = tab_get(s, S_CHANS, id);
   let w = wq_pop(c, 2);
   if w != 0 {
@@ -747,6 +829,7 @@ pub fn chan_recv(id: Int) -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   let c = tab_get(s, S_CHANS, id);
   let n = ld(c, 0);
   if n != 0 {
@@ -775,6 +858,7 @@ pub fn lock_new(v: Int, dropfn: Int) -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   let l = rec(5);
   st(l, 0, v);
   st(l, 4, dropfn);
@@ -788,6 +872,7 @@ pub fn lock_acquire(id: Int) -> Int
   effects none
 {
   let s = sched();
+  bump(s);
   settle(s);
   let l = tab_get(s, S_LOCKS, id);
   let cur = ld(s, S_CUR);

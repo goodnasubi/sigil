@@ -614,7 +614,13 @@ impl<'a, 'p> Fx<'a, 'p> {
                 .m
                 .declare_func_in_func(self.cg.fids[p.entry], self.b.func);
             let inst = self.b.ins().call(fr, &vs);
-            self.b.inst_results(inst).to_vec()
+            let r = self.b.inst_results(inst).to_vec();
+            // 並行処理の操作を使うが、入口は中断しない（チャネル・`Lock` だけなど）: 実行の割り当てに残った値を破棄し、
+            // 記録を返す（中断しうる入口は駆動の輪が行う）。
+            if self.cg.task.is_some() {
+                self.finish_sched();
+            }
+            r
         };
         let (stopb, showb) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(r[1], stopb, NOARGS, showb, NOARGS);

@@ -1004,6 +1004,11 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             // 並行処理の操作（ADR 0030 決定 1、PR 5-2d）。中断点は `func/task.rs` が作る（再開可能な入口の中）。
             // ここへ来るのは、中断しない操作と、入れ子の呼び出しの中の中断点（評価器と同じ停止）。
+            // fd の待ち（ADR 0031 決定 1-1）。実装は PR 6-3c。lowering はまだこの組み込みを生成しない。
+            IoWaitFd => {
+                let v = self.unsupported("io.wait_fd は未実装（ADR 0031、PR 6-3c）");
+                (v, u)
+            }
             TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
             | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
             | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut | AtomicNew | AtomicLoad => {

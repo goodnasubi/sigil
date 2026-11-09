@@ -1,0 +1,120 @@
+module std.os.thread
+  targets server
+  trust base
+
+// スレッドの作成・終了・待ち合わせ（ADR 0030 決定 4・補足 B、PR 5-2c）。ネイティブの実体。評価器は呼ばない
+// （評価器は複数の OS スレッドを動かさない。`std.os.fs` などと同じ作法）。
+//
+// - `clone`（番号 56）で、glibc なしにスレッドを作る。フラグは CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|
+//   CLONE_SYSVSEM|CLONE_CHILD_CLEARTID（0x250F00）。子が終わるとカーネルが ctid の語を 0 にして `futex` で起こす。
+// - **新しい機械語は足さない**。既存の `sigil_syscall6`（3-7b で承認済み）は `syscall` の直後に `ret` する。子は新しいスタックで
+//   `syscall` から戻るので、その `ret` は新しいスタックの先頭の語（子のスタックの先頭 s）を戻り番地として取る。そこに
+//   生成コードの `sigil_thread_entry` の番地（大域 `ENTRY`。起動の処理が書く）を置いておくと、子は `ret` で `sigil_thread_entry` に入る。
+//   子のレジスタは親のものの写しで、rdi = フラグ、rsi = s なので、`sigil_thread_entry(フラグ, s)` は s + 8 の語（= ハンドル）を読み、
+//   `thread_main(ハンドル)` を呼び、`exit`（番号 60。スレッドだけ終わる）で終わる。
+// - スレッドのスタックは、スレッドごとの領域（`STACK_REGION` に整列した 256MiB。生成コードの `region_base`）の中にある。
+//   `mmap` で 2 倍を取って整列した領域を切り出し、先頭の 1 ページをガードページにする（`mprotect`）。作業の列・表示バッファ・
+//   スタックの下限は、この領域の先頭から決まる（スレッドごと。補足 A-4）。
+// - **最初のスレッドを作る前に確保器を一度呼ぶ**（補足 A-4）。`spawn` はハンドルを確保器から取るので、これを満たす。
+// - ハンドル（48 バイト）: [0] ctid の語（生きている間 1。カーネルが終了時に 0 にする）、[8] `mmap` した先頭、[16] その長さ、[24] 引数。
+// - `thread_main` が呼ぶ `body` は、5-2c では何もしない。5-2e が実行の割り当て（ワーカーの本体）に置き換える。試験は、
+//   このモジュールのソースの `body` を差し替えて使う。
+// 単一の引数だけを渡す。スレッドの本体から戻ったスレッドは、ハンドルを `join` するまで領域を持つ。
+
+global mut ENTRY: Addr = raw.addr_null()
+global REGION: Int = 268435456
+global CLONE_FLAGS: Int = 2428672
+global HANDLE_BYTES: Int = 48
+
+fn map(len: Int) -> Int
+  intent "len バイトの匿名の領域を mmap する（読み書き可、MAP_NORESERVE）。成功なら番地、失敗なら負の errno"
+  requires none
+  ensures none
+  effects none
+  unchecked "mmap(0, len, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0) だけを発行する。len > 0"
+{
+  return raw.syscall(9, 0, len, 3, 16418, -1, 0);
+}
+
+fn unmap(base: Int, len: Int)
+  intent "map で得た領域を返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "base..base+len は map が返した領域（スレッドのスタックを含む）で、その領域を使っているスレッドはもう無い"
+{
+  raw.syscall(11, base, len, 0, 0, 0, 0);
+}
+
+pub fn spawn(arg: Addr) -> Addr
+  intent "新しいスレッドを作り、body(arg) を実行させる。ハンドルを返す。失敗なら空番地"
+  requires none
+  ensures none
+  effects none
+  unchecked "ENTRY は起動の処理が書いた sigil_thread_entry の番地（空なら失敗を返す）。arg は新しいスレッドが読む間、生きている。作ったスレッドは join で待ち合わせるまでハンドルと領域を持つ"
+{
+  if raw.addr_to_int(ENTRY) == 0 {
+    return raw.addr_null();
+  }
+  let h = raw.alloc(HANDLE_BYTES, 8);
+  let m = map(2 * REGION);
+  if m < 0 {
+    raw.free(h, HANDLE_BYTES, 8);
+    return raw.addr_null();
+  }
+  let base = (m + REGION - 1) / REGION * REGION;
+  if raw.syscall(10, base, 4096, 0, 0, 0, 0) < 0 {
+    unmap(m, 2 * REGION);
+    raw.free(h, HANDLE_BYTES, 8);
+    return raw.addr_null();
+  }
+  let top = base + REGION - 64;
+  let s = raw.int_to_addr(top);
+  raw.store_addr(s, ENTRY);
+  raw.store_addr(raw.offset(s, 8), h);
+  raw.atomic_store_i64(h, 1);
+  raw.store_i64(raw.offset(h, 8), m);
+  raw.store_i64(raw.offset(h, 16), 2 * REGION);
+  raw.store_addr(raw.offset(h, 24), arg);
+  let r = raw.syscall(56, CLONE_FLAGS, top, 0, raw.addr_to_int(h), 0, 0);
+  if r < 0 {
+    unmap(m, 2 * REGION);
+    raw.free(h, HANDLE_BYTES, 8);
+    return raw.addr_null();
+  }
+  return h;
+}
+
+pub fn join(h: Addr)
+  intent "スレッドが終わるのを待ち、そのスタックとハンドルを返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "h は spawn が返し、まだ join していないハンドル。join は 1 つのハンドルに 1 回だけ、作ったスレッド以外から呼ぶ"
+{
+  while raw.atomic_load_i64(h) != 0 {
+    raw.syscall(202, raw.addr_to_int(h), 0, 1, 0, 0, 0);
+  }
+  let m = raw.load_i64(raw.offset(h, 8));
+  let len = raw.load_i64(raw.offset(h, 16));
+  unmap(m, len);
+  raw.free(h, HANDLE_BYTES, 8);
+}
+
+fn body(arg: Addr)
+  intent "スレッドの本体。5-2c では何もしない（5-2e が実行の割り当てに置き換える）"
+  requires none
+  ensures none
+  effects none
+{
+}
+
+pub fn thread_main(h: Addr)
+  intent "新しいスレッドの入口（生成コードの sigil_thread_entry が呼ぶ）。body(引数) を実行して戻る"
+  requires none
+  ensures none
+  effects none
+  unchecked "h は spawn が返したハンドルで、join されるまで生きている。呼ぶのは sigil_thread_entry だけで、戻ったらスレッドは exit する"
+{
+  body(raw.load_addr(raw.offset(h, 24)));
+}

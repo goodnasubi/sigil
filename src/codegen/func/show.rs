@@ -11,7 +11,7 @@
 //! （`Addr` だけは補足 H-10 で評価器に合わせて直した）。
 
 use super::{strip, Fx, NOARGS};
-use crate::codegen::{norm_with, Gk, SFn, SB_INLINE_BYTES};
+use crate::codegen::{norm_with, Gk, SFn, SB_INLINE_BYTES, TCB_SB_OFF};
 use crate::ir::{Ty, TypeKind};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
@@ -422,10 +422,9 @@ impl<'a, 'p> Fx<'a, 'p> {
     /// バッファの状態の番地。語: `[0]` 長さ、`[8]` 確保した領域（0 なら静的な領域）、`[16]` その容量、
     /// `[24..]` 静的な領域。
     fn sb_base(&mut self) -> Value {
-        match self.cg.show_buf_data() {
-            Ok(d) => self.data_addr(d),
-            Err(e) => self.fail(e),
-        }
+        // スレッドごとの領域の中（`TCB_SB_OFF`）。静的データは持たない。
+        let base = self.region_base();
+        self.b.ins().iadd_imm_s(base, TCB_SB_OFF)
     }
 
     /// 今の領域の番地と容量（確保した領域がなければ静的な領域。容量は `SB_INLINE_BYTES`）。

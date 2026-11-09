@@ -1,5 +1,6 @@
 //! 初期スタック・専用スタックと終了処理（ADR 0025 C-4〜C-6）。
 use super::*;
+use crate::codegen::{STACK_LIMIT_OFF, STACK_REGION};
 use cranelift_codegen::ir::TrapCode;
 use cranelift_module::FuncId;
 
@@ -11,11 +12,19 @@ impl Fx<'_, '_> {
         self.b.block_params(b).to_vec()
     }
 
-    pub(crate) fn start_limit(&mut self, limit: DataId) {
+    /// 今のスレッドの領域の先頭（スタックポインタの下位ビットを落とす。`STACK_REGION`）。
+    pub(crate) fn region_base(&mut self) -> Value {
+        let sp = self.b.ins().get_stack_pointer(types::I64);
+        let mask = self.ic(!(STACK_REGION - 1));
+        self.b.ins().band(sp, mask)
+    }
+
+    /// スタックの下限（領域の先頭 + `STACK_LIMIT_OFF`）。関数の入口が比べる。
+    pub(crate) fn start_limit(&mut self) {
         self.start_head();
-        let p = self.data_addr(limit);
-        let v = self.ld(p, 0);
-        self.b.ins().return_(&[v]);
+        let base = self.region_base();
+        let lim = self.b.ins().iadd_imm_s(base, STACK_LIMIT_OFF);
+        self.b.ins().return_(&[lim]);
     }
 
     /// `_start` から入る。glibc の `__libc_start_main` を経ず、入口（`sigil_start`）を直接呼ぶ（補足 C-7 の 3-7c）。
@@ -33,6 +42,19 @@ impl Fx<'_, '_> {
         self.b.ins().trap(TrapCode::unwrap_user(1));
     }
 
+    /// 新しいスレッドの入口（`sigil_thread_entry(フラグ, s)`）。`std.os.thread.spawn` が子のスタックの先頭 `s` に置いた
+    /// 戻り番地（この関数）へ、子は `sigil_syscall6` の `ret` で入る。`s + 8` の語がハンドルで、`thread_main` を呼び、
+    /// スレッドだけを終える（`exit`、番号 60）。戻らない。
+    pub(crate) fn start_thread_entry(&mut self) {
+        let ps = self.start_head();
+        let h = self.ld(ps[1], 8);
+        self.rt("thread_main", &[h]);
+        let n = self.ic(60);
+        let z = self.ic(0);
+        self.rt("syscall6", &[n, z, z, z, z, z, z]);
+        self.b.ins().trap(TrapCode::unwrap_user(1));
+    }
+
     pub(crate) fn start_exit(&mut self, code: Value) {
         let n = self.ic(231);
         let z = self.ic(0);
@@ -40,7 +62,12 @@ impl Fx<'_, '_> {
         self.b.ins().trap(TrapCode::unwrap_user(1));
     }
 
-    pub(crate) fn start_stack(&mut self, limit: DataId, run: FuncId, switch: FuncId) {
+    pub(crate) fn start_stack(
+        &mut self,
+        run: FuncId,
+        switch: FuncId,
+        thread_entry: Option<FuncId>,
+    ) {
         let ps = self.start_head();
         let argc = self.b.ins().uextend(types::I64, ps[0]);
         let argv = ps[1];
@@ -57,28 +84,47 @@ impl Fx<'_, '_> {
             let p = self.data_addr(self.cg.gids[g]);
             self.st(envp, p, 0);
         }
+        // 新しいスレッドの入口の番地を大域 `std.os.thread.ENTRY` に書く（`std.os.thread.spawn` が子のスタックの先頭に置く）。
+        if let Some(e) = thread_entry {
+            if let Some(g) = self
+                .cg
+                .p
+                .globals
+                .iter()
+                .position(|g| g.name == "std.os.thread.ENTRY")
+            {
+                let fr = self.cg.m.declare_func_in_func(e, self.b.func);
+                let addr = self.b.ins().func_addr(types::I64, fr);
+                let p = self.data_addr(self.cg.gids[g]);
+                self.st(addr, p, 0);
+            }
+        }
         let a = self.zero_tmp(24);
         self.st(argc, a, 0);
         self.st(argv, a, 8);
         self.st(envp, a, 16);
         let z = self.ic(0);
         let n = self.ic(9);
-        let size = self.ic(256 * 1024 * 1024 + 4096);
+        // 領域の大きさの 2 倍を取り、`STACK_REGION` に整列した領域を切り出す（余りは触らない仮想の領域）。
+        let size = self.ic(2 * STACK_REGION);
         let prot = self.ic(3);
         let flags = self.ic(0x4022);
         let minus = self.ic(-1);
-        let base = self.rt("syscall6", &[n, z, size, prot, flags, minus, z]);
+        let mapped = self.rt("syscall6", &[n, z, size, prot, flags, minus, z]);
         let bad = self.b.create_block();
         let protect = self.b.create_block();
         let failed = self
             .b
             .ins()
-            .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, base, -4095);
+            .icmp_imm_s(IntCC::UnsignedGreaterThanOrEqual, mapped, -4095);
         self.b.ins().brif(failed, bad, NOARGS, protect, NOARGS);
         self.b.switch_to_block(bad);
         let code = self.ic(70);
         self.start_exit(code);
         self.b.switch_to_block(protect);
+        let up = self.b.ins().iadd_imm_s(mapped, STACK_REGION - 1);
+        let mask = self.ic(!(STACK_REGION - 1));
+        let base = self.b.ins().band(up, mask);
         let n = self.ic(10);
         let page = self.ic(4096);
         let r = self.rt("syscall6", &[n, base, page, z, z, z, z]);
@@ -86,10 +132,7 @@ impl Fx<'_, '_> {
         let ready = self.b.create_block();
         self.b.ins().brif(failed, bad, NOARGS, ready, NOARGS);
         self.b.switch_to_block(ready);
-        let top = self.b.ins().iadd(base, size);
-        let low = self.b.ins().iadd_imm_s(top, -192 * 1024 * 1024);
-        let lp = self.data_addr(limit);
-        self.st(low, lp, 0);
+        let top = self.b.ins().iadd_imm_s(base, STACK_REGION);
         let fr = self.cg.m.declare_func_in_func(run, self.b.func);
         let addr = self.b.ins().func_addr(types::I64, fr);
         let fr = self.cg.m.declare_func_in_func(switch, self.b.func);

@@ -16,6 +16,8 @@ use cranelift_module::Module;
 
 /// 塊の頭の第 1 語に立つ「黙った」印（補足 G-4。`val.rs` の `SILENT` と同じ）。
 const SILENT: i64 = 1 << 62;
+/// 塊の頭の第 1 語に立つ「`Lock` の守り」の印（ADR 0030 決定 1、PR 5-2d）。最後の参照を破棄するとき、`Lock` の解放を知らせる。
+const GUARD: i64 = 1 << 61;
 /// 解放した塊の参照の数の場所に書く印（`val.rs` の `FREED` と同じ）。
 const FREED: i64 = 0x5afe_dead_0000_0001;
 /// 二重解放の停止の報告（補足 G-4）。
@@ -117,6 +119,28 @@ impl<'a, 'p> Fx<'a, 'p> {
         let c1 = self.b.ins().iadd_imm_s(c, -1);
         self.st(c1, r, 0);
         c1
+    }
+
+    /// 守りの塊 `w` の頭に守りの印を立てる（破棄で `Lock` の解放を知らせる）。
+    pub(super) fn set_guard(&mut self, w: Value) {
+        let h = self.b.ins().iadd_imm_s(w, -16);
+        let hw = self.ld(h, 0);
+        let s = self.b.ins().bor_imm_s(hw, GUARD);
+        self.st(s, h, 0);
+    }
+
+    /// 型 `t` の値を破棄する生成の関数 `sigil_drop_<k>` の番地。破棄の要らない型は 0（スケジューラが積む値用）。
+    pub(super) fn drop_addr(&mut self, t: &Ty) -> Value {
+        if !aggregate(t) {
+            return self.ic(0);
+        }
+        match self.cg.gen_fn(Gk::Drop, &key(t)) {
+            Ok(id) => {
+                let fr = self.cg.m.declare_func_in_func(id, self.b.func);
+                self.b.ins().func_addr(types::I64, fr)
+            }
+            Err(e) => self.fail(e),
+        }
     }
 
     /// 塊 `w` の頭に黙った印を立てる。
@@ -391,7 +415,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let fv = self.ic(FREED);
         self.st(fv, h, 8);
         let hd = self.ld(h, 0);
-        let n = self.b.ins().band_imm_s(hd, !SILENT);
+        let n = self.b.ins().band_imm_s(hd, !(SILENT | GUARD));
         let total = self.b.ins().iadd_imm_s(n, 16);
         let eight = self.ic(8);
         self.rt("raw_free", &[h, total, eight]);
@@ -602,6 +626,19 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let z = self.b.ins().icmp_imm_s(IntCC::Equal, cnt, 0);
                 self.b.ins().brif(z, dead, NOARGS, end, NOARGS);
                 self.b.switch_to_block(dead);
+                // `Lock` の守り（`LockGuard`。頭に守りの印がある）の最後の参照が消えた: 解放を知らせる（語 8 が Lock のレコード）。
+                if self.cg.rt.contains_key("sched_lock_release") {
+                    let h = self.b.ins().iadd_imm_s(w, -16);
+                    let hw = self.ld(h, 0);
+                    let g = self.b.ins().band_imm_s(hw, GUARD);
+                    let (rel, after) = (self.b.create_block(), self.b.create_block());
+                    self.b.ins().brif(g, rel, NOARGS, after, NOARGS);
+                    self.b.switch_to_block(rel);
+                    let l = self.ld(w, 8);
+                    self.rt("sched_lock_release", &[l]);
+                    self.b.ins().jump(after, NOARGS);
+                    self.b.switch_to_block(after);
+                }
                 let c = self.ld(w, 0);
                 self.push_child(i, c);
                 self.blk_free(w);

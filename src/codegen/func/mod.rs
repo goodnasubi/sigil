@@ -8,6 +8,7 @@ mod expr;
 mod show;
 mod start;
 mod stmt;
+mod task;
 mod valops;
 
 use super::{norm, rt_spec, shim_spec, Cg, CgError, SFn};
@@ -66,6 +67,10 @@ pub(super) struct Fx<'a, 'p> {
     line: u32,
     cleanup: Option<CBlock>,
     stack_code: i64,
+    /// 再開可能な入口（中断しうる関数の `sigil_step_<f>`。ADR 0030 決定 1）を作っているときの状態。
+    rs: Option<task::Rs>,
+    /// 今作っている SIR の基本ブロックの番号（中断点を引く）。
+    cur_bb: usize,
 }
 
 impl<'a, 'p> Fx<'a, 'p> {
@@ -83,6 +88,8 @@ impl<'a, 'p> Fx<'a, 'p> {
             line: 0,
             cleanup: None,
             stack_code: 0,
+            rs: None,
+            cur_bb: 0,
         }
     }
 
@@ -598,12 +605,17 @@ impl<'a, 'p> Fx<'a, 'p> {
                 vs.push(self.ld(out, 8 * i as i32));
             }
         }
-        let fr = self
-            .cg
-            .m
-            .declare_func_in_func(self.cg.fids[p.entry], self.b.func);
-        let inst = self.b.ins().call(fr, &vs);
-        let r = self.b.inst_results(inst).to_vec();
+        // 入口の関数が中断しうるときは、枠を作って駆動の輪（`sigil_sched_run`）で動かす（ADR 0030 決定 1）。
+        let r = if self.cg.task.as_ref().is_some_and(|t| t.susp[p.entry]) {
+            self.run_entry_task(p.entry, &vs)
+        } else {
+            let fr = self
+                .cg
+                .m
+                .declare_func_in_func(self.cg.fids[p.entry], self.b.func);
+            let inst = self.b.ins().call(fr, &vs);
+            self.b.inst_results(inst).to_vec()
+        };
         let (stopb, showb) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(r[1], stopb, NOARGS, showb, NOARGS);
 

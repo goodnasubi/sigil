@@ -17,6 +17,7 @@
 
 mod func;
 mod start;
+mod task;
 
 use crate::exec::StopKind;
 use crate::ir::{Func, GlobalInit, Program, Ty};
@@ -117,6 +118,17 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "console_log" => ("pp", 'v'),
         // 新しいスレッドの入口 `std.os.thread.thread_main(ハンドル)`（ADR 0030 決定 4、PR 5-2c）
         "thread_main" => ("p", 'v'),
+        // タスクの実行の割り当て `std.os.sched`（ADR 0030 決定 1・2、PR 5-2d）。値は語で受け渡す
+        "sched_start" | "sched_lock_new" => ("pp", 'p'),
+        "sched_next_task" | "sched_blocked" | "sched_take_resume" | "sched_idle"
+        | "sched_root_done" | "sched_root_result" | "sched_scope_begin" | "sched_chan_new"
+        | "sched_cancel_next" | "sched_garbage_pop" => ("", 'p'),
+        "sched_scope_end" | "sched_join" | "sched_chan_recv" | "sched_lock_acquire" => ("p", 'p'),
+        "sched_spawn" => ("ppp", 'p'),
+        "sched_finish_task" | "sched_yield_val" | "sched_sleep" | "sched_lock_release"
+        | "sched_garbage_free" => ("p", 'v'),
+        "sched_chan_send" => ("ppp", 'v'),
+        "sched_collect_garbage" | "sched_release" => ("", 'v'),
         // `fs.read`/`fs.write`/`Path`（`std.os.fs`・`std.core.path`。補足 C-7 の 3-6b）。文字列は頭の番地で受け渡す
         "fs_read" => ("ppp", 'p'),
         "fs_write" => ("ppppp", 'i'),
@@ -198,6 +210,8 @@ pub(crate) struct Cg<'p> {
     /// 合わせ込みの失敗の内訳（補足 I-4）: `[要る型の名前の番地, 長さ, 渡された値の名前の番地, 長さ]`。
     /// `sigil_coerce_<k>` が失敗の箇所で書き、thunk が誤りの文言を組み立てるときに読む。
     coerce_err: Option<DataId>,
+    /// タスクの状態機械の変換の計画（ADR 0030 決定 1、PR 5-2d）。中断しうる関数がなければ `None`。
+    pub(crate) task: Option<task::Plan>,
 }
 
 /// 型ごとに生成する関数の種類（補足 G-1・G-2）。
@@ -694,6 +708,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         show_q: vec![],
         quote: None,
         coerce_err: None,
+        task: None,
     };
 
     // Sigil 製の確保器のシム（ADR 0025 補足 B-2・B-5）。確保器の関数を結んだときだけ公開する。
@@ -707,6 +722,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(console_shims(&mut cg)?);
     // 新しいスレッドの入口のシム（ADR 0030 決定 4）。結ばれていなければ作らない。
     shims.extend(thread_shims(&mut cg)?);
+    // タスクの実行の割り当て（`std.os.sched`）のシム（ADR 0030 決定 1・2、PR 5-2d）。結ばれていなければ作らない。
+    shims.extend(sched_shims(&mut cg)?);
     // `fs.read`/`fs.write`/`Path` のシム（補足 C-7 の 3-6b）。同じく結ばれていなければ作らない。
     shims.extend(fs_path_shims(&mut cg)?);
     // バイト列の表現（`std.core.bytes`）のシム（補足 F-4）。同じく常に必要。
@@ -720,6 +737,9 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         cg.m.declare_function("sigil_blkfree_nz", Linkage::Local, &shim_sig(cc, 1, 'v'))
             .map_err(internal)?;
     cg.blkfree_nz = Some(blkfree);
+
+    // タスクの状態機械の変換（補助関数と、中断しうる関数の入口・作成関数。ADR 0030 決定 1）。
+    task::define_all(&mut cg)?;
 
     for (i, f) in p.funcs.iter().enumerate() {
         let sig = cg.sig(f.params.len());
@@ -1055,6 +1075,32 @@ fn console_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         .map_err(internal)?;
     cg.rt.insert("console_log", id);
     Ok(vec![(id, target, 2, 'v')])
+}
+
+/// タスクの実行の割り当て（`std.os.sched`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する
+/// （ADR 0030 決定 1・2、PR 5-2d）。モジュールの関数が SIR にあるとき（プログラムが並行処理の操作を使うとき）だけ作る。
+fn sched_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::{SCHED_FNS, SCHED_MODULE};
+    let mut out = vec![];
+    for &(n, key) in SCHED_FNS {
+        let full = format!("{SCHED_MODULE}.{n}");
+        let Some(target) = cg.p.funcs.iter().position(|f| f.name == full) else {
+            return Ok(vec![]);
+        };
+        let Some((ps, r)) = shim_spec(key) else {
+            return Err(internal(format!("シムの形がない: {key}")));
+        };
+        let id =
+            cg.m.declare_function(
+                &format!("sigil_rt_{key}"),
+                Linkage::Local,
+                &shim_sig(cg.cc, ps.len(), r),
+            )
+            .map_err(internal)?;
+        cg.rt.insert(key, id);
+        out.push((id, target, ps.len(), r));
+    }
+    Ok(out)
 }
 
 /// 新しいスレッドの入口 `std.os.thread.thread_main` を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する

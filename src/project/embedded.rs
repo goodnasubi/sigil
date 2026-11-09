@@ -70,6 +70,7 @@ impl Proj<'_> {
                 || r == embedded::FS_MODULE
                 || r == embedded::ENV_MODULE
                 || r == embedded::THREAD_MODULE
+                || r == embedded::SCHED_MODULE
             {
                 continue;
             }

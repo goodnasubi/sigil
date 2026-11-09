@@ -611,3 +611,47 @@ fn run() -> Int
 "#;
     assert!(go(body, "run", &[]).starts_with("12"));
 }
+
+#[test]
+fn scope_waits_for_children_that_nobody_joined() {
+    // 範囲の本体が先に戻っても、範囲を出る前に子の完了を待つ（ADR 0007 決定 1）。子の出力が範囲の後の出力より先に出る。
+    let body = r#"
+fn say(n: Int) -> Int
+  intent "s"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&n);
+  return n;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, task.spawn, task.suspend
+{
+  let n = task.scope(|s| {
+    let a = s.spawn(move || {
+      task.yield();
+      say(1);
+      task.yield();
+      say(3);
+      return 0;
+    });
+    let b = s.spawn(move || {
+      task.yield();
+      say(2);
+      return 0;
+    });
+    say(0);
+    return 10;
+  });
+  say(4);
+  return n;
+}
+"#;
+    let v = go(body, "run", &[]);
+    assert!(v.starts_with("10|0\n1\n2\n3\n4\n"), "{v}");
+}

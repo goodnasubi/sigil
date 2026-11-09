@@ -1110,10 +1110,59 @@ impl<'p> M<'p> {
                 }
                 Val::Int(ret)
             }
-            // 原子的な操作（ADR 0030 決定 5）。実装は PR 5-2a の実装 PR で入る。lowering はまだこの組み込みを生成しない。
+            // 原子的な操作（ADR 0030 決定 5）。評価器はタスクを 1 つのスレッドで動かすので、通常の読み書きと
+            // 同じ意味で足りるが、ネイティブとの食い違いを避けるため `AtomicI64`（逐次一貫）で行う。
+            // 検査は `load_i64`・`store_i64` と同じ（8 バイト境界・生きた領域）で、状態を書き換える前に行う。
             RawAtomicLoadI64 | RawAtomicStoreI64 | RawAtomicAddI64 | RawAtomicSwapI64
-            | RawAtomicCasI64 | RawAtomicFence => {
-                unreachable!("原子的な操作は未実装（ADR 0030 決定 5、PR 5-2a）")
+            | RawAtomicCasI64 => {
+                use std::sync::atomic::{AtomicI64, Ordering::SeqCst};
+                let name = match b {
+                    RawAtomicLoadI64 => "raw.atomic_load_i64",
+                    RawAtomicStoreI64 => "raw.atomic_store_i64",
+                    RawAtomicAddI64 => "raw.atomic_add_i64",
+                    RawAtomicSwapI64 => "raw.atomic_swap_i64",
+                    _ => "raw.atomic_cas_i64",
+                };
+                let a = match self.scalar(locals, &args[0]) {
+                    Val::Addr(a) => a,
+                    _ => 0,
+                };
+                let x = if matches!(b, RawAtomicLoadI64) {
+                    0
+                } else {
+                    self.read_int(locals, &args[1])
+                };
+                let y = if matches!(b, RawAtomicCasI64) {
+                    self.read_int(locals, &args[2])
+                } else {
+                    0
+                };
+                if a % 8 != 0 {
+                    return Err(self.stop_at(
+                        loc,
+                        Some(StopKind::StdRequiresViolated),
+                        Some(&format!("{name}: 8バイト境界違反")),
+                    ));
+                }
+                self.check_raw_access(a, 8, loc)?;
+                // SAFETY: 8 バイト境界で、生きた領域の中であることを検査した。
+                let cell = unsafe { AtomicI64::from_ptr(a as *mut i64) };
+                match b {
+                    RawAtomicLoadI64 => Val::Int(cell.load(SeqCst)),
+                    RawAtomicStoreI64 => {
+                        cell.store(x, SeqCst);
+                        Val::Unit
+                    }
+                    RawAtomicAddI64 => Val::Int(cell.fetch_add(x, SeqCst)),
+                    RawAtomicSwapI64 => Val::Int(cell.swap(x, SeqCst)),
+                    _ => Val::Int(match cell.compare_exchange(x, y, SeqCst, SeqCst) {
+                        Ok(v) | Err(v) => v,
+                    }),
+                }
+            }
+            RawAtomicFence => {
+                std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+                Val::Unit
             }
             TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
             | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew

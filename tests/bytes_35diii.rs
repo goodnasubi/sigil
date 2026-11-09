@@ -431,18 +431,19 @@ fn failure_paths_leave_no_blocks_across_1000_and_100000_iterations() {
 }
 
 // ---------------------------------------------------------------------------
-// Rust のランタイムから消えている
+// 暫定の Rust ランタイムと変換用の rt_spec が消えている
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_three_conversions_are_gone_from_the_rust_runtime() {
-    let rt = include_str!("../runtime/core/src/lib.rs");
+fn the_rust_runtime_and_three_conversion_specs_are_gone() {
+    assert!(
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("runtime")
+            .exists(),
+        "暫定の Rust ランタイムが残っている"
+    );
     let cg = include_str!("../src/codegen.rs");
     for name in ["bytes_to_string_utf8", "str_as_bytes", "bytes_from_list"] {
-        assert!(
-            !rt.contains(&format!("sigil_rt_{name}")),
-            "{name} が Rust のランタイムに残っている"
-        );
         assert!(
             !cg.contains(&format!("\"{name}\"")),
             "{name} が rt_spec に残っている"

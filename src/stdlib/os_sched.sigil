@@ -467,8 +467,18 @@ fn next_task_locked() -> Int
   let mut t = ld(s, S_RHEAD);
   let mut prev = 0;
   while t != 0 && (ld(t, T_ACTIVE) != 0 || ld(t, T_CANCEL) != 0) {
-    prev = t;
-    t = ld(t, T_NEXT);
+    let nx = ld(t, T_NEXT);
+    if ld(t, T_CANCEL) != 0 {
+      // 取り消し済みの要素は残さない。idle が空でない列を見て空転するのを防ぐ。
+      if prev == 0 { ready_pop(s); } else {
+        st(prev, T_NEXT, nx);
+        if ld(s, S_RTAIL) == t { st(s, S_RTAIL, prev); }
+        st(t, T_NEXT, 0);
+      }
+    } else {
+      prev = t;
+    }
+    t = nx;
   }
   if t == 0 {
     return 0;
@@ -732,6 +742,9 @@ fn spawn_locked(sid: Int, frame: Int, retdrop: Int) -> Int
   bump(s);
   let sc = tab_get(s, S_SCOPES, sid);
   let t = new_task(s, frame, retdrop, sid);
+  // 取り消しの待機中に動いている親が作った子も、選択不能にして走査に含める。
+  let cur = ld(s, S_CUR);
+  if cur != 0 && ld(cur, T_CANCEL) != 0 { st(t, T_CANCEL, 1); }
   st(sc, 0, ld(sc, 0) + 1);
   let tail = ld(sc, 3);
   if tail == 0 {
@@ -754,7 +767,7 @@ fn join_locked(tid: Int) -> Int
   bump(s);
   let t = tab_get(s, S_TASKS, tid);
   let cur = ld(s, S_CUR);
-  if ld(t, T_STATE) == ST_DONE {
+  if ld(t, T_STATE) == ST_DONE && ld(t, T_CANCEL) == 0 {
     let v = ld(t, T_RESULT);
     st(t, T_HASRES, 0);
     return v;
@@ -1051,7 +1064,24 @@ fn scope_cancel_next_locked(sid: Int) -> Int
   let s = sched();
   let mut i = 0;
   if ld(s, S_SAVED) == 0 {
-    st(s, S_SAVED, ld(s, S_CUR));
+    let me = ld(s, S_CUR);
+    st(s, S_SAVED, me);
+    // 排他を放す前に全子孫を選択不能にする。枠の巻き戻しは全員の停止後。
+    let mut active = true;
+    while active {
+      active = false;
+      let mut j = 0;
+      while j < ld(s, S_TASKS + 1) {
+        let t = tab_get(s, S_TASKS, j);
+        if t != me && in_scope(s, t, sid) {
+          st(t, T_CANCEL, 1);
+          if ld(t, T_ACTIVE) != 0 { active = true; }
+        }
+        j = j + 1;
+      }
+      // 待機中に spawn された子孫も、再走査してから走査範囲を確定する。
+      if active { wait_event(s); }
+    }
     i = ld(s, S_TASKS + 1);
   } else {
     i = ld(s, S_SCAN);
@@ -1061,8 +1091,6 @@ fn scope_cancel_next_locked(sid: Int) -> Int
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
     if t != me && in_scope(s, t, sid) {
-      st(t, T_CANCEL, 1);
-      while ld(t, T_ACTIVE) != 0 { wait_event(s); }
       if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
         st(t, T_HASRES, 0);
         garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
@@ -1543,8 +1571,9 @@ fn mutex_lock()
 {
   let s = sched();
   let a = raw.int_to_addr(s + 8 * S_MUTEX);
-  while raw.atomic_cas_i64(a, 0, 1) != 0 {
-    raw.syscall(202, raw.addr_to_int(a), 128, 1, 0, 0, 0);
+  if raw.atomic_cas_i64(a, 0, 1) == 0 { return; }
+  while raw.atomic_swap_i64(a, 2) != 0 {
+    raw.syscall(202, raw.addr_to_int(a), 128, 2, 0, 0, 0);
   }
 }
 
@@ -1556,8 +1585,9 @@ fn mutex_unlock()
   unchecked "このワーカーが mutex_lock で取得済み"
 {
   let a = raw.int_to_addr(SCHED + 8 * S_MUTEX);
-  raw.atomic_store_i64(a, 0);
-  raw.syscall(202, raw.addr_to_int(a), 129, 1, 0, 0, 0);
+  if raw.atomic_swap_i64(a, 0) == 2 {
+    raw.syscall(202, raw.addr_to_int(a), 129, 1, 0, 0, 0);
+  }
 }
 
 fn notify()

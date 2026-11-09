@@ -373,3 +373,64 @@ fn run() -> Int
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn cancellation_marks_all_children_before_returning_and_drains_ready_queue() {
+    // ランタイム入口を直接駆動する。枠は実行しない識別値で、解放対象の実メモリではない。
+    let body = String::from(
+        r#"
+fn run() -> Int
+  intent "全子孫の取り消しが巻き戻しより先に完了し、空の待ち行列でデッドロックを検出する"
+  requires none
+  ensures none
+  effects none
+{
+  start(100, 0);
+  next_task();
+  let sid = scope_begin();
+  spawn_locked(sid, 101, 0);
+  spawn_locked(sid, 102, 0);
+  let last = scope_cancel_next(sid);
+  // 最初の枠を返した時点で、まだ巻き戻していない兄弟も実行できない。
+  let runnable = next_task();
+  if runnable != 0 { step_end(); }
+  let first = scope_cancel_next(sid);
+  let end = scope_cancel_next(sid);
+  step_end();
+  let empty = next_task();
+  let deadlock = idle();
+  release();
+  if last == 102 && first == 101 && end == 0 && runnable == 0 && empty == 0 && deadlock == 0 {
+    return 1;
+  }
+  return 0;
+}
+"#,
+    );
+    // 単一スレッドで内部状態を駆動する試験用モジュール。ワーカー専用領域も共有領域を使う。
+    let runtime = include_str!("../src/stdlib/os_sched.sigil")
+        .split("fn worker_count()")
+        .next()
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with("use "))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replacen("module std.os.sched", "module m.a", 1)
+        .replacen(
+            "{\n  return 0;",
+            "  unchecked \"試験は単一スレッドで共有領域を使う\"\n{\n  return SCHED;",
+            1,
+        )
+        .replace("clock", "test_clock");
+    let src = format!("{runtime}\n{body}");
+    let dir = scratch("355-cancel-ready");
+    let exe = dir.join("prog");
+    build(&src, &exe);
+    for count in ["1", "2", "4", "8"] {
+        let o = execute(&exe, Some(count));
+        assert!(o.status.success(), "{o:?}");
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "1");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

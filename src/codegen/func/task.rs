@@ -452,7 +452,9 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.b.ins().brif(has, dropb, NOARGS, after, NOARGS);
             self.b.switch_to_block(dropb);
             let w = self.rt("sched_take_resume", &[]);
-            self.drop_val(dty, w);
+            // すぐには破棄せず、ごみの列に積む（局所・持ち主の後に、駆動の輪が破棄する）。
+            let df = self.drop_addr(dty);
+            self.rt("sched_defer_drop", &[w, df]);
             self.b.ins().jump(after, NOARGS);
             self.b.switch_to_block(after);
         }
@@ -504,6 +506,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         let (fail, okb) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(code, fail, NOARGS, okb, NOARGS);
         self.b.switch_to_block(fail);
+        // 範囲の本体が失敗した: 外側を巻き戻す前に、この範囲の子（子孫）を取り消す（評価器の Act::Resume の cancel_scope）。
+        let sid_f = self.ld(self.frame(), aux1);
+        self.cancel_loop(Some(sid_f));
         self.jump_cleanup(code);
         self.b.switch_to_block(okb);
         let frame = self.frame();
@@ -1077,8 +1082,22 @@ impl<'a, 'p> Fx<'a, 'p> {
     /// 残りのタスクを新しいものから順に取り消し、後始末をして、符号 `code` の停止を返す。
     fn cancel_all_and_return(&mut self, code: Value) {
         let (_, drain) = self.plan_ids();
+        self.cancel_loop(None);
+        self.rt("sched_collect_garbage", &[]);
+        self.plan_fn(drain, &[]);
+        self.rt("sched_release", &[]);
+        let z = self.ic(0);
+        self.b.ins().return_(&[z, code]);
+    }
+
+    /// 取り消しの旗を立てて、タスクを 1 つずつ取り消す（`scope` が `Some` ならその範囲の子孫だけ、なければ全体）。
+    /// 取り消したタスクごとに、枠を片付けてから（持ち主の関数の値の破棄）ごみの列を空にする（未受領の起床の値は
+    /// 局所・持ち主の後に破棄する。評価器の cancel_task の順序）。旗は元の値に戻す。
+    fn cancel_loop(&mut self, scope: Option<Value>) {
+        let (done, drain) = self.plan_ids();
         let flag = self.cg.task.as_ref().expect("計画").cancel_flag;
         let fa = self.data_addr(flag);
+        let old = self.ld(fa, 0);
         let one = self.ic(1);
         self.st(one, fa, 0);
         let (head, body, end) = (
@@ -1088,7 +1107,10 @@ impl<'a, 'p> Fx<'a, 'p> {
         );
         self.b.ins().jump(head, NOARGS);
         self.b.switch_to_block(head);
-        let g = self.rt("sched_cancel_next", &[]);
+        let g = match scope {
+            Some(sid) => self.rt("sched_scope_cancel_next", &[sid]),
+            None => self.rt("sched_cancel_next", &[]),
+        };
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, g, 0);
         let (chk, only_drain) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(zero, end, NOARGS, chk, NOARGS);
@@ -1102,18 +1124,12 @@ impl<'a, 'p> Fx<'a, 'p> {
         let sig = self.sigref(1);
         let stepf = self.ld(g, 0);
         self.b.ins().call_indirect(sig, stepf, &[g]);
-        let (done, _) = self.plan_ids();
         self.plan_fn(done, &[g]);
+        self.plan_fn(drain, &[]);
         self.b.ins().jump(head, NOARGS);
         self.b.switch_to_block(end);
         let fa = self.data_addr(flag);
-        let z = self.ic(0);
-        self.st(z, fa, 0);
-        self.rt("sched_collect_garbage", &[]);
-        self.plan_fn(drain, &[]);
-        self.rt("sched_release", &[]);
-        let z = self.ic(0);
-        self.b.ins().return_(&[z, code]);
+        self.st(old, fa, 0);
     }
 
     /// 入口の `thunk` から: 入口の関数が中断しうるとき、枠を作って駆動の輪で動かし、（値, 符号）を返す。

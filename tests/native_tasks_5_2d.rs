@@ -994,3 +994,169 @@ fn run() -> Int
 "#;
     assert!(go(body, "run", &[]).starts_with("3"));
 }
+
+// ---- 取り消しの破棄順序（評価器の cancel_task / cancel_scope / stop_root_inner / cancel_all_inner との突き合わせ）----
+//
+// 評価器の順序（src/ir_eval/sched.rs）と、ネイティブの経路の対応:
+//
+// | 経路 | 評価器 | ネイティブ |
+// |---|---|---|
+// | 通常の停止（失敗したタスク） | 枠を内側から巻き戻す（Resume）。枠が範囲の本体なら、その局所を捨てる前に cancel_scope | 同じ cleanup の連鎖。範囲の本体の失敗では、子の取り消しを済ませてから外側へ |
+// | 通常の停止（他のタスク） | stop_root_inner: 作成順の逆。完了済みの結果もその位置で破棄 | cancel_next: 同じ走査。結果は -1 を返して先に破棄 |
+// | 取り消しの 1 タスク | 全枠の局所（内側から）→ 起床の値 → 結果 | 取り消しの再開で cleanup の連鎖 → 持ち主 → 起床の値（遅延させた破棄） |
+// | デッドロック | stop_root: 同上 | idle が現在のタスクを空にして、同じ走査 |
+// | 範囲の待ち中の取り消し | 子 → 局所 → 範囲の待ちの値 | 作成順の逆の走査で子が先。待ちの値は wait の取り消しで破棄 |
+
+const TOK: &str = r#"
+struct Tok {
+  id: Int,
+}
+"#;
+
+fn with_tok(rest: &str) -> String {
+    format!("{TOK}{rest}")
+}
+
+#[test]
+fn cancelled_receiver_drops_locals_before_the_handed_over_value() {
+    // Codex 指摘 9: 受信待ちのタスクの局所 A → 渡された値 B の順（評価器の cancel_task）。
+    let body = with_tok(
+        r#"
+fn recv_holding(rx: &Receiver<Tok>) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let a = Tok { id: 1 };
+  let b = rx.recv();
+  return a.id + b.id;
+}
+
+fn run(z: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let r = s.spawn(move || recv_holding(&rx));
+    let w = s.spawn(move || {
+      tx.send(Tok { id: 2 });
+      return 10 / z;
+    });
+    return r.join() + w.join();
+  });
+}
+"#,
+    );
+    let opts = Options {
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let e = run_with(&prog(&body), "run", &[Arg::Int(0)], &opts).unwrap_err();
+    assert_eq!(e.drops.len(), 2, "{:?} {:?}", e.drops, e.error);
+}
+
+#[test]
+fn failing_scope_cancels_its_children_before_unwinding_the_caller() {
+    // Codex 指摘 10: 範囲の本体が失敗したら、子の取り消し（B）→ 外側の局所（A）の順。
+    let body = with_tok(
+        r#"
+fn hold_and_yield() -> Int
+  intent "h"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let b = Tok { id: 2 };
+  task.yield();
+  task.yield();
+  return b.id;
+}
+
+fn run(z: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  let a = Tok { id: 1 };
+  let n = task.scope(|s| {
+    let c = s.spawn(move || hold_and_yield());
+    task.yield();
+    return 10 / z;
+  });
+  return n + a.id;
+}
+"#,
+    );
+    let opts = Options {
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let e = run_with(&prog(&body), "run", &[Arg::Int(0)], &opts).unwrap_err();
+    assert_eq!(e.drops.len(), 2, "{:?} {:?}", e.drops, e.error);
+}
+
+#[test]
+fn every_cancel_path_matches_the_evaluator() {
+    // 経路の組み合わせ: 完了済みの結果・保持する局所・範囲の待ち・入れ子の範囲が混ざった停止。
+    let body = with_tok(
+        r#"
+fn holder(n: Int) -> Int
+  intent "h"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let t = Tok { id: n };
+  task.yield();
+  task.yield();
+  return t.id;
+}
+
+fn nested(n: Int) -> Int
+  intent "n"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  let mine = Tok { id: n };
+  return task.scope(|s| {
+    let g = s.spawn(move || holder(n + 10));
+    task.yield();
+    task.yield();
+    task.yield();
+    return g.join() + mine.id;
+  });
+}
+
+fn run(z: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let top = Tok { id: 0 };
+    let a = s.spawn(move || holder(1));
+    let done = s.spawn(move || Tok { id: 2 });
+    let n = s.spawn(move || nested(3));
+    let c = s.spawn(move || {
+      task.yield();
+      return 10 / z;
+    });
+    return a.join() + n.join() + c.join() + top.id;
+  });
+}
+"#,
+    );
+    let opts = Options {
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let e = run_with(&prog(&body), "run", &[Arg::Int(0)], &opts).unwrap_err();
+    assert!(e.drops.len() >= 4, "{:?}", e.drops);
+}

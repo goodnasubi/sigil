@@ -81,7 +81,9 @@ global S_ETAIL: Int = 24
 global S_CANCEL_I: Int = 25
 global S_VER: Int = 26
 global S_YIELDED: Int = 27
-global S_WORDS: Int = 28
+global S_SAVED: Int = 28
+global S_SCAN: Int = 29
+global S_WORDS: Int = 30
 
 fn ld(p: Int, i: Int) -> Int
   intent "レコード p の i 番目の語を読む"
@@ -614,7 +616,9 @@ pub fn scope_begin() -> Int
 {
   let s = sched();
   bump(s);
-  return tab_push(s, S_SCOPES, rec(4));
+  let sc = rec(5);
+  st(sc, 4, ld(s, S_CUR));
+  return tab_push(s, S_SCOPES, sc);
 }
 
 fn finish_scope(s: Int, sc: Int)
@@ -945,6 +949,75 @@ pub fn cancel_next() -> Int
   return 0;
 }
 
+pub fn defer_drop(v: Int, dropfn: Int)
+  intent "破棄する値を、ごみの列に積む（取り消しの途中で、局所の後に破棄させるため）"
+  requires none
+  ensures none
+  effects none
+{
+  garbage_push(sched(), v, dropfn);
+}
+
+fn in_scope(s: Int, t: Int, sid: Int) -> Bool
+  intent "タスク t が範囲 sid の子孫か（t を起こした範囲から、その範囲を作ったタスクの範囲へとたどる）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut x = ld(t, T_SCOPE);
+  while x >= 0 {
+    if x == sid {
+      return true;
+    }
+    let creator = ld(tab_get(s, S_SCOPES, x), 4);
+    if creator == 0 {
+      return false;
+    }
+    x = ld(creator, T_SCOPE);
+  }
+  return false;
+}
+
+pub fn scope_cancel_next(sid: Int) -> Int
+  intent "範囲 sid の子孫のタスクを、作った順の逆に 1 つ取り消す。枠を返す（完了済みの未回収の結果は、積んで -1 を返す）。なければ 0 で、現在のタスクを元に戻す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let mut i = 0;
+  if ld(s, S_SAVED) == 0 {
+    st(s, S_SAVED, ld(s, S_CUR));
+    i = ld(s, S_TASKS + 1);
+  } else {
+    i = ld(s, S_SCAN);
+  }
+  let me = ld(s, S_SAVED);
+  while i > 0 {
+    i = i - 1;
+    let t = tab_get(s, S_TASKS, i);
+    if t != me && in_scope(s, t, sid) {
+      if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
+        st(t, T_HASRES, 0);
+        garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
+        st(s, S_SCAN, i);
+        return 0 - 1;
+      }
+      if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
+        st(s, S_SCAN, i);
+        st(s, S_CUR, t);
+        st(t, T_STATE, ST_DONE);
+        let f = ld(t, T_FRAME);
+        st(t, T_FRAME, 0);
+        return f;
+      }
+    }
+  }
+  st(s, S_CUR, me);
+  st(s, S_SAVED, 0);
+  return 0;
+}
+
 pub fn collect_garbage()
   intent "残っている値（受け取られなかったタスクの結果・チャネルの項・Lock の値）をごみの列に積む"
   requires none
@@ -1001,7 +1074,7 @@ pub fn release()
   let ns = ld(s, S_SCOPES + 1);
   let mut j = 0;
   while j < ns {
-    rec_free(tab_get(s, S_SCOPES, j), 4);
+    rec_free(tab_get(s, S_SCOPES, j), 5);
     j = j + 1;
   }
   tab_free(s, S_SCOPES);

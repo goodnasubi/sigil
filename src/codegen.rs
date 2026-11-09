@@ -125,11 +125,16 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_scope_begin" | "sched_chan_new" | "sched_cancel_next" | "sched_garbage_pop" => {
             ("", 'p')
         }
-        "sched_scope_end" | "sched_join" | "sched_chan_recv" | "sched_lock_acquire" => ("p", 'p'),
+        "sched_scope_cancel_next"
+        | "sched_scope_end"
+        | "sched_join"
+        | "sched_chan_recv"
+        | "sched_lock_acquire" => ("p", 'p'),
         "sched_spawn" => ("ppp", 'p'),
         "sched_finish_task" | "sched_note_yield" | "sched_yield_val" | "sched_sleep"
         | "sched_lock_release" | "sched_garbage_free" => ("p", 'v'),
         "sched_chan_send" => ("ppp", 'v'),
+        "sched_defer_drop" => ("pp", 'v'),
         "sched_collect_garbage" | "sched_release" | "sched_yield_plain" => ("", 'v'),
         // `fs.read`/`fs.write`/`Path`（`std.os.fs`・`std.core.path`。補足 C-7 の 3-6b）。文字列は頭の番地で受け渡す
         "fs_read" => ("ppp", 'p'),

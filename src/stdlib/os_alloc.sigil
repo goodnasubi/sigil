@@ -17,7 +17,7 @@ module std.os.alloc
 //   （SIGSEGV に頼らない。A-4）。
 // - 異常停止はすべて exit_group(70)（A-4）。検査は状態の書き換えより前に終える。
 // - 排他（ADR 0030 決定 6、PR 5-2b）: 公開の入口（`alloc`・`free`・`live_blocks`）は、状態のページの最後の語（4088）に置いた
-//   ロックの語を `atomic_cas_i64` で取り、`atomic_store_i64` で放して、内側の `*_locked` を囲む。ロックは 1 本で、競合時は `futex` で眠り、
+//   ロックの語を `atomic_cas_i64` で取り、競合時は状態 2 にして、`atomic_swap_i64` で放して、内側の `*_locked` を囲む。ロックは 1 本で、競合時は `futex` で眠り、
 //   解放時に待機者を起こす（PR 5-2e）。ロックの語は状態のページの中にあるので、
 //   状態のページを作る最初の呼び出しだけは排他の外で起こる。**最初の呼び出しは、最初のスレッドを作るより前に行う**（前提。5-2c の
 //   スレッドの作成が、作る前に確保器を一度呼ぶ）。`halt()`（`exit_group(70)`）はプロセス全体を終えるので、ロックを放さなくてよい。
@@ -526,11 +526,12 @@ fn lock()
   requires none
   ensures none
   effects none
-  unchecked "lock_addr() の語は 8 バイト整列で、0（空き）か 1（取得済み）だけが入る。取ったら必ず unlock() で放す（halt() で終える経路を除く）。同じスレッドでの再入は待ち続けて戻らない（入口は alloc・free・live_blocks だけで、内側から呼ばない）"
+  unchecked "lock_addr() の語は 8 バイト整列で、0（空き）・1（取得済み）・2（待機者あり）が入る。取ったら必ず unlock() で放す（halt() で終える経路を除く）。同じスレッドでの再入は待ち続けて戻らない（入口は alloc・free・live_blocks だけで、内側から呼ばない）"
 {
   let l = lock_addr();
-  while raw.atomic_cas_i64(l, 0, 1) != 0 {
-    raw.syscall(202, raw.addr_to_int(l), 128, 1, 0, 0, 0);
+  if raw.atomic_cas_i64(l, 0, 1) == 0 { return; }
+  while raw.atomic_swap_i64(l, 2) != 0 {
+    raw.syscall(202, raw.addr_to_int(l), 128, 2, 0, 0, 0);
   }
 }
 
@@ -539,11 +540,12 @@ fn unlock()
   requires none
   ensures none
   effects none
-  unchecked "lock() で取ったスレッドだけが呼ぶ。lock_addr() の語は 8 バイト整列で、書くのは 0（空き）だけ"
+  unchecked "lock() で取ったスレッドだけが呼ぶ。lock_addr() の語は 8 バイト整列で、0（空き）へ交換し、前の値が 2 の場合だけ futex で起こす"
 {
   let l = lock_addr();
-  raw.atomic_store_i64(l, 0);
-  raw.syscall(202, raw.addr_to_int(l), 129, 1, 0, 0, 0);
+  if raw.atomic_swap_i64(l, 0) == 2 {
+    raw.syscall(202, raw.addr_to_int(l), 129, 1, 0, 0, 0);
+  }
 }
 
 pub fn alloc(size: Int, align: Int) -> Addr

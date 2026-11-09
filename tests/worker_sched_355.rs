@@ -198,6 +198,27 @@ fn run() -> Int
 fn allocator_failure_on_a_worker_ends_the_whole_process() {
     let src = source(
         r#"
+global mut SIGNAL: Addr = raw.addr_null()
+fn setup()
+  intent "親と子の合図を初期化する"
+  requires none
+  ensures none
+  effects none
+  unchecked "ワーカーへタスクを渡す前に初期化する"
+{
+  SIGNAL = raw.alloc(8, 8);
+  raw.atomic_store_i64(SIGNAL, 0);
+}
+fn wait_started()
+  intent "親が中断せず子の開始を待ち、別の OS ワーカーでの実行を保証する"
+  requires none
+  ensures none
+  effects none
+  unchecked "SIGNAL の語は初期化済みで、子が原子的に更新する"
+{
+  while raw.atomic_load_i64(SIGNAL) == 0 { }
+  raw.atomic_store_i64(SIGNAL, 2);
+}
 fn crash() -> Int
   intent "ワーカーで確保器の異常停止を起こす"
   requires none
@@ -205,6 +226,13 @@ fn crash() -> Int
   effects none
   unchecked "試験用に確保器の不正な解放を発生させる。exit_group(70) で終わることを確かめる"
 {
+  raw.atomic_store_i64(SIGNAL, 1);
+  while raw.atomic_load_i64(SIGNAL) != 2 { }
+  // 親に join へ入る機会を与える。停止は必ず主スレッド以外のワーカーで起こる。
+  let delay = raw.alloc(16, 8);
+  raw.store_i64(delay, 0);
+  raw.store_i64(raw.offset(delay, 8), 10000000);
+  raw.syscall(35, raw.addr_to_int(delay), 0, 0, 0, 0, 0);
   raw.free(raw.int_to_addr(8), 8, 8);
   return 0;
 }
@@ -214,8 +242,10 @@ fn run() -> Int
   ensures none
   effects task.spawn, task.suspend
 {
+  setup();
   return task.scope(|s| {
     let h = s.spawn(move || crash());
+    wait_started();
     return h.join();
   });
 }

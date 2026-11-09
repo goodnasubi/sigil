@@ -49,3 +49,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0027](0027-ai-era-security-design-principles.md) | AI が書く前提の安全設計原則（攻撃側 AI の実証知見に基づく） | 承認 |
 | [0028](0028-task-suspend-on-bare.md) | bare における task.suspend の許可（task.yield の協調点） | 承認 |
 | [0029](0029-scope-arena-allocation.md) | 生成コードの値の確保にスコープアリーナ（データスタック）を導入する検討 | 承認 |
+| [0030](0030-p1b-native-concurrency.md) | 並行処理 P1-b（ネイティブ出力での状態機械の変換・実行の割り当て・epoll・スレッドの作成・原子的な操作） | 提案 |

@@ -27,6 +27,24 @@ pub(super) struct Rs {
     pub sites: HashMap<usize, SiteInfo>,
 }
 
+/// 局所の語がそのまま値を表すか（空転の指紋に使える型か）。参照は指す先が連鎖の枠かクロージャの環境なので許す。
+fn fp_checkable(t: &Ty) -> bool {
+    match t {
+        Ty::Int
+        | Ty::Float
+        | Ty::Bool
+        | Ty::Unit
+        | Ty::Addr
+        | Ty::ParseError
+        | Ty::Ref(_)
+        | Ty::MutRef(_) => true,
+        Ty::Shared(i) => {
+            matches!(&**i, Ty::Cell(c) if fp_checkable(c) && !matches!(**c, Ty::Ref(_) | Ty::MutRef(_)))
+        }
+        _ => false,
+    }
+}
+
 impl<'a, 'p> Fx<'a, 'p> {
     pub(super) fn frame(&self) -> Value {
         self.rs.as_ref().expect("再開可能な入口").frame
@@ -235,6 +253,14 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.st(sz, fr, 32);
         // 子の枠の位置の始まり（空転の検出の指紋が、局所と子を分けて辿る）。
         let cb = self.ic(HDR as i64 + 8 * f.locals.len() as i64);
+        // 値を語として比べるだけでは変化が分からない局所（一覧・文字列・構造体など、中身が別の塊にあるもの）を持つ関数は、
+        // 空転の検出の対象外にする印（高位ビット）を立てる。評価器は中身まで指紋に入れるので、誤って時計を進めない側に倒す。
+        let opaque = f.locals.iter().any(|l| !fp_checkable(&norm(&l.ty)));
+        let cb = if opaque {
+            self.b.ins().bor_imm_s(cb, 1 << 40)
+        } else {
+            cb
+        };
         self.st(cb, fr, 8);
         let rd = self.drop_addr(&norm(&f.ret));
         self.st(rd, fr, 48);
@@ -443,6 +469,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         if b == Builtin::LockAcquire {
             // 守りの塊: [0 = 空（破棄で何も破棄しない）][8 = Lock のレコード]。破棄の知らせの印を頭に立てる。
             let g = self.blk(16);
+            // 先頭の語は明示的に 0 にする（再利用された塊の古い値を、破棄が T の値として解放しないため）。
+            let z = self.ic(0);
+            self.st(z, g, 0);
             self.st(r, g, 8);
             self.set_guard(g);
             self.mk_enum_c(0, &[g])
@@ -816,6 +845,14 @@ impl<'a, 'p> Fx<'a, 'p> {
             .ins()
             .brif(nz, go, NOARGS, fin, &[BlockArg::Value(h)]);
         self.b.switch_to_block(go);
+        let cbw = self.ld(cur, 8);
+        let opaque = self.b.ins().ushr_imm_s(cbw, 40);
+        let (unk, known) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(opaque, unk, NOARGS, known, NOARGS);
+        self.b.switch_to_block(unk);
+        let zero = self.ic(0);
+        self.b.ins().return_(&[zero]);
+        self.b.switch_to_block(known);
         let state = self.ld(cur, 16);
         let h = mix(self, h, state);
         let i0 = self.ic(HDR as i64);

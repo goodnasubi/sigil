@@ -546,7 +546,7 @@ pub fn note_yield(fp: Int)
   let t = ld(s, S_CUR);
   let ver = ld(s, S_VER);
   let mut same = 0;
-  if ld(t, T_SPIN_FP) == fp && ld(t, T_SPIN_VER) == ver {
+  if fp != 0 && ld(t, T_SPIN_FP) == fp && ld(t, T_SPIN_VER) == ver {
     same = 1;
   }
   st(t, T_SPIN_FP, fp);

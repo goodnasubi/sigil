@@ -907,3 +907,90 @@ fn run() -> Int
     let out = run_native(body, "run", &[], 1);
     assert_eq!(out.trim(), "1");
 }
+
+#[test]
+fn heap_progress_while_yielding_does_not_advance_the_clock_early() {
+    // Codex 指摘 7: 一覧の中身だけが進む繰り返しを空転と誤判定して、時計を早く進めない（評価器は中身まで指紋に入れる）。
+    let body = r#"
+fn say(n: Int) -> Int
+  intent "s"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&n);
+  return n;
+}
+
+fn step(xs: &mut List<Int>) -> Bool
+  intent "s"
+  requires none
+  ensures none
+  effects none
+{
+  xs.push(1);
+  return xs.len() < 300;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, console, task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let sleeper = s.spawn(move || {
+      task.sleep(50);
+      say(2);
+      return 0;
+    });
+    let looper = s.spawn(move || {
+      let mut xs = List.new();
+      while step(&mut xs) {
+        task.yield();
+      }
+      say(1);
+      return xs.len();
+    });
+    return looper.join() + sleeper.join();
+  });
+}
+"#;
+    assert!(go(body, "run", &[]).starts_with("300|1\n2\n"));
+}
+
+#[test]
+fn lock_guard_first_word_is_zeroed_on_reused_memory() {
+    // Codex 指摘 8: 同じ大きさの解放済みの塊を非ゼロで汚してから Lock<String> を使っても、守りの破棄が不正な値を解放しない。
+    let body = r#"
+struct Pair {
+  a: Int,
+  b: Int,
+}
+
+fn dirty(n: Int) -> Int
+  intent "d"
+  requires none
+  ensures none
+  effects none
+{
+  let p = Pair { a: n, b: n + 1 };
+  return p.a + p.b;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let d = dirty(123456789) + dirty(987654321) + dirty(55555555) + dirty(777);
+  let l = Lock.new("abc");
+  match l.acquire() {
+    Ok(g) => { return g.get().len() + d - d; }
+    Err(e) => { return 0 - 1; }
+  }
+}
+"#;
+    assert!(go(body, "run", &[]).starts_with("3"));
+}

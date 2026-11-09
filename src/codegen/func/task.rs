@@ -1,7 +1,7 @@
 //! 中断しうる関数の再開可能な入口と、並行処理の操作の生成（ADR 0030 決定 1、PR 5-2d）。計画は `codegen/task.rs`。
 use super::{aggregate, norm, strip, Fx, NOARGS};
-use crate::codegen::task::{self, SiteKind, CANCEL_CODE, HDR, SITE_W, SUSPEND};
 use crate::codegen::shim_sig;
+use crate::codegen::task::{self, SiteKind, CANCEL_CODE, HDR, SITE_W, SUSPEND};
 use crate::exec::StopKind;
 use crate::ir::{Builtin, Callee, Func, Operand, Place, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -222,10 +222,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let argv = self.b.block_params(entry)[0];
         let (size, step) = {
             let t = self.cg.task.as_ref().expect("変換の計画");
-            (
-                task::frame_bytes(f, &t.susp, t.indirect_susp),
-                t.step[&fid],
-            )
+            (task::frame_bytes(f, &t.susp, t.indirect_susp), t.step[&fid])
         };
         let sz = self.ic(size);
         let eight = self.ic(8);
@@ -501,7 +498,12 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     /// 中断しない並行処理の操作と、入れ子の呼び出しの中での中断点（評価器と同じ停止）。
-    pub(super) fn task_builtin(&mut self, b: Builtin, args: &[Operand], stop: usize) -> Option<(Value, Ty)> {
+    pub(super) fn task_builtin(
+        &mut self,
+        b: Builtin,
+        args: &[Operand],
+        stop: usize,
+    ) -> Option<(Value, Ty)> {
         use Builtin::*;
         let u = Ty::Unit;
         Some(match b {

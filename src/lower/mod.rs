@@ -442,8 +442,18 @@ impl<'a> L<'a> {
                     &b.term,
                     Term::Call {
                         func: ir::Callee::Builtin(
-                            TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskSleep | TaskChannel
-                                | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | LockNew | LockAcquire
+                            TaskScope
+                                | TaskAllOk
+                                | TaskRace
+                                | TaskTimeout
+                                | TaskSleep
+                                | TaskChannel
+                                | ScopeSpawn
+                                | TaskJoin
+                                | ChanSend
+                                | ChanRecv
+                                | LockNew
+                                | LockAcquire
                                 | AtomicLoad
                         ),
                         ..

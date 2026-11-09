@@ -66,12 +66,6 @@ pub(crate) fn blocking(b: Builtin) -> bool {
     )
 }
 
-/// ネイティブ出力未対応の並行処理の操作（取り消しの意味が要る。ADR 0030 決定 7 と 5-2g）。
-pub(crate) fn unsupported(b: Builtin) -> bool {
-    use Builtin::*;
-    matches!(b, TaskAllOk | TaskRace | TaskTimeout)
-}
-
 fn visit_operand(o: &Operand, out: &mut Vec<usize>) {
     if let Operand::Const(Const::Fn(f)) = o {
         out.push(*f);
@@ -234,10 +228,9 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
     let fn_start = decl(cg, "sigil_fn_start", 4, 'p')?;
     let frame_done = decl(cg, "sigil_frame_done", 1, 'v')?;
     let drain = decl(cg, "sigil_drain", 0, 'v')?;
-    let cancel_flag = cg
-        .m
-        .declare_data("sigil_cancel_flag", Linkage::Local, true, false)
-        .map_err(internal)?;
+    let cancel_flag =
+        cg.m.declare_data("sigil_cancel_flag", Linkage::Local, true, false)
+            .map_err(internal)?;
     let mut dd = DataDescription::new();
     dd.define_zeroinit(8);
     dd.set_align(8);

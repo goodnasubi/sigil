@@ -294,7 +294,10 @@ fn run() -> Int
 }
 "#;
     let v = go(body, "run", &[]);
-    assert!(v.starts_with("23" /* 23 + 67 = 90 */) || v.starts_with("90"), "{v}");
+    assert!(
+        v.starts_with("23" /* 23 + 67 = 90 */) || v.starts_with("90"),
+        "{v}"
+    );
 }
 
 #[test]

@@ -23,6 +23,7 @@ module std.os.io
 // - 終了は `io_stop`（旗を立てて起こす）→ スレッドの `join` → `io_free`（記述子・ヒープ・表・完了の列を返す）。
 //
 // トークンは 1 以上 2147483646 以下の整数（`epoll_event` のデータの下位 32 ビットに入れる。0 は `eventfd` の印）。
+// 同じトークンで複数の記述子を登録してもよい（`io_cancel` はそのすべてを外す）。通知は (トークン, 世代) の両方で登録を引く。
 // データの上位 32 ビットには「登録の世代」を入れる（登録・登録し直しのたびに 1 進める）。取り消しや登録し直しの前に
 // `epoll_wait` が受け取った古い通知は、同じトークンで登録し直されていても世代が違うので捨てる。
 //
@@ -437,6 +438,22 @@ fn reg_find_token(s: Int, token: Int) -> Int
   return 0 - 1;
 }
 
+fn reg_find_exact(s: Int, token: Int, gen: Int) -> Int
+  intent "トークンと世代の両方が合う登録の添字を返す（なければ -1）。同じトークンの登録が複数あってもよい"
+  requires none
+  ensures none
+  effects none
+{
+  let r = ld(s, S_REGS);
+  let n = ld(s, S_RLEN);
+  let mut i = 0;
+  while i < n {
+    if ld(r, 3 * i + 1) == token && ld(r, 3 * i + 2) == gen { return i; }
+    i = i + 1;
+  }
+  return 0 - 1;
+}
+
 fn reg_add(s: Int, fd: Int, token: Int, gen: Int)
   intent "登録を足す"
   requires none
@@ -826,8 +843,8 @@ fn dispatch(s: Int, n: Int) -> Bool
       kicked = true;
     } else {
       // 取り消しや登録し直しの後に届いた古い準備完了は、登録を引き直し、トークンと世代が合わなければ捨てる。
-      let k = reg_find_token(s, token);
-      if k >= 0 && ld(ld(s, S_REGS), 3 * k + 2) == u32_at(buf, 12 * i + 8) {
+      let k = reg_find_exact(s, token, u32_at(buf, 12 * i + 8));
+      if k >= 0 {
         cq_push(s, token, KIND_FD, u32_at(buf, 12 * i), now);
         pushed = true;
       }

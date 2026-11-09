@@ -638,7 +638,53 @@ fn mutation_ignoring_the_generation_is_caught() {
 
 fn mutate_gen() -> String {
     mutate(
-        " && ld(ld(s, S_REGS), 3 * k + 2) == u32_at(buf, 12 * i + 8) {",
-        " {",
+        "ld(r, 3 * i + 1) == token && ld(r, 3 * i + 2) == gen { return i; }",
+        "ld(r, 3 * i + 1) == token { return i; }",
     )
+}
+
+const SAME_TOKEN_BODY: &str = r#"
+  let s = io_new();
+  if s == 0 { return 1; }
+  let out = buf();
+  let p1 = pipe_new();
+  let p2 = pipe_new();
+  if io_wait_fd(s, p1 / 65536, 1, 7) != 0 { return 2; }
+  if io_wait_fd(s, p2 / 65536, 1, 7) != 0 { return 3; }
+  wr(p1 % 65536);
+  wr(p2 % 65536);
+  let n = io_poll_wait(s);
+  if n != 2 { return 4; }
+  io_poll_dispatch(s, n);
+  if io_take(s, out) != 1 { return 5; }
+  if io_take(s, out) != 1 { return 6; }
+  if io_take(s, out) != 0 { return 7; }
+  if io_cancel(s, 7) != 2 { return 8; }
+  io_free(s);
+  fd_close(p1 / 65536);
+  fd_close(p1 % 65536);
+  fd_close(p2 / 65536);
+  fd_close(p2 % 65536);
+  buf_free(out);
+  return 0;
+"#;
+
+#[test]
+fn two_fds_with_the_same_token_are_both_delivered() {
+    // 指摘 C: 同じトークンで二つの記述子を登録しても、どちらの通知も（トークンと世代の両方で引いて）届く。
+    let r = native_hooks(&io_source(), SAME_TOKEN_BODY).expect("ハング");
+    assert_eq!(step(&r), "0");
+}
+
+#[test]
+fn mutation_first_token_match_only_is_caught() {
+    let m = mutate(
+        "let k = reg_find_exact(s, token, u32_at(buf, 12 * i + 8));\n      if k >= 0 {",
+        "let k = reg_find_token(s, token);\n      if k >= 0 && ld(ld(s, S_REGS), 3 * k + 2) == u32_at(buf, 12 * i + 8) {",
+    );
+    let got = native_hooks(&m, SAME_TOKEN_BODY);
+    let passed = got
+        .map(|r| r.code == Some(0) && r.stdout.trim_end().rsplit('\n').next() == Some("0"))
+        .unwrap_or(false);
+    assert!(!passed, "壊したのに試験が通った");
 }

@@ -737,3 +737,72 @@ fn run(z: Int) -> Int
         e.error
     );
 }
+
+#[test]
+fn sleep_saturates_the_wakeup_time() {
+    // Codex 指摘 3: 仮想時計と待機時間の和が Int の上限を超えても桁あふれで止まらない（評価器は飽和加算）。
+    let body = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task.suspend
+{
+  task.sleep(9223372036854775807);
+  task.sleep(1);
+  return 3;
+}
+"#;
+    assert!(go(body, "run", &[]).starts_with("3"));
+}
+
+#[test]
+fn stop_drops_finished_results_in_creation_order_reversed() {
+    // Codex 指摘 4: 取り消しの走査は作成順の逆で、完了済みタスクの未回収の結果もその位置で破棄する（B → A）。
+    let body = r#"
+struct Tok {
+  id: Int,
+}
+
+fn holder(n: Int) -> Int
+  intent "h"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let t = Tok { id: n };
+  task.yield();
+  task.yield();
+  return t.id;
+}
+
+fn boom(z: Int) -> Int
+  intent "b"
+  requires none
+  ensures none
+  effects none
+{
+  return 10 / z;
+}
+
+fn run(z: Int) -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let a = s.spawn(move || holder(1));
+    let b = s.spawn(move || Tok { id: 2 });
+    let c = s.spawn(move || boom(z));
+    return c.join();
+  });
+}
+"#;
+    let opts = Options {
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let e = run_with(&prog(body), "run", &[Arg::Int(0)], &opts).unwrap_err();
+    assert!(e.drops.len() >= 2, "{:?} {:?}", e.drops, e.error);
+}

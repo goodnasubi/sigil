@@ -688,7 +688,13 @@ pub fn sleep(ms: Int)
   }
   let seq = ld(s, S_SEQ) + 1;
   st(s, S_SEQ, seq);
-  st(t, T_SLEEP_AT, ld(s, S_CLOCK) + d);
+  // 飽和加算（評価器の saturating_add と同じ）。
+  let clock = ld(s, S_CLOCK);
+  let mut at = 9223372036854775807;
+  if d <= 9223372036854775807 - clock {
+    at = clock + d;
+  }
+  st(t, T_SLEEP_AT, at);
   st(t, T_SLEEP_SEQ, seq);
   st(t, T_SNEXT, ld(s, S_SLEEP));
   st(s, S_SLEEP, t);
@@ -834,6 +840,13 @@ pub fn cancel_next() -> Int
   while i > 0 {
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
+    // 完了済みで受け取られていない結果は、走査のこの位置で破棄させる（-1 を返し、呼び出し側が先にごみの列を空にする）。
+    if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
+      st(t, T_HASRES, 0);
+      garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
+      st(s, S_CANCEL_I, i);
+      return 0 - 1;
+    }
     if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
       st(s, S_CANCEL_I, i);
       st(s, S_CUR, t);

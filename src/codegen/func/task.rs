@@ -880,7 +880,14 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.switch_to_block(head);
         let g = self.rt("sched_cancel_next", &[]);
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, g, 0);
-        self.b.ins().brif(zero, end, NOARGS, body, NOARGS);
+        let (chk, only_drain) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(zero, end, NOARGS, chk, NOARGS);
+        self.b.switch_to_block(chk);
+        let neg = self.b.ins().icmp_imm_s(IntCC::Equal, g, -1);
+        self.b.ins().brif(neg, only_drain, NOARGS, body, NOARGS);
+        self.b.switch_to_block(only_drain);
+        self.plan_fn(drain, &[]);
+        self.b.ins().jump(head, NOARGS);
         self.b.switch_to_block(body);
         let sig = self.sigref(1);
         let stepf = self.ld(g, 0);

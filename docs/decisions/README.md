@@ -50,3 +50,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0028](0028-task-suspend-on-bare.md) | bare における task.suspend の許可（task.yield の協調点） | 承認 |
 | [0029](0029-scope-arena-allocation.md) | 生成コードの値の確保にスコープアリーナ（データスタック）を導入する検討 | 承認 |
 | [0030](0030-p1b-native-concurrency.md) | 並行処理 P1-b（ネイティブ出力での状態機械の変換・実行の割り当て・epoll・スレッドの作成・原子的な操作） | 提案 |
+| [0031](0031-p1-first-wait-ops-and-socket-api.md) | 最初の待ちの操作とソケット API の形（fd／期限で中断する操作・TCP の最小 API・複数ルートの入口・段階 6 の PR 分割） | 提案（予約: Issue #369） |

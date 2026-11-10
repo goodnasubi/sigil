@@ -232,6 +232,16 @@ pub const RAW_OPS: &[RawRow] = &[
         requires: "none",
         premise: "逐次一貫の壁。他のスレッドの操作との順序だけに作用する",
     },
+    // fd の準備完了を待つ内部の原始操作（ADR 0031 決定 1-1、PR 6-3c）。`raw.*` の枠（`unchecked` の関数の本体だけ）に
+    // 置くので、`trust base` のモジュールからしか呼べない。ADR は `io.wait_fd` と書くが、名前空間を足さずに既存の
+    // `raw.*` の制限を再利用するため `raw.io_wait_fd` とする。
+    RawRow {
+        layer: Layer::Os,
+        signature: "io_wait_fd(fd: Int, events: Int) -> Int",
+        effects: "task.suspend",
+        requires: "none",
+        premise: "fd は呼び出し側が所有する開いた記述子で、待っている間は閉じない。events は EPOLLIN(1)・EPOLLOUT(4) の組み合わせ。戻りは準備のできたイベントの印で、負の値はエラー",
+    },
     RawRow {
         layer: Layer::Os,
         signature: "syscall(n: Int, a0: Int, a1: Int, a2: Int, a3: Int, a4: Int, a5: Int) -> Int",

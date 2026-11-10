@@ -455,6 +455,7 @@ impl<'a> L<'a> {
                                 | LockNew
                                 | LockAcquire
                                 | AtomicLoad
+                                | IoWaitFd
                         ),
                         ..
                     }

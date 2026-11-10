@@ -729,6 +729,10 @@ impl<'a> L<'a> {
                     "raw.atomic_swap_i64" => Builtin::RawAtomicSwapI64,
                     "raw.atomic_cas_i64" => Builtin::RawAtomicCasI64,
                     "raw.atomic_fence" => Builtin::RawAtomicFence,
+                    "raw.io_wait_fd" => {
+                        self.core_only = false;
+                        Builtin::IoWaitFd
+                    }
                     "raw.syscall" => {
                         self.core_only = false;
                         Builtin::RawSyscall

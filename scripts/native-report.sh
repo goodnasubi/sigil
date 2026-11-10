@@ -1,6 +1,6 @@
 #!/bin/sh
 # cargo test の後に、ネイティブとの突き合わせの件数と飛ばした理由ごとの件数を出し、
-# 飛ばし件数が上限を超えたら（突き合わせ件数が下限を割ったら）失敗させる。
+# 飛ばし件数（仕様上ビルドで止める参照・Lock の入口引数を除く）が上限を超えたら（突き合わせ件数が下限を割ったら）失敗させる。
 # 使い方: cargo test && scripts/native-report.sh
 # 環境変数: SIGIL_NATIVE_MAX_SKIP（飛ばしの上限。既定 10）、SIGIL_NATIVE_MIN_CHECKED（突き合わせの下限。既定 400）
 dir="${CARGO_TARGET_DIR:-target}/tmp"
@@ -14,9 +14,9 @@ fi
 echo "== 突き合わせ / 飛ばし（理由別） =="
 cat "$@" | awk -F'\t' -v max="$max_skip" -v min="$min_checked" '
   $1=="checked"{c++}
-  $1=="skip"{s[$2]++; n++}
+  $1=="skip"{s[$2]++; if ($2 ~ /^仕様上ビルドで止める/) d++; else n++}
   END{
-    printf "突き合わせ %d 件（下限 %d）\n飛ばし %d 件（上限 %d）\n", c, min, n, max
+    printf "突き合わせ %d 件（下限 %d）\n飛ばし %d 件（上限 %d。仕様上ビルドで止める入口引数 %d 件は上限の対象外）\n", c, min, n, max, d
     for(k in s) printf "  %5d  %s\n", s[k], k
     bad = 0
     if (n > max) { printf "飛ばしが上限を超えた: %d > %d\n", n, max; bad = 1 }

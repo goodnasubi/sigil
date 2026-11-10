@@ -330,3 +330,132 @@ fn a_timeout_cancels_sibling_subtrees_in_the_evaluators_order() {
     assert!(d.starts_with("-1"), "{d}");
     assert!(d.matches("Tok").count() >= 3, "破棄の記録がない: {d}");
 }
+
+const CANCEL_CHAN: &str = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task
+{
+  return task.scope(|s| {
+    let (tx, rx) = task.channel();
+    let rx2 = rx.clone();
+    let tx2 = tx.clone();
+    let a = s.spawn(move || {
+      let rx3 = rx2.clone();
+      let r = task.timeout(5, move || rx3.recv());
+      match r {
+        Some(v) => { return v; }
+        None => { return 0 - 1; }
+      }
+    });
+    let b = s.spawn(move || {
+      task.sleep(100);
+      tx2.send(9);
+      return 0;
+    });
+    let x = a.join();
+    let y = rx.recv();
+    b.join();
+    return x * 100 + y;
+  });
+}
+"#;
+
+#[test]
+fn a_timed_out_receiver_does_not_swallow_a_later_value() {
+    // 時間切れで取り消した子がチャネルの受信待ちの列に残ると、あとから送られた値が破棄済みのタスクへ渡る。
+    // 外のタスクが値 9 を受け取れる（-1 * 100 + 9 = -91）。評価器と一致する。
+    assert!(go(CANCEL_CHAN, "run", &[]).starts_with("-91"));
+}
+
+const CANCEL_LOCK: &str = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task
+{
+  return task.scope(|s| {
+    let l = Lock.new(5);
+    let l2 = l.clone();
+    match l.acquire() {
+      Ok(g) => {
+        let a = s.spawn(move || {
+          let l3 = l2.clone();
+          let r = task.timeout(5, move || {
+            match l3.acquire() {
+              Ok(h) => { return h.get() + 0; }
+              Err(e) => { return 0 - 7; }
+            }
+          });
+          match r {
+            Some(v) => { return v; }
+            None => { return 0 - 1; }
+          }
+        });
+        let x = a.join();
+        return x * 100 + g.get() + 0;
+      }
+      Err(e) => { return 0 - 2; }
+    }
+  });
+}
+"#;
+
+#[test]
+fn a_timed_out_lock_waiter_does_not_keep_the_lock() {
+    // 子が共有の Lock の取得を待つ間に時間切れ。守りの解放で次の待機者として取り消し済みの子へ渡ると、Lock が
+    // 取得できなくなる。解放のあとで外のタスクが取得できること。評価器と一致する。
+    assert!(go(CANCEL_LOCK, "run", &[]).starts_with("-95"));
+}
+
+const CANCEL_LOCK_AFTER: &str = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects clock, task
+{
+  return task.scope(|s| {
+    let l = Lock.new(5);
+    let l2 = l.clone();
+    let l3 = l.clone();
+    let a = s.spawn(move || {
+      match l2.acquire() {
+        Ok(g) => {
+          task.sleep(50);
+          return g.get() + 0;
+        }
+        Err(e) => { return 0 - 2; }
+      }
+    });
+    let b = s.spawn(move || {
+      let l4 = l3.clone();
+      let r = task.timeout(5, move || {
+        match l4.acquire() {
+          Ok(h) => { return h.get() + 0; }
+          Err(e) => { return 0 - 7; }
+        }
+      });
+      match r {
+        Some(v) => { return v; }
+        None => { return 0 - 1; }
+      }
+    });
+    task.sleep(1);
+    let x = a.join();
+    let y = b.join();
+    match l.acquire() {
+      Ok(g) => { return x * 1000 + y * 10 + g.get() + 0; }
+      Err(e) => { return 0 - 3; }
+    }
+  });
+}
+"#;
+
+#[test]
+fn a_lock_stays_acquirable_after_a_waiter_was_cancelled() {
+    go(CANCEL_LOCK_AFTER, "run", &[]);
+}

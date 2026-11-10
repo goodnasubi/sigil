@@ -90,7 +90,9 @@ global T_ACTIVE: Int = 20
 global T_CANCEL: Int = 21
 global T_TMO: Int = 22
 global T_FIRED: Int = 23
-global T_WORDS: Int = 24
+global T_WOBJ: Int = 24
+global T_WIH: Int = 25
+global T_WORDS: Int = 26
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -344,6 +346,8 @@ fn wq_push(o: Int, ih: Int, t: Int)
   effects none
 {
   st(t, T_WNEXT, 0);
+  st(t, T_WOBJ, o);
+  st(t, T_WIH, ih);
   let tail = ld(o, ih + 1);
   if tail == 0 {
     st(o, ih, t);
@@ -369,7 +373,34 @@ fn wq_pop(o: Int, ih: Int) -> Int
     st(o, ih + 1, 0);
   }
   st(t, T_WNEXT, 0);
+  st(t, T_WOBJ, 0);
   return t;
+}
+
+fn wq_remove(t: Int)
+  intent "タスク t が載っているチャネル・Lock の待機の列から外す（載っていなければ何もしない）"
+  requires none
+  ensures none
+  effects none
+{
+  let o = ld(t, T_WOBJ);
+  if o == 0 { return; }
+  let ih = ld(t, T_WIH);
+  let head = ld(o, ih);
+  if head == t {
+    wq_pop(o, ih);
+  } else {
+    let mut p = head;
+    while p != 0 && ld(p, T_WNEXT) != t {
+      p = ld(p, T_WNEXT);
+    }
+    if p != 0 {
+      st(p, T_WNEXT, ld(t, T_WNEXT));
+      if ld(o, ih + 1) == t { st(o, ih + 1, p); }
+      st(t, T_WNEXT, 0);
+      st(t, T_WOBJ, 0);
+    }
+  }
 }
 
 fn wake(s: Int, t: Int, v: Int, has: Bool)
@@ -1152,6 +1183,32 @@ fn tmo_fired_locked() -> Int
   return f;
 }
 
+fn unwait(s: Int, t: Int)
+  intent "取り消しの入口: 取り消すタスク t を、載っているすべての待機（I/O・task.timeout の期限・眠り・チャネルと Lock の待機の列・合流・範囲の待ち）から、枠を巻き戻す前に外す（評価器の cancel_task と同じ）"
+  requires none
+  ensures none
+  effects none
+{
+  io_unwait(s, t);
+  timeout_unwait(s, t);
+  if ld(t, T_STATE) == ST_SLEEPING { sleep_unlink(s, t); }
+  wq_remove(t);
+  // t が合流で待っている相手の、合流待ちの印を外す。
+  let n = ld(s, S_TASKS + 1);
+  let mut i = 0;
+  while i < n {
+    let o = tab_get(s, S_TASKS, i);
+    if ld(o, T_JOINER) == t { st(o, T_JOINER, 0); }
+    i = i + 1;
+  }
+  // t が範囲の終わりを待っていれば、その待ち手の印を外す。
+  let w = ld(t, T_WAITSCOPE);
+  if w >= 0 {
+    let sc = tab_get(s, S_SCOPES, w);
+    if ld(sc, 1) == t { st(sc, 1, 0); }
+  }
+}
+
 fn timeout_unwait(s: Int, t: Int)
   intent "取り消すタスクが task.timeout の期限を待っていれば、眠りの列から外す"
   requires none
@@ -1314,8 +1371,7 @@ fn cancel_next_locked() -> Int
       return 0 - 1;
     }
     if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
-      io_unwait(s, t);
-      timeout_unwait(s, t);
+      unwait(s, t);
       st(s, S_CANCEL_I, i);
       st(s, S_CUR, t);
       st(t, T_STATE, ST_DONE);
@@ -1429,8 +1485,7 @@ fn tmo_pick(s: Int, sid: Int) -> Int
       return 0 - 1;
     }
     if ld(c, T_STATE) != ST_DONE && ld(c, T_FRAME) != 0 {
-      io_unwait(s, c);
-      timeout_unwait(s, c);
+      unwait(s, c);
       st(s, S_CUR, c);
       st(c, T_STATE, ST_DONE);
       let f = ld(c, T_FRAME);
@@ -1484,8 +1539,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
         return 0 - 1;
       }
       if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
-        io_unwait(s, t);
-        timeout_unwait(s, t);
+        unwait(s, t);
         st(s, S_SCAN, i);
         st(s, S_CUR, t);
         st(t, T_STATE, ST_DONE);

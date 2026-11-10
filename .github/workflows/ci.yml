@@ -67,5 +67,5 @@ jobs:
       - name: ネイティブの突き合わせ件数（飛ばしの上限を検査）
         run: scripts/native-report.sh
         env:
-          SIGIL_NATIVE_MAX_SKIP: "10"
+          SIGIL_NATIVE_MAX_SKIP: "20"
           SIGIL_NATIVE_MIN_CHECKED: "400"

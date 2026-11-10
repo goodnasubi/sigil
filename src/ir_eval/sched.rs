@@ -7,9 +7,10 @@
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crate::exec::StopKind;
 use crate::ir::*;
@@ -18,6 +19,32 @@ use super::value::{
     list_of, new_slot, shadow, with_val, Agg, GuardTok, Ptr, Tag, Val, LOCK_EVENTS, UNWINDING,
 };
 use super::{Slot, E, M};
+
+#[cfg(unix)]
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+}
+
+#[cfg(unix)]
+fn is_valid_fd(fd: i32) -> bool {
+    const F_GETFD: i32 = 1;
+    // SAFETY: `F_GETFD` は追加の引数を取らず、記述子が有効かだけを検査する。
+    unsafe { fcntl(fd, F_GETFD) != -1 }
+}
+
+#[cfg(not(unix))]
+fn is_valid_fd(_fd: i32) -> bool {
+    false
+}
 
 pub(super) struct Frame {
     fid: FuncId,
@@ -45,6 +72,7 @@ enum State {
     LockWait,
     Scoping,
     Sleeping,
+    IoWait,
     Done,
 }
 
@@ -226,6 +254,10 @@ pub(super) struct Sched {
     /// 異常停止の巻き戻しが確保器の関数の枠を通った（プロセス全体の停止にする）。
     alloc_stop: bool,
     sleepers: Vec<(i64, u64, Wake)>,
+    /// 外の待ち（`raw.io_wait_fd`）の登録。素の `fd` をキーとし、`(タスク番号, イベントマスク)` を持つ。
+    io_waiters: BTreeMap<i32, (usize, i16)>,
+    /// 実時間モードの起点 `(開始時刻, その時点の仮想時計)`。最初の `raw.io_wait_fd` 登録で設定され、以後は戻らない（ADR 0031 決定 1-3）。
+    realtime: Option<(Instant, i64)>,
     clock: i64,
     seq: u64,
     cur: usize,
@@ -250,6 +282,8 @@ impl Sched {
             results: vec![],
             alloc_stop: false,
             sleepers: vec![],
+            io_waiters: BTreeMap::new(),
+            realtime: None,
             clock: 0,
             seq: 0,
             cur: 0,
@@ -321,7 +355,8 @@ fn is_task_op(b: Builtin) -> bool {
     use Builtin::*;
     matches!(
         b,
-        TaskScope
+        IoWaitFd
+            | TaskScope
             | TaskAllOk
             | TaskRace
             | TaskTimeout
@@ -702,6 +737,7 @@ impl<'p> M<'p> {
         self.sch.tasks[t].state = State::Done;
         self.sch.tasks[t].joiner = None;
         self.sch.ready.retain(|&x| x != t);
+        self.sch.io_waiters.retain(|_, &mut (w, _)| w != t);
         self.sch
             .sleepers
             .retain(|s| !matches!(s.2, Wake::Sleep(x) if x == t));
@@ -775,6 +811,133 @@ impl<'p> M<'p> {
         tid
     }
 
+    fn enter_realtime(&mut self) {
+        if self.sch.realtime.is_none() {
+            self.sch.realtime = Some((Instant::now(), self.sch.clock));
+        }
+    }
+
+    fn rt_clock(&self) -> i64 {
+        match self.sch.realtime {
+            Some((t0, clk0)) => {
+                let elapsed_ms = t0.elapsed().as_millis().min(i64::MAX as u128) as i64;
+                clk0.saturating_add(elapsed_ms).max(self.sch.clock)
+            }
+            None => self.sch.clock,
+        }
+    }
+
+    fn rt_clock_up(&self) -> i64 {
+        match self.sch.realtime {
+            Some((t0, clk0)) => {
+                let ns = t0.elapsed().as_nanos();
+                let elapsed_ms = ns
+                    .saturating_add(999_999)
+                    .div_euclid(1_000_000)
+                    .min(i64::MAX as u128) as i64;
+                clk0.saturating_add(elapsed_ms).max(self.sch.clock)
+            }
+            None => self.sch.clock,
+        }
+    }
+
+    fn due_sleepers(&mut self, clock: i64) {
+        self.sch.clock = clock;
+        let mut due: Vec<(i64, u64, Wake)> = vec![];
+        self.sch.sleepers.retain(|&(a, sq, w)| {
+            if a <= clock {
+                due.push((a, sq, w));
+                false
+            } else {
+                true
+            }
+        });
+        due.sort_by_key(|&(a, sq, _)| (a, sq));
+        for (_, _, w) in due {
+            match w {
+                Wake::Sleep(t) => {
+                    if self.sch.tasks[t].state == State::Sleeping {
+                        self.wake(t, None);
+                    }
+                }
+                Wake::Timeout(sid) => {
+                    if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                        self.cancel_scope(sid);
+                        self.sch.tasks[w].waiting_scope = None;
+                        let none = self.none();
+                        self.wake(w, Some(none));
+                    }
+                }
+            }
+        }
+    }
+
+    fn poll_realtime(&mut self, wait: bool) {
+        if self.sch.realtime.is_none() {
+            return;
+        }
+        let clock = self.rt_clock();
+        self.due_sleepers(clock);
+        let timeout_ms: i32 = if !wait || !self.sch.ready.is_empty() {
+            0
+        } else if let Some(min_at) = self.sch.sleepers.iter().map(|s| s.0).min() {
+            let now = self.rt_clock();
+            if min_at <= now {
+                0
+            } else {
+                (min_at - now).min(50) as i32
+            }
+        } else if !self.sch.io_waiters.is_empty() {
+            50
+        } else {
+            0
+        };
+        if !self.sch.io_waiters.is_empty() {
+            #[cfg(unix)]
+            {
+                const POLLNVAL: i16 = 0x0020;
+                const EBADF: i64 = 9;
+                let mut fds: Vec<PollFd> = self
+                    .sch
+                    .io_waiters
+                    .iter()
+                    .map(|(&fd, &(_, events))| PollFd {
+                        fd,
+                        events,
+                        revents: 0,
+                    })
+                    .collect();
+                // SAFETY: `fds` は有効な配列を指し、`fds.len()` 件を `poll` に渡す。
+                let n =
+                    unsafe { poll(fds.as_mut_ptr(), fds.len() as std::ffi::c_ulong, timeout_ms) };
+                if n > 0 {
+                    for pfd in fds {
+                        if pfd.revents != 0 {
+                            if let Some((tid, _)) = self.sch.io_waiters.remove(&pfd.fd) {
+                                if self.sch.tasks[tid].state == State::IoWait {
+                                    let val = if (pfd.revents & POLLNVAL) != 0 {
+                                        -EBADF
+                                    } else {
+                                        (pfd.revents as u16) as i64
+                                    };
+                                    self.wake(tid, Some(Val::Int(val)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            if timeout_ms > 0 {
+                std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+            }
+        } else if timeout_ms > 0 {
+            std::thread::sleep(Duration::from_millis(timeout_ms as u64));
+        }
+        let clock = self.rt_clock();
+        self.due_sleepers(clock);
+    }
+
     fn task_op(&mut self, locals: &[Slot], b: Builtin, args: &[Operand], stop: StopId) -> Op {
         use Builtin::*;
         let cur = self.sch.cur;
@@ -824,7 +987,13 @@ impl<'p> M<'p> {
                 let sid = self.sch.scopes.len();
                 self.sch.seq += 1;
                 let sq = self.sch.seq;
-                let at = self.sch.clock.saturating_add(ms);
+                let base = if self.sch.realtime.is_some() {
+                    self.sch.clock = self.rt_clock();
+                    self.rt_clock_up()
+                } else {
+                    self.sch.clock
+                };
+                let at = base.saturating_add(ms);
                 self.sch.scopes.push(ScopeSt {
                     live: 0,
                     waiter: Some(cur),
@@ -907,12 +1076,37 @@ impl<'p> M<'p> {
             }
             TaskSleep => {
                 let ms = self.read_int(locals, &args[0]).max(0);
-                let at = self.sch.clock.saturating_add(ms);
+                let base = if self.sch.realtime.is_some() {
+                    self.sch.clock = self.rt_clock();
+                    self.rt_clock_up()
+                } else {
+                    self.sch.clock
+                };
+                let at = base.saturating_add(ms);
                 self.sch.seq += 1;
                 let sq = self.sch.seq;
                 self.sch.sleepers.push((at, sq, Wake::Sleep(cur)));
                 self.sch.tasks[cur].resume = Some(Val::Unit);
                 self.sch.tasks[cur].state = State::Sleeping;
+                Op::Block
+            }
+            IoWaitFd => {
+                let fd = self.read_int(locals, &args[0]);
+                let events = self.read_int(locals, &args[1]);
+                let token = cur.saturating_add(1);
+                if token >= 2_147_483_646 || events <= 0 || (events & !(1 | 4)) != 0 {
+                    return Op::Val(Val::Int(-22));
+                }
+                let Ok(fd_i32) = i32::try_from(fd) else {
+                    return Op::Val(Val::Int(-9));
+                };
+                if fd_i32 < 0 || !is_valid_fd(fd_i32) {
+                    return Op::Val(Val::Int(-9));
+                }
+                self.enter_realtime();
+                self.sch.io_waiters.insert(fd_i32, (cur, events as i16));
+                self.sch.tasks[cur].resume = None;
+                self.sch.tasks[cur].state = State::IoWait;
                 Op::Block
             }
             TaskChannel => {
@@ -1350,7 +1544,29 @@ impl<'p> M<'p> {
                     .collect());
             }
             self.settle_locks();
+            if self.sch.realtime.is_some() {
+                self.poll_realtime(false);
+            }
             let Some(t) = self.sch.pop_ready() else {
+                if self.sch.realtime.is_some() {
+                    if self.sch.sleepers.is_empty() && self.sch.io_waiters.is_empty() {
+                        if let Some(i) = (0..self.sch.roots.len())
+                            .rev()
+                            .find(|&i| self.sch.results[i].is_none())
+                        {
+                            let root = self.sch.roots[i];
+                            self.stop_root(root);
+                            self.sch.results[i] = Some(Err(self.stop_at(
+                                0,
+                                Some(StopKind::StdRequiresViolated),
+                                Some("デッドロック（進行できるタスクがない）"),
+                            )));
+                        }
+                        continue;
+                    }
+                    self.poll_realtime(true);
+                    continue;
+                }
                 if self.sch.sleepers.is_empty() {
                     // 進行できるタスクがない。結果の出ていないルートタスクのうち一番新しいものを 1 つだけ
                     // デッドロックとして止め、次の反復で進行できるかを判定し直す（止めたことで起きた
@@ -1386,12 +1602,27 @@ impl<'p> M<'p> {
             if matches!(run, Run::Suspend) {
                 self.sch.tasks[t].frames = frames;
                 if std::mem::take(&mut self.sch.yielded) && self.yield_livelock(t) {
-                    if self.sch.sleepers.is_empty() {
+                    if self.sch.sleepers.is_empty() && self.sch.io_waiters.is_empty() {
                         run = Run::Fail(self.stop_at(
                             0,
                             Some(StopKind::StdRequiresViolated),
                             Some("デッドロック（task.yield だけで進行しない）"),
                         ));
+                    } else if self.sch.realtime.is_some() {
+                        // 実時間モードでは時計を飛ばさず、次の期限または I/O 完了まで少し実時間を進めてから続ける。
+                        let before_ver = self.sch.ver;
+                        self.poll_realtime(false);
+                        if self.sch.ver == before_ver {
+                            let ms = self
+                                .sch
+                                .sleepers
+                                .iter()
+                                .map(|s| s.0)
+                                .min()
+                                .map_or(5, |at| (at - self.rt_clock()).clamp(1, 5)) as u64;
+                            std::thread::sleep(Duration::from_millis(ms));
+                            self.poll_realtime(false);
+                        }
                     } else {
                         // 実行可能なタスクが全員空転している間は、時計を進めないと起きられない
                         // タスクがいる。時計を最も早い起床時刻まで進めて続ける（起床で共有の状態の版が進む）。

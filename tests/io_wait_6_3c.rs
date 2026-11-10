@@ -1,9 +1,10 @@
-//! ADR 0031 決定 1-1・1-3・2 / PR 6-3c: ネイティブの `io.wait_fd`（`raw.io_wait_fd`）の中断点、完了の列から実行可能待ち行列への結線、
-//! 実時間モード（最初の fd の待ちの登録から時計が実時間に結ぶ）、遅延して作る I/O スレッド、本番の `body` の振り分け。
+//! ADR 0031 決定 1-1・1-3・2・5-1 / PR 6-3c: ネイティブ・評価器の `io.wait_fd`（`raw.io_wait_fd`）の中断点、
+//! 完了の列から実行可能待ち行列への結線、実時間モード（最初の fd の待ちの登録から時計が実時間に結ぶ）、
+//! 遅延して作る I/O スレッド、本番の `body` の振り分け。
 //!
-//! 評価器は `io.wait_fd` を持たない（判断点 D まで `unreachable`）ので、ネイティブだけで試験する。待つ相手は `pipe2` の
-//! 記述子で、書き込みの順序や時刻に依らない性質で確かめる。駆動のモジュール `std.os.t`（`trust base`）が入口で、
-//! `task.scope` のタスクが `raw.io_wait_fd` を呼ぶ。
+//! 待つ相手は `pipe2` の記述子で、書き込みの順序や時刻に依らない性質で確かめる。駆動のモジュール `std.os.t`（`trust base`）が
+//! 入口で、`task.scope` のタスクが `raw.io_wait_fd` を呼ぶ。評価器の `raw.syscall` 許可表（9 個）には `pipe2` がないため、
+//! 評価器の試験ではテストハーネス側で非ブロッキングパイプを作り、素の fd 番号を入口引数（`Arg::Int`）で渡す。
 mod common;
 
 use common::native::{scratch, Ran};
@@ -606,3 +607,276 @@ fn task_timeout_fires_on_time_while_another_worker_runs_a_long_task() {
     let body = timeout_body("let c = s.spawn(move || busy(450));");
     assert_eq!(value(&native_env(&body, &[("SIGIL_WORKERS", "3")])), "-93");
 }
+
+// ---------------------------------------------------------------------------
+// 評価器（ADR 0031 決定 5-1 案 B・決定 1-3 案 A）
+
+extern "C" {
+    fn pipe2(pipefd: *mut i32, flags: i32) -> i32;
+}
+
+fn new_nonblocking_pipe() -> (i64, i64) {
+    const O_NONBLOCK_CLOEXEC: i32 = 0o4000 | 0o2000000;
+    let mut fds = [0i32; 2];
+    let rc = unsafe { pipe2(fds.as_mut_ptr(), O_NONBLOCK_CLOEXEC) };
+    assert_eq!(rc, 0, "pipe2 failed");
+    (fds[0] as i64, fds[1] as i64)
+}
+
+const EVAL_HELPERS: &[(&str, &str, &str)] = &[
+    (
+        "wr(fd: Int)",
+        "none",
+        "  let b = raw.alloc(8, 8);\n  raw.store_i64(b, 90);\n  raw.syscall(1, fd, raw.addr_to_int(b), 1, 0, 0, 0);\n  raw.free(b, 8, 8);",
+    ),
+    (
+        "fd_close(fd: Int)",
+        "none",
+        "  raw.syscall(3, fd, 0, 0, 0, 0, 0);",
+    ),
+    (
+        "waiter(fd: Int) -> Int",
+        "task.suspend",
+        "  return raw.io_wait_fd(fd, 1);",
+    ),
+    (
+        "writer(fd: Int, ms: Int) -> Int",
+        "clock, task.suspend",
+        "  task.sleep(ms);\n  wr(fd);\n  return 0;",
+    ),
+    (
+        "sleeper(ms: Int, v: Int) -> Int",
+        "clock, task.suspend",
+        "  task.sleep(ms);\n  return v;",
+    ),
+    (
+        "tmo(limit: Int, ms: Int) -> Int",
+        "clock, task.spawn, task.suspend",
+        "  let r = task.timeout(limit, move || sleeper(ms, 7));\n  match r {\n    Some(v) => { return v; }\n    None => { return 0 - 1; }\n  }",
+    ),
+    (
+        "failer(ms: Int) -> Int",
+        "clock, task.suspend",
+        "  task.sleep(ms);\n  let z = ms - ms;\n  return 5 / z;",
+    ),
+];
+
+fn eval_driver(params: &str, run_body: &str) -> String {
+    let mut f = String::new();
+    for (sig, eff, body) in EVAL_HELPERS {
+        f.push_str(&format!(
+            "fn {sig}\n{TAIL}  effects {eff}\n  unchecked \"試験の補助。ハーネスが渡した記述子と自分で作った領域だけを触る\"\n{{\n{body}\n}}\n\n"
+        ));
+    }
+    format!(
+        "module std.os.t\n  targets server\n  trust base\n\n{f}pub fn run({params}) -> Int\n{TAIL}  effects clock, task\n  unchecked \"試験\"\n{{\n{run_body}\n}}\n"
+    )
+}
+
+fn eval_run(
+    params: &str,
+    run_body: &str,
+    args: &[sigil::exec::Arg],
+) -> Result<sigil::exec::Outcome, sigil::exec::Failure> {
+    let src = eval_driver(params, run_body);
+    let opts = sigil::exec::Options {
+        trust_base: vec!["std.os.t".to_string()],
+        ..sigil::exec::Options::captured()
+    };
+    sigil::ir_eval::run_with(&src, "run", args, &opts)
+}
+
+#[test]
+fn evaluator_wakes_a_task_waiting_on_a_pipe() {
+    let (r, w) = new_nonblocking_pipe();
+    let body = r#"
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 40));
+    k.join();
+    return h.join();
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+    let out = eval_run(
+        "r: Int, w: Int",
+        body,
+        &[sigil::exec::Arg::Int(r), sigil::exec::Arg::Int(w)],
+    )
+    .expect("評価器の実行に成功すること");
+    assert_eq!(out.value, "1");
+}
+
+#[test]
+fn evaluator_wakes_several_waiting_tasks_once_each() {
+    let (r1, w1) = new_nonblocking_pipe();
+    let (r2, w2) = new_nonblocking_pipe();
+    let (r3, w3) = new_nonblocking_pipe();
+    let body = r#"
+  let v = task.scope(|s| {
+    let a = s.spawn(move || waiter(r1));
+    let b = s.spawn(move || waiter(r2));
+    let c = s.spawn(move || waiter(r3));
+    let k3 = s.spawn(move || writer(w3, 20));
+    let k1 = s.spawn(move || writer(w1, 50));
+    let k2 = s.spawn(move || writer(w2, 80));
+    k1.join();
+    k2.join();
+    k3.join();
+    return a.join() + b.join() * 10 + c.join() * 100;
+  });
+  fd_close(r1);
+  fd_close(w1);
+  fd_close(r2);
+  fd_close(w2);
+  fd_close(r3);
+  fd_close(w3);
+  return v;
+"#;
+    let out = eval_run(
+        "r1: Int, w1: Int, r2: Int, w2: Int, r3: Int, w3: Int",
+        body,
+        &[
+            sigil::exec::Arg::Int(r1),
+            sigil::exec::Arg::Int(w1),
+            sigil::exec::Arg::Int(r2),
+            sigil::exec::Arg::Int(w2),
+            sigil::exec::Arg::Int(r3),
+            sigil::exec::Arg::Int(w3),
+        ],
+    )
+    .expect("評価器の実行に成功すること");
+    assert_eq!(out.value, "111");
+}
+
+#[test]
+fn evaluator_switches_to_realtime_mode_once_fd_wait_is_registered() {
+    let (r, w) = new_nonblocking_pipe();
+    let body = r#"
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let z = s.spawn(move || sleeper(180, 5));
+    let k = s.spawn(move || writer(w, 10));
+    k.join();
+    return h.join() + z.join();
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+    let t0 = std::time::Instant::now();
+    let out = eval_run(
+        "r: Int, w: Int",
+        body,
+        &[sigil::exec::Arg::Int(r), sigil::exec::Arg::Int(w)],
+    )
+    .expect("評価器の実行に成功すること");
+    let elapsed = t0.elapsed();
+    assert_eq!(out.value, "6");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(180),
+        "実時間で 180ms 以上待つこと: {elapsed:?}"
+    );
+}
+
+#[test]
+fn evaluator_keeps_virtual_clock_without_any_fd_wait() {
+    let body = r#"
+  let v = task.scope(|s| {
+    let z = s.spawn(move || sleeper(5000, 5));
+    return z.join();
+  });
+  return v;
+"#;
+    let t0 = std::time::Instant::now();
+    let out = eval_run("", body, &[]).expect("評価器の実行に成功すること");
+    let elapsed = t0.elapsed();
+    assert_eq!(out.value, "5");
+    assert!(
+        elapsed < std::time::Duration::from_millis(2000),
+        "仮想時計のまま即座に終わること: {elapsed:?}"
+    );
+}
+
+#[test]
+fn evaluator_task_timeout_follows_real_clock_in_realtime_mode() {
+    let (r, w) = new_nonblocking_pipe();
+    let body = r#"
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 5));
+    k.join();
+    h.join();
+    let a = s.spawn(move || tmo(30, 700));
+    let b = s.spawn(move || tmo(700, 20));
+    let x = a.join();
+    let y = b.join();
+    return x * 100 + y;
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+    let t0 = std::time::Instant::now();
+    let out = eval_run(
+        "r: Int, w: Int",
+        body,
+        &[sigil::exec::Arg::Int(r), sigil::exec::Arg::Int(w)],
+    )
+    .expect("評価器の実行に成功すること");
+    let elapsed = t0.elapsed();
+    assert_eq!(out.value, "-93");
+    assert!(
+        elapsed < std::time::Duration::from_millis(600),
+        "700ms の子を待たずに終わること: {elapsed:?}"
+    );
+}
+
+#[test]
+fn evaluator_stop_cancels_waiting_fd_task_and_exits() {
+    let (r, w) = new_nonblocking_pipe();
+    let body = r#"
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let f = s.spawn(move || failer(20));
+    return f.join() + h.join();
+  });
+  return v;
+"#;
+    let err = eval_run("r: Int", body, &[sigil::exec::Arg::Int(r)])
+        .expect_err("0 除算で停止すること");
+    let msg = format!("{:?}", err.error);
+    assert!(
+        msg.contains("DivisionByZero") || msg.contains("0 で割った") || msg.contains("除算"),
+        "{msg}"
+    );
+    let _ = eval_run(
+        "r: Int, w: Int",
+        "  fd_close(r);\n  fd_close(w);\n  return 0;",
+        &[sigil::exec::Arg::Int(r), sigil::exec::Arg::Int(w)],
+    );
+}
+
+#[test]
+fn evaluator_rejects_invalid_fd_or_events_with_negative_errno() {
+    let (r, w) = new_nonblocking_pipe();
+    let body = r#"
+  let e1 = raw.io_wait_fd(0 - 1, 1);
+  let e2 = raw.io_wait_fd(r, 0);
+  let e3 = raw.io_wait_fd(r, 2);
+  fd_close(r);
+  fd_close(w);
+  return e1 * 10000 + e2 * 100 + e3;
+"#;
+    let out = eval_run(
+        "r: Int, w: Int",
+        body,
+        &[sigil::exec::Arg::Int(r), sigil::exec::Arg::Int(w)],
+    )
+    .expect("評価器の実行に成功すること");
+    // e1 = -9 (EBADF), e2 = -22 (EINVAL), e3 = -22 (EINVAL) -> -90000 - 2200 - 22 = -92222
+    assert_eq!(out.value, "-92222");
+}
+

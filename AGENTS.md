@@ -72,16 +72,18 @@ Agent-Env: cloud
 - rebase・squash でトレーラーを失わない。squash では含まれる全エージェントの `Agent:` 行を残す。
 - 確認: `git log --format='%h %(trailers:key=Agent,valueonly) %s'`
 
-## PR を出す前に必ず通す
+## PR を出す前の確認（ローカルは最小限、全量は CI）
 
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo test --test <変更範囲のテスト>
 ```
 
+- 全量の `cargo test` はローカルで回さない。CI に任せる。
 - `origin/main` にリベースしてから実行する。
-- `runtime/core`・`runtime/os` を変更した場合は各ディレクトリでも同じ 3 コマンドを実行する。
+- `runtime/core`・`runtime/os` を変更した場合は各ディレクトリでも fmt と clippy を実行する（テストは変更範囲だけ）。
+- ツールチェーンが無い環境ではローカル確認を省略してよい。その場合は PR に「ローカル確認なし・CI に委任」と書く。
 - `scripts/*.sh` は bash 用で、Windows では Git Bash か WSL でのみ動く。ネイティブ出力は Linux x86-64 のみ。Windows ではその確認を CI に任せる。
 
 ## レーン（担当ファイル）

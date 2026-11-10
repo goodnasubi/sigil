@@ -576,7 +576,11 @@ fn wake_sleeper(s: Int, t: Int)
   if c != 0 {
     st(t, T_TMO, 0);
     st(t, T_FIRED, 1);
-    st(tab_get(s, S_TASKS, c - 1), T_JOINER, 0);
+    let child = tab_get(s, S_TASKS, c - 1);
+    st(child, T_JOINER, 0);
+    // 評価器は期限の処理の中で子孫を実行可能待ち行列から外す。ここでは巻き戻しは親が再開してから行うが、
+    // その間に子孫が実行されないよう、期限の時点で選択不能にする。
+    mark_cancel(s, ld(child, T_SCOPE), t);
     wake(s, t, 0, false);
   } else {
     wake(s, t, 0, true);
@@ -1353,6 +1357,107 @@ fn in_scope(s: Int, t: Int, sid: Int) -> Bool
   return false;
 }
 
+fn mark_cancel(s: Int, sid: Int, me: Int) -> Bool
+  intent "範囲 sid の全子孫（me を除く）を選択不能にする。実行中のものがあれば true"
+  requires none
+  ensures none
+  effects none
+{
+  let mut active = false;
+  let mut j = 0;
+  while j < ld(s, S_TASKS + 1) {
+    let t = tab_get(s, S_TASKS, j);
+    if t != me && in_scope(s, t, sid) {
+      st(t, T_CANCEL, 1);
+      if ld(t, T_ACTIVE) != 0 { active = true; }
+    }
+    j = j + 1;
+  }
+  return active;
+}
+
+fn scope_cancel_begin(s: Int, sid: Int)
+  intent "取り消しの開始: 現在のタスクを S_SAVED に退避し、範囲 sid の全子孫を選択不能にして、実行中のものが止まるのを待つ"
+  requires none
+  ensures none
+  effects none
+{
+  let me = ld(s, S_CUR);
+  st(s, S_SAVED, me);
+  // 排他を放す前に全子孫を選択不能にする。枠の巻き戻しは全員の停止後。
+  // 待機中に spawn された子孫も、再走査してから走査範囲を確定する。
+  while mark_cancel(s, sid, me) { wait_event(s); }
+}
+
+fn tmo_last_child(sc: Int, bound: Int) -> Int
+  intent "範囲 sc の子の列で、bound（0 なら末尾の次）の直前の子を返す（なければ 0）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut c = ld(sc, 2);
+  let mut prev = 0;
+  while c != 0 && c != bound {
+    prev = c;
+    c = ld(c, T_SIB);
+  }
+  return prev;
+}
+
+fn tmo_pick(s: Int, sid: Int) -> Int
+  intent "評価器の cancel_scope と同じ部分木単位の順序（子を新しい順に、各子は自分の範囲の子孫を先に、そのあと自分自身）で、次に巻き戻すタスクの枠を返す。完了済みの未回収の結果は積んで -1、尽きたら 0"
+  requires none
+  ensures none
+  effects none
+{
+  let sc = tab_get(s, S_SCOPES, sid);
+  let mut c = tmo_last_child(sc, 0);
+  while c != 0 {
+    // 子 c が作った範囲（新しい順）の子孫を先に。
+    let mut k = ld(s, S_SCOPES + 1);
+    while k > 0 {
+      k = k - 1;
+      let inner = tab_get(s, S_SCOPES, k);
+      if ld(inner, 4) == c {
+        let r = tmo_pick(s, k);
+        if r != 0 { return r; }
+      }
+    }
+    if ld(c, T_STATE) == ST_DONE && ld(c, T_HASRES) != 0 {
+      st(c, T_HASRES, 0);
+      garbage_push(s, ld(c, T_RESULT), ld(c, T_RETDROP));
+      return 0 - 1;
+    }
+    if ld(c, T_STATE) != ST_DONE && ld(c, T_FRAME) != 0 {
+      io_unwait(s, c);
+      timeout_unwait(s, c);
+      st(s, S_CUR, c);
+      st(c, T_STATE, ST_DONE);
+      let f = ld(c, T_FRAME);
+      st(c, T_FRAME, 0);
+      return f;
+    }
+    c = tmo_last_child(sc, c);
+  }
+  return 0;
+}
+
+fn tmo_cancel_next_locked(sid: Int) -> Int
+  intent "task.timeout の時間切れの取り消し: 範囲 sid の子孫を、評価器と同じ部分木単位の順序で 1 つずつ返す。なければ 0 で、現在のタスクを元に戻す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  if ld(s, S_SAVED) == 0 { scope_cancel_begin(s, sid); }
+  let r = tmo_pick(s, sid);
+  if r == 0 {
+    st(s, S_CUR, ld(s, S_SAVED));
+    st(s, S_SAVED, 0);
+  }
+  return r;
+}
+
 fn scope_cancel_next_locked(sid: Int) -> Int
   intent "範囲 sid の子孫のタスクを、作った順の逆に 1 つ取り消す。枠を返す（完了済みの未回収の結果は、積んで -1 を返す）。なければ 0 で、現在のタスクを元に戻す"
   requires none
@@ -1362,24 +1467,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
   let s = sched();
   let mut i = 0;
   if ld(s, S_SAVED) == 0 {
-    let me = ld(s, S_CUR);
-    st(s, S_SAVED, me);
-    // 排他を放す前に全子孫を選択不能にする。枠の巻き戻しは全員の停止後。
-    let mut active = true;
-    while active {
-      active = false;
-      let mut j = 0;
-      while j < ld(s, S_TASKS + 1) {
-        let t = tab_get(s, S_TASKS, j);
-        if t != me && in_scope(s, t, sid) {
-          st(t, T_CANCEL, 1);
-          if ld(t, T_ACTIVE) != 0 { active = true; }
-        }
-        j = j + 1;
-      }
-      // 待機中に spawn された子孫も、再走査してから走査範囲を確定する。
-      if active { wait_event(s); }
-    }
+    scope_cancel_begin(s, sid);
     i = ld(s, S_TASKS + 1);
   } else {
     i = ld(s, S_SCAN);
@@ -1750,6 +1838,18 @@ pub fn timeout_wait(tid: Int, ms: Int) -> Int
 {
   mutex_lock();
   let r = timeout_wait_locked(tid, ms);
+  mutex_unlock();
+  return r;
+}
+
+pub fn tmo_cancel_next(sid: Int) -> Int
+  intent "排他の下で tmo_cancel_next を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = tmo_cancel_next_locked(sid);
   mutex_unlock();
   return r;
 }

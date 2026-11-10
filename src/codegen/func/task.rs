@@ -547,7 +547,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.switch_to_block(fb);
         let frame = self.frame();
         let sid2 = self.ld(frame, aux1);
-        self.cancel_loop(Some(sid2));
+        self.cancel_loop_by(Some(sid2), "sched_tmo_cancel_next");
         let zz = self.ic(0);
         let none = self.mk_enum_c(1, &[zz]);
         self.finish_call(none, dty, dty, dest, next);
@@ -1222,6 +1222,11 @@ impl<'a, 'p> Fx<'a, 'p> {
     /// 取り消したタスクごとに、枠を片付けてから（持ち主の関数の値の破棄）ごみの列を空にする（未受領の起床の値は
     /// 局所・持ち主の後に破棄する。評価器の cancel_task の順序）。旗は元の値に戻す。
     fn cancel_loop(&mut self, scope: Option<Value>) {
+        self.cancel_loop_by(scope, "sched_scope_cancel_next");
+    }
+
+    /// `cancel_loop` の取り消し順の選び方を指定する版（`task.timeout` は評価器と同じ部分木単位の `sched_tmo_cancel_next`）。
+    fn cancel_loop_by(&mut self, scope: Option<Value>, next_fn: &'static str) {
         let (done, drain) = self.plan_ids();
         let base = self.region_base();
         let fa = self
@@ -1239,7 +1244,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().jump(head, NOARGS);
         self.b.switch_to_block(head);
         let g = match scope {
-            Some(sid) => self.rt("sched_scope_cancel_next", &[sid]),
+            Some(sid) => self.rt(next_fn, &[sid]),
             None => self.rt("sched_cancel_next", &[]),
         };
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, g, 0);

@@ -126,6 +126,7 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_stopped" | "sched_scope_begin" | "sched_chan_new" | "sched_cancel_next"
         | "sched_garbage_pop" | "sched_tmo_fired" => ("", 'p'),
         "sched_scope_cancel_next"
+        | "sched_tmo_cancel_next"
         | "sched_scope_end"
         | "sched_join"
         | "sched_chan_recv"

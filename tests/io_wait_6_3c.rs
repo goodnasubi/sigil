@@ -55,6 +55,16 @@ const HELPERS: &[(&str, &str, &str)] = &[
         "  task.sleep(ms);\n  wr(fd);\n  return 0;",
     ),
     (
+        "mono_us() -> Int",
+        "none",
+        "  let b = raw.alloc(16, 8);\n  raw.syscall(228, 1, raw.addr_to_int(b), 0, 0, 0, 0);\n  let us = raw.load_i64(b) * 1000000 + raw.load_i64(raw.offset(b, 8)) / 1000;\n  raw.free(b, 16, 8);\n  return us;",
+    ),
+    (
+        "timed_sleep(ms: Int) -> Int",
+        "clock, task.suspend",
+        "  let t0 = mono_us();\n  task.sleep(ms);\n  return mono_us() - t0 - ms * 1000;",
+    ),
+    (
         "failer(ms: Int) -> Int",
         "clock, task.suspend",
         "  task.sleep(ms);\n  let z = ms - ms;\n  return 5 / z;",
@@ -151,7 +161,11 @@ fn a_task_waiting_on_a_pipe_is_woken_with_the_ready_events() {
 #[test]
 fn the_wake_works_with_several_workers_too() {
     for n in ["1", "2", "4"] {
-        assert_eq!(value(&native_env(WAKE_BODY, &[("SIGIL_WORKERS", n)])), "1", "workers={n}");
+        assert_eq!(
+            value(&native_env(WAKE_BODY, &[("SIGIL_WORKERS", n)])),
+            "1",
+            "workers={n}"
+        );
     }
 }
 
@@ -184,7 +198,11 @@ const MANY_BODY: &str = r#"
 fn several_waiting_tasks_are_each_woken_exactly_once() {
     // 完了の順序に依らない性質: 3 つの待ちがそれぞれ 1 度だけ起こされ、印の合計が 111 になる。
     for n in ["1", "3"] {
-        assert_eq!(value(&native_env(MANY_BODY, &[("SIGIL_WORKERS", n)])), "111", "workers={n}");
+        assert_eq!(
+            value(&native_env(MANY_BODY, &[("SIGIL_WORKERS", n)])),
+            "111",
+            "workers={n}"
+        );
     }
 }
 
@@ -212,7 +230,11 @@ fn once_a_wait_is_registered_sleep_really_waits() {
     // 実時間モード: fd の待ちを一度登録したあとの `task.sleep(250)` は、時計を飛ばさず実際に 250 ミリ秒以上待つ。
     // 値は 待ち(1) + 眠りの戻り(5)。
     for n in ["1", "2"] {
-        assert_eq!(value(&native_env(REALTIME_BODY, &[("SIGIL_WORKERS", n)])), "6", "workers={n}");
+        assert_eq!(
+            value(&native_env(REALTIME_BODY, &[("SIGIL_WORKERS", n)])),
+            "6",
+            "workers={n}"
+        );
     }
 }
 
@@ -274,7 +296,60 @@ fn a_stop_while_a_task_waits_on_an_fd_cancels_it_and_exits() {
     for n in ["1", "2"] {
         let r = native_env(ABORT_BODY, &[("SIGIL_WORKERS", n)]);
         assert_ne!(r.code, Some(0), "{}", r.stderr);
-        assert!(r.code.unwrap_or(0) < 128, "シグナルで落ちた: {:?} {}", r.code, r.stderr);
-        assert!(r.stderr.contains("0 で割った") || r.stderr.contains("除算") || r.stderr.contains("zero") , "{}", r.stderr);
+        assert!(
+            r.code.unwrap_or(0) < 128,
+            "シグナルで落ちた: {:?} {}",
+            r.code,
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("0 で割った")
+                || r.stderr.contains("除算")
+                || r.stderr.contains("zero"),
+            "{}",
+            r.stderr
+        );
+    }
+}
+
+const PRECISION_BODY: &str = r#"
+  let p = pipe_new();
+  let r = p / 65536;
+  let w = p % 65536;
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 5));
+    k.join();
+    h.join();
+    let a = s.spawn(move || timed_sleep(1));
+    let a1 = a.join();
+    let b = s.spawn(move || timed_sleep(2));
+    let b1 = b.join();
+    let c = s.spawn(move || timed_sleep(7));
+    let c1 = c.join();
+    let d = s.spawn(move || timed_sleep(10));
+    let d1 = d.join();
+    return a1 + b1 * 65536 + c1 * 4294967296 + d1 * 281474976710656;
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+
+/// 実時間モードの精度の測定（ADR 0031 根拠の限界）。`cargo test --test io_wait_6_3c measure -- --ignored --nocapture`。
+/// 眠りの要求 1・2・7・10 ミリ秒それぞれについて、実際の経過 - 要求（マイクロ秒）を表示する。
+#[test]
+#[ignore]
+fn measure_realtime_precision() {
+    for _ in 0..5 {
+        let v: i64 = value(&native_env(PRECISION_BODY, &[])).parse().unwrap();
+        let f = |i: u32| (v >> (16 * i)) & 0xffff;
+        eprintln!(
+            "超過(us): 1ms={} 2ms={} 7ms={} 10ms={}",
+            f(0),
+            f(1),
+            f(2),
+            f(3)
+        );
     }
 }

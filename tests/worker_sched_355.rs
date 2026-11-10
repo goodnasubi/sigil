@@ -423,7 +423,21 @@ fn run() -> Int
             1,
         )
         .replace("clock", "test_clock");
-    let src = format!("{runtime}\n{body}");
+    // 6-3c: スケジューラが呼ぶ `std.os.io` と `std.os.thread` の関数は、この単体の試験では使わない（実時間モードに入らない）。
+    // `use` を外した分の名前を、何もしない代役で補う。
+    let stubs = "fn io_cancel(s: Int, t: Int) -> Int\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\n\
+fn io_free(s: Int)\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n}\n\
+fn io_loop(s: Int)\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n}\n\
+fn io_new() -> Int\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\n\
+fn io_now() -> Int\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\n\
+fn io_set_hook(s: Int, h: Int)\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n}\n\
+fn io_sleep_until(s: Int, d: Int, t: Int)\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n}\n\
+fn io_stop(s: Int)\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n}\n\
+fn io_take(s: Int, out: Int) -> Int\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\n\
+fn io_wait_fd(s: Int, fd: Int, e: Int, t: Int) -> Int\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n  return 0;\n}\n\
+fn join(h: Addr)\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n{\n}\n\
+fn spawn(a: Addr) -> Addr\n  intent \"代役\"\n  requires none\n  ensures none\n  effects none\n  unchecked \"代役\"\n{\n  return raw.addr_null();\n}\n";
+    let src = format!("{runtime}\n{stubs}\n{body}");
     let dir = scratch("355-cancel-ready");
     let exe = dir.join("prog");
     build(&src, &exe);

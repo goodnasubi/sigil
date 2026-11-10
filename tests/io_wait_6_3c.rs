@@ -100,6 +100,11 @@ const HELPERS: &[(&str, &str, &str)] = &[
         "  let t0 = mono_ms();\n  let mut i = 0;\n  while i < n {\n    wr(w);\n    raw.io_wait_fd(r, 1);\n    rd(r);\n    i = i + 1;\n  }\n  return mono_ms() - t0;",
     ),
     (
+        "tmo(limit: Int, ms: Int) -> Int",
+        "clock, task.spawn, task.suspend",
+        "  let r = task.timeout(limit, move || sleeper(ms, 7));\n  match r {\n    Some(v) => { return v; }\n    None => { return 0 - 1; }\n  }",
+    ),
+    (
         "failer(ms: Int) -> Int",
         "clock, task.suspend",
         "  task.sleep(ms);\n  let z = ms - ms;\n  return 5 / z;",
@@ -552,4 +557,52 @@ fn completions_are_not_missed_while_another_worker_runs_a_long_task() {
             .unwrap();
         assert!((0..1000).contains(&v), "{v} ms");
     }
+}
+
+fn timeout_body(peer: &str) -> String {
+    format!(
+        r#"
+  let p = pipe_new();
+  let r = p / 65536;
+  let w = p % 65536;
+  let t0 = mono_ms();
+  let v = task.scope(|s| {{
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 3));
+    k.join();
+    h.join();
+    {peer}
+    let a = s.spawn(move || tmo(30, 700));
+    let b = s.spawn(move || tmo(700, 20));
+    let x = a.join();
+    let y = b.join();
+    return x * 100 + y;
+  }});
+  let dt = mono_ms() - t0;
+  fd_close(r);
+  fd_close(w);
+  if dt > 600 {{ return 0 - 99999; }}
+  return v;
+"#
+    )
+}
+
+#[test]
+fn task_timeout_follows_the_real_clock_once_in_real_time_mode() {
+    // 実時間モード: 期限 30 ms は子の眠り 700 ms より先に来て None（-1）、子が 20 ms で終わるものは Some(7)。
+    // どちらの待ちも 600 ms 以内に終わる（700 ms の子を待たない）。値は -1 * 100 + 7 = -93。
+    for n in ["1", "2"] {
+        assert_eq!(
+            value(&native_env(&timeout_body(""), &[("SIGIL_WORKERS", n)])),
+            "-93",
+            "workers={n}"
+        );
+    }
+}
+
+#[test]
+fn task_timeout_fires_on_time_while_another_worker_runs_a_long_task() {
+    // 別のワーカーが yield しない 450 ms の計算を続けていても、期限は I/O 側のタイマーで届く（待機・起床の規則は変えない）。
+    let body = timeout_body("let c = s.spawn(move || busy(450));");
+    assert_eq!(value(&native_env(&body, &[("SIGIL_WORKERS", "3")])), "-93");
 }

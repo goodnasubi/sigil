@@ -98,6 +98,9 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("task_spawn", "sched_spawn"),
     ("start", "sched_start"),
     ("take_resume", "sched_take_resume"),
+    ("timeout_wait", "sched_timeout_wait"),
+    ("tmo_cancel_next", "sched_tmo_cancel_next"),
+    ("tmo_fired", "sched_tmo_fired"),
     ("yield_val", "sched_yield_val"),
 ];
 

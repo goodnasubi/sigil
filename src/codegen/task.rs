@@ -70,6 +70,7 @@ pub(crate) fn blocking(b: Builtin) -> bool {
             | LockAcquire
             | AtomicLoad
             | IoWaitFd
+            | TaskTimeout
     )
 }
 

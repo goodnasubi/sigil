@@ -12,7 +12,7 @@
 //! | `publish` | 突き合わせる | `Atomic` の `store`・`load` |
 //! | `handoff` | 突き合わせる | `Atomic` の `clone` を共有する待つタスクと書くタスク |
 //! | `bump` | 突き合わせない（不具合 #366） | 引数 `&Lock<Int>` を入口にすると、評価器は整数を初期値の `Lock` にするが、ネイティブの実行ファイルは SIGSEGV で落ちる。直さず Issue にした |
-//! | `first_within` | 突き合わせない（固定のみ） | `task.timeout` はネイティブ未対応（ビルドで止める。補足 D-3） |
+//! | `first_within` | 突き合わせる | `task.timeout`（ADR 0031 6-3c で対応。fd の待ちを使わない間は仮想の時計で決定的） |
 //! | `double`・`slow` | 単独では入口にしない | 上の関数の部品 |
 //!
 //! `Lock` の取得・解放・壊れた `Lock`（`Err(LockBroken)`）は、サンプルの入口からは突き合わせられないので、
@@ -62,16 +62,11 @@ fn atomic_handoff_between_tasks_matches() {
     assert_eq!(both("handoff", &[5]), "5");
 }
 
-/// `task.timeout` は、評価器では動き、ネイティブはビルドで止める（補足 D-3。この差を固定する）。
+/// `task.timeout` は、ADR 0031 6-3c でネイティブ対応になった。仮想の時計で決定的に動き、評価器と同じ結果になる。
 #[test]
-fn timeout_is_evaluator_only() {
-    let s = src();
-    let o = sigil::ir_eval::run(&s, "first_within", &[Arg::Int(50), Arg::Int(7)])
-        .unwrap_or_else(|e| panic!("{:?}", e.error));
-    assert_eq!(o.value, "None");
-    let out = common::native::scratch("ex06-timeout").join("prog");
-    let e = try_build(&[&s], "first_within", &out, false).unwrap_err();
-    assert!(e.contains("未対応"), "{e}");
+fn timeout_matches() {
+    assert_eq!(both("first_within", &[50, 7]), "None");
+    assert_eq!(both("first_within", &[500, 7]), "Some(7)");
 }
 
 /// ADR 0007 決定 6 の条件 10 の P1-b: 並行処理を使わないプログラム（核の部分だけ）の実行ファイルは、

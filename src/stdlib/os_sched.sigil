@@ -88,7 +88,11 @@ global T_SPIN_VER: Int = 18
 global T_SPIN_FLAG: Int = 19
 global T_ACTIVE: Int = 20
 global T_CANCEL: Int = 21
-global T_WORDS: Int = 22
+global T_TMO: Int = 22
+global T_FIRED: Int = 23
+global T_WOBJ: Int = 24
+global T_WIH: Int = 25
+global T_WORDS: Int = 26
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -342,6 +346,8 @@ fn wq_push(o: Int, ih: Int, t: Int)
   effects none
 {
   st(t, T_WNEXT, 0);
+  st(t, T_WOBJ, o);
+  st(t, T_WIH, ih);
   let tail = ld(o, ih + 1);
   if tail == 0 {
     st(o, ih, t);
@@ -367,7 +373,34 @@ fn wq_pop(o: Int, ih: Int) -> Int
     st(o, ih + 1, 0);
   }
   st(t, T_WNEXT, 0);
+  st(t, T_WOBJ, 0);
   return t;
+}
+
+fn wq_remove(t: Int)
+  intent "タスク t が載っているチャネル・Lock の待機の列から外す（載っていなければ何もしない）"
+  requires none
+  ensures none
+  effects none
+{
+  let o = ld(t, T_WOBJ);
+  if o == 0 { return; }
+  let ih = ld(t, T_WIH);
+  let head = ld(o, ih);
+  if head == t {
+    wq_pop(o, ih);
+  } else {
+    let mut p = head;
+    while p != 0 && ld(p, T_WNEXT) != t {
+      p = ld(p, T_WNEXT);
+    }
+    if p != 0 {
+      st(p, T_WNEXT, ld(t, T_WNEXT));
+      if ld(o, ih + 1) == t { st(o, ih + 1, p); }
+      st(t, T_WNEXT, 0);
+      st(t, T_WOBJ, 0);
+    }
+  }
 }
 
 fn wake(s: Int, t: Int, v: Int, has: Bool)
@@ -564,6 +597,27 @@ fn has_resume_locked() -> Int
   return ld(ld(s, S_CUR), T_HASRESUME);
 }
 
+fn wake_sleeper(s: Int, t: Int)
+  intent "眠りの列から外したタスクを起こす。task.timeout の期限なら、待っている子との合流を外して「時間切れ」の印を立てる（起床の値なし）"
+  requires none
+  ensures none
+  effects none
+{
+  let c = ld(t, T_TMO);
+  if c != 0 {
+    st(t, T_TMO, 0);
+    st(t, T_FIRED, 1);
+    let child = tab_get(s, S_TASKS, c - 1);
+    st(child, T_JOINER, 0);
+    // 評価器は期限の処理の中で子孫を実行可能待ち行列から外す。ここでは巻き戻しは親が再開してから行うが、
+    // その間に子孫が実行されないよう、期限の時点で選択不能にする。
+    mark_cancel(s, ld(child, T_SCOPE), t);
+    wake(s, t, 0, false);
+  } else {
+    wake(s, t, 0, true);
+  }
+}
+
 fn advance_clock(s: Int)
   intent "時計を最も早い目覚めまで進め、その時刻の眠りのタスクを連番の小さい順に起こす（眠りがあること）"
   requires none
@@ -598,7 +652,7 @@ fn advance_clock(s: Int)
       go = false;
     } else {
       sleep_unlink(s, pick);
-      wake(s, pick, 0, true);
+      wake_sleeper(s, pick);
     }
   }
 }
@@ -702,7 +756,7 @@ fn due_sleepers(s: Int, clock: Int)
     }
     if ld(best, T_SLEEP_AT) > clock { return; }
     sleep_unlink(s, best);
-    wake(s, best, 0, true);
+    wake_sleeper(s, best);
   }
 }
 
@@ -1008,6 +1062,7 @@ fn finish_task_locked(v: Int)
   let j = ld(t, T_JOINER);
   st(t, T_JOINER, 0);
   if j != 0 {
+    timeout_unwait(s, j);
     wake(s, j, v, true);
   } else {
     st(t, T_RESULT, v);
@@ -1044,19 +1099,16 @@ fn yield_val_locked(v: Int)
   st(s, S_BLOCKED, 1);
 }
 
-fn sleep_locked(ms: Int)
-  intent "現在のタスクを仮想の時計で ms 待たせる（負は 0）"
+fn sleep_enqueue(s: Int, t: Int, ms: Int)
+  intent "タスク t を眠りの列に足す（期限は ms 後。負は 0）。実時間モードでは I/O 側のタイマーに反映する"
   requires none
   ensures none
   effects none
 {
-  let s = sched();
-  let t = ld(s, S_CUR);
   let mut d = ms;
   if d < 0 {
     d = 0;
   }
-  bump(s);
   let seq = ld(s, S_SEQ) + 1;
   st(s, S_SEQ, seq);
   // 飽和加算（評価器の saturating_add と同じ）。実時間モードでは、基準を現在の実時間の時計にする。
@@ -1075,10 +1127,98 @@ fn sleep_locked(ms: Int)
   st(t, T_SLEEP_SEQ, seq);
   st(t, T_SNEXT, ld(s, S_SLEEP));
   st(s, S_SLEEP, t);
+  if ld(s, S_IO) != 0 { arm_timer(s); }
+}
+
+fn sleep_locked(ms: Int)
+  intent "現在のタスクを仮想の時計で ms 待たせる（負は 0）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  bump(s);
+  sleep_enqueue(s, t, ms);
   st(t, T_RESUME, 0);
   st(t, T_STATE, ST_SLEEPING);
   st(s, S_BLOCKED, 1);
-  if ld(s, S_IO) != 0 { arm_timer(s); }
+}
+
+fn timeout_wait_locked(tid: Int, ms: Int) -> Int
+  intent "task.timeout: 子 tid の結果を、期限 ms まで待つ。終わっていれば結果を返す。そうでなければ現在のタスクを眠りの列と子の合流に同時に結んで 0 を返す（先に起きた方が相手を外す）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  bump(s);
+  let c = tab_get(s, S_TASKS, tid);
+  let cur = ld(s, S_CUR);
+  if ld(c, T_STATE) == ST_DONE && ld(c, T_CANCEL) == 0 {
+    let v = ld(c, T_RESULT);
+    st(c, T_HASRES, 0);
+    return v;
+  }
+  sleep_enqueue(s, cur, ms);
+  st(cur, T_TMO, tid + 1);
+  st(cur, T_FIRED, 0);
+  st(c, T_JOINER, cur);
+  st(cur, T_RESUME, 0);
+  st(cur, T_STATE, ST_JOINING);
+  st(s, S_BLOCKED, 1);
+  return 0;
+}
+
+fn tmo_fired_locked() -> Int
+  intent "直前の task.timeout が時間切れで起こされたか（1 / 0）。読むと印を消す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  let f = ld(t, T_FIRED);
+  st(t, T_FIRED, 0);
+  return f;
+}
+
+fn unwait(s: Int, t: Int)
+  intent "取り消しの入口: 取り消すタスク t を、載っているすべての待機（I/O・task.timeout の期限・眠り・チャネルと Lock の待機の列・合流・範囲の待ち）から、枠を巻き戻す前に外す（評価器の cancel_task と同じ）"
+  requires none
+  ensures none
+  effects none
+{
+  io_unwait(s, t);
+  timeout_unwait(s, t);
+  if ld(t, T_STATE) == ST_SLEEPING { sleep_unlink(s, t); }
+  wq_remove(t);
+  // t が合流で待っている相手の、合流待ちの印を外す。
+  let n = ld(s, S_TASKS + 1);
+  let mut i = 0;
+  while i < n {
+    let o = tab_get(s, S_TASKS, i);
+    if ld(o, T_JOINER) == t { st(o, T_JOINER, 0); }
+    i = i + 1;
+  }
+  // t が範囲の終わりを待っていれば、その待ち手の印を外す。
+  let w = ld(t, T_WAITSCOPE);
+  if w >= 0 {
+    let sc = tab_get(s, S_SCOPES, w);
+    if ld(sc, 1) == t { st(sc, 1, 0); }
+  }
+}
+
+fn timeout_unwait(s: Int, t: Int)
+  intent "取り消すタスクが task.timeout の期限を待っていれば、眠りの列から外す"
+  requires none
+  ensures none
+  effects none
+{
+  if ld(t, T_TMO) != 0 {
+    sleep_unlink(s, t);
+    st(t, T_TMO, 0);
+  }
 }
 
 // --- チャネル ---
@@ -1231,7 +1371,7 @@ fn cancel_next_locked() -> Int
       return 0 - 1;
     }
     if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
-      io_unwait(s, t);
+      unwait(s, t);
       st(s, S_CANCEL_I, i);
       st(s, S_CUR, t);
       st(t, T_STATE, ST_DONE);
@@ -1273,6 +1413,106 @@ fn in_scope(s: Int, t: Int, sid: Int) -> Bool
   return false;
 }
 
+fn mark_cancel(s: Int, sid: Int, me: Int) -> Bool
+  intent "範囲 sid の全子孫（me を除く）を選択不能にする。実行中のものがあれば true"
+  requires none
+  ensures none
+  effects none
+{
+  let mut active = false;
+  let mut j = 0;
+  while j < ld(s, S_TASKS + 1) {
+    let t = tab_get(s, S_TASKS, j);
+    if t != me && in_scope(s, t, sid) {
+      st(t, T_CANCEL, 1);
+      if ld(t, T_ACTIVE) != 0 { active = true; }
+    }
+    j = j + 1;
+  }
+  return active;
+}
+
+fn scope_cancel_begin(s: Int, sid: Int)
+  intent "取り消しの開始: 現在のタスクを S_SAVED に退避し、範囲 sid の全子孫を選択不能にして、実行中のものが止まるのを待つ"
+  requires none
+  ensures none
+  effects none
+{
+  let me = ld(s, S_CUR);
+  st(s, S_SAVED, me);
+  // 排他を放す前に全子孫を選択不能にする。枠の巻き戻しは全員の停止後。
+  // 待機中に spawn された子孫も、再走査してから走査範囲を確定する。
+  while mark_cancel(s, sid, me) { wait_event(s); }
+}
+
+fn tmo_last_child(sc: Int, bound: Int) -> Int
+  intent "範囲 sc の子の列で、bound（0 なら末尾の次）の直前の子を返す（なければ 0）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut c = ld(sc, 2);
+  let mut prev = 0;
+  while c != 0 && c != bound {
+    prev = c;
+    c = ld(c, T_SIB);
+  }
+  return prev;
+}
+
+fn tmo_pick(s: Int, sid: Int) -> Int
+  intent "評価器の cancel_scope と同じ部分木単位の順序（子を新しい順に、各子は自分の範囲の子孫を先に、そのあと自分自身）で、次に巻き戻すタスクの枠を返す。完了済みの未回収の結果は積んで -1、尽きたら 0"
+  requires none
+  ensures none
+  effects none
+{
+  let sc = tab_get(s, S_SCOPES, sid);
+  let mut c = tmo_last_child(sc, 0);
+  while c != 0 {
+    // 子 c が作った範囲（新しい順）の子孫を先に。
+    let mut k = ld(s, S_SCOPES + 1);
+    while k > 0 {
+      k = k - 1;
+      let inner = tab_get(s, S_SCOPES, k);
+      if ld(inner, 4) == c {
+        let r = tmo_pick(s, k);
+        if r != 0 { return r; }
+      }
+    }
+    if ld(c, T_STATE) == ST_DONE && ld(c, T_HASRES) != 0 {
+      st(c, T_HASRES, 0);
+      garbage_push(s, ld(c, T_RESULT), ld(c, T_RETDROP));
+      return 0 - 1;
+    }
+    if ld(c, T_STATE) != ST_DONE && ld(c, T_FRAME) != 0 {
+      unwait(s, c);
+      st(s, S_CUR, c);
+      st(c, T_STATE, ST_DONE);
+      let f = ld(c, T_FRAME);
+      st(c, T_FRAME, 0);
+      return f;
+    }
+    c = tmo_last_child(sc, c);
+  }
+  return 0;
+}
+
+fn tmo_cancel_next_locked(sid: Int) -> Int
+  intent "task.timeout の時間切れの取り消し: 範囲 sid の子孫を、評価器と同じ部分木単位の順序で 1 つずつ返す。なければ 0 で、現在のタスクを元に戻す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  if ld(s, S_SAVED) == 0 { scope_cancel_begin(s, sid); }
+  let r = tmo_pick(s, sid);
+  if r == 0 {
+    st(s, S_CUR, ld(s, S_SAVED));
+    st(s, S_SAVED, 0);
+  }
+  return r;
+}
+
 fn scope_cancel_next_locked(sid: Int) -> Int
   intent "範囲 sid の子孫のタスクを、作った順の逆に 1 つ取り消す。枠を返す（完了済みの未回収の結果は、積んで -1 を返す）。なければ 0 で、現在のタスクを元に戻す"
   requires none
@@ -1282,24 +1522,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
   let s = sched();
   let mut i = 0;
   if ld(s, S_SAVED) == 0 {
-    let me = ld(s, S_CUR);
-    st(s, S_SAVED, me);
-    // 排他を放す前に全子孫を選択不能にする。枠の巻き戻しは全員の停止後。
-    let mut active = true;
-    while active {
-      active = false;
-      let mut j = 0;
-      while j < ld(s, S_TASKS + 1) {
-        let t = tab_get(s, S_TASKS, j);
-        if t != me && in_scope(s, t, sid) {
-          st(t, T_CANCEL, 1);
-          if ld(t, T_ACTIVE) != 0 { active = true; }
-        }
-        j = j + 1;
-      }
-      // 待機中に spawn された子孫も、再走査してから走査範囲を確定する。
-      if active { wait_event(s); }
-    }
+    scope_cancel_begin(s, sid);
     i = ld(s, S_TASKS + 1);
   } else {
     i = ld(s, S_SCAN);
@@ -1316,7 +1539,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
         return 0 - 1;
       }
       if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
-        io_unwait(s, t);
+        unwait(s, t);
         st(s, S_SCAN, i);
         st(s, S_CUR, t);
         st(t, T_STATE, ST_DONE);
@@ -1659,6 +1882,42 @@ pub fn io_main(io: Int)
   effects none
 {
   io_loop(io);
+}
+
+pub fn timeout_wait(tid: Int, ms: Int) -> Int
+  intent "task.timeout: 排他の下で timeout_wait を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = timeout_wait_locked(tid, ms);
+  mutex_unlock();
+  return r;
+}
+
+pub fn tmo_cancel_next(sid: Int) -> Int
+  intent "排他の下で tmo_cancel_next を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = tmo_cancel_next_locked(sid);
+  mutex_unlock();
+  return r;
+}
+
+pub fn tmo_fired() -> Int
+  intent "排他の下で tmo_fired を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = tmo_fired_locked();
+  mutex_unlock();
+  return r;
 }
 
 pub fn yield_val(v: Int)

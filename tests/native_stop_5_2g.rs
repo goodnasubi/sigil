@@ -6,13 +6,14 @@
 //! | 項目 | 評価器 | ネイティブ | 5-2g の扱い |
 //! |---|---|---|---|
 //! | ルートタスクの数 | 複数（`run_roots_with`） | 1 つ（番号 0） | 固定のみ。入口は段階 6（ADR 0026 決定 4） |
-//! | `task.timeout`／`race`／`all_ok` | 対応 | ビルドで止める | 固定のみ。意味づけは取り消しの結線と共に後続 |
+//! | `race`／`all_ok` | 対応 | ビルドで止める | 固定のみ（`task.timeout` は ADR 0031 6-3c で対応。`tests/native_timeout_6_3c.rs`） |
 //! | 眠りのない本物のライブロックの停止 | 検出して停止 | 無い（走り続ける） | 固定のみ。指紋の比較が必要で費用に見合わない |
 //! | 兄弟の部分木の取り消し | 兄弟ごとの再帰（`cancel_scope`） | 作成順の逆の一列 | 埋めた（対応する操作の範囲では観測差なし） |
 //!
 //! 兄弟の部分木: 評価器も停止・デッドロックでは `stop_root_inner` が作成順の逆の一列で回る（子は親より後に作られる
 //! ので部分木は親より先に片付く）。再帰の `cancel_scope` は `race`／`timeout`／`all_ok` の経路でだけ順序の違いを
-//! 生むが、これらはネイティブ未対応なので、対応する操作の範囲では差は観測されない。下の試験が評価器と一致を確かめる。
+//! 生む。`task.timeout` の時間切れの取り消しは、評価器と同じ部分木単位（`sched_tmo_cancel_next`）で行う
+//! （`tests/native_timeout_6_3c.rs`）。`race`／`all_ok` はネイティブ未対応。下の試験が評価器と一致を確かめる。
 
 mod common;
 
@@ -148,7 +149,6 @@ fn run(z: Int) -> Int
 #[test]
 fn unsupported_scope_operations_stop_the_build_but_the_evaluator_runs_them() {
     let heads = [
-        ("Option<Int>", "return task.timeout(500, move || 1);"),
         (
             "Int",
             "let mut gs = List.new(); gs.push(|| 1); return task.race(gs);",
@@ -159,11 +159,7 @@ fn unsupported_scope_operations_stop_the_build_but_the_evaluator_runs_them() {
         ),
     ];
     for (ty, call) in heads {
-        let eff = if call.contains("timeout") {
-            "clock, task.spawn, task.suspend"
-        } else {
-            "task.spawn, task.suspend"
-        };
+        let eff = "task.spawn, task.suspend";
         let body = format!(
             "fn run() -> {ty}\n  intent \"r\"\n  requires none\n  ensures none\n  effects {eff}\n{{\n  {call}\n}}\n"
         );

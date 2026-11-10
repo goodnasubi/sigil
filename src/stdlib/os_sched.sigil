@@ -726,6 +726,9 @@ fn io_poll_locked(s: Int) -> Int
   due_sleepers(s, clock);
   st(s, S_CLOCK, clock);
   if ld(s, S_RHEAD) != before { n = n + 1; }
+  // 不変条件: 実時間モードでは、眠りの最小の期限が I/O 側のタイマーに反映されている。期限が変わる場所（新しい眠り、
+  // 眠りを起こした直後、期限の完了を消費した直後）で、ここと sleep_locked が反映する。idle の分岐には置かない。
+  arm_timer(s);
   return n;
 }
 
@@ -774,7 +777,6 @@ fn idle_locked() -> Int
       st(s, S_CUR, 0);
       return 0;
     }
-    arm_timer(s);
     wait_io(s);
     return 1;
   }
@@ -1067,6 +1069,7 @@ fn sleep_locked(ms: Int)
   st(t, T_RESUME, 0);
   st(t, T_STATE, ST_SLEEPING);
   st(s, S_BLOCKED, 1);
+  if ld(s, S_IO) != 0 { arm_timer(s); }
 }
 
 // --- チャネル ---
@@ -1864,9 +1867,6 @@ fn wait_io(s: Int)
   let version = raw.atomic_load_i64(a);
   io_poll_locked(s);
   if ld(s, S_RHEAD) != 0 { return; }
-  // この確認が期限の完了を消費して S_TIMER_AT を 0 にしたかもしれない（arm_timer は消費の前に「登録済み」と見て省いた）。
-  // 眠りが残るなら、眠る前に必ず登録し直す。世代は登録の前に読んであるので、これ以後に届く通知は取りこぼさない。
-  arm_timer(s);
   mutex_unlock();
   raw.syscall(202, raw.addr_to_int(a), 128, version, 0, 0, 0);
   mutex_lock();

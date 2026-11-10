@@ -1619,7 +1619,8 @@ impl<'p> M<'p> {
                                 .iter()
                                 .map(|s| s.0)
                                 .min()
-                                .map_or(5, |at| (at - self.rt_clock()).clamp(1, 5)) as u64;
+                                .map_or(5, |at| (at - self.rt_clock()).clamp(1, 5))
+                                as u64;
                             std::thread::sleep(Duration::from_millis(ms));
                             self.poll_realtime(false);
                         }

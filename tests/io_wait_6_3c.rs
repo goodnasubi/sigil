@@ -845,8 +845,8 @@ fn evaluator_stop_cancels_waiting_fd_task_and_exits() {
   });
   return v;
 "#;
-    let err = eval_run("r: Int", body, &[sigil::exec::Arg::Int(r)])
-        .expect_err("0 除算で停止すること");
+    let err =
+        eval_run("r: Int", body, &[sigil::exec::Arg::Int(r)]).expect_err("0 除算で停止すること");
     let msg = format!("{:?}", err.error);
     assert!(
         msg.contains("DivisionByZero") || msg.contains("0 で割った") || msg.contains("除算"),
@@ -879,4 +879,3 @@ fn evaluator_rejects_invalid_fd_or_events_with_negative_errno() {
     // e1 = -9 (EBADF), e2 = -22 (EINVAL), e3 = -22 (EINVAL) -> -90000 - 2200 - 22 = -92222
     assert_eq!(out.value, "-92222");
 }
-

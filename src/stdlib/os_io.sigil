@@ -662,6 +662,11 @@ pub fn io_wait_fd(s: Int, fd: Int, events: Int, token: Int) -> Int
   let mut r = 0;
   if i >= 0 {
     r = ep_ctl(ep, 3, fd, events + EPOLLONESHOT, token, gen);
+    if r == 0 - 2 {
+      // 呼び出し側が fd を close すると、カーネルの登録は消えるが、この表には残る。同じ番号が別の記述子に再利用された
+      // ときの MOD は ENOENT になるので、ADD に切り替える（表の行はそのまま更新する）。
+      r = ep_ctl(ep, 1, fd, EPOLLONESHOT + events, token, gen);
+    }
     if r == 0 {
       st(ld(s, S_REGS), 3 * i + 1, token);
       st(ld(s, S_REGS), 3 * i + 2, gen);

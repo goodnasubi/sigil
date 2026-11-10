@@ -605,6 +605,17 @@ fn rt_clock(s: Int) -> Int
   return c;
 }
 
+fn rt_clock_up(s: Int) -> Int
+  intent "実時間モードの時計（ミリ秒、切り上げ）。眠りの期限を作るのに使い、期限が要求より早くならないようにする"
+  requires none
+  ensures none
+  effects none
+{
+  let c = ld(s, S_RTCLK0) + (io_now() - ld(s, S_RT0) + 999999) / 1000000;
+  if c < ld(s, S_CLOCK) { return ld(s, S_CLOCK); }
+  return c;
+}
+
 fn io_enter(s: Int) -> Bool
   intent "実時間モードに入る（最初の fd の待ちの登録で一度だけ）: I/O の状態と I/O スレッドを作る。失敗なら false"
   requires none
@@ -1040,8 +1051,10 @@ fn sleep_locked(ms: Int)
   // 飽和加算（評価器の saturating_add と同じ）。実時間モードでは、基準を現在の実時間の時計にする。
   let mut clock = ld(s, S_CLOCK);
   if ld(s, S_IO) != 0 {
-    clock = rt_clock(s);
-    st(s, S_CLOCK, clock);
+    // 期限は切り捨て前の実時間から作り、ミリ秒に切り上げる（切り捨てた時刻から作ると、最大 1 ミリ秒早く起きる）。
+    // 時計 S_CLOCK 自体は切り捨てた値のまま進める（時計が実時間より先へ出ないように）。
+    st(s, S_CLOCK, rt_clock(s));
+    clock = rt_clock_up(s);
   }
   let mut at = 9223372036854775807;
   if d <= 9223372036854775807 - clock {

@@ -65,6 +65,16 @@ const HELPERS: &[(&str, &str, &str)] = &[
         "  let t0 = mono_us();\n  task.sleep(ms);\n  return mono_us() - t0 - ms * 1000;",
     ),
     (
+        "spinner(n: Int) -> Int",
+        "task.suspend",
+        "  let mut i = 0;\n  while i < n {\n    task.yield();\n    i = i + 1;\n  }\n  return 0;",
+    ),
+    (
+        "many_sleeps(n: Int) -> Int",
+        "clock, task.suspend",
+        "  let mut i = 0;\n  let mut early = 0;\n  while i < n {\n    if timed_sleep(1) < 0 { early = early + 1; }\n    i = i + 1;\n  }\n  return early;",
+    ),
+    (
         "failer(ms: Int) -> Int",
         "clock, task.suspend",
         "  task.sleep(ms);\n  let z = ms - ms;\n  return 5 / z;",
@@ -350,6 +360,78 @@ fn measure_realtime_precision() {
             f(1),
             f(2),
             f(3)
+        );
+    }
+}
+
+const REUSE_BODY: &str = r#"
+  let p = pipe_new();
+  let r = p / 65536;
+  let w = p % 65536;
+  let a = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 20));
+    k.join();
+    return h.join();
+  });
+  fd_close(r);
+  fd_close(w);
+  let q = pipe_new();
+  let r2 = q / 65536;
+  let w2 = q % 65536;
+  let b = task.scope(|s| {
+    let h = s.spawn(move || waiter(r2));
+    let k = s.spawn(move || writer(w2, 20));
+    k.join();
+    return h.join();
+  });
+  fd_close(r2);
+  fd_close(w2);
+  return a * 1000 + b * 100 + (r2 - r);
+"#;
+
+#[test]
+fn a_closed_and_reused_fd_number_can_be_waited_on_again() {
+    // 正常完了のあとで fd を close し、同じ番号のパイプを作り直しても、次の待ちが成功する（登録表に古い fd が残っていても
+    // EPOLL_CTL_MOD が ENOENT になるだけなので ADD に切り替える）。番号が同じであること（r2 - r = 0）も確かめる。
+    for n in ["1", "2"] {
+        assert_eq!(
+            value(&native_env(REUSE_BODY, &[("SIGIL_WORKERS", n)])),
+            "1100",
+            "workers={n}"
+        );
+    }
+}
+
+const NEVER_EARLY_BODY: &str = r#"
+  let p = pipe_new();
+  let r = p / 65536;
+  let w = p % 65536;
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 3));
+    k.join();
+    h.join();
+    let sp = s.spawn(move || spinner(300000));
+    let m = s.spawn(move || many_sleeps(150));
+    sp.join();
+    return m.join();
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+
+#[test]
+fn sleep_never_wakes_earlier_than_requested_even_while_other_tasks_run() {
+    // 実時間モードで他の実行可能タスクがあると、`next_task` が期限を調べる（`epoll_wait` の切り上げは効かない）。
+    // 時計をミリ秒に切り捨てる前の時刻から期限を作らないと、1 ミリ秒の眠りが 1 ミリ秒より早く戻ることがある。
+    // 150 回の `task.sleep(1)` の中に、要求より早く戻ったものが 0 件であること。
+    for n in ["1", "2"] {
+        assert_eq!(
+            value(&native_env(NEVER_EARLY_BODY, &[("SIGIL_WORKERS", n)])),
+            "0",
+            "workers={n}"
         );
     }
 }

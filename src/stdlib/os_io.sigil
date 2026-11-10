@@ -29,7 +29,7 @@ module std.os.io
 //
 // 状態の塊 S の語: 0 epoll の記述子, 1 eventfd, 2 停止の旗, 3 排他（futex）, 4 完了の世代, 5 ヒープの配列, 6 ヒープの数,
 // 7 ヒープの容量, 8 連番, 9 登録の表, 10 登録の数, 11 登録の容量, 12 完了の先頭, 13 完了の末尾, 14 完了の数,
-// 15 イベントの受け取り領域（16 件 × 12 バイト）, 16 登録の世代の計数。
+// 15 イベントの受け取り領域（16 件 × 12 バイト）, 16 登録の世代の計数, 17 完了を知らせる外の futex 語の番地（0 は無し）。
 // ヒープの要素は [期限, 連番, トークン]、登録は [記述子, トークン, 世代]、完了は [次, トークン, 種類, 値, 時刻]。
 
 global S_EP: Int = 0
@@ -49,7 +49,8 @@ global S_CTAIL: Int = 13
 global S_CLEN: Int = 14
 global S_EVBUF: Int = 15
 global S_GENCTR: Int = 16
-global S_WORDS: Int = 17
+global S_HOOK: Int = 17
+global S_WORDS: Int = 18
 
 global EV_MAX: Int = 16
 global EV_BYTES: Int = 192
@@ -241,6 +242,16 @@ fn astore(p: Int, i: Int, v: Int)
   unchecked "p は生きた状態の塊で、語は 8 バイト整列。他のスレッドが並行に読みうる"
 {
   raw.atomic_store_i64(raw.int_to_addr(p + 8 * i), v);
+}
+
+fn aadd(p: Int, i: Int, v: Int)
+  intent "語 i へ原子的に v を足す"
+  requires none
+  ensures none
+  effects none
+  unchecked "p は生きた状態の塊（または呼び出し側が渡した語）で、語は 8 バイト整列。他のスレッドが並行に読み書きしうる"
+{
+  raw.atomic_add_i64(raw.int_to_addr(p + 8 * i), v);
 }
 
 fn lock(s: Int)
@@ -599,6 +610,17 @@ pub fn io_new() -> Int
   return s;
 }
 
+pub fn io_set_hook(s: Int, hook: Int)
+  intent "完了を列に積んだら、この番地の語（8 バイト整列の futex 語）に 1 を足して眠っている全員を起こす（結線。ADR 0031 決定 2）。0 で解除"
+  requires none
+  ensures none
+  effects none
+{
+  lock(s);
+  st(s, S_HOOK, hook);
+  unlock(s);
+}
+
 pub fn io_free(s: Int)
   intent "I/O の状態を返す（記述子を閉じ、ヒープ・登録の表・完了の列・受け取り領域を返す）"
   requires none
@@ -640,6 +662,11 @@ pub fn io_wait_fd(s: Int, fd: Int, events: Int, token: Int) -> Int
   let mut r = 0;
   if i >= 0 {
     r = ep_ctl(ep, 3, fd, events + EPOLLONESHOT, token, gen);
+    if r == 0 - 2 {
+      // 呼び出し側が fd を close すると、カーネルの登録は消えるが、この表には残る。同じ番号が別の記述子に再利用された
+      // ときの MOD は ENOENT になるので、ADD に切り替える（表の行はそのまま更新する）。
+      r = ep_ctl(ep, 1, fd, EPOLLONESHOT + events, token, gen);
+    }
     if r == 0 {
       st(ld(s, S_REGS), 3 * i + 1, token);
       st(ld(s, S_REGS), 3 * i + 2, gen);
@@ -859,7 +886,13 @@ fn dispatch(s: Int, n: Int) -> Bool
     pushed = true;
   }
   if pushed { announce(s); }
+  let hook = ld(s, S_HOOK);
   unlock(s);
+  if pushed && hook != 0 {
+    // 結線: 呼び出し側（スケジューラ）の待ちを起こす。排他の外で行い、スケジューラの排他を取らない。
+    aadd(hook, 0, 1);
+    futex_wake(hook, 0);
+  }
   if kicked { ev_drain(ld(s, S_EV)); }
   return pushed;
 }

@@ -290,6 +290,15 @@ impl<'a, 'p> Fx<'a, 'p> {
             let entry = self.b.create_block();
             self.b.append_block_params_for_function_params(entry);
             self.b.switch_to_block(entry);
+            // 引数（`spawn` に渡した番地）が空ならワーカー、空でなければ I/O スレッド（引数は I/O の状態。ADR 0031 決定 2）。
+            let arg = self.b.block_params(entry)[0];
+            let (wb, ib) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(arg, ib, &[], wb, &[]);
+            self.b.switch_to_block(ib);
+            self.rt("sched_io_main", &[arg]);
+            let z = self.ic(0);
+            self.b.ins().return_(&[z, z]);
+            self.b.switch_to_block(wb);
             let worker = self.cg.task.as_ref().expect("計画").worker_run;
             let fr = self.cg.m.declare_func_in_func(worker, self.b.func);
             self.b.ins().call(fr, &[]);

@@ -62,7 +62,14 @@ pub(crate) fn blocking(b: Builtin) -> bool {
     use Builtin::*;
     matches!(
         b,
-        TaskScope | TaskJoin | TaskYield | TaskSleep | ChanRecv | LockAcquire | AtomicLoad
+        TaskScope
+            | TaskJoin
+            | TaskYield
+            | TaskSleep
+            | ChanRecv
+            | LockAcquire
+            | AtomicLoad
+            | IoWaitFd
     )
 }
 

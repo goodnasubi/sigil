@@ -75,6 +75,11 @@ const HELPERS: &[(&str, &str, &str)] = &[
         "  let mut i = 0;\n  let mut early = 0;\n  while i < n {\n    if timed_sleep(1) < 0 { early = early + 1; }\n    i = i + 1;\n  }\n  return early;",
     ),
     (
+        "sleep_loop(n: Int, ms: Int) -> Int",
+        "clock, task.suspend",
+        "  let mut i = 0;\n  while i < n {\n    task.sleep(ms + (i % 3));\n    i = i + 1;\n  }\n  return n;",
+    ),
+    (
         "failer(ms: Int) -> Int",
         "clock, task.suspend",
         "  task.sleep(ms);\n  let z = ms - ms;\n  return 5 / z;",
@@ -431,6 +436,40 @@ fn sleep_never_wakes_earlier_than_requested_even_while_other_tasks_run() {
         assert_eq!(
             value(&native_env(NEVER_EARLY_BODY, &[("SIGIL_WORKERS", n)])),
             "0",
+            "workers={n}"
+        );
+    }
+}
+
+const TIMER_RACE_BODY: &str = r#"
+  let p = pipe_new();
+  let r = p / 65536;
+  let w = p % 65536;
+  let v = task.scope(|s| {
+    let h = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 3));
+    k.join();
+    h.join();
+    let a = s.spawn(move || sleep_loop(150, 1));
+    let b = s.spawn(move || sleep_loop(150, 2));
+    let c = s.spawn(move || sleep_loop(150, 1));
+    let d = s.spawn(move || spinner(20000));
+    d.join();
+    return a.join() + b.join() + c.join();
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+
+#[test]
+fn sleeps_never_stall_when_a_timer_completion_arrives_late() {
+    // 以前の眠りを先に起こしたあとで、その期限の完了通知が遅れて届いても、残る眠りの期限は I/O 側に必ず登録され、
+    // 後続の眠りが永久に止まらない（止まれば制限時間のハングで落ちる）。競合の窓は狭いので、眠りを繰り返す負荷で窓を通す。
+    for n in ["1", "2", "4"] {
+        assert_eq!(
+            value(&native_env(TIMER_RACE_BODY, &[("SIGIL_WORKERS", n)])),
+            "450",
             "workers={n}"
         );
     }

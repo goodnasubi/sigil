@@ -661,7 +661,35 @@ const EVAL_HELPERS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// `run` の本体が実際に起こす効果（呼ぶ補助関数の効果と、`task.scope`／`spawn` の `task.spawn`・`task.suspend`）の和集合。
+/// `effects` 節に余分な効果を書くと EffectExtra になるため、本体ごとに求める。
+fn eval_run_effects(run_body: &str) -> String {
+    let mut set = std::collections::BTreeSet::new();
+    if run_body.contains("task.scope") || run_body.contains(".spawn(") {
+        set.insert("task.spawn".to_string());
+        set.insert("task.suspend".to_string());
+    }
+    // `raw.io_wait_fd` を直接呼ぶ本体は `task.suspend` を起こす。
+    if run_body.contains("raw.io_wait_fd(") {
+        set.insert("task.suspend".to_string());
+    }
+    for (sig, eff, _) in EVAL_HELPERS {
+        let name = sig.split('(').next().unwrap_or("");
+        if run_body.contains(&format!("{name}(")) {
+            for e in eff.split(',').map(str::trim).filter(|e| *e != "none") {
+                set.insert(e.to_string());
+            }
+        }
+    }
+    if set.is_empty() {
+        "none".to_string()
+    } else {
+        set.into_iter().collect::<Vec<_>>().join(", ")
+    }
+}
+
 fn eval_driver(params: &str, run_body: &str) -> String {
+    let run_effects = eval_run_effects(run_body);
     let mut f = String::new();
     for (sig, eff, body) in EVAL_HELPERS {
         f.push_str(&format!(
@@ -669,7 +697,7 @@ fn eval_driver(params: &str, run_body: &str) -> String {
         ));
     }
     format!(
-        "module std.os.t\n  targets server\n  trust base\n\n{f}pub fn run({params}) -> Int\n{TAIL}  effects clock, task\n  unchecked \"試験\"\n{{\n{run_body}\n}}\n"
+        "module std.os.t\n  targets server\n  trust base\n\n{f}pub fn run({params}) -> Int\n{TAIL}  effects {run_effects}\n  unchecked \"試験\"\n{{\n{run_body}\n}}\n"
     )
 }
 

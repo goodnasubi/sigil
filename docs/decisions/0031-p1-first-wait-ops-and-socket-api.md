@@ -126,7 +126,7 @@ TCP の待ち受けとバイト列の読み書きだけを決める。HTTP の�
 - 書きに `write` でなく `sendto`＋`MSG_NOSIGNAL` を使うのは、シグナルの処理を持たない（ADR 0030 の未決）ので、閉じた接続への書き込みで `SIGPIPE` がプロセスを落とすのを避けるためである。
 - `EAGAIN` なら `io.wait_fd(fd, EPOLLIN/EPOLLOUT)` で待って、同じ操作をやり直す。`EINTR` はやり直す。ほかの負の値は `NetError` に写す。
 - `unchecked` の前提の文は、「`sockaddr` の領域は確保した大きさの範囲で書く」「`fd` は `TcpListener`／`TcpStream` の所有する値だけ」「`close` は破棄でだけ、1 回」を軸に書く。`sockaddr` の組み立て（`AF_INET` の 16 バイト）は、1 つの関数に閉じ込める。
-- **評価器の `raw.syscall` 許可表には足さない**（ADR 0030 決定 3 の推奨と同じ。ネイティブだけが使う標準モジュールで、評価器は呼ばない）。`tests/raw_syscall_table.rs` は変えない。
+- **評価器でも `std.os.net` の Sigil のコードをそのまま動かす**（判断点 D の案 B、決定 5-1）。評価器の `raw.syscall` 許可表には、6-3e で上の表のソケット系の行を足し、`tests/raw_syscall_table.rs` も許可表に合わせて更新する。行の追加は ADR 0018 判断 2 のレビューの対象。評価器はソケットの Rust の組み込みを別に持たず、ソケットの意味の実装は `std.os.net` の 1 つに揃える。
 
 ## 決定 4: 複数ルートの入口とルート単位の隔離
 
@@ -206,7 +206,7 @@ HTTP/1.1 の解釈（ADR 0018 の PR 6-3 の本体）は、次の細分の最後
 | 6-3b | 契約変更: `Builtin` に `IoWaitFd`・`RootsScope`・`RootReserve`・`RootStart` を足す。`src/error.rs` の新しいエラー（利用者のモジュールからの `io.wait_fd`、`RootGroup` の宣言など）。lowering/検査器の登録だけで、実体は入れない | 6-3a | **要承認**（`src/ir.rs` の契約変更。`contract-change` のラベル） |
 | 6-3c | 結線と実時間: 完了の列→実行可能待ち行列、`body` の振り分け（`worker_run`／`io_loop`）、遅延して作る I/O スレッド、決定 1-3 の時計（案 A）、ネイティブの `task.timeout`（取り消し。ADR 0030 5-2g の機構を使う）、`io.wait_fd` の評価器・ネイティブの実体。`trust base` のテスト用モジュールでパイプを待って試験。**判断点 A の決定（2026-11-10）により、ネイティブ側（結線、実時間の時計、`task.timeout`、`io.wait_fd` の実体）は実装できる。評価器の `io.wait_fd` の実体と評価器の実時間モードは、判断点 D の承認まで止める** | 6-3b | 信頼基盤の差分。判断点 A は決定済み。評価器の部分は判断点 D の承認 |
 | 6-3d | 複数ルート: `task.roots`・`reserve`・`start`、ルート単位の隔離、ルートをまたぐ `LockBroken`（評価器とネイティブ）。ADR 0030 補足 D の表の更新。ルートの漏れの試験（止めたルートの値がすべて破棄される） | 6-3c | 判断点 C の承認 |
-| 6-3e | ソケット: `std.os.net`（ネイティブ）、評価器の組み込み、`OPAQUE_TYPES`・`NAMESPACED_FNS`・`IMPLS` の `Os` 層の行（`Os` の一覧の単体テストの更新）、`NetError`。決定 5-2 の突き合わせ | 6-3c・6-3d | **要承認**（セキュリティ関連。CODEOWNERS）。判断点 B・D・E の承認 |
+| 6-3e | ソケット: `std.os.net`（ネイティブと評価器で共用）、評価器の `raw.syscall` 許可表へのソケット系の行の追加と `tests/raw_syscall_table.rs` の更新（判断点 D の案 B）、`OPAQUE_TYPES`・`NAMESPACED_FNS`・`IMPLS` の `Os` 層の行（`Os` の一覧の単体テストの更新）、`NetError`。決定 5-2 の突き合わせ | 6-3c・6-3d | **要承認**（セキュリティ関連。CODEOWNERS）。判断点 B・D・E の承認 |
 | 6-3f | 完了の記録: ソケットと待ちの操作の突き合わせの表、`scripts/native-report.sh` の基準、ADR 0007 決定 6 の表の P1-b の列への追記 | 6-3e | — |
 | 6-3g | HTTP/1.1 のサーバー（ADR 0018 の PR 6-3 の本体）: 別の ADR（上限の表の実装、密輸の規則、ファジング）と実装。ADR 0020 決定 5 の項目。HTTP の 500 への写し（決定 4-2）の確定 | 6-3e | **要承認**（セキュリティ関連）。ADR 0018 判断 5 |
 

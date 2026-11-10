@@ -148,7 +148,6 @@ fn run(z: Int) -> Int
 #[test]
 fn unsupported_scope_operations_stop_the_build_but_the_evaluator_runs_them() {
     let heads = [
-        ("Option<Int>", "return task.timeout(500, move || 1);"),
         (
             "Int",
             "let mut gs = List.new(); gs.push(|| 1); return task.race(gs);",
@@ -159,11 +158,7 @@ fn unsupported_scope_operations_stop_the_build_but_the_evaluator_runs_them() {
         ),
     ];
     for (ty, call) in heads {
-        let eff = if call.contains("timeout") {
-            "clock, task.spawn, task.suspend"
-        } else {
-            "task.spawn, task.suspend"
-        };
+        let eff = "task.spawn, task.suspend";
         let body = format!(
             "fn run() -> {ty}\n  intent \"r\"\n  requires none\n  ensures none\n  effects {eff}\n{{\n  {call}\n}}\n"
         );

@@ -88,7 +88,9 @@ global T_SPIN_VER: Int = 18
 global T_SPIN_FLAG: Int = 19
 global T_ACTIVE: Int = 20
 global T_CANCEL: Int = 21
-global T_WORDS: Int = 22
+global T_TMO: Int = 22
+global T_FIRED: Int = 23
+global T_WORDS: Int = 24
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -564,6 +566,23 @@ fn has_resume_locked() -> Int
   return ld(ld(s, S_CUR), T_HASRESUME);
 }
 
+fn wake_sleeper(s: Int, t: Int)
+  intent "眠りの列から外したタスクを起こす。task.timeout の期限なら、待っている子との合流を外して「時間切れ」の印を立てる（起床の値なし）"
+  requires none
+  ensures none
+  effects none
+{
+  let c = ld(t, T_TMO);
+  if c != 0 {
+    st(t, T_TMO, 0);
+    st(t, T_FIRED, 1);
+    st(tab_get(s, S_TASKS, c - 1), T_JOINER, 0);
+    wake(s, t, 0, false);
+  } else {
+    wake(s, t, 0, true);
+  }
+}
+
 fn advance_clock(s: Int)
   intent "時計を最も早い目覚めまで進め、その時刻の眠りのタスクを連番の小さい順に起こす（眠りがあること）"
   requires none
@@ -598,7 +617,7 @@ fn advance_clock(s: Int)
       go = false;
     } else {
       sleep_unlink(s, pick);
-      wake(s, pick, 0, true);
+      wake_sleeper(s, pick);
     }
   }
 }
@@ -702,7 +721,7 @@ fn due_sleepers(s: Int, clock: Int)
     }
     if ld(best, T_SLEEP_AT) > clock { return; }
     sleep_unlink(s, best);
-    wake(s, best, 0, true);
+    wake_sleeper(s, best);
   }
 }
 
@@ -1008,6 +1027,7 @@ fn finish_task_locked(v: Int)
   let j = ld(t, T_JOINER);
   st(t, T_JOINER, 0);
   if j != 0 {
+    timeout_unwait(s, j);
     wake(s, j, v, true);
   } else {
     st(t, T_RESULT, v);
@@ -1044,19 +1064,16 @@ fn yield_val_locked(v: Int)
   st(s, S_BLOCKED, 1);
 }
 
-fn sleep_locked(ms: Int)
-  intent "現在のタスクを仮想の時計で ms 待たせる（負は 0）"
+fn sleep_enqueue(s: Int, t: Int, ms: Int)
+  intent "タスク t を眠りの列に足す（期限は ms 後。負は 0）。実時間モードでは I/O 側のタイマーに反映する"
   requires none
   ensures none
   effects none
 {
-  let s = sched();
-  let t = ld(s, S_CUR);
   let mut d = ms;
   if d < 0 {
     d = 0;
   }
-  bump(s);
   let seq = ld(s, S_SEQ) + 1;
   st(s, S_SEQ, seq);
   // 飽和加算（評価器の saturating_add と同じ）。実時間モードでは、基準を現在の実時間の時計にする。
@@ -1075,10 +1092,72 @@ fn sleep_locked(ms: Int)
   st(t, T_SLEEP_SEQ, seq);
   st(t, T_SNEXT, ld(s, S_SLEEP));
   st(s, S_SLEEP, t);
+  if ld(s, S_IO) != 0 { arm_timer(s); }
+}
+
+fn sleep_locked(ms: Int)
+  intent "現在のタスクを仮想の時計で ms 待たせる（負は 0）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  bump(s);
+  sleep_enqueue(s, t, ms);
   st(t, T_RESUME, 0);
   st(t, T_STATE, ST_SLEEPING);
   st(s, S_BLOCKED, 1);
-  if ld(s, S_IO) != 0 { arm_timer(s); }
+}
+
+fn timeout_wait_locked(tid: Int, ms: Int) -> Int
+  intent "task.timeout: 子 tid の結果を、期限 ms まで待つ。終わっていれば結果を返す。そうでなければ現在のタスクを眠りの列と子の合流に同時に結んで 0 を返す（先に起きた方が相手を外す）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  bump(s);
+  let c = tab_get(s, S_TASKS, tid);
+  let cur = ld(s, S_CUR);
+  if ld(c, T_STATE) == ST_DONE && ld(c, T_CANCEL) == 0 {
+    let v = ld(c, T_RESULT);
+    st(c, T_HASRES, 0);
+    return v;
+  }
+  sleep_enqueue(s, cur, ms);
+  st(cur, T_TMO, tid + 1);
+  st(cur, T_FIRED, 0);
+  st(c, T_JOINER, cur);
+  st(cur, T_RESUME, 0);
+  st(cur, T_STATE, ST_JOINING);
+  st(s, S_BLOCKED, 1);
+  return 0;
+}
+
+fn tmo_fired_locked() -> Int
+  intent "直前の task.timeout が時間切れで起こされたか（1 / 0）。読むと印を消す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  let f = ld(t, T_FIRED);
+  st(t, T_FIRED, 0);
+  return f;
+}
+
+fn timeout_unwait(s: Int, t: Int)
+  intent "取り消すタスクが task.timeout の期限を待っていれば、眠りの列から外す"
+  requires none
+  ensures none
+  effects none
+{
+  if ld(t, T_TMO) != 0 {
+    sleep_unlink(s, t);
+    st(t, T_TMO, 0);
+  }
 }
 
 // --- チャネル ---
@@ -1232,6 +1311,7 @@ fn cancel_next_locked() -> Int
     }
     if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
       io_unwait(s, t);
+      timeout_unwait(s, t);
       st(s, S_CANCEL_I, i);
       st(s, S_CUR, t);
       st(t, T_STATE, ST_DONE);
@@ -1317,6 +1397,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
       }
       if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
         io_unwait(s, t);
+        timeout_unwait(s, t);
         st(s, S_SCAN, i);
         st(s, S_CUR, t);
         st(t, T_STATE, ST_DONE);
@@ -1659,6 +1740,30 @@ pub fn io_main(io: Int)
   effects none
 {
   io_loop(io);
+}
+
+pub fn timeout_wait(tid: Int, ms: Int) -> Int
+  intent "task.timeout: 排他の下で timeout_wait を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = timeout_wait_locked(tid, ms);
+  mutex_unlock();
+  return r;
+}
+
+pub fn tmo_fired() -> Int
+  intent "排他の下で tmo_fired を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = tmo_fired_locked();
+  mutex_unlock();
+  return r;
 }
 
 pub fn yield_val(v: Int)

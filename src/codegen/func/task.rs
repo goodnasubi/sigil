@@ -394,6 +394,10 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.scope_site(si, args, dest, dty, next);
             return;
         }
+        if b == TaskTimeout {
+            self.timeout_site(si, args, dest, dty, next);
+            return;
+        }
         // 操作を起こして、ブロックしなかったときの値（ブロックしたときは意味がない）を作る。
         let (r, force) = match b {
             TaskYield => {
@@ -472,6 +476,97 @@ impl<'a, 'p> Fx<'a, 'p> {
         let r2 = self.rt("sched_take_resume", &[]);
         let v = self.post_block(b, r2);
         self.finish_call(v, dty, dty, dest, next);
+    }
+
+    /// `task.timeout(ms, g)`: 新しい範囲に `g` を子のタスクとして起こし、子の完了と期限のどちらか先までブロックする
+    /// （評価器の `TaskTimeout`）。子が先なら `Some(値)`。期限が先なら範囲の子孫を取り消して（評価器の `cancel_scope`
+    /// と同じく、新しい子から）`None`。
+    fn timeout_site(
+        &mut self,
+        si: &SiteInfo,
+        args: &[Operand],
+        dest: &Place,
+        dty: &Ty,
+        next: usize,
+    ) {
+        let k = si.k;
+        let Some(start) = self.cg.task.as_ref().map(|t| t.fn_start) else {
+            let v = self.unsupported("タスクを起こす関数が変換されていない");
+            self.finish_call(v, dty, dty, dest, next);
+            return;
+        };
+        let aux1 = self.site_off(k, 1);
+        let (ms, _) = self.val(&args[0]);
+        let (fv, _) = self.own(&args[1]);
+        let sid = self.rt("sched_scope_begin", &[]);
+        let argv = self.zero_tmp(8);
+        let z = self.ic(0);
+        let one = self.ic(1);
+        let child = self.plan_fn(start, &[fv, argv, z, one])[0];
+        let rd = self.ld(child, 48);
+        let tid = self.rt("sched_spawn", &[sid, child, rd]);
+        let frame = self.frame();
+        self.st(sid, frame, aux1);
+        let r = self.rt("sched_timeout_wait", &[tid, ms]);
+        let s = self.ic(1 + 2 * k as i64);
+        let suspend = self.b.create_block();
+        let okb = self.b.create_block();
+        let bl = self.rt("sched_blocked", &[]);
+        self.b.ins().brif(bl, suspend, NOARGS, okb, NOARGS);
+        self.b.switch_to_block(suspend);
+        self.st(s, self.frame(), 16);
+        self.suspend_ret();
+        // 子がすでに終わっていた: Some(結果)。
+        self.b.switch_to_block(okb);
+        let v = self.mk_enum_c(0, &[r]);
+        self.finish_call(v, dty, dty, dest, next);
+        // 起こされた。取り消しならそのまま巻き戻す。
+        self.b.switch_to_block(si.call_blk);
+        let can = self.cancelling();
+        let (cb, rb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(can, cb, NOARGS, rb, NOARGS);
+        self.b.switch_to_block(cb);
+        // 起こされたが再開前に取り消された: 子の結果（`Some` に包む前の `T`）を受け取っていれば、ごみの列に積む。
+        let has = self.rt("sched_has_resume", &[]);
+        let (dropb, after) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(has, dropb, NOARGS, after, NOARGS);
+        self.b.switch_to_block(dropb);
+        let w = self.rt("sched_take_resume", &[]);
+        let inner = self.option_inner(dty);
+        let df = self.drop_addr(&inner);
+        self.rt("sched_defer_drop", &[w, df]);
+        self.b.ins().jump(after, NOARGS);
+        self.b.switch_to_block(after);
+        let c = self.ic(CANCEL_CODE);
+        self.jump_cleanup(c);
+        self.b.switch_to_block(rb);
+        let fired = self.rt("sched_tmo_fired", &[]);
+        let (fb, vb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(fired, fb, NOARGS, vb, NOARGS);
+        // 時間切れ: 範囲の子孫を取り消してから None。
+        self.b.switch_to_block(fb);
+        let frame = self.frame();
+        let sid2 = self.ld(frame, aux1);
+        self.cancel_loop(Some(sid2));
+        let zz = self.ic(0);
+        let none = self.mk_enum_c(1, &[zz]);
+        self.finish_call(none, dty, dty, dest, next);
+        // 子が先に終わった: Some(値)。
+        self.b.switch_to_block(vb);
+        let r2 = self.rt("sched_take_resume", &[]);
+        let some = self.mk_enum_c(0, &[r2]);
+        self.finish_call(some, dty, dty, dest, next);
+    }
+
+    /// `Option<T>` の `T`。
+    fn option_inner(&self, dty: &Ty) -> Ty {
+        let Ty::Adt(id) = dty else {
+            unreachable!("task.timeout の戻りは Option")
+        };
+        match &self.cg.p.types[*id].kind {
+            crate::ir::TypeKind::Enum { variants } => variants[0].fields[0].clone(),
+            _ => unreachable!("Option は列挙型"),
+        }
     }
 
     /// 操作の結果の語を、型の値にする（`Lock` の取得は `Ok(LockGuard)` を作る）。
@@ -607,9 +702,9 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let rd = self.ld(child, 48);
                 (self.rt("sched_spawn", &[sid, child, rd]), u)
             }
-            TaskAllOk | TaskRace | TaskTimeout => (
+            TaskAllOk | TaskRace => (
                 self.unsupported(
-                    "task.all_ok・task.race・task.timeout はネイティブ出力未対応（取り消しの意味を要する。ADR 0030 の 5-2g）",
+                    "task.all_ok・task.race はネイティブ出力未対応（取り消しの意味を要する。ADR 0030 の 5-2g）",
                 ),
                 u,
             ),

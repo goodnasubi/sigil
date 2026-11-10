@@ -22,12 +22,17 @@ module std.os.sched
 // - S_CUR・S_BLOCKED・S_YIELDED と取り消しの走査位置は、生成コードが整列スタック内のワーカー専用領域へ振り分ける。
 // - 取り消しは対象を T_CANCEL で選択不能にし、T_ACTIVE が落ちるのを待ってから枠を巻き戻す。
 // - 既定の台数は sched_getaffinity の CPU 数。SIGIL_WORKERS の正の整数で上書きし、1 で従来の FIFO と仮想時計を選ぶ。
-// - 時計は 5-2d の仮想時計を引き継ぐ。実時間の待機と epoll は `std.os.io`（5-2f）が別の経路で持つ。完了の列からこの待ち行列へ
-//   積む結線は、最初の待ちの操作（段階 6）と一緒に入れる。
+// - 時計は 5-2d の仮想時計を引き継ぐ。fd の待ち（`io.wait_fd`。ADR 0031、PR 6-3c）を一度も登録していない間は、これまでどおり
+//   仮想の時計（実行可能なタスクがなければ時計を最も早い目覚めまで飛ばす）。最初の fd の待ちの登録から**実時間モード**に入り、
+//   戻らない（S_IO が 0 でなくなる）。実時間モードの時計は 登録時の仮想の時計 + 単調な実時間の経過（ミリ秒）で、実行可能な
+//   タスクがなければ `epoll_wait`（`std.os.io` の I/O スレッド）の完了か期限まで futex で眠る。I/O スレッドは最初の登録で遅延して
+//   作り、完了の列に積むたびにこの塊の S_EVENT を進めて起こす（`io_set_hook`）。完了の列からの取り出しと `wake` は、アイドルの
+//   ワーカーと `next_task` が排他の下で行う。終了は `release` が `io_stop` → `join` → `io_free` で行う。
 //
 // 状態の塊 S の語: 0 タスク表, 1 数, 2 容量 / 3 範囲表, 4, 5 / 6 チャネル表, 7, 8 / 9 Lock 表, 10, 11 / 12 実行可能の先頭,
 // 13 末尾 / 14 眠りの先頭 / 15 時計 / 16 連番 / 17 現在のタスク / 18 ブロック中 / 19 ルート完了 / 20 ルートの結果 /
-// 21 ごみの先頭 / 22 ごみの末尾 / 23 Lock 事象の先頭 / 24 同末尾 / 25 取り消しの走査位置。
+// 21 ごみの先頭 / 22 ごみの末尾 / 23 Lock 事象の先頭 / 24 同末尾 / 25 取り消しの走査位置 / 36 I/O の状態（0 は実時間モードに入っていない）, 37 I/O スレッドのハンドル,
+// 38 fd 待ちの数, 39 実時間モードに入った時刻（ナノ秒）, 40 そのときの仮想の時計, 41 登録済みの期限用タイマーの時刻（ナノ秒、0 は無し）。
 //
 // タスクのレコードの語: 0 状態, 1 枠, 2 起床の値, 3 結果, 4 結果の破棄, 5 属する範囲, 6 合流待ち, 7 実行可能の次,
 // 8 待機の次, 9 番号, 10 眠りの時刻, 11 眠りの連番, 12 眠りの次, 13 待っている範囲, 14 結果あり, 15 兄弟の次。
@@ -37,6 +42,16 @@ module std.os.sched
 
 use std.core.string.free;
 use std.os.env.get;
+use std.os.io.io_cancel;
+use std.os.io.io_free;
+use std.os.io.io_loop;
+use std.os.io.io_new;
+use std.os.io.io_now;
+use std.os.io.io_set_hook;
+use std.os.io.io_sleep_until;
+use std.os.io.io_stop;
+use std.os.io.io_take;
+use std.os.io.io_wait_fd;
 use std.os.thread.join;
 use std.os.thread.spawn;
 
@@ -74,6 +89,7 @@ global ST_LOCKWAIT: Int = 5
 global ST_SCOPING: Int = 6
 global ST_SLEEPING: Int = 7
 global ST_DONE: Int = 8
+global ST_IOWAIT: Int = 9
 
 global S_TASKS: Int = 0
 global S_SCOPES: Int = 3
@@ -103,7 +119,16 @@ global S_ACTIVE: Int = 32
 global S_STOP: Int = 33
 global S_WORKERS: Int = 34
 global S_HANDLES: Int = 35
-global S_WORDS: Int = 36
+global S_IO: Int = 36
+global S_IOTHREAD: Int = 37
+global S_IOPEND: Int = 38
+global S_RT0: Int = 39
+global S_RTCLK0: Int = 40
+global S_TIMER_AT: Int = 41
+global S_WORDS: Int = 42
+
+// 期限用のトークン（タスクのトークンは 番号 + 1 で、これより小さい。std.os.io の範囲は 1..2147483646）。
+global TIMER_TOKEN: Int = 2147483646
 
 // 81920..82160 は作業の列・表示バッファの後の予約領域。生成コードが local の本体を置く。
 fn local() -> Int
@@ -464,6 +489,7 @@ fn next_task_locked() -> Int
   let s = sched();
   if ld(s, S_STOP) != 0 || ld(s, S_RDONE) != 0 { return 0; }
   settle(s);
+  if ld(s, S_IO) != 0 { io_poll_locked(s); }
   st(s, S_BLOCKED, 0);
   let mut t = ld(s, S_RHEAD);
   let mut prev = 0;
@@ -568,6 +594,155 @@ fn advance_clock(s: Int)
   }
 }
 
+fn rt_clock(s: Int) -> Int
+  intent "実時間モードの時計（ミリ秒）: 入った時点の仮想の時計 + 実時間の経過。仮想の時計より戻さない"
+  requires none
+  ensures none
+  effects none
+{
+  let c = ld(s, S_RTCLK0) + (io_now() - ld(s, S_RT0)) / 1000000;
+  if c < ld(s, S_CLOCK) { return ld(s, S_CLOCK); }
+  return c;
+}
+
+fn io_enter(s: Int) -> Bool
+  intent "実時間モードに入る（最初の fd の待ちの登録で一度だけ）: I/O の状態と I/O スレッドを作る。失敗なら false"
+  requires none
+  ensures none
+  effects none
+  unchecked "SCHED の排他を取得済み。I/O の状態は io_new が返した値で、スレッドの本体（io_loop）が読む間は release まで生きる。ハンドルは release が一度だけ join する"
+{
+  if ld(s, S_IO) != 0 { return true; }
+  let io = io_new();
+  if io == 0 { return false; }
+  let hook = s + 8 * S_EVENT;
+  io_set_hook(io, hook);
+  let h = spawn(raw.int_to_addr(io));
+  if raw.addr_to_int(h) == 0 {
+    io_free(io);
+    return false;
+  }
+  st(s, S_IOTHREAD, raw.addr_to_int(h));
+  st(s, S_RT0, io_now());
+  st(s, S_RTCLK0, ld(s, S_CLOCK));
+  st(s, S_IO, io);
+  return true;
+}
+
+fn io_wait_locked(fd: Int, events: Int) -> Int
+  intent "現在のタスクを fd の準備完了まで待たせる（io.wait_fd）。登録に失敗したらブロックせず負の errno を返す。起こされる値は準備のできたイベントの印"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  let token = ld(t, T_ID) + 1;
+  if token >= TIMER_TOKEN { return 0 - 22; }
+  if !io_enter(s) { return 0 - 12; }
+  let r = io_wait_fd(ld(s, S_IO), fd, events, token);
+  if r < 0 { return r; }
+  bump(s);
+  st(t, T_RESUME, 0);
+  st(t, T_STATE, ST_IOWAIT);
+  st(s, S_IOPEND, ld(s, S_IOPEND) + 1);
+  st(s, S_BLOCKED, 1);
+  return 0;
+}
+
+fn io_unwait(s: Int, t: Int)
+  intent "fd の待ちのタスクを取り消す前に、I/O の登録・期限・取り出していない完了を外す（close より先）"
+  requires none
+  ensures none
+  effects none
+{
+  if ld(t, T_STATE) == ST_IOWAIT {
+    io_cancel(ld(s, S_IO), ld(t, T_ID) + 1);
+    st(s, S_IOPEND, ld(s, S_IOPEND) - 1);
+    st(t, T_STATE, ST_READY);
+  }
+}
+
+fn due_sleepers(s: Int, clock: Int)
+  intent "実時間モード: 時刻が clock に届いた眠りのタスクを、時刻・連番の順に起こす。時計は clock にする"
+  requires none
+  ensures none
+  effects none
+{
+  while ld(s, S_SLEEP) != 0 {
+    let mut best = ld(s, S_SLEEP);
+    let mut t = ld(best, T_SNEXT);
+    while t != 0 {
+      let a = ld(t, T_SLEEP_AT);
+      let b = ld(best, T_SLEEP_AT);
+      if a < b || (a == b && ld(t, T_SLEEP_SEQ) < ld(best, T_SLEEP_SEQ)) {
+        best = t;
+      }
+      t = ld(t, T_SNEXT);
+    }
+    if ld(best, T_SLEEP_AT) > clock { return; }
+    sleep_unlink(s, best);
+    wake(s, best, 0, true);
+  }
+}
+
+fn io_poll_locked(s: Int) -> Int
+  intent "実時間モード: 完了の列から実行可能待ち行列へ起こす（wake）。届いた期限の眠りも起こす。起こした数を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let io = ld(s, S_IO);
+  if io == 0 { return 0; }
+  let out = rec(4);
+  let mut n = 0;
+  while io_take(io, out) == 1 {
+    let token = ld(out, 0);
+    if token == TIMER_TOKEN {
+      st(s, S_TIMER_AT, 0);
+    } else {
+      let t = tab_get(s, S_TASKS, token - 1);
+      if ld(t, T_STATE) == ST_IOWAIT {
+        st(s, S_IOPEND, ld(s, S_IOPEND) - 1);
+        wake(s, t, ld(out, 2), true);
+        n = n + 1;
+      }
+    }
+  }
+  rec_free(out, 4);
+  let before = ld(s, S_RHEAD);
+  let clock = rt_clock(s);
+  due_sleepers(s, clock);
+  st(s, S_CLOCK, clock);
+  if ld(s, S_RHEAD) != before { n = n + 1; }
+  return n;
+}
+
+fn arm_timer(s: Int)
+  intent "実時間モード: 最も近い眠りの時刻に I/O スレッドの期限（epoll_wait のタイムアウト）を 1 つ登録する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut at = 0;
+  let mut t = ld(s, S_SLEEP);
+  while t != 0 {
+    if at == 0 || ld(t, T_SLEEP_AT) < at { at = ld(t, T_SLEEP_AT); }
+    t = ld(t, T_SNEXT);
+  }
+  if at == 0 { return; }
+  // 時刻 0 の眠りは即座に届くので、ここへは来ない（due_sleepers が起こす）。ナノ秒への換算は飽和させる。
+  let mut deadline = 9223372036854775807;
+  if at - ld(s, S_RTCLK0) < 9000000000000 {
+    deadline = ld(s, S_RT0) + (at - ld(s, S_RTCLK0)) * 1000000;
+  }
+  let armed = ld(s, S_TIMER_AT);
+  if armed != 0 && armed <= deadline { return; }
+  io_cancel(ld(s, S_IO), TIMER_TOKEN);
+  io_sleep_until(ld(s, S_IO), deadline, TIMER_TOKEN);
+  st(s, S_TIMER_AT, deadline);
+}
+
 fn idle_locked() -> Int
   intent "実行可能なタスクがないとき、時計を進めて眠りのタスクを起こす。眠りがなければ 0（デッドロック）"
   requires none
@@ -578,6 +753,18 @@ fn idle_locked() -> Int
   if ld(s, S_STOP) != 0 || ld(s, S_RDONE) != 0 { return 1; }
   if ld(s, S_ACTIVE) != 0 {
     wait_event(s);
+    return 1;
+  }
+  if ld(s, S_IO) != 0 {
+    // 実時間モード: 時計を飛ばさず、完了と期限を待つ（fd の待ちが残る間はデッドロックにしない）。
+    io_poll_locked(s);
+    if ld(s, S_RHEAD) != 0 { return 1; }
+    if ld(s, S_IOPEND) == 0 && ld(s, S_SLEEP) == 0 {
+      st(s, S_CUR, 0);
+      return 0;
+    }
+    arm_timer(s);
+    wait_io(s);
     return 1;
   }
   if ld(s, S_RHEAD) != 0 { return 1; }
@@ -637,7 +824,7 @@ fn note_yield_locked(fp: Int)
     }
     r = ld(r, T_NEXT);
   }
-  if all && ld(s, S_SLEEP) != 0 {
+  if all && ld(s, S_SLEEP) != 0 && ld(s, S_IO) == 0 {
     advance_clock(s);
   }
 }
@@ -850,8 +1037,12 @@ fn sleep_locked(ms: Int)
   bump(s);
   let seq = ld(s, S_SEQ) + 1;
   st(s, S_SEQ, seq);
-  // 飽和加算（評価器の saturating_add と同じ）。
-  let clock = ld(s, S_CLOCK);
+  // 飽和加算（評価器の saturating_add と同じ）。実時間モードでは、基準を現在の実時間の時計にする。
+  let mut clock = ld(s, S_CLOCK);
+  if ld(s, S_IO) != 0 {
+    clock = rt_clock(s);
+    st(s, S_CLOCK, clock);
+  }
   let mut at = 9223372036854775807;
   if d <= 9223372036854775807 - clock {
     at = clock + d;
@@ -1015,6 +1206,7 @@ fn cancel_next_locked() -> Int
       return 0 - 1;
     }
     if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
+      io_unwait(s, t);
       st(s, S_CANCEL_I, i);
       st(s, S_CUR, t);
       st(t, T_STATE, ST_DONE);
@@ -1099,6 +1291,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
         return 0 - 1;
       }
       if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
+        io_unwait(s, t);
         st(s, S_SCAN, i);
         st(s, S_CUR, t);
         st(t, T_STATE, ST_DONE);
@@ -1156,9 +1349,17 @@ fn release_locked()
   requires none
   ensures none
   effects none
+  unchecked "全ワーカーの合流の後に主スレッドだけが呼ぶ。I/O スレッドのハンドルは io_enter が作ったもので、ここで一度だけ join する"
 {
   let s = sched();
   settle(s);
+  if ld(s, S_IO) != 0 {
+    // 全ワーカーの合流の後: I/O スレッドを止めて合流し、I/O の状態を返す（登録した記述子は閉じない）。
+    io_stop(ld(s, S_IO));
+    join(raw.int_to_addr(ld(s, S_IOTHREAD)));
+    io_free(ld(s, S_IO));
+    st(s, S_IO, 0);
+  }
   let n = ld(s, S_TASKS + 1);
   let mut i = 0;
   while i < n {
@@ -1414,6 +1615,27 @@ pub fn finish_task(v: Int)
   mutex_unlock();
 }
 
+pub fn io_wait(fd: Int, events: Int) -> Int
+  intent "io.wait_fd: 現在のタスクを fd の準備完了まで待たせる。ブロックしたら 0（起床の値が準備のできたイベントの印）、登録の失敗はブロックせず負の errno"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let r = io_wait_locked(fd, events);
+  mutex_unlock();
+  return r;
+}
+
+pub fn io_main(io: Int)
+  intent "I/O スレッドの本体（生成コードのスレッドの入口が、引数が空でないときに呼ぶ）。io_stop まで epoll_wait を回す"
+  requires none
+  ensures none
+  effects none
+{
+  io_loop(io);
+}
+
 pub fn yield_val(v: Int)
   intent "排他の下で yield_val を行う"
   requires none
@@ -1613,6 +1835,22 @@ fn wait_event(s: Int)
 {
   let a = raw.int_to_addr(s + 8 * S_EVENT);
   let version = raw.atomic_load_i64(a);
+  mutex_unlock();
+  raw.syscall(202, raw.addr_to_int(a), 128, version, 0, 0, 0);
+  mutex_lock();
+}
+
+fn wait_io(s: Int)
+  intent "実時間モード: 世代を読んでから完了を調べ、起こすものがなければ排他を放して futex で眠る（読んだ後に届いた完了は世代が変わるので取りこぼさない）"
+  requires none
+  ensures none
+  effects none
+  unchecked "SCHED の排他を取得済み。比較と待機は futex が不可分に行い、割り込み・偽の起床では呼び出し側が条件を再確認する"
+{
+  let a = raw.int_to_addr(s + 8 * S_EVENT);
+  let version = raw.atomic_load_i64(a);
+  io_poll_locked(s);
+  if ld(s, S_RHEAD) != 0 { return; }
   mutex_unlock();
   raw.syscall(202, raw.addr_to_int(a), 128, version, 0, 0, 0);
   mutex_lock();

@@ -78,6 +78,8 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("has_resume", "sched_has_resume"),
     ("defer_drop", "sched_defer_drop"),
     ("idle", "sched_idle"),
+    ("io_main", "sched_io_main"),
+    ("io_wait", "sched_io_wait"),
     ("scope_cancel_next", "sched_scope_cancel_next"),
     ("note_yield", "sched_note_yield"),
     ("yield_plain", "sched_yield_plain"),

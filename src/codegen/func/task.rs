@@ -405,6 +405,11 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.rt("sched_sleep", &[ms]);
                 (self.ic(0), true)
             }
+            IoWaitFd => {
+                let (fd, _) = self.val(&args[0]);
+                let (ev, _) = self.val(&args[1]);
+                (self.rt("sched_io_wait", &[fd, ev]), false)
+            }
             AtomicLoad => {
                 let w = self.shared_get(&args[0]);
                 self.rt("sched_yield_val", &[w]);

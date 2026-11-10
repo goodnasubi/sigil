@@ -680,10 +680,11 @@ fn eval_run(
 ) -> Result<sigil::exec::Outcome, sigil::exec::Failure> {
     let src = eval_driver(params, run_body);
     let opts = sigil::exec::Options {
-        trust_base: vec!["std.os.t".to_string()],
+        embedded_extra: vec![("std.os.t".to_string(), src)],
+        embedded_roots: vec!["std.os.t".into()],
         ..sigil::exec::Options::captured()
     };
-    sigil::ir_eval::run_with(&src, "run", args, &opts)
+    sigil::ir_eval::run_sources_with(&[&user_entry()], "std.os.t.run", args, &opts)
 }
 
 #[test]

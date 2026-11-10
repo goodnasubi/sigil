@@ -117,8 +117,9 @@ pub fn exec_env(exe: &std::path::Path, args: &[String], env: &[(&str, &str)]) ->
 static SKIPPED: AtomicUsize = AtomicUsize::new(0);
 static CHECKED: AtomicUsize = AtomicUsize::new(0);
 
-/// 突き合わせと飛ばしの記録。テストのバイナリごとに `native-report-<名前>.tsv` へ書く
-/// （`scripts/native-report.sh` が数える）。
+/// 突き合わせと飛ばしの記録。テストのバイナリとプロセスごとに `native-report-<名前>-<プロセスID>.tsv` へ書く
+/// （nextest はテストごとに別プロセスで動くため、プロセスIDでファイルを分けないと、
+/// 先に書いた行を後発のプロセスが削除で消してしまう。`scripts/native-report.sh` が数える）。
 fn record(kind: &str, why: &str, func: &str) {
     use std::io::Write;
     static START: std::sync::Once = std::sync::Once::new();
@@ -127,7 +128,8 @@ fn record(kind: &str, why: &str, func: &str) {
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_default();
     let name = exe.rsplit_once('-').map_or(exe.as_str(), |(a, _)| a);
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("native-report-{name}.tsv"));
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("native-report-{name}-{}.tsv", std::process::id()));
     START.call_once(|| {
         let _ = std::fs::remove_file(&path);
     });

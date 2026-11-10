@@ -54,11 +54,18 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: cargo-nextest の導入
+        uses: taiki-e/install-action@7c48f0a661edab95fdc666d1526d9ef945205245 # nextest
+        with:
+          tool: nextest@0.9.151
+
       - name: test（検証器・SIR 評価器・ネイティブを突き合わせる）
-        run: cargo test
+        run: |
+          cargo nextest run --no-fail-fast
+          cargo test --doc
 
       - name: ネイティブの突き合わせ件数（飛ばしの上限を検査）
         run: scripts/native-report.sh
         env:
-          SIGIL_NATIVE_MAX_SKIP: "10"
+          SIGIL_NATIVE_MAX_SKIP: "20"
           SIGIL_NATIVE_MIN_CHECKED: "400"

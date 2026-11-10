@@ -29,6 +29,15 @@ module std.os.sched
 //   作り、完了の列に積むたびにこの塊の S_EVENT を進めて起こす（`io_set_hook`）。完了の列からの取り出しと `wake` は、アイドルの
 //   ワーカーと `next_task` が排他の下で行う。終了は `release` が `io_stop` → `join` → `io_free` で行う。
 //
+// 待機・起床の規則（不変条件。実時間モードの競合を、経路ごとの対症でなく規則で防ぐ）:
+//   読む順序: 眠るのは `wait_event` の 1 か所だけ。`wait_event` は (1) 世代 S_EVENT を読む → (2) 排他の外から届く事象（I/O の
+//     完了・期限。`io_poll_locked`）を再確認する → (3) 起こすタスクがなければ、読んだ世代と同じ間だけ futex で眠る、の順に行う。
+//     世代の読み取りより前の確認だけで眠る経路は作らない（`idle` の S_ACTIVE の分岐を含め、眠る経路はすべて通る）。
+//   進める順序: 起こす側は、状態を変えて（完了の列への積み込み、タスクの実行可能化、停止の旗）から世代を進めて futex を起こす。
+//     排他の下の変更は `notify`（排他を放す前に進める）、排他の外の I/O スレッドは `io_set_hook` の語に `aadd` してから起こす。
+//     世代の読み取りは排他の下なので、排他の下の変更とは交差しない。排他の外の事象だけが、読み取りの後に届きうる。
+//   タイマー: 眠りの最小の期限は I/O 側のタイマーに反映する（`arm_timer`）。呼ぶのは `sleep_locked` と `io_poll_locked` の末尾だけ。
+//
 // 状態の塊 S の語: 0 タスク表, 1 数, 2 容量 / 3 範囲表, 4, 5 / 6 チャネル表, 7, 8 / 9 Lock 表, 10, 11 / 12 実行可能の先頭,
 // 13 末尾 / 14 眠りの先頭 / 15 時計 / 16 連番 / 17 現在のタスク / 18 ブロック中 / 19 ルート完了 / 20 ルートの結果 /
 // 21 ごみの先頭 / 22 ごみの末尾 / 23 Lock 事象の先頭 / 24 同末尾 / 25 取り消しの走査位置 / 36 I/O の状態（0 は実時間モードに入っていない）, 37 I/O スレッドのハンドル,
@@ -777,7 +786,7 @@ fn idle_locked() -> Int
       st(s, S_CUR, 0);
       return 0;
     }
-    wait_io(s);
+    wait_event(s);
     return 1;
   }
   if ld(s, S_RHEAD) != 0 { return 1; }
@@ -1843,7 +1852,7 @@ fn notify()
 }
 
 fn wait_event(s: Int)
-  intent "世代を読んで排他を放し、変化まで futex で眠る。戻る前に排他を取り直す"
+  intent "待機の唯一の入口: 世代を読み、完了を再確認し、世代が変わっていなければ排他を放して futex で眠る。戻る前に排他を取り直す"
   requires none
   ensures none
   effects none
@@ -1851,22 +1860,11 @@ fn wait_event(s: Int)
 {
   let a = raw.int_to_addr(s + 8 * S_EVENT);
   let version = raw.atomic_load_i64(a);
-  mutex_unlock();
-  raw.syscall(202, raw.addr_to_int(a), 128, version, 0, 0, 0);
-  mutex_lock();
-}
-
-fn wait_io(s: Int)
-  intent "実時間モード: 世代を読んでから完了を調べ、起こすものがなければ排他を放して futex で眠る（読んだ後に届いた完了は世代が変わるので取りこぼさない）"
-  requires none
-  ensures none
-  effects none
-  unchecked "SCHED の排他を取得済み。比較と待機は futex が不可分に行い、割り込み・偽の起床では呼び出し側が条件を再確認する"
-{
-  let a = raw.int_to_addr(s + 8 * S_EVENT);
-  let version = raw.atomic_load_i64(a);
-  io_poll_locked(s);
-  if ld(s, S_RHEAD) != 0 { return; }
+  // 世代を読んだ後で、排他の外から届く事象（I/O の完了と期限）を取り込む。読む前に確認して眠ると、確認と世代の読み取りの間に
+  // 届いた完了を取りこぼす。起こしたタスクがあれば、眠らずに戻る。
+  if ld(s, S_IO) != 0 {
+    if io_poll_locked(s) > 0 { return; }
+  }
   mutex_unlock();
   raw.syscall(202, raw.addr_to_int(a), 128, version, 0, 0, 0);
   mutex_lock();

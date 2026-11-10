@@ -90,6 +90,16 @@ const HELPERS: &[(&str, &str, &str)] = &[
         "  let t0 = mono_ms();\n  task.sleep(ms);\n  return mono_ms() - t0 - ms;",
     ),
     (
+        "rd(fd: Int)",
+        "none",
+        "  let b = raw.alloc(8, 8);\n  raw.syscall(0, fd, raw.addr_to_int(b), 1, 0, 0, 0);\n  raw.free(b, 8, 8);",
+    ),
+    (
+        "ping(r: Int, w: Int, n: Int) -> Int",
+        "task.suspend",
+        "  let t0 = mono_ms();\n  let mut i = 0;\n  while i < n {\n    wr(w);\n    raw.io_wait_fd(r, 1);\n    rd(r);\n    i = i + 1;\n  }\n  return mono_ms() - t0;",
+    ),
+    (
         "failer(ms: Int) -> Int",
         "clock, task.suspend",
         "  task.sleep(ms);\n  let z = ms - ms;\n  return 5 / z;",
@@ -512,4 +522,34 @@ fn a_sleep_wakes_on_time_while_another_worker_runs_a_long_task() {
         .parse()
         .unwrap();
     assert!((0..300).contains(&v), "遅れ {v} ms");
+}
+
+const PING_BODY: &str = r#"
+  let p = pipe_new();
+  let r = p / 65536;
+  let w = p % 65536;
+  let v = task.scope(|s| {
+    let z = s.spawn(move || sleeper(1, 0));
+    z.join();
+    let a = s.spawn(move || busy(1500));
+    let b = s.spawn(move || ping(r, w, 400));
+    a.join();
+    return b.join();
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+
+#[test]
+fn completions_are_not_missed_while_another_worker_runs_a_long_task() {
+    // 2 ワーカーで、片方が yield しない 1500 ms の計算を続ける間に、もう片方のタスクが「書いて待つ」を 400 回繰り返す
+    // （完了が待ちの登録の直後に届く）。待機の前に世代を読み、読んだ後で完了を再確認する規則が破れていれば、
+    // どこかで完了を取りこぼし、計算の終了（1500 ms）まで眠る。400 回が 1000 ms 未満で終わること。
+    for _ in 0..3 {
+        let v: i64 = value(&native_env(PING_BODY, &[("SIGIL_WORKERS", "2")]))
+            .parse()
+            .unwrap();
+        assert!((0..1000).contains(&v), "{v} ms");
+    }
 }

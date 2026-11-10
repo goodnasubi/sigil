@@ -11,7 +11,7 @@
 //! | `relay` | 突き合わせる | チャネル・`task.yield` |
 //! | `publish` | 突き合わせる | `Atomic` の `store`・`load` |
 //! | `handoff` | 突き合わせる | `Atomic` の `clone` を共有する待つタスクと書くタスク |
-//! | `bump` | 突き合わせない（不具合 #366） | 引数 `&Lock<Int>` を入口にすると、評価器は整数を初期値の `Lock` にするが、ネイティブの実行ファイルは SIGSEGV で落ちる。直さず Issue にした |
+//! | `bump` | 突き合わせない（Issue #366） | 引数 `&Lock<Int>` を入口にすると、評価器は整数を初期値の `Lock` にするが、ネイティブは参照の入口をビルドで止める（以前は実行ファイルが SIGSEGV で落ちた） |
 //! | `first_within` | 突き合わせる | `task.timeout`（ADR 0031 6-3c で対応。fd の待ちを使わない間は仮想の時計で決定的） |
 //! | `double`・`slow` | 単独では入口にしない | 上の関数の部品 |
 //!
@@ -67,6 +67,17 @@ fn atomic_handoff_between_tasks_matches() {
 fn timeout_matches() {
     assert_eq!(both("first_within", &[50, 7]), "None");
     assert_eq!(both("first_within", &[500, 7]), "Some(7)");
+}
+
+/// Issue #366: `&Lock<Int>` を入口の引数にすると、実行ファイルは SIGSEGV で落ちずに、ビルドで止まる。
+#[test]
+fn reference_entry_param_is_rejected_at_build() {
+    let dir = common::native::scratch("lock-entry");
+    let exe = dir.join("prog");
+    let r = try_build(&[&src()], "bump", &exe, false);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = r.expect_err("bump はビルドで止まるはず");
+    assert!(e.contains("コマンドラインから受け取れない"), "{e}");
 }
 
 /// ADR 0007 決定 6 の条件 10 の P1-b: 並行処理を使わないプログラム（核の部分だけ）の実行ファイルは、

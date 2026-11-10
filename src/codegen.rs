@@ -628,7 +628,8 @@ fn supported_param(t: &Ty) -> bool {
     match t {
         Ty::Int | Ty::Float | Ty::Bool | Ty::Addr | Ty::Str | Ty::Path => true,
         Ty::List(e) => supported_param(e),
-        Ty::Ref(i) | Ty::MutRef(i) => supported_param(i),
+        // 参照は入口の引数にできない。`Lock` は `Int` に下がるので、`&Lock<Int>` を再帰で許すと
+        // 入口の thunk が値を番地として辿って落ちる（Issue #366）。
         _ => false,
     }
 }
@@ -639,7 +640,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     for &pi in &entry.params {
         if !supported_param(&entry.locals[pi].ty) {
             return Err(CgError::Entry(format!(
-                "入口の関数 {} の引数 {} の型は、コマンドラインから受け取れない（Int・Float・Bool・String・Path とその List だけ）",
+                "入口の関数 {} の引数 {} の型は、コマンドラインから受け取れない（Int・Float・Bool・String・Path とその List だけ。参照・Lock は不可）",
                 entry.name, entry.locals[pi].name
             )));
         }

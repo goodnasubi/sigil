@@ -195,12 +195,20 @@ fn mismatch_errors() {
         &["[[1,2]]"],
         "入口の指定が誤り: 引数 x の型が合わない: List が要るが、文字列が渡された",
     );
-    // 参照の引数も、指す先の型の名前で出る。
-    expect_err(
-        "(x: &Int) -> &Int",
-        &["abc"],
-        "入口の指定が誤り: 引数 x の型が合わない: Int が要るが、文字列が渡された",
-    );
+}
+
+/// 参照の引数は入口にできず、ビルドで止まる（Issue #366）。以前は指す先の型の名前で
+/// 実行時の型の不一致が出ていたが、`&Lock<Int>` が `&Int` に下がって落ちる不具合を
+/// 防ぐため、参照はビルドの段階で拒否する。
+#[test]
+fn reference_entry_param_is_rejected_at_build() {
+    let src = prog("(x: &Int) -> &Int", "  return x;");
+    let dir = common::native::scratch("entry-ref");
+    let exe = dir.join("prog");
+    let r = common::native::try_build(&[&src], "main", &exe, false);
+    let _ = std::fs::remove_dir_all(&dir);
+    let e = r.expect_err("参照の入口はビルドで止まるはず");
+    assert!(e.contains("コマンドラインから受け取れない"), "{e}\n{src}");
 }
 
 #[test]

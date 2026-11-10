@@ -266,6 +266,10 @@ pub fn check(
             if m.contains("コマンドラインから受け取れない") =>
         {
             let _ = std::fs::remove_dir_all(&dir);
+            // 参照型・Lock の入口引数は、ビルドで止めるのが仕様（#366）。上限の対象外として別の理由で数える。
+            if m.contains("入口の参照型") {
+                return skip("仕様上ビルドで止める入口引数（参照・Lock）");
+            }
             return skip("コマンドラインで書けない引数の型");
         }
         Err(e) => panic!("{func}: ネイティブのビルドに失敗: {e}"),

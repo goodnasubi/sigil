@@ -244,6 +244,17 @@ ADR 0004 の規則 7 の延長として、テスト用の実行環境では実�
 | 9 | 取り消しの破棄の順序が、実行ファイルでも同じ | `tests/native_tasks_5_2d.rs`（`unjoined_results_and_unreceived_items_are_dropped_in_the_same_order`・`cancelled_receiver_drops_locals_before_the_handed_over_value`・`failing_scope_cancels_its_children_before_unwinding_the_caller`・`every_cancel_path_matches_the_evaluator`。`--trace-drops` の列を評価器と比べる）、`tests/native_stop_5_2g.rs`（停止・取り消し時の破棄の列） | 完了 |
 | 10 | 核の部分だけを使うプログラムが実行の割り当てに依存しない | `tests/examples_concurrency_native_5_2h.rs`（`task_free_program_does_not_depend_on_the_scheduler`: 並行処理を使わない `examples/05-control` の実行ファイルに、実行の割り当て・状態機械・I/O スレッドのシンボルが無い）。出力先 `bare` が `task.spawn` を拒むことは `tests/m4_core_split.rs`（`bare_rejects_task_spawn`）。生成側の分岐は `src/codegen/task.rs` の `analyse`（`sched_start` を使うときだけ変換する） | 完了（5-2h の実装 PR で固定） |
 
+**P1-b の列の確かめの追記（[ADR 0031](0031-p1-first-wait-ops-and-socket-api.md) 6-3f、段階 6 の待ちの操作とソケット）**: 段階 6 で入った待ちの操作（`io.wait_fd`・`task.timeout`）、複数ルート（`task.roots`）、`race`／`all_ok`、ソケット（`std.os.net`）について、条件 9・10 の確かめを、評価器と比べるテストに当たって追記する（2026-11-12 JST、Issue #403）。上の表の本文と 5-2h の記録は書き換えない。条件 8 の扱い（下の「条件 8 の判断」）と Issue #366 は、本追記では決めない。評価器との差は ADR 0030 補足 D-3 の表（D-5 の記録）にまとめる。
+
+| 条件 | 追記する確かめ | 確かめた根拠 | 状況 |
+|---|---|---|---|
+| 9 | 待ちの操作・複数ルート・`race`／`all_ok` の取り消しでも、破棄の順序が評価器と同じ | `tests/native_timeout_6_3c.rs`（`owned_values_are_dropped_in_the_evaluators_order`・`a_timeout_cancels_sibling_subtrees_in_the_evaluators_order`）、`tests/task_roots_6_3d.rs`（ルートの異常停止・集まりの取り消しで値が 1 回ずつ破棄される。ネイティブはワーカー 1 で破棄の順序まで比べる）、`tests/native_race_all_ok_396.rs`（`all_ok_early_error_drops_accumulated_results_before_remaining_tasks`・`parent_cancellation_drops_selected_results_before_parent_resumes`） | 確かめた |
+| 9 | ソケットの待ちの取り消しで、fd を所有する値が 1 回だけ閉じられる | `tests/net_6_3e.rs`（`a_cancelled_accept_closes_its_listener_and_the_fd_can_be_reused`・`cancelling_the_group_closes_connections_blocked_in_read`・`fds_do_not_leak_across_many_connections`。評価器とネイティブのワーカー 1・4 の 3 つの形） | 確かめた |
+| 10 | 待ちの操作とソケットを使わないプログラムは、I/O スレッドに依存しない。核の部分からソケットは使えない | `tests/examples_concurrency_native_5_2h.rs`（`task_free_program_does_not_depend_on_the_scheduler`。`io_loop` などのシンボルが無い）、`tests/io_wait_6_3c.rs`（`without_any_fd_wait_the_virtual_clock_still_skips_ahead`）、`tests/net_6_3e.rs`（`net_is_not_available_on_bare`: 出力先 `bare` で `net.listen` が `OsItemInCore`） | 確かめた |
+
+- 並行処理のサンプル（`examples/06-concurrency`）を評価器と比べた結果（`tests/examples_concurrency_native_5_2h.rs`）: 入口にする 6 つの関数のうち、`sum_of_doubles`・`relay`・`publish`・`handoff`・`first_within`（`task.timeout`）の 5 つは、値・標準出力・停止・終了コードが一致する。`bump`（入口の引数 `&Lock<Int>`）は、ネイティブがビルドで止める（Issue #366。突き合わせない）。サンプルは `race`／`all_ok`・`task.roots`・ソケットを使わないので、それらは上の表のテストで比べる。
+- ネイティブ対応の状況: 段階 6 の 6-3c〜6-3e の操作（`io.wait_fd`・`task.timeout`・`task.roots`・`RootGroup.reserve`・`RootSlot.start`・`race`／`all_ok`・`std.os.net`）は、評価器・ネイティブとも対応した（PR #378・#380・#387・#397・#398・#401・#402）。残る差は ADR 0030 補足 D-3 の表のとおり。
+
 **条件 8 の判断（2026-11-10、クマが委任の手順で決定）**: 文言を実装に合わせて改める。typesafe-ai の正式判定で文言改定が選ばれた（確率 1.00。生存計算の追加と現状維持は採らない）。条件 8 の P1-b の文言は、本改訂で「中断をまたぐ値は、状態オブジェクトに置かれ、借用の区間の計算は検査器が行う」とした。コードの変更はない。なお ADR 0030 の判断点 3〜6 も同日に承認された。
 
 条件の見直し（ADR 0006 の根拠の限界で求めた確認）: 11 条件はすべて必要だった。条件 6 は「`state` の下位に加える」ではなく別のカテゴリにしたので、下位カテゴリを加えられる実装は他の用途のための余地として残る。漏れていた条件として、次の 1 つを ADR 0006 に追加する。

@@ -1164,9 +1164,7 @@ impl<'p> M<'p> {
                 std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                 Val::Unit
             }
-            // fd の待ち（ADR 0031 決定 1-1）。実装は PR 6-3c。lowering はまだこの組み込みを生成しない。
-            IoWaitFd => unreachable!("io.wait_fd は未実装（ADR 0031、PR 6-3c）"),
-            TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
+            IoWaitFd | TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
             | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
             | SyncSharedGet | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut
             | AtomicNew | AtomicLoad | AtomicStore => {

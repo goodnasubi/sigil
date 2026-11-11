@@ -836,9 +836,7 @@ impl<'p> M<'p> {
                     Val::Addr(a) => a,
                     _ => 0,
                 };
-                self.check_raw_access(a, 1, loc)?;
-                let byte = unsafe { *(a as *const u8) };
-                Val::Int(byte as i64)
+                Val::Int(i64::from(self.peek_u8(a, loc)?))
             }
             RawStoreU8 => {
                 let a = match self.scalar(locals, &args[0]) {
@@ -1073,28 +1071,7 @@ impl<'p> M<'p> {
                 let a4 = self.read_int(locals, &args[5]);
                 let a5 = self.read_int(locals, &args[6]);
                 self.check_syscall(n, [a0, a1, a2, a3, a4, a5], loc)?;
-                let ret: i64;
-                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                unsafe {
-                    std::arch::asm!(
-                        "syscall",
-                        inlateout("rax") n => ret,
-                        in("rdi") a0,
-                        in("rsi") a1,
-                        in("rdx") a2,
-                        in("r10") a3,
-                        in("r8") a4,
-                        in("r9") a5,
-                        lateout("rcx") _,
-                        lateout("r11") _,
-                        options(nostack)
-                    );
-                }
-                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-                {
-                    let _ = (n, a0, a1, a2, a3, a4, a5);
-                    ret = -1;
-                }
+                let ret = issue_syscall(n, [a0, a1, a2, a3, a4, a5]);
                 if n == SYS_MMAP && !(-4095..0).contains(&ret) {
                     let len = (a1 as usize).div_ceil(PAGE) * PAGE;
                     self.chunks.insert(
@@ -1173,6 +1150,12 @@ impl<'p> M<'p> {
         })
     }
 
+    /// 番地 `a` の 1 バイトを、生きた確保領域の中であることを確かめてから読む（`raw.load_u8` と、許可表の引数検証が使う）。
+    fn peek_u8(&self, a: usize, loc: StopId) -> Result<u8, E> {
+        self.check_raw_access(a, 1, loc)?;
+        Ok(unsafe { *(a as *const u8) })
+    }
+
     /// 生きた確保領域内へのアクセスであることを検証する。
     fn check_raw_access(&self, addr: usize, len: usize, loc: StopId) -> Result<(), E> {
         if addr == 0 {
@@ -1219,6 +1202,104 @@ impl<'p> M<'p> {
                 }
             }
             SYS_CLOSE => {}
+            // ソケット系（ADR 0031 決定 3-4・判断点 D の案 B、PR 6-3e）。`std.os.net` が使う形だけを通す。
+            // 番地を渡す引数は、生きた塊の範囲に収まることを確かめる。カーネルが書く長さは、検査した大きさを超えない。
+            SYS_SOCKET => {
+                if a[0] != AF_INET
+                    || a[1] != SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
+                    || a[2] != 0
+                {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall socket: AF_INET・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0 のみ許可",
+                    ));
+                }
+            }
+            SYS_SETSOCKOPT => {
+                if a[1] != SOL_SOCKET || a[2] != SO_REUSEADDR || a[4] != 4 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall setsockopt: SOL_SOCKET・SO_REUSEADDR・長さ 4 のみ許可",
+                    ));
+                }
+                self.check_raw_access(addr_of(a[3], "optval")?, 4, loc)?;
+            }
+            SYS_BIND => {
+                if a[2] != SOCKADDR_IN_SIZE as i64 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall bind: addrlen は 16（sockaddr_in）のみ許可",
+                    ));
+                }
+                let sa = addr_of(a[1], "addr")?;
+                self.check_raw_access(sa, SOCKADDR_IN_SIZE, loc)?;
+                // 家族（先頭の 2 バイト。機械の並び）。
+                let family =
+                    u16::from_le_bytes([self.peek_u8(sa, loc)?, self.peek_u8(sa + 1, loc)?]);
+                if i64::from(family) != AF_INET {
+                    return Err(self.syscall_stop(loc, "raw.syscall bind: AF_INET のみ許可"));
+                }
+            }
+            SYS_LISTEN => {}
+            SYS_GETSOCKNAME => {
+                self.check_raw_access(addr_of(a[1], "addr")?, SOCKADDR_IN_SIZE, loc)?;
+                let lp = addr_of(a[2], "addrlen")?;
+                self.check_raw_access(lp, 4, loc)?;
+                let mut lb = [0u8; 4];
+                for (i, b) in lb.iter_mut().enumerate() {
+                    *b = self.peek_u8(lp + i, loc)?;
+                }
+                if u32::from_le_bytes(lb) as usize != SOCKADDR_IN_SIZE {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall getsockname: *addrlen は 16（検査した領域の大きさ）のみ許可",
+                    ));
+                }
+            }
+            SYS_ACCEPT4 => {
+                if a[1] != 0 || a[2] != 0 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall accept4: 相手のアドレスは受け取らない（addr・addrlen は 0 のみ許可）",
+                    ));
+                }
+                if a[3] != SOCK_NONBLOCK | SOCK_CLOEXEC {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall accept4: flags は SOCK_NONBLOCK|SOCK_CLOEXEC のみ許可",
+                    ));
+                }
+            }
+            SYS_RECVFROM | SYS_SENDTO => {
+                let name = if n == SYS_RECVFROM {
+                    "recvfrom"
+                } else {
+                    "sendto"
+                };
+                let flags = if n == SYS_RECVFROM { 0 } else { MSG_NOSIGNAL };
+                if a[2] < 0 {
+                    return Err(self.syscall_stop(loc, &format!("raw.syscall {name}: len >= 0")));
+                }
+                if a[3] != flags || a[4] != 0 || a[5] != 0 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        &format!(
+                            "raw.syscall {name}: flags は {flags} のみ、相手のアドレスは渡さない（0 のみ許可）"
+                        ),
+                    ));
+                }
+                if a[2] > 0 {
+                    let buf = addr_of(a[1], "buf")?;
+                    self.check_raw_access(buf, a[2] as usize, loc)?;
+                }
+            }
+            SYS_SHUTDOWN => {
+                if a[1] != SHUT_WR {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall shutdown: how は SHUT_WR のみ許可")
+                    );
+                }
+            }
             SYS_EXIT_GROUP => {
                 return Err(self.syscall_stop(
                     loc,
@@ -1312,6 +1393,39 @@ impl<'p> M<'p> {
     }
 }
 
+/// システムコールを発行する（`raw.syscall` の実体。引数の検証は呼び出し側が済ませる）。Linux x86-64 以外では -1。
+fn issue_syscall(n: i64, a: [i64; 6]) -> i64 {
+    let ret: i64;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe {
+        std::arch::asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            in("rdi") a[0],
+            in("rsi") a[1],
+            in("rdx") a[2],
+            in("r10") a[3],
+            in("r8") a[4],
+            in("r9") a[5],
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack)
+        );
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        let _ = (n, a);
+        ret = -1;
+    }
+    ret
+}
+
+/// fd を閉じる（`close(2)`。失敗は捨てる）。fd を所有する値（`TcpListener`・`TcpStream`）の破棄からだけ呼ぶ
+/// （`value::close_owned_fd`。ADR 0031 決定 3-1）。`close` は許可表にある番号で、番地を取らない。
+pub(super) fn close_fd(fd: i64) {
+    let _ = issue_syscall(SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
+}
+
 const PAGE: usize = 4096;
 const STAT_SIZE: usize = 144;
 const SYS_READ: i64 = 0;
@@ -1323,6 +1437,24 @@ const SYS_EXIT_GROUP: i64 = 231;
 const SYS_OPENAT: i64 = 257;
 const SYS_NEWFSTATAT: i64 = 262;
 const SYS_UNLINKAT: i64 = 263;
+const SYS_SOCKET: i64 = 41;
+const SYS_SENDTO: i64 = 44;
+const SYS_RECVFROM: i64 = 45;
+const SYS_SHUTDOWN: i64 = 48;
+const SYS_BIND: i64 = 49;
+const SYS_LISTEN: i64 = 50;
+const SYS_GETSOCKNAME: i64 = 51;
+const SYS_SETSOCKOPT: i64 = 54;
+const SYS_ACCEPT4: i64 = 288;
+const SOCKADDR_IN_SIZE: usize = 16;
+const AF_INET: i64 = 2;
+const SOCK_STREAM: i64 = 1;
+const SOCK_NONBLOCK: i64 = 0o4000;
+const SOCK_CLOEXEC: i64 = 0o2000000;
+const SOL_SOCKET: i64 = 1;
+const SO_REUSEADDR: i64 = 2;
+const MSG_NOSIGNAL: i64 = 0x4000;
+const SHUT_WR: i64 = 1;
 const PROT_READ: i64 = 1;
 const PROT_WRITE: i64 = 2;
 const MAP_PRIVATE: i64 = 0x2;

@@ -71,6 +71,7 @@ impl Proj<'_> {
                 || r == embedded::ENV_MODULE
                 || r == embedded::THREAD_MODULE
                 || r == embedded::SCHED_MODULE
+                || r == embedded::NET_MODULE
             {
                 continue;
             }

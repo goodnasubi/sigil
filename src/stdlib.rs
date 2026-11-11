@@ -69,7 +69,20 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // 複数ルートの入口の前置き型（ADR 0031 決定 4-1、PR 6-3d）。`Scope` と同じく性質を持たない。
     ("RootGroup", 0, Layer::Core),
     ("RootSlot", 0, Layer::Core),
+    // TCP のソケット（ADR 0031 決定 3、PR 6-3e）。中身は `std.os.net` の Sigil 実装が持つ（`Secret` と同じ作法）。
+    // `TcpListener`・`TcpStream` は 1 つの値が 1 つの fd を所有し、破棄で閉じる。複製できず、`Sendable` だが
+    // `Shareable` でない（性質は検査器が型名ごとに持つ）。`NetError` は腕を `match` できる列挙で、検査器は
+    // この行を列挙として登録し直す（`NET_ERROR_ARMS`）。
+    ("TcpListener", 0, Layer::Os),
+    ("TcpStream", 0, Layer::Os),
+    ("NetError", 0, Layer::Os),
 ];
+
+/// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ（単体テストで固定する）。
+pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
+/// `std.os.net` が実体を持つ、fd を所有する型（結合後の名前）。値の破棄で `close(2)` を 1 回呼ぶ
+/// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
+pub const NET_FD_TYPES: &[&str] = &["std.os.net.TcpListener", "std.os.net.TcpStream"];
 
 pub mod core_sigil;
 pub mod embedded;
@@ -306,10 +319,26 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "write(p: &Path, s: &String) -> Result<Unit, IoError>",
         "fs.write",
     ),
+    // TCP の待ち受け（ADR 0031 決定 3-2、PR 6-3e）。実体は `std.os.net.listen`（lower が名前で結ぶ）。
+    (
+        Layer::Os,
+        "net",
+        "listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>",
+        "net.server",
+    ),
 ];
 
 /// シグネチャ（`Entry` の最初の要素）に対応する `requires` 節。ない関数は `none`。
 pub const REQUIRES: &[(&str, &str)] = &[
+    // ソケットの契約（ADR 0031 決定 3-2）。1 回の読みの大きさの上限を、API の側で破れなくする（ADR 0020 決定 4）。
+    (
+        "listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>",
+        "0 <= port && port <= 65535 && 1 <= backlog && backlog <= 1024",
+    ),
+    (
+        "read(self: &TcpStream, max: Int) -> Result<Bytes, NetError>",
+        "1 <= max && max <= 65536",
+    ),
     ("min(self: &List<T>) -> &T", "self.len() > 0"),
     ("max(self: &List<T>) -> &T", "self.len() > 0"),
     // 暗号の部品の契約（ADR 0024 決定 2、PR 6-1d）。短すぎる鍵と、
@@ -508,6 +537,36 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("parent(self: &Path) -> Option<Path>", "none"),
         ],
     ),
+    // TCP のソケットの操作（ADR 0031 決定 3-2、PR 6-3e）。実体は `std.os.net` の `impl`。
+    (
+        Layer::Os,
+        "TcpListener",
+        &[
+            ("local_port(self: &TcpListener) -> Int", "net.server"),
+            (
+                "accept(self: &TcpListener) -> Result<TcpStream, NetError>",
+                "net.server, task.suspend",
+            ),
+        ],
+    ),
+    (
+        Layer::Os,
+        "TcpStream",
+        &[
+            (
+                "read(self: &TcpStream, max: Int) -> Result<Bytes, NetError>",
+                "net.server, task.suspend",
+            ),
+            (
+                "write_all(self: &TcpStream, data: &Bytes) -> Result<Unit, NetError>",
+                "net.server, task.suspend",
+            ),
+            (
+                "shutdown(self: &TcpStream) -> Result<Unit, NetError>",
+                "net.server",
+            ),
+        ],
+    ),
     (
         Layer::Core,
         "<T> Cell<T>",
@@ -663,6 +722,16 @@ mod tests {
             "Path.file_name",
             "Path.parent",
             "IoError",
+            // ADR 0031 決定 3（PR 6-3e）。
+            "net.listen",
+            "TcpListener",
+            "TcpListener.local_port",
+            "TcpListener.accept",
+            "TcpStream",
+            "TcpStream.read",
+            "TcpStream.write_all",
+            "TcpStream.shutdown",
+            "NetError",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -672,7 +741,12 @@ mod tests {
 
     fn mentions_os_type(sig: &str) -> bool {
         sig.split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|w| w == "Path" || w == "IoError")
+            .any(|w| {
+                matches!(
+                    w,
+                    "Path" | "IoError" | "TcpListener" | "TcpStream" | "NetError"
+                )
+            })
     }
 
     #[test]

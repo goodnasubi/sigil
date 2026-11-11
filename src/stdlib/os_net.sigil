@@ -1,0 +1,367 @@
+module std.os.net
+  targets server
+  trust base
+
+// TCP の待ち受けとバイト列の読み書きの Sigil 実装（ADR 0031 決定 3、PR 6-3e）。ネイティブと評価器で共用する
+// （判断点 D の案 B。評価器は `raw.syscall` の許可表のソケット系の行でこのコードをそのまま動かす）。
+//
+// - 利用者から見える名前は、標準ライブラリの表（`src/stdlib.rs`）の `net.listen` と `TcpListener`・`TcpStream`・`NetError`。
+//   表の宣言の実体がこのモジュールで、検査器は埋め込みモジュールの宣言を実体として受け取る（`std.crypto` と同じ作法）。
+// - `TcpListener`・`TcpStream` は 1 つの値が 1 つの fd を所有する。fd の番号は利用者に見せない（取り出す関数も、番号から作る関数も
+//   持たない）。値の破棄で `close(2)` を 1 回呼ぶ。破棄の呼び出しは処理系が型で結ぶ（ネイティブは破棄の関数が `close_fd` を呼び、
+//   評価器は値の破棄で同じシステムコールを呼ぶ）。ここに `close` を呼ぶ公開の操作は無い。
+// - ソケットは非ブロッキングかつ close-on-exec。操作が EAGAIN（-11）なら `raw.io_wait_fd` で待って、同じ操作をやり直す。
+//   EINTR（-4）はやり直す。ほかの負の値は `NetError` に写す（`classify`）。
+// - 中断（`raw.io_wait_fd`）をまたいで持つのは、所有の規則に載る値（`Int`・借用・`Bytes`）だけにする。`raw.alloc` の領域と、
+//   値に包んでいない fd は、中断しない補助の関数（`recv_once`・`send_once`・`accept_once`）の中で作って、戻る前に片付ける。
+//   待っているタスクが取り消されても、領域も fd も漏れない。
+// - 書きは `sendto`＋`MSG_NOSIGNAL`（閉じた接続への書き込みで `SIGPIPE` がプロセスを落とさない）。
+// - システムコールの番号（x86-64）: socket 41、setsockopt 54、bind 49、listen 50、getsockname 51、accept4 288、
+//   recvfrom 45、sendto 44、shutdown 48、close 3。
+// 利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
+
+pub struct TcpListener {
+  fd: Int,
+}
+
+pub struct TcpStream {
+  fd: Int,
+}
+
+pub enum NetError {
+  AddrInUse,
+  PermissionDenied,
+  Closed,
+  Other,
+}
+
+fn unit()
+  intent "Unit の値を作る（`Ok(unit())`。値としての `Unit` は lowering が未対応のため）"
+  requires none
+  ensures none
+  effects none
+{
+}
+
+fn classify(r: Int) -> NetError
+  intent "負の errno（-r）を NetError の腕にする。EADDRINUSE(98)→AddrInUse、EACCES(13)・EPERM(1)→PermissionDenied、相手のリセット・切断・壊れた接続（EPIPE 32・ECONNABORTED 103・ECONNRESET 104・ENOTCONN 107・ETIMEDOUT 110）→Closed、それ以外→Other"
+  requires none
+  ensures none
+  effects none
+{
+  if r == -98 {
+    return NetError.AddrInUse;
+  }
+  if r == -13 || r == -1 {
+    return NetError.PermissionDenied;
+  }
+  if r == -32 || r == -103 || r == -104 || r == -107 || r == -110 {
+    return NetError.Closed;
+  }
+  return NetError.Other;
+}
+
+fn parse_ipv4(host: &String) -> Int
+  intent "IPv4 のドット表記（10 進の 4 つ組。各部は 0〜255 で 1〜3 桁、先頭の余分な 0 は不可）を 32 ビットの数にする。形が違えば -1（名前解決はしない）"
+  requires none
+  ensures none
+  effects none
+{
+  let b = host.as_bytes();
+  let n = b.len();
+  let mut i = 0;
+  let mut parts = 0;
+  let mut acc = 0;
+  let mut cur = 0;
+  let mut digits = 0;
+  let mut lead_zero = false;
+  while i <= n {
+    let mut c = 46;
+    if i < n {
+      c = b.get(i).unwrap_or(0);
+    }
+    if c == 46 {
+      if digits == 0 || cur > 255 || parts >= 4 {
+        return -1;
+      }
+      acc = acc * 256 + cur;
+      parts = parts + 1;
+      cur = 0;
+      digits = 0;
+      lead_zero = false;
+    } else {
+      if c < 48 || c > 57 || digits >= 3 || lead_zero {
+        return -1;
+      }
+      if digits == 0 && c == 48 {
+        lead_zero = true;
+      }
+      cur = cur * 10 + (c - 48);
+      digits = digits + 1;
+    }
+    i = i + 1;
+  }
+  if parts != 4 {
+    return -1;
+  }
+  return acc;
+}
+
+fn sockaddr(ip: Int, port: Int) -> Addr
+  intent "AF_INET の sockaddr_in（16 バイト）を組み立てて返す。呼び出し側が raw.free(a, 16, 8) で返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "0 <= ip < 2^32、0 <= port <= 65535。確保した 16 バイトの範囲だけに書く（家族 2 は機械の並び、番号とアドレスはネットワークの並び、残りは 0）"
+{
+  let a = raw.alloc(16, 8);
+  raw.set(a, 0, 16);
+  raw.store_u8(a, 2);
+  raw.store_u8(raw.offset(a, 2), (port >> 8) & 255);
+  raw.store_u8(raw.offset(a, 3), port & 255);
+  raw.store_u8(raw.offset(a, 4), (ip >> 24) & 255);
+  raw.store_u8(raw.offset(a, 5), (ip >> 16) & 255);
+  raw.store_u8(raw.offset(a, 6), (ip >> 8) & 255);
+  raw.store_u8(raw.offset(a, 7), ip & 255);
+  return a;
+}
+
+fn setup(fd: Int, ip: Int, port: Int, backlog: Int) -> Int
+  intent "待ち受けのソケット fd に SO_REUSEADDR を付け、bind して listen する。成功は 0、失敗は負の errno"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。ここでは閉じない。確保した領域（4 バイトの値と sockaddr の 16 バイト）は戻る前に返す。発行するのは setsockopt（54）・bind（49）・listen（50）だけ"
+{
+  let one = raw.alloc(8, 8);
+  raw.store_i64(one, 1);
+  let r0 = raw.syscall(54, fd, 1, 2, raw.addr_to_int(one), 4, 0);
+  raw.free(one, 8, 8);
+  if r0 < 0 {
+    return r0;
+  }
+  let sa = sockaddr(ip, port);
+  let r1 = raw.syscall(49, fd, raw.addr_to_int(sa), 16, 0, 0, 0);
+  raw.free(sa, 16, 8);
+  if r1 < 0 {
+    return r1;
+  }
+  return raw.syscall(50, fd, backlog, 0, 0, 0, 0);
+}
+
+pub fn listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>
+  intent "host（IPv4 のドット表記）と port で TCP の待ち受けを始める。port が 0 なら空いている番号を選ぶ"
+  requires 0 <= port && port <= 65535 && 1 <= backlog && backlog <= 1024
+  ensures none
+  effects net.server
+  unchecked "socket（41。AF_INET・SOCK_STREAM・SOCK_NONBLOCK・SOCK_CLOEXEC）で得た fd は、すぐ TcpListener に包む。以後の失敗では値の破棄が閉じる（ここで close を呼ばない）"
+{
+  let ip = parse_ipv4(&host);
+  if ip < 0 {
+    return Err(NetError.Other);
+  }
+  let fd = raw.syscall(41, 2, 526337, 0, 0, 0, 0);
+  if fd < 0 {
+    return Err(classify(fd));
+  }
+  let l = TcpListener { fd: fd };
+  let r = setup(l.fd, ip, port, backlog);
+  if r < 0 {
+    return Err(classify(r));
+  }
+  return Ok(l);
+}
+
+fn port_of(fd: Int) -> Int
+  intent "ソケット fd の待ち受けの番号を getsockname で読む。失敗は 0"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。sockaddr の 16 バイトと長さの語（16 を入れる）は確保した範囲で、戻る前に返す。発行するのは getsockname（51）だけ"
+{
+  let sa = raw.alloc(16, 8);
+  raw.set(sa, 0, 16);
+  let len = raw.alloc(8, 8);
+  raw.store_i64(len, 16);
+  let r = raw.syscall(51, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);
+  let p = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));
+  raw.free(len, 8, 8);
+  raw.free(sa, 16, 8);
+  if r < 0 {
+    return 0;
+  }
+  return p;
+}
+
+fn accept_once(fd: Int) -> Int
+  intent "待ち受けの fd から接続を 1 つ受け付ける（accept4。SOCK_NONBLOCK・SOCK_CLOEXEC）。新しい fd か負の errno。EINTR と、受け付ける前に消えた接続の誤りはやり直す"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いた待ち受けのソケット。相手のアドレスは受け取らない（番地は 0）。戻した fd は呼び出し側がすぐ TcpStream に包む。発行するのは accept4（288）だけ"
+{
+  let mut r = -4;
+  let mut go = true;
+  while go {
+    r = raw.syscall(288, fd, 0, 0, 526336, 0, 0);
+    // EINTR(4)、ECONNABORTED(103)、EPROTO(71)、および accept(2) が「やり直す」とするネットワークの誤り
+    // （ENETDOWN 100・ENOPROTOOPT 92・EHOSTDOWN 112・ENONET 64・EHOSTUNREACH 113・EOPNOTSUPP 95・ENETUNREACH 101）。
+    // どれも待ち行列の接続を 1 つ消費するので、繰り返しは届いた接続の数で止まる。
+    go = r == -4 || r == -103 || r == -71 || r == -100 || r == -92 || r == -112 || r == -64 || r == -113 || r == -95 || r == -101;
+  }
+  return r;
+}
+
+fn recv_once(fd: Int, max: Int, out: &mut Bytes) -> Int
+  intent "fd から最大 max バイトを 1 回読んで out の末尾に足す（recvfrom）。読んだ数（0 は相手の終了）か負の errno。EINTR はやり直す"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。1 <= max <= 65536。確保した max バイトの範囲だけに読み、読めた r バイトだけを out へ写して、戻る前に領域を返す。発行するのは recvfrom（45）だけ"
+{
+  let buf = raw.alloc(max, 1);
+  let mut r = -4;
+  while r == -4 {
+    r = raw.syscall(45, fd, raw.addr_to_int(buf), max, 0, 0, 0);
+  }
+  let mut i = 0;
+  while i < r {
+    out.push(raw.load_u8(raw.offset(buf, i)));
+    i = i + 1;
+  }
+  raw.free(buf, max, 1);
+  return r;
+}
+
+fn send_once(fd: Int, data: &Bytes, off: Int) -> Int
+  intent "data の off 以降（最大 65536 バイト）を fd へ 1 回書く（sendto。MSG_NOSIGNAL）。書けた数か負の errno。EINTR はやり直す"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。0 <= off < data.len()。確保した k バイトの範囲だけに写して書き、戻る前に領域を返す。発行するのは sendto（44）だけ"
+{
+  let mut k = data.len() - off;
+  if k > 65536 {
+    k = 65536;
+  }
+  let buf = raw.alloc(k, 1);
+  let mut i = 0;
+  while i < k {
+    raw.store_u8(raw.offset(buf, i), data.get(off + i).unwrap_or(0));
+    i = i + 1;
+  }
+  let mut r = -4;
+  while r == -4 {
+    r = raw.syscall(44, fd, raw.addr_to_int(buf), k, 16384, 0, 0);
+  }
+  raw.free(buf, k, 1);
+  return r;
+}
+
+pub fn close_fd(fd: Int)
+  intent "fd を閉じる（close。失敗は捨てる）。TcpListener・TcpStream の破棄からだけ呼ぶ（ネイティブの破棄の関数が呼ぶ）"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は破棄される値が所有していた開いた記述子で、1 つの値につき 1 回だけ呼ばれる。待ちの登録は、呼ぶ前に外れている（ADR 0031 決定 1-2）。発行するのは close（3）だけ"
+{
+  raw.syscall(3, fd, 0, 0, 0, 0, 0);
+}
+
+impl TcpListener {
+  pub fn local_port(self: &TcpListener) -> Int
+    intent "実際の待ち受けの番号を返す（port に 0 を渡したときに要る）。読めなければ 0"
+    requires none
+    ensures none
+    effects net.server
+  {
+    return port_of(self.fd);
+  }
+
+  pub fn accept(self: &TcpListener) -> Result<TcpStream, NetError>
+    intent "接続を 1 つ受け付ける。来るまで中断する。得た TcpStream も非ブロッキング"
+    requires none
+    ensures none
+    effects net.server, task.suspend
+    unchecked "self.fd は self が所有する開いた待ち受けのソケットで、待っている間は借用が生きているので閉じられない。受け付けた fd は、中断を挟まずに TcpStream に包む"
+  {
+    while true {
+      let r = accept_once(self.fd);
+      if r >= 0 {
+        return Ok(TcpStream { fd: r });
+      }
+      if r != -11 {
+        return Err(classify(r));
+      }
+      if raw.io_wait_fd(self.fd, 1) < 0 {
+        return Err(NetError.Other);
+      }
+    }
+    return Err(NetError.Other);
+  }
+}
+
+impl TcpStream {
+  pub fn read(self: &TcpStream, max: Int) -> Result<Bytes, NetError>
+    intent "1 バイト以上読めるか、相手が書き込みを終えるまで中断して、最大 max バイトを返す。空の Bytes は相手の終了（EOF）"
+    requires 1 <= max && max <= 65536
+    ensures none
+    effects net.server, task.suspend
+    unchecked "self.fd は self が所有する開いたソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは out（所有の規則に載る Bytes）だけ"
+  {
+    let mut out = Bytes.new();
+    while true {
+      let r = recv_once(self.fd, max, &mut out);
+      if r >= 0 {
+        return Ok(out);
+      }
+      if r != -11 {
+        return Err(classify(r));
+      }
+      if raw.io_wait_fd(self.fd, 1) < 0 {
+        return Err(NetError.Other);
+      }
+    }
+    return Err(NetError.Other);
+  }
+
+  pub fn write_all(self: &TcpStream, data: &Bytes) -> Result<Unit, NetError>
+    intent "data を全部書き終えるまで繰り返す。書けないときは中断する。戻るのは全部をカーネルに渡したとき"
+    requires none
+    ensures none
+    effects net.server, task.suspend
+    unchecked "self.fd は self が所有する開いたソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは書いた数（Int）だけ"
+  {
+    let n = data.len();
+    let mut off = 0;
+    while off < n {
+      let r = send_once(self.fd, &data, off);
+      if r > 0 {
+        off = off + r;
+      } else if r == -11 {
+        if raw.io_wait_fd(self.fd, 4) < 0 {
+          return Err(NetError.Other);
+        }
+      } else if r == 0 {
+        return Err(NetError.Other);
+      } else {
+        return Err(classify(r));
+      }
+    }
+    return Ok(unit());
+  }
+
+  pub fn shutdown(self: &TcpStream) -> Result<Unit, NetError>
+    intent "書き込み側を閉じる（SHUT_WR）。読み込み側は開いたまま"
+    requires none
+    ensures none
+    effects net.server
+    unchecked "self.fd は self が所有する開いたソケット。発行するのは shutdown（48）だけ"
+  {
+    let r = raw.syscall(48, self.fd, 1, 0, 0, 0, 0);
+    if r < 0 {
+      return Err(classify(r));
+    }
+    return Ok(unit());
+  }
+}

@@ -260,6 +260,11 @@ impl Ck {
                 {
                     Some(false)
                 }
+                // fd を所有する型（ADR 0031 決定 3-1）。ハンドラのタスクへ移せる（`Sendable`）が、複数のタスクが
+                // 同じ接続を同時に読み書きできない（`Shareable` でない）。複製・比較・表示も持たない。
+                Some(TypeDef::Opaque(_)) if matches!(n.as_str(), "TcpListener" | "TcpStream") => {
+                    Some(p == Prop::Sendable)
+                }
                 Some(TypeDef::Opaque(_)) => match (n.as_str(), p) {
                     // ADR 0007 決定 2 の表。参照カウントの増減が原子的でないので、
                     // `Shared` は移すことも共有することもできない。

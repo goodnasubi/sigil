@@ -409,6 +409,7 @@ fn execute_roots(
     DEEP.with(|d| d.set(false));
     DROP_LOG.with(|l| *l.borrow_mut() = opts.trace_drops.then(Vec::new));
     TYPES.with(|t| *t.borrow_mut() = Rc::new(program.types.clone()));
+    value::set_fd_types(&program.types);
 
     let mut canon = Vec::with_capacity(program.types.len());
     for (i, t) in program.types.iter().enumerate() {

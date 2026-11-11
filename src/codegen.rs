@@ -116,6 +116,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "str_from_utf8" => ("ppp", 'p'),
         // `console.log` の書き出し（`std.os.console.log`。補足 C-7 の 3-6a）。引数は（バッファの番地, 長さ）
         "console_log" => ("pp", 'v'),
+        // fd を所有する値の破棄で呼ぶ `std.os.net.close_fd(fd)`（ADR 0031 決定 3-1、PR 6-3e）
+        "net_close" => ("p", 'v'),
         // 新しいスレッドの入口 `std.os.thread.thread_main(ハンドル)`（ADR 0030 決定 4、PR 5-2c）
         "thread_main" => ("p", 'v'),
         // タスクの実行の割り当て `std.os.sched`（ADR 0030 決定 1・2、PR 5-2d）。値は語で受け渡す
@@ -783,6 +785,8 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     shims.extend(int_shims(&mut cg)?);
     // `console.log`（`std.os.console`）のシム（補足 C-7 の 3-6a）。結ばれていなければ作らない（確保器と同じ）。
     shims.extend(console_shims(&mut cg)?);
+    // fd を所有する値の破棄で呼ぶ `std.os.net.close_fd` のシム（ADR 0031 決定 3-1）。SIR に無ければ作らない。
+    shims.extend(net_shims(&mut cg)?);
     // 新しいスレッドの入口のシム（ADR 0030 決定 4）。結ばれていなければ作らない。
     shims.extend(thread_shims(&mut cg)?);
     // タスクの実行の割り当て（`std.os.sched`）のシム（ADR 0030 決定 1・2、PR 5-2d）。結ばれていなければ作らない。
@@ -1138,6 +1142,25 @@ fn console_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
         .map_err(internal)?;
     cg.rt.insert("console_log", id);
     Ok(vec![(id, target, 2, 'v')])
+}
+
+/// `std.os.net.close_fd` を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する（ADR 0031 決定 3-1、PR 6-3e）。
+/// fd を所有する型（`TcpListener`・`TcpStream`）の破棄の関数が呼ぶ。lower は、プログラムがこれらの型を持つときだけ
+/// 関数を SIR に入れるので、無ければ作らない。シムは公開しない。
+fn net_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
+    use crate::stdlib::embedded::NET_CLOSE_FN;
+    let Some(target) = cg.p.funcs.iter().position(|f| f.name == NET_CLOSE_FN) else {
+        return Ok(vec![]);
+    };
+    let id =
+        cg.m.declare_function(
+            "sigil_rt_net_close",
+            Linkage::Local,
+            &shim_sig(cg.cc, 1, 'v'),
+        )
+        .map_err(internal)?;
+    cg.rt.insert("net_close", id);
+    Ok(vec![(id, target, 1, 'v')])
 }
 
 /// タスクの実行の割り当て（`std.os.sched`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する

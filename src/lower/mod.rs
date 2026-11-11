@@ -401,6 +401,22 @@ impl<'a> L<'a> {
             let f = self.lower_fn(job)?;
             self.funcs[fid] = Some(f);
         }
+        // fd を所有する型（`TcpListener`・`TcpStream`）を持つプログラムには、破棄で呼ぶ `std.os.net.close_fd` を SIR に入れる
+        // （ADR 0031 決定 3-1、PR 6-3e）。ネイティブの破棄の関数がシムから呼び、評価器は値の破棄で閉じる。
+        if self
+            .types
+            .iter()
+            .any(|t| crate::stdlib::NET_FD_TYPES.contains(&t.name.as_str()))
+        {
+            if let Some(&d) = self.fns.get(crate::stdlib::embedded::NET_CLOSE_FN) {
+                self.instance(d, HashMap::new(), vec![]);
+            }
+            while let Some(job) = self.queue.pop() {
+                let fid = job.fid;
+                let f = self.lower_fn(job)?;
+                self.funcs[fid] = Some(f);
+            }
+        }
         // 並行処理の操作を使うプログラムには、タスクの実行の割り当て（`std.os.sched`。ADR 0030 決定 1・2、PR 5-2d）を
         // SIR に入れる。ネイティブの生成コードが呼び、評価器は呼ばない。使わないプログラムには入れない（SIR を肥やさない）。
         if self.uses_sched() {
@@ -430,6 +446,46 @@ impl<'a> L<'a> {
             core_only: self.core_only,
             exit_line: decl.span.line,
         })
+    }
+
+    /// 名前 `n` が列挙型か。標準ライブラリの表で裸の名前で登録され、埋め込みモジュールが実体を持つ列挙
+    /// （`NetError`。実体は `std.os.net.NetError`）も含める（型そのものの寄せは `adt` が行う）。
+    pub(super) fn is_enum_name(&self, n: &str) -> bool {
+        self.enums.contains_key(n)
+            || (crate::stdlib::OPAQUE_TYPES.iter().any(|(t, _, _)| *t == n)
+                && self
+                    .enums
+                    .keys()
+                    .any(|k| k.starts_with("std.") && k.rsplit('.').next() == Some(n)))
+    }
+
+    /// 型 `t` が、fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`）を値として中に持つか。
+    pub(super) fn owns_fd(&self, t: &ir::Ty, seen: &mut Vec<usize>) -> bool {
+        match t {
+            ir::Ty::Adt(id) => {
+                if crate::stdlib::NET_FD_TYPES.contains(&self.types[*id].name.as_str()) {
+                    return true;
+                }
+                if seen.contains(id) {
+                    return false;
+                }
+                seen.push(*id);
+                let parts: Vec<ir::Ty> = match &self.types[*id].kind {
+                    ir::TypeKind::Struct { fields } => {
+                        fields.iter().map(|(_, t)| t.clone()).collect()
+                    }
+                    ir::TypeKind::Enum { variants } => variants
+                        .iter()
+                        .flat_map(|v| v.fields.iter().cloned())
+                        .collect(),
+                };
+                parts.iter().any(|p| self.owns_fd(p, seen))
+            }
+            ir::Ty::Tuple(ts) => ts.iter().any(|x| self.owns_fd(x, seen)),
+            // `Shared` の `clone` は同じ実体を指す（複製しない）ので数えない。
+            ir::Ty::List(e) | ir::Ty::Cell(e) => self.owns_fd(e, seen),
+            _ => false,
+        }
     }
 
     /// 生成した関数が、実行の割り当てを要る並行処理の操作を呼んでいるか。`task.yield` と、割り当てを使わない

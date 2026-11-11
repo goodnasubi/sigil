@@ -32,6 +32,18 @@ impl Ck {
                 self.os_items.types.insert((*n).into());
             }
         }
+        // `NetError` は腕を `match` できる列挙（ADR 0031 決定 3-3、判断点 B）。表の行（OS 層の印）は残し、
+        // 型の定義だけを列挙に置き換える。実体は `std.os.net` の同じ並びの宣言（lower が名前で結ぶ）。
+        self.types.insert(
+            "NetError".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: crate::stdlib::NET_ERROR_ARMS
+                    .iter()
+                    .map(|a| ((*a).to_string(), vec![]))
+                    .collect(),
+            },
+        );
     }
 
     /// `impl` の型の名前（`impl<T> List<T>` なら `List`）。標準ライブラリの表の鍵に使う。
@@ -77,7 +89,8 @@ impl Ck {
                 )
             }
         };
-        if !std && PRELUDE_TYPES.contains(&tn.as_str()) {
+        let net_impl = self.net_home && super::NET_TYPES.contains(&tn.as_str());
+        if !std && !net_impl && PRELUDE_TYPES.contains(&tn.as_str()) {
             return self.err(
                 ErrorKind::TypeMismatch,
                 format!("`impl` は型を宣言したモジュールの中にだけ書ける（標準の型 `{tn}` には付けられない）"),

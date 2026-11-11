@@ -152,7 +152,7 @@ impl<'a> L<'a> {
             a::Expr::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs),
             a::Expr::Field { expr, name } => {
                 if let a::Expr::Name(tn) = strip(expr) {
-                    if self.lookup(tn).is_none() && self.enums.contains_key(tn.as_str()) {
+                    if self.lookup(tn).is_none() && self.is_enum_name(tn) {
                         let ty = self.ety(e)?;
                         if let ir::Ty::FnRef(ps, ret) = &ty {
                             let fid = self.ctor_fn(ps, ret, name)?;
@@ -398,7 +398,7 @@ impl<'a> L<'a> {
             a::Expr::Paren(i) => self.place_expr(i),
             a::Expr::Field { expr, name } => {
                 if let a::Expr::Name(tn) = strip(expr) {
-                    if self.lookup(tn).is_none() && self.enums.contains_key(tn.as_str()) {
+                    if self.lookup(tn).is_none() && self.is_enum_name(tn) {
                         return Ok(None);
                     }
                 }
@@ -696,6 +696,15 @@ impl<'a> L<'a> {
             }
             ResKind::Namespaced => {
                 let ops = self.args_of(args)?;
+                // `net.listen`（ADR 0031 決定 3-2）は組み込みでなく、埋め込みモジュール `std.os.net` の Sigil の関数が
+                // 実体（評価器とネイティブで共用）。結合後の名前で引いて、利用者の関数と同じ呼び出しにする。
+                if r.name == "net.listen" {
+                    self.core_only = false;
+                    let Some(&decl) = self.fns.get(crate::stdlib::embedded::NET_LISTEN_FN) else {
+                        return bail("net.listen の実体（std.os.net）が結ばれていない");
+                    };
+                    return self.user_call(decl, &r.targs, ops, ret);
+                }
                 let b = match r.name.as_str() {
                     "console.log" => {
                         self.core_only = false;
@@ -918,6 +927,13 @@ impl<'a> L<'a> {
         if name == "clone" {
             let (p, ty) = self.expr_place(recv)?;
             let ty = peel(&ty).clone();
+            // fd を所有する値は複製できない（ADR 0031 決定 3-1）。検査器が型で止めるが、型引数を通した `clone` は
+            // 単相化の後でしか分からないので、ここでも止める（複製すると 1 つの fd を 2 回閉じる）。
+            if self.owns_fd(&ty, &mut Vec::new()) {
+                return bail(
+                    "`TcpListener`・`TcpStream` を中に持つ値は `clone` できない（1 つの値が 1 つの接続を所有する。ADR 0031 決定 3-1）",
+                );
+            }
             return Ok(self.fresh(Rvalue::Clone(Operand::Copy(p), ty.clone()), ty));
         }
         use Builtin::*;
@@ -1004,7 +1020,18 @@ impl<'a> L<'a> {
         if by_value {
             ops.push(self.expr(recv)?);
         } else {
-            let (p, _) = self.expr_place(recv)?;
+            let (p, rty) = self.expr_place(recv)?;
+            // `List.map` は要素の写しを関数へ値で渡す。fd を所有する値の写しは、元の値より長く生きうる
+            // （閉じた後の fd を使う）ので、要素が fd を所有する一覧では使えない（ADR 0031 決定 3-1）。
+            if matches!(b, ListMap) {
+                if let ir::Ty::List(e) = peel(&rty) {
+                    if self.owns_fd(e, &mut Vec::new()) {
+                        return bail(
+                            "`TcpListener`・`TcpStream` を中に持つ値の一覧では `map` を使えない（要素の写しを作れない。ADR 0031 決定 3-1）",
+                        );
+                    }
+                }
+            }
             ops.push(Operand::Copy(p));
         }
         for x in args {

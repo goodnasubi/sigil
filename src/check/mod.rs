@@ -231,7 +231,14 @@ const PRELUDE_TYPES: &[&str] = &[
     // 複数ルートの入口の前置き型（ADR 0031 決定 4-1）。
     "RootGroup",
     "RootSlot",
+    // TCP のソケットの型（ADR 0031 決定 3-1）。実体は埋め込みモジュール `std.os.net` が持つ。利用者が同じ名前の型を
+    // 宣言できると、表のシグネチャの型（fd を所有する型）と取り違えるので、前置きの名前にする。
+    "TcpListener",
+    "TcpStream",
+    "NetError",
 ];
+/// `std.os.net` が実体を宣言する前置きの型（上の 3 つ）。そのモジュール自身の検査でだけ、宣言と `impl` を許す。
+pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "NetError"];
 /// 型名を付けずに書く値（`Option`・`Result` の値）。
 const PRELUDE_VALUES: &[(&str, &str)] = &[
     ("Some", "Option"),
@@ -421,6 +428,8 @@ struct Ck {
     base_module: bool,
     /// 埋め込み標準モジュールの検査（予約名と許可一覧の確認を飛ばす。ADR 0025 補足 A-6）。
     embedded: bool,
+    /// 埋め込みモジュール `std.os.net` 自身の検査（前置きの型 `NET_TYPES` の宣言と `impl` を許す）。
+    net_home: bool,
     /// 検査中の項目が埋め込みモジュール由来（結合後の名前が `std.` 始まり）。結合後のプログラムの再検査で、
     /// 入口が `trust base` でなくても、その項目の `unchecked`・大域・性質の手付けを許す（出所の印は名前）。
     item_embedded: bool,
@@ -571,7 +580,8 @@ pub(crate) fn check_module_embedded(
 pub fn std_heads() -> &'static [&'static str] {
     // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
     // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
-    &["console", "fs", "raw", "std"]
+    // `net` は ADR 0031 決定 3-1（名前空間 `net`）で足した。
+    &["console", "fs", "net", "raw", "std"]
 }
 
 /// 標準の前置きの名前（型・値）と名前空間の頭か。`use` で取り込む名前に使えない。
@@ -732,6 +742,7 @@ fn analyze(
         raw_delegated: false,
         base_module: file.module.trust == Trust::Base,
         embedded,
+        net_home: false,
         item_embedded: false,
         allowed_base: opts.trust_base.clone(),
         reports: HashMap::new(),

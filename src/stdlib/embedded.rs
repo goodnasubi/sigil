@@ -56,6 +56,16 @@ pub const THREAD_MAIN_FN: &str = "std.os.thread.thread_main";
 /// 入口の関数は、プログラムが並行処理の操作（`task.scope` など）を使うときだけ SIR に入れる（`lower`）。
 pub const SCHED_MODULE: &str = "std.os.sched";
 
+/// TCP のソケットの Sigil 実装のモジュール名（ADR 0031 決定 3、PR 6-3e）。`std.os.fs` などと同じく暗黙に結ぶ
+/// プラットフォーム層で、入口の `targets` との照合は免除する。ネイティブと評価器の両方が、このモジュールの関数を
+/// そのまま動かす（判断点 D の案 B）。使わないプログラムの SIR には入らない（lower は呼ばれた関数だけを入れる）。
+pub const NET_MODULE: &str = "std.os.net";
+/// `net.listen` の実体（結合後の名前）。lower が名前で結ぶ。
+pub const NET_LISTEN_FN: &str = "std.os.net.listen";
+/// fd を所有する値（`TcpListener`・`TcpStream`）の破棄で呼ぶ関数（結合後の名前）。ネイティブは `sigil_rt_net_close` の
+/// シムから呼ぶ。lower は、プログラムがこれらの型を持つときだけ SIR に入れる。
+pub const NET_CLOSE_FN: &str = "std.os.net.close_fd";
+
 /// 入出力の準備完了と時間の待機（`epoll`・期限の一覧）の Sigil 実装のモジュール名（ADR 0030 決定 3、PR 5-2f）。
 /// 機構だけで、言語の API は持たない（段階 6）。評価器は呼ばない。暗黙には結ばない（`use` した試験や後続の PR が結ぶ）。
 pub const IO_MODULE: &str = "std.os.io";
@@ -216,6 +226,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (THREAD_MODULE, include_str!("os_thread.sigil")),
     (SCHED_MODULE, include_str!("os_sched.sigil")),
     (IO_MODULE, include_str!("os_io.sigil")),
+    (NET_MODULE, include_str!("os_net.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
@@ -248,6 +259,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             ENV_MODULE,
             THREAD_MODULE,
             SCHED_MODULE,
+            NET_MODULE,
             PATH_MODULE,
             STRING_MODULE,
             LIST_MODULE,

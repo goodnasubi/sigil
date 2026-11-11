@@ -1629,7 +1629,12 @@ fn stop_root_rest(s: Int, root: Int)
   while k < nl {
     let l = tab_get(s, S_LOCKS, k);
     if ld(l, L_ROOT) == root {
-      while wq_pop(l, 2) != 0 { }
+      // 持ち手を外へ渡した Lock を別のルートが待っていれば、-1（LockBroken）で起こす（ADR 0031 決定 4-3）。
+      let mut w = wq_pop(l, 2);
+      while w != 0 {
+        wake(s, w, 0 - 1, true);
+        w = wq_pop(l, 2);
+      }
       st(l, L_BROKEN, 1);
       garbage_push(s, ld(l, 0), ld(l, 4));
       st(l, 0, 0);

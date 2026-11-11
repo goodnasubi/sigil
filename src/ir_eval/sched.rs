@@ -1850,12 +1850,18 @@ impl<'p> M<'p> {
             ch.reclaimed = true;
         }
         let mut dead = vec![];
+        let mut woken = vec![];
         for l in self.sch.locks.iter_mut().filter(|l| l.root == root) {
-            l.waiters.clear();
+            // 持ち手を外へ渡した `Lock` を別のルートが待っていれば、`Err(LockBroken)` で起こす（ADR 0031 決定 4-3）。
+            woken.extend(l.waiters.drain(..));
             l.broken = true;
             dead.push(l.value.replace(Val::Unit));
         }
         drop(dead);
+        for w in woken {
+            let e = self.lock_broken();
+            self.wake(w, Some(e));
+        }
     }
 
     /// 進行できるタスクがない（デッドロック）。結果の出ていないルートのうち一番新しいものを 1 つだけ止める。

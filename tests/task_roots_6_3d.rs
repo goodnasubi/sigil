@@ -755,3 +755,60 @@ fn run() -> Int
         );
     }
 }
+
+/// 起動したルートが作った `Lock` の持ち手を親へ渡し、そのルートが持ったまま異常停止したら、待っている親を
+/// `Err(LockBroken)` で起こす（待機列から黙って外さない。PR #398 の指摘）。
+#[test]
+fn a_parent_waiting_on_a_lock_of_an_aborted_root_gets_lock_broken() {
+    let o = ok(LOCK_TO_PARENT);
+    assert_eq!((o.value.as_str(), o.output.as_str()), ("7", "3\n200\n"));
+}
+
+const LOCK_TO_PARENT: &str = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, task.spawn, task.suspend, task.share
+{
+  return task.roots(1, |g| {
+    let (tx, rx) = task.channel();
+    let s = g.reserve();
+    s.start(tx, move |c| {
+      let l = Lock.new(5);
+      c.send(l.clone());
+      match l.acquire() {
+        Ok(gd) => {
+          task.yield();
+          task.yield();
+          let q = 10 / (gd.get() - 5);
+        }
+        Err(e) => { console.log(&9); }
+      }
+    }, move |c| { console.log(&200); });
+    let l2 = rx.recv();
+    match l2.acquire() {
+      Ok(gd) => { console.log(&2); }
+      Err(e) => { console.log(&3); }
+    }
+    return 7;
+  });
+}
+"#;
+
+/// 同じ形を並列のワーカーで: 取得の順は決まらない（親が先に取れば `Ok`）が、親は待ち続けずに終わり、漏れもない。
+#[test]
+fn native_parent_waiting_on_a_broken_lock_finishes_with_several_workers() {
+    let dir = common::native::scratch("roots-lock");
+    let exe = dir.join("prog");
+    common::native::try_build(&[&format!("{HEAD}{LOCK_TO_PARENT}")], "run", &exe, false)
+        .expect("ビルド");
+    for _ in 0..5 {
+        let r =
+            common::native::exec_env(&exe, &[], &[("SIGIL_RT_LIVE", "1"), ("SIGIL_WORKERS", "4")]);
+        assert_eq!(r.code, Some(0), "{}", r.stderr);
+        assert!(r.stdout.ends_with("7\n"), "{}", r.stdout);
+        assert!(r.stderr.contains("live: sigil_blocks=0"), "{}", r.stderr);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

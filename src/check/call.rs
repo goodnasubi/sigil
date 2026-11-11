@@ -248,6 +248,18 @@ impl Ck {
                         }
                     }
                 }
+                // `List.map` は要素の写しを関数へ値で渡す。fd を所有する要素の写しは元の値より長く生きうる
+                // （閉じた後の fd を使う）ので使えない（ADR 0031 決定 3-1。lowering も同じ理由で止める）。
+                if name == "map" {
+                    if let Ty::Named(tn, targs) = self.shallow(&rt) {
+                        if tn == "List" && targs.iter().any(|e| self.owns_fd(e, &mut Vec::new())) {
+                            return self.err(
+                                ErrorKind::NoSuchMember,
+                                format!("`{}` には `map` がない（`TcpListener`・`TcpStream` を中に持つ要素は写しを作れない。ADR 0031 決定 3-1）", show(&self.zonk(&rt))),
+                            );
+                        }
+                    }
+                }
                 let clone_sig = if name == "clone" {
                     Some(self.clone_sig(&rt)?)
                 } else {

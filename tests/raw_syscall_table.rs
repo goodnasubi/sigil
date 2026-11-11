@@ -210,3 +210,145 @@ fn mmap_prot_combinations_stop() {
         "PROT_EXEC",
     );
 }
+
+// ---------------------------------------------------------------------------
+// ソケット系の行（ADR 0031 決定 3-4・判断点 D の案 B、PR 6-3e）。`std.os.net` が使う形だけを通す。
+
+/// AF_INET・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC のソケット。
+const SOCK: &str = "raw.syscall(41, 2, 526337, 0, 0, 0, 0)";
+
+/// 127.0.0.1:0 の sockaddr_in を `sa`（16 バイト）に組み立てる。
+const SOCKADDR: &str = "  let sa = raw.alloc(16, 8);\n  raw.set(sa, 0, 16);\n  raw.store_u8(sa, 2);\n  raw.store_u8(raw.offset(sa, 4), 127);\n  raw.store_u8(raw.offset(sa, 7), 1);\n";
+
+#[test]
+fn normal_socket_bind_listen_getsockname_accept_close() {
+    // 待ち受けを作り、番号を読み、誰も来ていない accept4 は EAGAIN（-11）。shutdown（SHUT_WR）は表を通る。
+    let r = run(&format!(
+        "  let fd = {SOCK};\n  if fd < 0 {{ return 0 - 1; }}\n  let one = raw.alloc(8, 8);\n  raw.store_i64(one, 1);\n  let r0 = raw.syscall(54, fd, 1, 2, raw.addr_to_int(one), 4, 0);\n  raw.free(one, 8, 8);\n{SOCKADDR}  let r1 = raw.syscall(49, fd, raw.addr_to_int(sa), 16, 0, 0, 0);\n  let r2 = raw.syscall(50, fd, 4, 0, 0, 0, 0);\n  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 16);\n  let r3 = raw.syscall(51, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);\n  let port = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));\n  let r4 = raw.syscall(288, fd, 0, 0, 526336, 0, 0);\n  let r5 = raw.syscall(48, fd, 1, 0, 0, 0, 0);\n  let r6 = raw.syscall(3, fd, 0, 0, 0, 0, 0);\n  raw.free(len, 8, 8);\n  raw.free(sa, 16, 8);\n  if port <= 0 {{ return 0 - 2; }}\n  if r0 != 0 || r1 != 0 || r2 != 0 || r3 != 0 || r6 != 0 {{ return 0 - 3; }}\n  if r5 > 0 {{ return 0 - 4; }}\n  return r4;"
+    ));
+    assert_eq!(r.unwrap(), "-11");
+}
+
+#[test]
+fn socket_shape_is_restricted() {
+    // ブロッキングのソケット、AF_UNIX、SOCK_DGRAM、protocol の指定は通さない。
+    for call in [
+        "raw.syscall(41, 2, 1, 0, 0, 0, 0)",
+        "raw.syscall(41, 1, 526337, 0, 0, 0, 0)",
+        "raw.syscall(41, 2, 526338, 0, 0, 0, 0)",
+        "raw.syscall(41, 2, 526337, 6, 0, 0, 0)",
+    ] {
+        stops(&format!("  return {call};"), "socket");
+    }
+    // 接続する側（connect 42）と、フラグのない accept（43）は表にない。
+    stops(
+        "  return raw.syscall(42, 3, 0, 0, 0, 0, 0);",
+        "許可表にない",
+    );
+    stops(
+        "  return raw.syscall(43, 3, 0, 0, 0, 0, 0);",
+        "許可表にない",
+    );
+}
+
+#[test]
+fn setsockopt_and_shutdown_shapes_are_restricted() {
+    let opt = |level: i64, name: i64, len: i64| {
+        format!(
+            "  let one = raw.alloc(8, 8);\n  raw.store_i64(one, 1);\n  return raw.syscall(54, 3, {level}, {name}, raw.addr_to_int(one), {len}, 0);"
+        )
+    };
+    stops(&opt(1, 9, 4), "setsockopt");
+    stops(&opt(6, 2, 4), "setsockopt");
+    stops(&opt(1, 2, 8), "setsockopt");
+    stops(
+        "  let one = raw.alloc(2, 1);\n  return raw.syscall(54, 3, 1, 2, raw.addr_to_int(one), 4, 0);",
+        "範囲外",
+    );
+    stops("  return raw.syscall(48, 3, 2, 0, 0, 0, 0);", "shutdown");
+    stops("  return raw.syscall(48, 3, 0, 0, 0, 0, 0);", "shutdown");
+}
+
+#[test]
+fn bind_and_getsockname_addresses_must_be_in_range() {
+    // bind: 長さは 16 だけ、領域は 16 バイトが生きていること、家族は AF_INET。
+    stops(
+        &format!("{SOCKADDR}  return raw.syscall(49, 3, raw.addr_to_int(sa), 8, 0, 0, 0);"),
+        "bind",
+    );
+    stops(
+        "  let sa = raw.alloc(8, 8);\n  raw.set(sa, 0, 8);\n  return raw.syscall(49, 3, raw.addr_to_int(sa), 16, 0, 0, 0);",
+        "範囲外",
+    );
+    stops(
+        "  let sa = raw.alloc(16, 8);\n  raw.set(sa, 0, 16);\n  raw.store_u8(sa, 1);\n  return raw.syscall(49, 3, raw.addr_to_int(sa), 16, 0, 0, 0);",
+        "AF_INET",
+    );
+    // getsockname: カーネルが書く長さ（*addrlen）は、検査した 16 バイトを超えない。
+    stops(
+        &format!("{SOCKADDR}  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 128);\n  return raw.syscall(51, 3, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);"),
+        "getsockname",
+    );
+    stops(
+        "  let sa = raw.alloc(8, 8);\n  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 16);\n  return raw.syscall(51, 3, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);",
+        "範囲外",
+    );
+    stops(
+        &format!("{SOCKADDR}  return raw.syscall(51, 3, raw.addr_to_int(sa), 4096, 0, 0, 0);"),
+        "範囲外",
+    );
+}
+
+#[test]
+fn accept4_takes_no_peer_address_and_requires_nonblocking() {
+    stops(
+        &format!("{SOCKADDR}  return raw.syscall(288, 3, raw.addr_to_int(sa), 0, 526336, 0, 0);"),
+        "accept4",
+    );
+    stops(
+        "  let len = raw.alloc(8, 8);\n  return raw.syscall(288, 3, 0, raw.addr_to_int(len), 526336, 0, 0);",
+        "accept4",
+    );
+    stops("  return raw.syscall(288, 3, 0, 0, 0, 0, 0);", "accept4");
+    stops("  return raw.syscall(288, 3, 0, 0, 2048, 0, 0);", "accept4");
+}
+
+#[test]
+fn recvfrom_and_sendto_buffers_and_flags_are_checked() {
+    // 領域の範囲。
+    stops(
+        "  let p = raw.alloc(8, 8);\n  return raw.syscall(45, 3, raw.addr_to_int(p), 9, 0, 0, 0);",
+        "範囲外",
+    );
+    stops(
+        "  let p = raw.alloc(8, 8);\n  return raw.syscall(44, 3, raw.addr_to_int(p), 9, 16384, 0, 0);",
+        "範囲外",
+    );
+    stops(
+        "  let p = raw.alloc(8, 8);\n  return raw.syscall(45, 3, raw.addr_to_int(p), 0 - 1, 0, 0, 0);",
+        "recvfrom",
+    );
+    // フラグ: 読みは 0、書きは MSG_NOSIGNAL だけ（SIGPIPE でプロセスが落ちない形だけを通す）。
+    stops(
+        "  let p = raw.alloc(8, 8);\n  return raw.syscall(45, 3, raw.addr_to_int(p), 8, 2, 0, 0);",
+        "recvfrom",
+    );
+    stops(
+        "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 3, raw.addr_to_int(p), 8, 0, 0, 0);",
+        "sendto",
+    );
+    // 相手のアドレスは渡さない・受け取らない。
+    stops(
+        "  let p = raw.alloc(8, 8);\n  return raw.syscall(45, 3, raw.addr_to_int(p), 8, 0, raw.addr_to_int(p), 0);",
+        "recvfrom",
+    );
+    stops(
+        "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 3, raw.addr_to_int(p), 8, 16384, raw.addr_to_int(p), 16);",
+        "sendto",
+    );
+    // ソケットでない fd への正しい形の呼び出しは、カーネルの errno（ENOTSOCK = -88）がそのまま返る。
+    let r = run(
+        "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  let r = raw.syscall(44, 1, raw.addr_to_int(p), 8, 16384, 0, 0);\n  raw.free(p, 8, 8);\n  return r;",
+    );
+    assert_eq!(r.unwrap(), "-88");
+}

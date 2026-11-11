@@ -565,9 +565,21 @@ impl<'a, 'p> Fx<'a, 'p> {
                     // fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`。ADR 0031 決定 3-1、PR 6-3e）は、
                     // 塊を解放する前に fd（先頭のフィールド）を 1 回閉じる。判定は結合後の名前で、`std` は標準ライブラリ
                     // 専用の名前なので、利用者の型はここに来ない。
+                    // 影（黙った写し。`SILENT`）は fd を所有しないので閉じない（評価器の `close_owned_fd` と同じ）。
                     if owns_fd(&p.types[*id]) {
-                        let fd = self.ld(w, 0);
-                        self.rt("net_close", &[fd]);
+                        let h = self.b.ins().iadd_imm_s(w, -16);
+                        let hw = self.ld(h, 0);
+                        let silent = self.b.ins().band_imm_s(hw, SILENT);
+                        let owner = self.b.ins().icmp_imm_s(IntCC::Equal, silent, 0);
+                        self.branch(
+                            owner,
+                            |s| {
+                                let fd = s.ld(w, 0);
+                                s.rt("net_close", &[fd]);
+                                s.ic(0)
+                            },
+                            |s| s.ic(0),
+                        );
                     }
                     if self.cg.trace {
                         let tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();

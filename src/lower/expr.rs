@@ -1020,7 +1020,18 @@ impl<'a> L<'a> {
         if by_value {
             ops.push(self.expr(recv)?);
         } else {
-            let (p, _) = self.expr_place(recv)?;
+            let (p, rty) = self.expr_place(recv)?;
+            // `List.map` は要素の写しを関数へ値で渡す。fd を所有する値の写しは、元の値より長く生きうる
+            // （閉じた後の fd を使う）ので、要素が fd を所有する一覧では使えない（ADR 0031 決定 3-1）。
+            if matches!(b, ListMap) {
+                if let ir::Ty::List(e) = peel(&rty) {
+                    if self.owns_fd(e, &mut Vec::new()) {
+                        return bail(
+                            "`TcpListener`・`TcpStream` を中に持つ値の一覧では `map` を使えない（要素の写しを作れない。ADR 0031 決定 3-1）",
+                        );
+                    }
+                }
+            }
             ops.push(Operand::Copy(p));
         }
         for x in args {

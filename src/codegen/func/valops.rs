@@ -562,6 +562,13 @@ impl<'a, 'p> Fx<'a, 'p> {
                             |s| s.ic(0),
                         );
                     }
+                    // fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`。ADR 0031 決定 3-1、PR 6-3e）は、
+                    // 塊を解放する前に fd（先頭のフィールド）を 1 回閉じる。判定は結合後の名前で、`std` は標準ライブラリ
+                    // 専用の名前なので、利用者の型はここに来ない。
+                    if owns_fd(&p.types[*id]) {
+                        let fd = self.ld(w, 0);
+                        self.rt("net_close", &[fd]);
+                    }
                     if self.cg.trace {
                         let tys: Vec<Ty> = fields.iter().map(|(_, t)| t.clone()).collect();
                         self.trace_struct(*id, w, &tys);
@@ -721,8 +728,11 @@ impl<'a, 'p> Fx<'a, 'p> {
         let flat = match t {
             Ty::Tuple(ts) => !ts.iter().any(aggregate),
             Ty::Adt(id) => match &p.types[*id].kind {
+                // fd を所有する型は、破棄で fd を閉じるので、型ごとの破棄の関数を通す。
                 TypeKind::Struct { fields } => {
-                    !self.cg.trace && !fields.iter().any(|(_, ft)| aggregate(ft))
+                    !self.cg.trace
+                        && !owns_fd(&p.types[*id])
+                        && !fields.iter().any(|(_, ft)| aggregate(ft))
                 }
                 TypeKind::Enum { variants } => {
                     variants.iter().all(|v| !v.fields.iter().any(aggregate))
@@ -748,4 +758,9 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
         let _ = self.gen_call(Gk::Drop, t, &[w]);
     }
+}
+
+/// fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`）か。破棄で `close(2)` を呼ぶ。
+fn owns_fd(def: &crate::ir::TypeDef) -> bool {
+    crate::stdlib::NET_FD_TYPES.contains(&def.name.as_str())
 }

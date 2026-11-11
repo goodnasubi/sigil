@@ -463,6 +463,14 @@ impl Ck {
             }
             _ => {}
         }
+        // fd を所有する値（ADR 0031 決定 3-1）は複製できない。中に持つ型（構造体・列挙型・組・標準の入れ物）も同じ
+        // （複製すると 1 つの fd を 2 つの値が所有し、破棄で 2 回閉じる）。
+        if self.owns_fd(rt, &mut Vec::new()) {
+            return self.err(
+                ErrorKind::NoSuchMember,
+                format!("`{shown}` には `clone` がない（`TcpListener`・`TcpStream` は 1 つの値が 1 つの接続を所有し、複製できない。ADR 0031 決定 3-1）"),
+            );
+        }
         if self.holds(rt, Prop::Copyable, 0) == Some(true) {
             return self.err(
                 ErrorKind::CloneOfCopyable,
@@ -478,6 +486,35 @@ impl Ck {
             effects: vec![],
             has_self: true,
         })
+    }
+
+    /// 型 `t` が、fd を所有する標準の型（`TcpListener`・`TcpStream`）を値として中に持つか。参照の先と関数の型は数えない。
+    fn owns_fd(&self, t: &Ty, seen: &mut Vec<String>) -> bool {
+        match self.shallow(t) {
+            Ty::Named(n, args) => {
+                if matches!(self.types.get(&n), Some(TypeDef::Opaque(_)))
+                    && matches!(n.as_str(), "TcpListener" | "TcpStream")
+                {
+                    return true;
+                }
+                // `Shared`・`SyncShared`・`Atomic` の `clone` は同じ実体を指す（複製しない）ので数えない。
+                if matches!(n.as_str(), "Shared" | "SyncShared" | "Atomic") {
+                    return false;
+                }
+                if args.iter().any(|a| self.owns_fd(a, seen)) {
+                    return true;
+                }
+                if seen.contains(&n) {
+                    return false;
+                }
+                seen.push(n.clone());
+                self.component_types(&n, &args)
+                    .iter()
+                    .any(|c| self.owns_fd(c, seen))
+            }
+            Ty::Tuple(ts) => ts.iter().any(|x| self.owns_fd(x, seen)),
+            _ => false,
+        }
     }
 
     fn args(&mut self, params: &[Ty], args: &[Expr], what: &str, eff: &Eff) -> R<Vec<Src>> {

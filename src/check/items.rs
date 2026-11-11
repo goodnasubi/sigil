@@ -30,6 +30,7 @@ impl Ck {
             self.span = span;
             return self.err(ErrorKind::PrivateInPublic, msg);
         }
+        self.net_home = self.embedded && mname == crate::stdlib::embedded::NET_MODULE;
         let externs = self.externs.clone();
         let all: Vec<&Item> = externs.iter().chain(file.items.iter()).collect();
         if self.base_module && !self.embedded && !self.allowed_base.contains(&mname) {
@@ -72,7 +73,12 @@ impl Ck {
             };
             self.span = span;
             let Some(n) = name else { continue };
-            if PRELUDE_TYPES.contains(&n.as_str()) || PRELUDE_VALUES.iter().any(|(v, _)| v == n) {
+            // `std.os.net` 自身の検査では、その型（表が中身を見せない型として先に登録したもの）の実体の宣言を許す。
+            let net_decl = self.net_home && super::NET_TYPES.contains(&n.as_str());
+            if !net_decl
+                && (PRELUDE_TYPES.contains(&n.as_str())
+                    || PRELUDE_VALUES.iter().any(|(v, _)| v == n))
+            {
                 return self.err(
                     ErrorKind::DuplicateDefinition,
                     format!("`{n}` は標準の前置きの名前なので、型の名前に使えない"),

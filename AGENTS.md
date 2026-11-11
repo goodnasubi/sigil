@@ -59,12 +59,12 @@ Sigil は、AI がコードを書き、人間は仕様だけをレビューす�
 <本文（任意）>
 
 Agent: claude
-Agent-Model: <モデル名（分かれば）>
+Agent-Model: <モデル名>
 Agent-Env: cloud
 ```
 
 - `Agent:` は必須。値は `claude` / `gemini` / `muse` / `codex`（ブランチ名の `<agent>` と同じ）。
-- `Agent-Model:` は任意（分かるときだけ）。
+- `Agent-Model:` は必須。自分が動いているモデルの識別名を、その実行環境で名乗っている名前のまま書く（例: `claude-sonnet-5-5-medium`、`gemini-4-argon-medium`、`gpt-oss-120b-medium`）。正確な識別名が分からないときは、判明している最も具体的な名前を書く。
 - `Agent-Env:` は必須。値は `local-windows` / `cloud`。
 - トレーラーは本文と空行 1 行をあけ、末尾にまとめる。
 - 人間の手作業コミットには付けない（`Agent:` が無いコミット = 人間）。

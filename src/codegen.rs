@@ -119,8 +119,12 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         // 新しいスレッドの入口 `std.os.thread.thread_main(ハンドル)`（ADR 0030 決定 4、PR 5-2c）
         "thread_main" => ("p", 'v'),
         // タスクの実行の割り当て `std.os.sched`（ADR 0030 決定 1・2、PR 5-2d）。値は語で受け渡す
-        "sched_start" | "sched_lock_new" | "sched_io_wait" | "sched_timeout_wait" => ("pp", 'p'),
-        "sched_io_main" => ("p", 'v'),
+        "sched_start"
+        | "sched_lock_new"
+        | "sched_io_wait"
+        | "sched_timeout_wait"
+        | "sched_select_result" => ("pp", 'p'),
+        "sched_io_main" | "sched_select_discard" | "sched_select_finish" => ("p", 'v'),
         "sched_next_task"
         | "sched_yielded"
         | "sched_has_resume"
@@ -137,7 +141,11 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_tmo_fired"
         | "sched_deadlock_root"
         | "sched_op_dead" => ("", 'p'),
-        "sched_scope_cancel_next"
+        "sched_select_begin"
+        | "sched_finish_task"
+        | "sched_select_done"
+        | "sched_select_wait"
+        | "sched_scope_cancel_next"
         | "sched_tmo_cancel_next"
         | "sched_scope_end"
         | "sched_join"
@@ -154,10 +162,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         "sched_root_new" => ("ppppp", 'p'),
         "sched_root_launch" => ("ppp", 'v'),
         "sched_spawn" => ("ppp", 'p'),
-        "sched_finish_task" | "sched_note_yield" | "sched_yield_val" | "sched_sleep"
-        | "sched_fail" | "sched_lock_release" | "sched_garbage_free" | "sched_slot_release" => {
-            ("p", 'v')
-        }
+        "sched_note_yield" | "sched_yield_val" | "sched_sleep" | "sched_fail"
+        | "sched_lock_release" | "sched_garbage_free" | "sched_slot_release" => ("p", 'v'),
         "sched_chan_send" => ("ppp", 'v'),
         "sched_defer_drop" => ("pp", 'v'),
         "sched_collect_garbage"

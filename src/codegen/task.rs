@@ -73,6 +73,8 @@ pub(crate) fn blocking(b: Builtin) -> bool {
             | AtomicLoad
             | IoWaitFd
             | TaskTimeout
+            | TaskRace
+            | TaskAllOk
             | RootsScope
             | RootReserve
     )

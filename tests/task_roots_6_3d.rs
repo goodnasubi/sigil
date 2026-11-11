@@ -491,3 +491,71 @@ fn run() -> Int
     assert!(stderr.contains("live: frames=0 chunks=0"), "{stderr}");
     assert_eq!(stderr.matches("0 での除算").count(), 1, "{stderr}");
 }
+
+const STUCK_ROOTS: &str = r#"
+  return task.roots(2, |g| {
+    let s = g.reserve();
+    s.start(Conn { id: 1 }, move |c| { console.log(&1); }, move |c| { console.log(&201); });
+    let s2 = g.reserve();
+    s2.start(Conn { id: 2 }, move |c| { let r = stuck(&c); }, move |c| { console.log(&202); });
+    return 7;
+  });
+"#;
+
+const STUCK: &str = r#"
+fn stuck(c: &Conn) -> Int
+  intent "s"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let (tx, rx) = task.channel();
+  return rx.recv();
+}
+"#;
+
+/// 起動したルートが進行不能（デッドロック）なら、親ではなくそのルートを止め、`on_abort` に接続を渡す
+/// （隔離。PR #397 の指摘）。
+#[test]
+fn deadlocked_started_root_is_stopped_instead_of_the_parent() {
+    let o = ok(&format!(
+        "{STUCK}\nfn run() -> Int\n  intent \"r\"\n  requires none\n  ensures none\n  effects console, task.spawn, task.suspend, task.share\n{{{STUCK_ROOTS}}}\n"
+    ));
+    assert_eq!((o.value.as_str(), o.output.as_str()), ("7", "1\n202\n"));
+    assert_eq!(count(&o.drops, "Conn { id: 2 }"), 1, "{:?}", o.drops);
+}
+
+/// 実時間モード（`raw.io_wait_fd` を一度登録した後）でも同じ。待つ相手は読める普通のファイルの記述子。
+#[test]
+fn deadlocked_started_root_is_stopped_in_real_time_mode_too() {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(env!("CARGO_MANIFEST_PATH")).expect("読めるファイル");
+    let head = HEAD.replace(
+        "module m.a\n  targets server\n  trust none",
+        "module std.os.t\n  targets server\n  trust base",
+    );
+    let src = format!(
+        "{head}{STUCK}\npub fn run(fd: Int) -> Int\n  intent \"r\"\n  requires none\n  ensures none\n  effects console, task.spawn, task.suspend, task.share\n  unchecked \"試験。ハーネスが開いたファイルの記述子を待つだけ\"\n{{\n  let w = raw.io_wait_fd(fd, 1);\n{STUCK_ROOTS}}}\n"
+    );
+    let entry = "module app.main\n  targets server\n  trust none\n\npub fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  return 7;\n}\n";
+    let o = Options {
+        embedded_extra: vec![("std.os.t".to_string(), src)],
+        embedded_roots: vec!["std.os.t".into()],
+        trace_drops: true,
+        ..Options::captured()
+    };
+    let r = sigil::ir_eval::run_sources_with(
+        &[entry],
+        "std.os.t.run",
+        &[sigil::exec::Arg::Int(i64::from(file.as_raw_fd()))],
+        &o,
+    )
+    .unwrap_or_else(|e| panic!("{:?}\n{}", e.error, e.output));
+    assert_eq!((r.value.as_str(), r.output.as_str()), ("7", "1\n202\n"));
+    assert_eq!(
+        count(&r.drops, "std.os.t.Conn { id: 2 }"),
+        1,
+        "{:?}",
+        r.drops
+    );
+}

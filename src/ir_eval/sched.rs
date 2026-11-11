@@ -1806,6 +1806,34 @@ impl<'p> M<'p> {
         drop(dead);
     }
 
+    /// 進行できるタスクがない（デッドロック）。結果の出ていないルートのうち一番新しいものを 1 つだけ止める。
+    /// `task.roots` が起動したルートが生きていれば、その中の一番新しいものを先に止め、異常停止と同じ後始末
+    /// （`on_abort`）をする（隔離。ADR 0031 決定 4-2）。親や兄弟のルートは止めない。
+    fn stop_deadlocked(&mut self) {
+        let e = self.stop_at(
+            0,
+            Some(StopKind::StdRequiresViolated),
+            Some("デッドロック（進行できるタスクがない）"),
+        );
+        let started = (0..self.sch.started.len())
+            .filter(|&si| self.sch.started[si].phase != Phase::Done)
+            .max_by_key(|&si| self.sch.started[si].task);
+        if let Some(si) = started {
+            let root = self.sch.started[si].task;
+            self.stop_root(root);
+            self.root_aborted(si, &e);
+            return;
+        }
+        if let Some(i) = (0..self.sch.roots.len())
+            .rev()
+            .find(|&i| self.sch.results[i].is_none())
+        {
+            let root = self.sch.roots[i];
+            self.stop_root(root);
+            self.sch.results[i] = Some(Err(e));
+        }
+    }
+
     /// ルートタスクを実行する。既定は決定的な FIFO（`schedule_seed` 指定時は種による攪拌）で、中断点でだけ切り替える。
     ///
     /// ルートタスクごとに結果を返す。ルートタスクの異常停止は、そのルートタスクと子のタスクだけを止める
@@ -1858,18 +1886,7 @@ impl<'p> M<'p> {
             let Some(t) = self.sch.pop_ready() else {
                 if self.sch.realtime.is_some() {
                     if self.sch.sleepers.is_empty() && self.sch.io_waiters.is_empty() {
-                        if let Some(i) = (0..self.sch.roots.len())
-                            .rev()
-                            .find(|&i| self.sch.results[i].is_none())
-                        {
-                            let root = self.sch.roots[i];
-                            self.stop_root(root);
-                            self.sch.results[i] = Some(Err(self.stop_at(
-                                0,
-                                Some(StopKind::StdRequiresViolated),
-                                Some("デッドロック（進行できるタスクがない）"),
-                            )));
-                        }
+                        self.stop_deadlocked();
                         continue;
                     }
                     self.poll_realtime(true);
@@ -1879,18 +1896,7 @@ impl<'p> M<'p> {
                     // 進行できるタスクがない。結果の出ていないルートタスクのうち一番新しいものを 1 つだけ
                     // デッドロックとして止め、次の反復で進行できるかを判定し直す（止めたことで起きた
                     // ルートタスクを、続けて潰さない）。
-                    if let Some(i) = (0..self.sch.roots.len())
-                        .rev()
-                        .find(|&i| self.sch.results[i].is_none())
-                    {
-                        let root = self.sch.roots[i];
-                        self.stop_root(root);
-                        self.sch.results[i] = Some(Err(self.stop_at(
-                            0,
-                            Some(StopKind::StdRequiresViolated),
-                            Some("デッドロック（進行できるタスクがない）"),
-                        )));
-                    }
+                    self.stop_deadlocked();
                     continue;
                 }
                 self.advance_clock();

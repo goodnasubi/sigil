@@ -250,6 +250,110 @@ fn race_cancels_nested_subtrees_and_can_itself_be_cancelled() {
     assert_eq!(compare(OWNED, "cancelled", &[]), "0");
 }
 
+const CANCELLED_RESULTS: &str = r#"
+struct Token { id: Int, }
+
+fn held(ms: Int, n: Int) -> Result<Token, String>
+  intent "所有値を保持して成功する"
+  requires none
+  ensures none
+  effects clock, task.suspend
+{
+  let t = Token { id: n };
+  task.sleep(ms);
+  return Ok(t);
+}
+
+fn partial() -> Result<List<Token>, String>
+  intent "即時成功の結果を蓄えて残りを待つ"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  let mut gs = List.new();
+  gs.push(|| Ok(Token { id: 1 }));
+  gs.push(|| held(100, 2));
+  return task.all_ok(gs);
+}
+
+fn cancel_partial() -> Int
+  intent "部分成功の all_ok を親の時間切れで取り消す"
+  requires none
+  ensures none
+  effects clock, task.spawn, task.suspend
+{
+  let r = task.timeout(1, || partial());
+  match r {
+    Some(v) => { return 1; }
+    None => { return 0; }
+  }
+}
+
+fn inner(mode: Int) -> Token
+  intent "race・Err・全成功の起床結果を持つ親になる"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  if mode == 0 {
+    let mut gs = List.new();
+    gs.push(|| Token { id: 1 });
+    gs.push(|| Token { id: 2 });
+    return task.race(gs);
+  }
+  let mut gs = List.new();
+  gs.push(|| Ok(Token { id: 1 }));
+  gs.push(move || {
+    if mode == 1 { return Err("selected"); }
+    return Ok(Token { id: 2 });
+  });
+  let outcome = task.all_ok(gs);
+  match outcome {
+    Ok(values) => { return Token { id: values.len() }; }
+    Err(e) => { return Token { id: e.len() }; }
+  }
+}
+
+fn trigger() -> Token
+  intent "内側の結果が選ばれた直後、親が再開する前に外側を完了する"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  task.yield();
+  return Token { id: 3 };
+}
+
+fn cancel_selected(mode: Int) -> Token
+  intent "起床済みの内側の親を、別の実行可能な兄弟の完了で取り消す"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  let mut gs = List.new();
+  gs.push(move || inner(mode));
+  gs.push(|| trigger());
+  return task.race(gs);
+}
+"#;
+
+#[test]
+fn parent_cancellation_drops_partial_all_ok_results() {
+    assert_eq!(compare(CANCELLED_RESULTS, "cancel_partial", &[]), "0");
+}
+
+#[test]
+fn parent_cancellation_drops_selected_results_before_parent_resumes() {
+    // 内側の子を起こした親は中断中。trigger の yield 後に内側の子が完了し、
+    // 親より先に待ち行列に戻っていた trigger が外側の race を完了させる。
+    for mode in [0, 1, 2] {
+        assert_eq!(
+            compare(CANCELLED_RESULTS, "cancel_selected", &[Arg::Int(mode)]),
+            "Token { id: 3 }"
+        );
+    }
+}
+
 #[test]
 fn multiple_workers_finish_both_combinators_without_leaks() {
     let src = source(BASIC);

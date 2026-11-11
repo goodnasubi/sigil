@@ -250,8 +250,13 @@ impl Ck {
                 // 性質を持たない型（ADR 0026 決定 3）。`Scope` は借用の引数としてだけ
                 // 現れる値でなく、`TaskHandle` と `LockGuard` は作った（取得した）
                 // タスクだけが持つので、タスクの境界を越えられない。
+                // `RootGroup`・`RootSlot`（ADR 0031 決定 4-1）も同じ。集まりは借用の引数としてだけ現れ、
+                // スロットは作った集まりの範囲の中で消費する。
                 Some(TypeDef::Opaque(_))
-                    if matches!(n.as_str(), "Scope" | "TaskHandle" | "LockGuard") =>
+                    if matches!(
+                        n.as_str(),
+                        "Scope" | "TaskHandle" | "LockGuard" | "RootGroup" | "RootSlot"
+                    ) =>
                 {
                     Some(false)
                 }
@@ -374,11 +379,19 @@ impl Ck {
     /// 戻り値の型（`TaskHandle<T>`）で、`T` がクロージャの戻り値の型になる。
     /// とらえた値の記録が取れるのは、クロージャリテラルと `let` で束縛した
     /// クロージャの名前だけ（置ける位置の検査 `check_stored_closure_captures` と同じ範囲）。
-    pub(super) fn check_spawn(&mut self, arg: Option<&Expr>, handle: &Ty) -> R<()> {
+    /// `rec` は、クロージャリテラルの記録の位置（`None` なら最後の記録。引数が 1 つの `Scope.spawn`）。
+    pub(super) fn check_spawn(
+        &mut self,
+        arg: Option<&Expr>,
+        rec: Option<usize>,
+        handle: &Ty,
+    ) -> R<()> {
         let caps = match arg.map(strip_paren) {
-            Some(Expr::Closure { .. }) => {
-                self.cur_closures.last().map(|r| (r.span, r.caps.clone()))
+            Some(Expr::Closure { .. }) => match rec {
+                Some(i) => self.cur_closures.get(i),
+                None => self.cur_closures.last(),
             }
+            .map(|r| (r.span, r.caps.clone())),
             Some(Expr::Name(n)) => self
                 .cur_closures
                 .iter()

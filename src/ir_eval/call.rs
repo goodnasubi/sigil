@@ -1164,14 +1164,10 @@ impl<'p> M<'p> {
                 std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
                 Val::Unit
             }
-            // 複数ルートの入口（ADR 0031 決定 4-1）。実体は PR 6-3d。検査器はまだ `task.roots` を通さない。
-            RootsScope | RootReserve | RootStart => {
-                unreachable!("task.roots は未実装（ADR 0031、PR 6-3d）")
-            }
-            IoWaitFd | TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield | TaskSleep
-            | TaskChannel | ScopeSpawn | TaskJoin | ChanSend | ChanRecv | SyncSharedNew
-            | SyncSharedGet | LockNew | LockAcquire | LockGuardGet | LockGuardGetMut
-            | AtomicNew | AtomicLoad | AtomicStore => {
+            RootsScope | RootReserve | RootStart | IoWaitFd | TaskScope | TaskAllOk | TaskRace
+            | TaskTimeout | TaskYield | TaskSleep | TaskChannel | ScopeSpawn | TaskJoin
+            | ChanSend | ChanRecv | SyncSharedNew | SyncSharedGet | LockNew | LockAcquire
+            | LockGuardGet | LockGuardGetMut | AtomicNew | AtomicLoad | AtomicStore => {
                 unreachable!("タスク関連の組み込み操作はスケジューラ側で特別に処理される")
             }
         })

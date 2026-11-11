@@ -1002,6 +1002,11 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.b.ins().fence();
                 (self.ic(0), u)
             }
+            // 複数ルートの入口（ADR 0031 決定 4-1）。実体は PR 6-3d。
+            RootsScope | RootReserve | RootStart => {
+                let v = self.unsupported("task.roots はネイティブ出力未実装（ADR 0031、PR 6-3d）");
+                (v, u)
+            }
             // 並行処理の操作（ADR 0030 決定 1、PR 5-2d）。中断点は `func/task.rs` が作る（再開可能な入口の中）。
             // ここへ来るのは、中断しない操作と、入れ子の呼び出しの中の中断点（評価器と同じ停止）。
             // fd の待ち（ADR 0031 決定 1-1、PR 6-3c）。中断点は `func/task.rs` が作る。

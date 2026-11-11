@@ -414,6 +414,11 @@ pub enum Builtin {
     AtomicNew,
     AtomicLoad,
     AtomicStore,
+    /// 複数ルートの入口（ADR 0031 決定 4-1、PR 6-3b）。`task.roots(limit, f)`・`RootGroup.reserve()`・
+    /// `RootSlot.start(conn, g, on_abort)`。実体（評価器・ネイティブ）は 6-3d で入る。
+    RootsScope,
+    RootReserve,
+    RootStart,
     /// 組・一覧・構造体・列挙型の比較（深い入れ子で止まりうるので `Call` を通す）。
     Compare(BinOp),
 }

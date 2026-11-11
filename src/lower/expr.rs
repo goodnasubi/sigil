@@ -744,6 +744,8 @@ impl<'a> L<'a> {
                     "task.yield" => Builtin::TaskYield,
                     "task.sleep" => Builtin::TaskSleep,
                     "task.channel" => Builtin::TaskChannel,
+                    // 複数ルートの入口（ADR 0031 決定 4-1）。検査器の登録と実体は PR 6-3d。
+                    "task.roots" => Builtin::RootsScope,
                     n => return bail(format!("名前空間の関数 {n}")),
                 };
                 Ok(self.emit_call(Callee::Builtin(b), ops, ret))
@@ -990,6 +992,9 @@ impl<'a> L<'a> {
             ("LockGuard", "get_mut") => (LockGuardGetMut, false),
             ("Atomic", "load") => (AtomicLoad, false),
             ("Atomic", "store") => (AtomicStore, false),
+            ("RootGroup", "reserve") => (RootReserve, false),
+            // `RootSlot` は消費される（ADR 0031 決定 4-1）。
+            ("RootSlot", "start") => (RootStart, true),
             (o, n) => return bail(format!("メソッド {o}.{n}")),
         };
         if owner == "Path" {

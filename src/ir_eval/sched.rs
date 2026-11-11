@@ -254,8 +254,8 @@ pub(super) struct Sched {
     /// 異常停止の巻き戻しが確保器の関数の枠を通った（プロセス全体の停止にする）。
     alloc_stop: bool,
     sleepers: Vec<(i64, u64, Wake)>,
-    /// 外の待ち（`raw.io_wait_fd`）の登録。素の `fd` をキーとし、`(タスク番号, イベントマスク)` を持つ。
-    io_waiters: BTreeMap<i32, (usize, i16)>,
+    /// 外の待ち（`raw.io_wait_fd`）の登録。素の `fd` をキーとし、`(タスク番号, イベントマスク)` の一覧を持つ。
+    io_waiters: BTreeMap<i32, Vec<(usize, i16)>>,
     /// 実時間モードの起点 `(開始時刻, その時点の仮想時計)`。最初の `raw.io_wait_fd` 登録で設定され、以後は戻らない（ADR 0031 決定 1-3）。
     realtime: Option<(Instant, i64)>,
     clock: i64,
@@ -737,7 +737,10 @@ impl<'p> M<'p> {
         self.sch.tasks[t].state = State::Done;
         self.sch.tasks[t].joiner = None;
         self.sch.ready.retain(|&x| x != t);
-        self.sch.io_waiters.retain(|_, &mut (w, _)| w != t);
+        for waiters in self.sch.io_waiters.values_mut() {
+            waiters.retain(|&(w, _)| w != t);
+        }
+        self.sch.io_waiters.retain(|_, waiters| !waiters.is_empty());
         self.sch
             .sleepers
             .retain(|s| !matches!(s.2, Wake::Sleep(x) if x == t));
@@ -895,16 +898,21 @@ impl<'p> M<'p> {
         if !self.sch.io_waiters.is_empty() {
             #[cfg(unix)]
             {
+                const POLLERR: i16 = 0x0008;
+                const POLLHUP: i16 = 0x0010;
                 const POLLNVAL: i16 = 0x0020;
                 const EBADF: i64 = 9;
                 let mut fds: Vec<PollFd> = self
                     .sch
                     .io_waiters
                     .iter()
-                    .map(|(&fd, &(_, events))| PollFd {
-                        fd,
-                        events,
-                        revents: 0,
+                    .map(|(&fd, waiters)| {
+                        let events = waiters.iter().fold(0i16, |acc, &(_, ev)| acc | ev);
+                        PollFd {
+                            fd,
+                            events,
+                            revents: 0,
+                        }
                     })
                     .collect();
                 // SAFETY: `fds` は有効な配列を指し、`fds.len()` 件を `poll` に渡す。
@@ -913,14 +921,27 @@ impl<'p> M<'p> {
                 if n > 0 {
                     for pfd in fds {
                         if pfd.revents != 0 {
-                            if let Some((tid, _)) = self.sch.io_waiters.remove(&pfd.fd) {
-                                if self.sch.tasks[tid].state == State::IoWait {
-                                    let val = if (pfd.revents & POLLNVAL) != 0 {
-                                        -EBADF
+                            if let Some(waiters) = self.sch.io_waiters.remove(&pfd.fd) {
+                                let mut remaining = Vec::new();
+                                for (tid, events) in waiters {
+                                    let matched = (pfd.revents
+                                        & (events | POLLERR | POLLHUP | POLLNVAL))
+                                        != 0;
+                                    if matched {
+                                        if self.sch.tasks[tid].state == State::IoWait {
+                                            let val = if (pfd.revents & POLLNVAL) != 0 {
+                                                -EBADF
+                                            } else {
+                                                (pfd.revents as u16) as i64
+                                            };
+                                            self.wake(tid, Some(Val::Int(val)));
+                                        }
                                     } else {
-                                        (pfd.revents as u16) as i64
-                                    };
-                                    self.wake(tid, Some(Val::Int(val)));
+                                        remaining.push((tid, events));
+                                    }
+                                }
+                                if !remaining.is_empty() {
+                                    self.sch.io_waiters.insert(pfd.fd, remaining);
                                 }
                             }
                         }
@@ -1104,7 +1125,11 @@ impl<'p> M<'p> {
                     return Op::Val(Val::Int(-9));
                 }
                 self.enter_realtime();
-                self.sch.io_waiters.insert(fd_i32, (cur, events as i16));
+                self.sch
+                    .io_waiters
+                    .entry(fd_i32)
+                    .or_default()
+                    .push((cur, events as i16));
                 self.sch.tasks[cur].resume = None;
                 self.sch.tasks[cur].state = State::IoWait;
                 Op::Block

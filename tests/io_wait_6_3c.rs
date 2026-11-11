@@ -908,3 +908,27 @@ fn evaluator_rejects_invalid_fd_or_events_with_negative_errno() {
     // e1 = -9 (EBADF), e2 = -22 (EINVAL), e3 = -22 (EINVAL) -> -90000 - 2200 - 22 = -92222
     assert_eq!(out.value, "-92222");
 }
+
+#[test]
+fn evaluator_wakes_multiple_tasks_waiting_same_fd() {
+    let (r, w) = new_nonblocking_pipe();
+    let body = r#"
+  let v = task.scope(|s| {
+    let a = s.spawn(move || waiter(r));
+    let b = s.spawn(move || waiter(r));
+    let k = s.spawn(move || writer(w, 20));
+    k.join();
+    return a.join() + b.join() * 10;
+  });
+  fd_close(r);
+  fd_close(w);
+  return v;
+"#;
+    let out = eval_run(
+        "r: Int, w: Int",
+        body,
+        &[sigil::exec::Arg::Int(r), sigil::exec::Arg::Int(w)],
+    )
+    .expect("評価器の実行に成功すること");
+    assert_eq!(out.value, "11");
+}

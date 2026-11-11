@@ -164,6 +164,8 @@ struct Chan {
     waiters: VecDeque<usize>,
     /// 作ったルートタスク。
     root: usize,
+    /// 作ったルートが終わって回収した（以後の使用は停止。ADR 0031 決定 4-2）。
+    reclaimed: bool,
 }
 
 /// `Lock` の状態。値は `Lock.new` で渡されたもの（評価器では番号で指す）。
@@ -176,6 +178,8 @@ struct LockSt {
     broken: bool,
     /// 作ったルートタスク。ホストが共有するものは `usize::MAX`。
     root: usize,
+    /// 作ったルート（`task.roots` が起動したもの）が正常に終わって回収した（以後の取得は停止）。
+    reclaimed: bool,
 }
 
 /// 確保器（ADR 0025 決定 3）の関数か。核の `std.alloc` と OS 層の `std.os.alloc` の中。
@@ -353,6 +357,7 @@ impl Sched {
             waiters: VecDeque::new(),
             broken: false,
             root: usize::MAX,
+            reclaimed: false,
         });
         self.locks.len() - 1
     }
@@ -1214,6 +1219,10 @@ impl<'p> M<'p> {
             ChanSend => {
                 let id = self.read_int(locals, &args[0]) as usize;
                 let v = self.owned(locals, &args[1]);
+                if self.sch.chans[id].reclaimed {
+                    drop(v);
+                    return Op::Fail(self.reclaimed_stop(stop, "通信路"));
+                }
                 if let Some(w) = self.sch.chans[id].waiters.pop_front() {
                     self.wake(w, Some(v));
                 } else {
@@ -1223,6 +1232,9 @@ impl<'p> M<'p> {
             }
             ChanRecv => {
                 let id = self.read_int(locals, &args[0]) as usize;
+                if self.sch.chans[id].reclaimed {
+                    return Op::Fail(self.reclaimed_stop(stop, "通信路"));
+                }
                 if let Some(v) = self.sch.chans[id].q.pop_front() {
                     Op::Val(v)
                 } else {
@@ -1271,6 +1283,7 @@ impl<'p> M<'p> {
                     waiters: VecDeque::new(),
                     broken: false,
                     root,
+                    reclaimed: false,
                 });
                 Op::Val(Val::Int(id as i64))
             }
@@ -1278,6 +1291,9 @@ impl<'p> M<'p> {
                 // 直前の破棄による解放を先に反映する。
                 self.settle_locks();
                 let id = self.read_int(locals, &args[0]) as usize;
+                if self.sch.locks[id].reclaimed {
+                    return Op::Fail(self.reclaimed_stop(stop, "Lock"));
+                }
                 let l = &mut self.sch.locks[id];
                 if l.broken {
                     Op::Val(self.lock_broken())
@@ -1467,6 +1483,8 @@ impl<'p> M<'p> {
     /// 起動したルートが終わった（正常終了、または `on_abort` の異常停止の後始末の済み）。接続と `on_abort` を
     /// 破棄し、スロットを返す。集まりの本体が待っていて、これが最後なら起こす。
     fn root_finished(&mut self, si: usize) {
+        let r = self.sch.started[si].task;
+        self.reclaim_root(r);
         let st = &mut self.sch.started[si];
         st.phase = Phase::Done;
         let conn = st.conn.replace(Val::Empty);
@@ -1485,6 +1503,39 @@ impl<'p> M<'p> {
                 self.wake(w, None);
             }
         }
+    }
+
+    /// 起動したルート `root` が終わった後、そのルートで作った通信路の項と `Lock` の値を捨てる（要求ごとに
+    /// 積み上がらないように。ADR 0031 決定 4-2）。待機者・保持者がいるもの（持ち手がルートの外へ出て使われて
+    /// いる）は残す。回収したものは記録し、外へ出た持ち手で後から使うと停止にする（黙って値を失わない）。
+    fn reclaim_root(&mut self, root: usize) {
+        // 終わったタスクの `LockGuard` の破棄（解放）を先に反映する。
+        self.settle_locks();
+        let mut dead = vec![];
+        for ch in self.sch.chans.iter_mut() {
+            if ch.root == root && !ch.reclaimed && ch.waiters.is_empty() {
+                ch.reclaimed = true;
+                dead.extend(std::mem::take(&mut ch.q));
+            }
+        }
+        for l in self.sch.locks.iter_mut() {
+            if l.root == root && !l.reclaimed && l.holder.is_none() && l.waiters.is_empty() {
+                l.reclaimed = true;
+                dead.push(l.value.replace(Val::Unit));
+            }
+        }
+        drop(dead);
+    }
+
+    /// 回収済みの通信路・`Lock` の使用の停止。
+    fn reclaimed_stop(&self, stop: StopId, what: &str) -> E {
+        self.stop_at(
+            stop,
+            Some(StopKind::StdRequiresViolated),
+            Some(&format!(
+                "回収済みの{what}を使った（作ったルートが終わっている。ADR 0031 決定 4-2）"
+            )),
+        )
     }
 
     /// 起動したルートが異常停止した（そのルートのタスクは `stop_root` で破棄済み）。`g` のルートなら、接続を
@@ -1796,6 +1847,7 @@ impl<'p> M<'p> {
             let q = std::mem::take(&mut ch.q);
             drop(q);
             ch.waiters.clear();
+            ch.reclaimed = true;
         }
         let mut dead = vec![];
         for l in self.sch.locks.iter_mut().filter(|l| l.root == root) {

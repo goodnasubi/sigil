@@ -559,3 +559,86 @@ fn deadlocked_started_root_is_stopped_in_real_time_mode_too() {
         r.drops
     );
 }
+
+/// 正常に終わったルート（ここでは `on_abort`）が自分の通信路に残した値は、スロットを返す時点で破棄される
+/// （要求ごとに積み上がらない。PR #397 の指摘）。上限 1 なので、次の `reserve` が戻るのは前のルートの後。
+#[test]
+fn values_left_in_a_finished_roots_channel_are_dropped_when_the_slot_returns() {
+    let o = ok(r#"
+fn keep(c: Conn)
+  intent "k"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let (tx, rx) = task.channel();
+  tx.send(c);
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend, task.share
+{
+  return task.roots(1, |g| {
+    let mut i = 1;
+    while i <= 3 {
+      let s = g.reserve();
+      if true {
+        let m = Tmp { v: 100 + i };
+      }
+      s.start(Conn { id: i }, move |c| { let z = 1 / (c.id - c.id); }, move |c| { keep(c); });
+      i = i + 1;
+    }
+    return 7;
+  });
+}
+"#);
+    assert_eq!(o.value, "7");
+    let d = &o.drops;
+    for i in 1..=3 {
+        assert_eq!(count(d, &format!("Conn {{ id: {i} }}")), 1, "{d:?}");
+    }
+    assert!(pos(d, "Conn { id: 1 }") < pos(d, "Tmp { v: 102 }"), "{d:?}");
+    assert!(pos(d, "Conn { id: 2 }") < pos(d, "Tmp { v: 103 }"), "{d:?}");
+}
+
+/// 回収した通信路・`Lock` を、ルートの外へ出た持ち手で後から使うと、黙って値を失わずに停止する。
+#[test]
+fn using_a_reclaimed_handle_stops_explicitly() {
+    for (make, give, use_it) in [
+        (
+            "let (t2, r2) = task.channel();",
+            "c.send(t2);",
+            "let t2 = rx.recv();\n    t2.send(5);",
+        ),
+        (
+            "let l2 = Lock.new(5);",
+            "c.send(l2);",
+            "let l2 = rx.recv();\n    match l2.acquire() {\n      Ok(gd) => { return gd.get() + 0; }\n      Err(e) => { return 0 - 1; }\n    }",
+        ),
+    ] {
+        let (kind, detail, _, _) = stop(&format!(
+            r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend, task.share
+{{
+  return task.roots(1, |g| {{
+    let (tx, rx) = task.channel();
+    let s = g.reserve();
+    s.start(tx, move |c| {{ {make} {give} }}, move |c| {{ }});
+    let s2 = g.reserve();
+    {use_it}
+    return 7;
+  }});
+}}
+"#
+        ));
+        assert_eq!(kind, StopKind::StdRequiresViolated, "{detail}");
+        assert!(detail.contains("回収済み"), "{detail}");
+    }
+}

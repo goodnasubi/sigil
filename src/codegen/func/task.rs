@@ -433,17 +433,19 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             ChanRecv => {
                 let (c, _) = self.val(&args[0]);
+                let r = self.rt("sched_chan_recv", &[c]);
                 if roots {
-                    self.dead_check("sched_chan_dead", c, "通信路", stop);
+                    self.dead_check("通信路", stop);
                 }
-                (self.rt("sched_chan_recv", &[c]), false)
+                (r, false)
             }
             LockAcquire => {
                 let (l, _) = self.val(&args[0]);
+                let r = self.rt("sched_lock_acquire", &[l]);
                 if roots {
-                    self.dead_check("sched_lock_dead", l, "Lock", stop);
+                    self.dead_check("Lock", stop);
                 }
-                (self.rt("sched_lock_acquire", &[l]), false)
+                (r, false)
             }
             RootReserve => {
                 let (g, _) = self.val(&args[0]);
@@ -609,9 +611,10 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
     }
 
-    /// 回収済みの通信路・`Lock`（作ったルートが終わった。ADR 0031 決定 4-2）の使用を停止にする。
-    fn dead_check(&mut self, f: &'static str, id: Value, what: &str, stop: usize) {
-        let dead = self.rt(f, &[id]);
+    /// 直前の操作が、回収済みの通信路・`Lock`（作ったルートが終わった。ADR 0031 決定 4-2）に当たっていたら停止に
+    /// する。回収済みかの判定は、操作と同じ排他の中でスケジューラが行い、ワーカー専用の印に残す（操作は行わない）。
+    fn dead_check(&mut self, what: &str, stop: usize) {
+        let dead = self.rt("sched_op_dead", &[]);
         let code = self.cg.code_for(
             stop,
             Some(StopKind::StdRequiresViolated),
@@ -832,12 +835,25 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             ChanSend => {
                 let (id, _) = self.val(&args[0]);
-                if self.cg.task.as_ref().is_some_and(|t| t.roots) {
-                    self.dead_check("sched_chan_dead", id, "通信路", stop);
-                }
                 let (x, xt) = self.own(&args[1]);
                 let df = self.drop_addr(&xt);
                 self.rt("sched_chan_send", &[id, x, df]);
+                if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+                    // 回収済みなら送らずに戻る: 値はこちらが破棄してから停止する（評価器と同じ順）。
+                    let dead = self.rt("sched_op_dead", &[]);
+                    let (db, cont) = (self.b.create_block(), self.b.create_block());
+                    self.b.ins().brif(dead, db, NOARGS, cont, NOARGS);
+                    self.b.switch_to_block(db);
+                    self.drop_val(&xt, x);
+                    let code = self.cg.code_for(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("回収済みの通信路を使った（作ったルートが終わっている。ADR 0031 決定 4-2）"),
+                    );
+                    let c = self.ic(code);
+                    self.jump_cleanup(c);
+                    self.b.switch_to_block(cont);
+                }
                 (self.ic(0), u)
             }
             LockNew => {

@@ -135,7 +135,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_cancel_next"
         | "sched_garbage_pop"
         | "sched_tmo_fired"
-        | "sched_deadlock_root" => ("", 'p'),
+        | "sched_deadlock_root"
+        | "sched_op_dead" => ("", 'p'),
         "sched_scope_cancel_next"
         | "sched_tmo_cancel_next"
         | "sched_scope_end"
@@ -149,9 +150,7 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_root_abort"
         | "sched_root_cancel_next"
         | "sched_root_abort_end"
-        | "sched_group_cancel_next"
-        | "sched_chan_dead"
-        | "sched_lock_dead" => ("p", 'p'),
+        | "sched_group_cancel_next" => ("p", 'p'),
         "sched_root_new" => ("ppppp", 'p'),
         "sched_root_launch" => ("ppp", 'v'),
         "sched_spawn" => ("ppp", 'p'),

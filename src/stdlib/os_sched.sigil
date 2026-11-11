@@ -154,6 +154,8 @@ global S_ISO: Int = 48
 global S_WORDS: Int = 49
 // ワーカー専用の語（共有の塊の外。生成コードの TCB_UNWIND_OFF）: 異常停止の巻き戻しの途中なら 1。
 global S_UNWIND: Int = 50
+// ワーカー専用の語: 直前の通信路・Lock の操作が回収済みに当たった（操作は行っていない）。op_dead が読んで消す。
+global S_OPDEAD: Int = 51
 
 // ルートの集まりのレコードの語: 0 待つ範囲, 1 上限, 2 使っているスロット, 3 閉じた, 4 reserve の待機の先頭, 5 同末尾,
 // 6 取り消しの走査位置（起動の記録の添字 + 1。0 は未開始）, 7 取り消しを始めたタスク, 8 ルートの中の走査位置（タスクの添字 + 1）。
@@ -220,7 +222,7 @@ fn slot(p: Int, i: Int) -> Int
   effects none
   unchecked "SCHED は起動前に初期化され、全ワーカーの合流まで不変。local は生成コードが整列スタックから求める"
 {
-  if p == SCHED && (i == S_CUR || i == S_BLOCKED || i == S_YIELDED || i == S_SAVED || i == S_SCAN || i == S_CANCEL_I || i == S_UNWIND) {
+  if p == SCHED && (i == S_CUR || i == S_BLOCKED || i == S_YIELDED || i == S_SAVED || i == S_SCAN || i == S_CANCEL_I || i == S_UNWIND || i == S_OPDEAD) {
     return local() + 8 * i;
   }
   return p + 8 * i;
@@ -1330,6 +1332,11 @@ fn chan_send_locked(id: Int, v: Int, dropfn: Int)
   let s = sched();
   bump(s);
   let c = tab_get(s, S_CHANS, id);
+  // 回収済みの判定は送る操作と同じ排他の中で行う（値は受け取らず、生成コードが破棄して停止する）。
+  if ld(c, C_DEAD) != 0 {
+    st(s, S_OPDEAD, 1);
+    return;
+  }
   let w = wq_pop(c, 2);
   if w != 0 {
     wake(s, w, v, true);
@@ -1356,6 +1363,10 @@ fn chan_recv_locked(id: Int) -> Int
   let s = sched();
   bump(s);
   let c = tab_get(s, S_CHANS, id);
+  if ld(c, C_DEAD) != 0 {
+    st(s, S_OPDEAD, 1);
+    return 0;
+  }
   let n = ld(c, 0);
   if n != 0 {
     let nx = ld(n, 0);
@@ -1402,6 +1413,11 @@ fn lock_acquire_locked(id: Int) -> Int
   settle(s);
   let l = tab_get(s, S_LOCKS, id);
   let cur = ld(s, S_CUR);
+  // 回収済みの判定は取得と同じ排他の中で行う（保持者は設定しない）。
+  if ld(l, L_DEAD) != 0 {
+    st(s, S_OPDEAD, 1);
+    return 0;
+  }
   if ld(l, L_BROKEN) != 0 { return 0 - 1; }
   if ld(l, 1) == 0 {
     st(l, 1, cur);
@@ -1920,24 +1936,6 @@ fn group_cancel_next_locked(gid: Int) -> Int
   st(s, S_SAVED, ld(g, G_SAVED));
   st(s, S_SCAN, ld(g, G_SCAN));
   return 0;
-}
-
-fn chan_dead_locked(id: Int) -> Int
-  intent "チャネルが回収済みか（1 / 0）"
-  requires none
-  ensures none
-  effects none
-{
-  return ld(tab_get(sched(), S_CHANS, id), C_DEAD);
-}
-
-fn lock_dead_locked(id: Int) -> Int
-  intent "Lock が回収済みか（1 / 0）"
-  requires none
-  ensures none
-  effects none
-{
-  return ld(tab_get(sched(), S_LOCKS, id), L_DEAD);
 }
 
 // --- 取り消しと後始末 ---
@@ -2795,28 +2793,16 @@ pub fn group_cancel_next(gid: Int) -> Int
   return outcome;
 }
 
-pub fn chan_dead(id: Int) -> Int
-  intent "排他の下で chan_dead を行う"
+pub fn op_dead() -> Int
+  intent "直前の通信路・Lock の操作が回収済みに当たったか（1 / 0）。読むと印を消す（ワーカー専用の語）"
   requires none
   ensures none
   effects none
 {
-  mutex_lock();
-  let outcome = chan_dead_locked(id);
-  mutex_unlock();
-  return outcome;
-}
-
-pub fn lock_dead(id: Int) -> Int
-  intent "排他の下で lock_dead を行う"
-  requires none
-  ensures none
-  effects none
-{
-  mutex_lock();
-  let outcome = lock_dead_locked(id);
-  mutex_unlock();
-  return outcome;
+  let s = sched();
+  let d = ld(s, S_OPDEAD);
+  st(s, S_OPDEAD, 0);
+  return d;
 }
 
 pub fn slot_release(gid: Int)

@@ -1106,3 +1106,36 @@ fn a_lock_released_normally_before_an_abort_is_not_broken() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 回収済みの通信路へ送る値は、送らずに破棄してから停止する（評価器と同じ破棄の順。回収済みの判定は送る操作と
+/// 同じ排他の中で行う）。
+#[test]
+fn a_value_sent_to_a_reclaimed_channel_is_dropped_before_the_stop() {
+    let (kind, detail, drops, _) = stop(
+        r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend, task.share
+{
+  return task.roots(1, |g| {
+    let (tx, rx) = task.channel();
+    let s = g.reserve();
+    s.start(tx, move |c| { let (t2, r2) = task.channel(); c.send(t2); }, move |c| { });
+    let s2 = g.reserve();
+    let t2 = rx.recv();
+    let keep = Tmp { v: 1 };
+    t2.send(Tmp { v: 2 });
+    return keep.v;
+  });
+}
+"#,
+    );
+    assert_eq!(kind, StopKind::StdRequiresViolated, "{detail}");
+    assert!(detail.contains("回収済みの通信路"), "{detail}");
+    assert!(
+        pos(&drops, "Tmp { v: 2 }") < pos(&drops, "Tmp { v: 1 }"),
+        "{drops:?}"
+    );
+}

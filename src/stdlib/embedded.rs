@@ -115,8 +115,7 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("root_cancel_next", "sched_root_cancel_next"),
     ("root_abort_end", "sched_root_abort_end"),
     ("group_cancel_next", "sched_group_cancel_next"),
-    ("chan_dead", "sched_chan_dead"),
-    ("lock_dead", "sched_lock_dead"),
+    ("op_dead", "sched_op_dead"),
 ];
 
 /// `Path` の操作の Sigil 実装のモジュール名と入口の関数（結合後の名前。補足 C-7、PR 3-6b）。純粋な核のモジュール。

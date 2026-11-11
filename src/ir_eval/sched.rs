@@ -180,6 +180,9 @@ struct LockSt {
     root: usize,
     /// 作ったルート（`task.roots` が起動したもの）が正常に終わって回収した（以後の取得は停止）。
     reclaimed: bool,
+    /// 作ったルートが止まったとき、別のルートのタスクが持っていた。値は、その持ち手が放すときに捨てる
+    /// （生きている持ち手が指す値を先に捨てない。PR #398 の指摘）。
+    drop_on_release: bool,
 }
 
 /// 確保器（ADR 0025 決定 3）の関数か。核の `std.alloc` と OS 層の `std.os.alloc` の中。
@@ -358,6 +361,7 @@ impl Sched {
             broken: false,
             root: usize::MAX,
             reclaimed: false,
+            drop_on_release: false,
         });
         self.locks.len() - 1
     }
@@ -1284,6 +1288,7 @@ impl<'p> M<'p> {
                     broken: false,
                     root,
                     reclaimed: false,
+                    drop_on_release: false,
                 });
                 Op::Val(Val::Int(id as i64))
             }
@@ -1611,6 +1616,10 @@ impl<'p> M<'p> {
             if unwinding {
                 l.broken = true;
             }
+            if std::mem::take(&mut l.drop_on_release) {
+                let v = l.value.replace(Val::Unit);
+                drop(v);
+            }
             if l.broken {
                 let ws: Vec<usize> = l.waiters.drain(..).collect();
                 for w in ws {
@@ -1851,11 +1860,17 @@ impl<'p> M<'p> {
         }
         let mut dead = vec![];
         let mut woken = vec![];
+        let tasks = &self.sch.tasks;
         for l in self.sch.locks.iter_mut().filter(|l| l.root == root) {
             // 持ち手を外へ渡した `Lock` を別のルートが待っていれば、`Err(LockBroken)` で起こす（ADR 0031 決定 4-3）。
             woken.extend(l.waiters.drain(..));
             l.broken = true;
-            dead.push(l.value.replace(Val::Unit));
+            // 別のルートのタスクが持っていれば、値はその守りが放すときに捨てる。
+            if l.holder.is_some_and(|h| tasks[h].root != root) {
+                l.drop_on_release = true;
+            } else {
+                dead.push(l.value.replace(Val::Unit));
+            }
         }
         drop(dead);
         for w in woken {

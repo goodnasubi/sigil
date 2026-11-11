@@ -180,7 +180,9 @@ global R_CI: Int = 7
 global R_ME: Int = 8
 global R_SAVED: Int = 9
 global R_SCAN: Int = 10
-global R_WORDS: Int = 11
+// 停止の処理を引き受けたワーカーがいる（1）。同じルートの別のタスクの異常停止・集まりの取り消しは、終わるまで手を出さない。
+global R_OWNER: Int = 11
+global R_WORDS: Int = 12
 // 段階: 1 g を実行中, 2 on_abort を実行中, 3 終わった。
 global PH_BODY: Int = 1
 global PH_ABORT: Int = 2
@@ -192,7 +194,9 @@ global C_WORDS: Int = 6
 global L_ROOT: Int = 5
 global L_BROKEN: Int = 6
 global L_DEAD: Int = 7
-global L_WORDS: Int = 8
+// 作ったルートが止まったとき別のルートのタスクが持っていた: 値はその守りが放すときに捨てる。
+global L_DROPLATER: Int = 8
+global L_WORDS: Int = 9
 
 // 期限用のトークン（タスクのトークンは 番号 + 1 で、これより小さい。std.os.io の範囲は 1..2147483646）。
 global TIMER_TOKEN: Int = 2147483646
@@ -576,6 +580,12 @@ fn settle(s: Int)
     } else {
       st(l, 1, 0);
       if rel != 0 && ld(rel, T_BREAK) != 0 { st(l, L_BROKEN, 1); }
+      if ld(l, L_DROPLATER) != 0 {
+        st(l, L_DROPLATER, 0);
+        garbage_push(s, ld(l, 0), ld(l, 4));
+        st(l, 0, 0);
+        st(l, 4, 0);
+      }
       if ld(l, L_BROKEN) != 0 {
         let mut w = wq_pop(l, 2);
         while w != 0 {
@@ -1555,6 +1565,8 @@ fn root_launch_locked(r: Int, frame: Int, retdrop: Int)
     st(r, R_CONNDROP, 0);
     st(r, R_ABORT, 0);
     st(r, R_ABORTDROP, 0);
+    // on_abort の起動まで済んだ: 停止の処理の引き受けを解く。
+    st(r, R_OWNER, 0);
   }
   ready_push(s, t);
 }
@@ -1636,9 +1648,15 @@ fn stop_root_rest(s: Int, root: Int)
         w = wq_pop(l, 2);
       }
       st(l, L_BROKEN, 1);
-      garbage_push(s, ld(l, 0), ld(l, 4));
-      st(l, 0, 0);
-      st(l, 4, 0);
+      let h = ld(l, 1);
+      if h != 0 && ld(h, T_ROOT) != root {
+        // 生きている守りが値を指している。値は、その守りが放すときに捨てる（settle）。
+        st(l, L_DROPLATER, 1);
+      } else {
+        garbage_push(s, ld(l, 0), ld(l, 4));
+        st(l, 0, 0);
+        st(l, 4, 0);
+      }
     }
     k = k + 1;
   }
@@ -1742,6 +1760,9 @@ fn root_abort_locked(code: Int) -> Int
   st(t, T_FRAME, 0);
   st(t, T_BREAK, 1);
   bump(s);
+  // 同じルートの停止を別のワーカーがすでに引き受けている: このタスクは止めた扱いにして、そのワーカーに任せる（-1）。
+  if ld(r, R_OWNER) != 0 { return 0 - 1; }
+  st(r, R_OWNER, 1);
   return r;
 }
 
@@ -1758,11 +1779,12 @@ fn deadlock_root_locked() -> Int
   while i < n {
     let r = tab_get(s, S_STARTED, i);
     let ph = ld(r, R_PHASE);
-    if ph == PH_BODY || ph == PH_ABORT {
+    if (ph == PH_BODY || ph == PH_ABORT) && ld(r, R_OWNER) == 0 {
       if best == 0 || ld(ld(r, R_TASK), T_ID) > ld(ld(best, R_TASK), T_ID) { best = r; }
     }
     i = i + 1;
   }
+  if best != 0 { st(best, R_OWNER, 1); }
   return best;
 }
 
@@ -1809,6 +1831,7 @@ fn root_abort_end_locked(r: Int) -> Int
     st(r, R_PHASE, PH_ABORT);
     return r;
   }
+  st(r, R_OWNER, 0);
   root_finished(s, r, false);
   return 0;
 }
@@ -1825,6 +1848,8 @@ fn mark_group(s: Int, gid: Int, me: Int) -> Bool
   while i < n {
     let r = tab_get(s, S_STARTED, i);
     if ld(r, R_GROUP) == gid && ld(r, R_PHASE) != PH_DONE && ld(r, R_PHASE) != 0 {
+      // 別のワーカーがこのルートを止めている途中なら、終わるまで待つ。
+      if ld(r, R_OWNER) != 0 { active = true; }
       let root = ld(r, R_TASK);
       let mut j = 0;
       while j < ld(s, S_TASKS + 1) {
@@ -2001,7 +2026,8 @@ fn mark_cancel(s: Int, sid: Int, me: Int) -> Bool
     let t = tab_get(s, S_TASKS, j);
     if t != me && in_scope(s, t, sid) {
       st(t, T_CANCEL, 1);
-      if ld(t, T_ACTIVE) != 0 { active = true; }
+      // 終わったタスク（異常停止して枠を片付け済みで、ワーカーがまだ step_end していないものを含む）は待たない。
+      if ld(t, T_ACTIVE) != 0 && ld(t, T_STATE) != ST_DONE { active = true; }
     }
     j = j + 1;
   }
@@ -2137,6 +2163,8 @@ fn collect_garbage_locked()
   effects none
 {
   let s = sched();
+  // 残っている解放の知らせを先に反映する（後で捨てる Lock の値がごみの列に載る）。
+  settle(s);
   let n = ld(s, S_TASKS + 1);
   let mut i = n;
   while i > 0 {

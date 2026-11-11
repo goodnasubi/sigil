@@ -971,6 +971,18 @@ impl<'a, 'p> Fx<'a, 'p> {
         let (cb, go) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(can, cb, NOARGS, go, NOARGS);
         self.b.switch_to_block(cb);
+        // 一度も実行せずに取り消された: 所有する引数（on_abort の接続）を破棄する。
+        let df = self.ld(frame, HDR + 24);
+        let (dropb, ret) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(df, dropb, NOARGS, ret, NOARGS);
+        self.b.switch_to_block(dropb);
+        let a0 = self.ld(frame, HDR + 16);
+        let z = self.ic(0);
+        self.st(z, frame, HDR + 24);
+        let sig = self.b.import_signature(shim_sig(self.cg.cc, 1, 'v'));
+        self.b.ins().call_indirect(sig, df, &[a0]);
+        self.b.ins().jump(ret, NOARGS);
+        self.b.switch_to_block(ret);
         let z = self.ic(0);
         let c = self.ic(CANCEL_CODE);
         self.b.ins().return_(&[z, c]);
@@ -1068,7 +1080,8 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().jump(merge, &[BlockArg::Value(child)]);
 
         self.b.switch_to_block(pb);
-        let sz = self.ic(HDR as i64 + 24);
+        // [関数の値][引数の数][引数][引数の破棄（0 なら所有しない。on_abort の接続だけが使う）]
+        let sz = self.ic(HDR as i64 + 32);
         let eight = self.ic(8);
         let fr = self.rt("raw_alloc", &[sz, eight]);
         let z = self.ic(0);
@@ -1424,8 +1437,21 @@ impl<'a, 'p> Fx<'a, 'p> {
         if self.cg.task.as_ref().is_some_and(|t| t.roots) {
             // 起動したルートの異常停止は、そのルートだけを止める（隔離。ADR 0031 決定 4-2）。
             let rr = self.rt("sched_root_abort", &[r[1]]);
-            let (iso, glob) = (self.b.create_block(), self.b.create_block());
-            self.b.ins().brif(rr, iso, NOARGS, glob, NOARGS);
+            let (iso, glob, chk, taken) = (
+                self.b.create_block(),
+                self.b.create_block(),
+                self.b.create_block(),
+                self.b.create_block(),
+            );
+            self.b.ins().brif(rr, chk, NOARGS, glob, NOARGS);
+            // 同じルートの停止を別のワーカーが引き受けている（-1）: そのワーカーに任せて続ける（報告はルートごとに 1 件）。
+            self.b.switch_to_block(chk);
+            let other = self.b.ins().icmp_imm_s(IntCC::Equal, rr, -1);
+            self.b.ins().brif(other, taken, NOARGS, iso, NOARGS);
+            self.b.switch_to_block(taken);
+            self.plan_fn(drain, &[]);
+            self.rt("sched_step_end", &[]);
+            self.b.ins().jump(head, NOARGS);
             self.b.switch_to_block(iso);
             self.isolate_root(rr, r[1]);
             self.rt("sched_step_end", &[]);
@@ -1450,10 +1476,23 @@ impl<'a, 'p> Fx<'a, 'p> {
         let start = self.cg.task.as_ref().expect("計画").fn_start;
         let oa = self.ld(again, 32);
         let conn = self.ld(again, 16);
+        let cd = self.ld(again, 24);
         let argv = self.zero_tmp(8);
         self.st(conn, argv, 0);
         let one = self.ic(1);
         let child = self.plan_fn(start, &[oa, argv, one, one])[0];
+        // 中断しない on_abort（sigil_plain_step の枠）は、実行前に取り消されたときに接続を破棄できるよう破棄の関数を持たせる。
+        let plain = self.cg.task.as_ref().expect("計画").plain_step;
+        let pr = self.cg.m.declare_func_in_func(plain, self.b.func);
+        let pa = self.b.ins().func_addr(types::I64, pr);
+        let stepf = self.ld(child, 0);
+        let is_plain = self.b.ins().icmp(IntCC::Equal, stepf, pa);
+        let (setb, cont) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(is_plain, setb, NOARGS, cont, NOARGS);
+        self.b.switch_to_block(setb);
+        self.st(cd, child, HDR + 24);
+        self.b.ins().jump(cont, NOARGS);
+        self.b.switch_to_block(cont);
         let rd = self.ld(child, 48);
         self.rt("sched_root_launch", &[again, child, rd]);
         self.b.ins().jump(end, NOARGS);

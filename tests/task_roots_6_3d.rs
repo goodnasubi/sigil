@@ -812,3 +812,164 @@ fn native_parent_waiting_on_a_broken_lock_finishes_with_several_workers() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 起動したルートの範囲の子が異常停止すると、そのルートの全タスク（兄弟の子と範囲を持つルートのタスク）が
+/// 巻き戻され、`on_abort` が動く（ネイティブで、片付け済みの失敗したタスクの停止を待ち続けない）。
+const CHILD_FAILS: &str = r#"
+fn boom(n: Int) -> Int
+  intent "b"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = 0;
+  let mut a = 0;
+  while i < 2000 {
+    a = a + i;
+    i = i + 1;
+  }
+  return a / (n - n);
+}
+
+fn work(c: &Conn) -> Int
+  intent "w"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  let id = c.id;
+  return task.scope(|s| {
+    let a = s.spawn(move || boom(id));
+    let b = s.spawn(move || boom(id));
+    let d = s.spawn(move || boom(id));
+    return a.join() + b.join() + d.join();
+  });
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, task.spawn, task.suspend
+{
+  return task.roots(4, |g| {
+    let mut i = 1;
+    while i <= 6 {
+      let s = g.reserve();
+      s.start(Conn { id: i }, move |c| { let r = work(&c); }, move |c| { console.log(&(200 + c.id)); });
+      i = i + 1;
+    }
+    return 7;
+  });
+}
+"#;
+
+#[test]
+fn a_failing_child_in_a_scope_stops_its_root_only() {
+    let o = ok(CHILD_FAILS);
+    assert_eq!(o.value, "7");
+    assert_eq!(o.output, "201\n202\n203\n204\n205\n206\n");
+}
+
+/// 並列のワーカーで、同じルートの子が同時に異常停止しても、そのルートの停止は 1 つのワーカーだけが行う
+/// （PR #398 の指摘）。毎回、全部の `on_abort` が 1 回ずつ動き、漏れもデッドロックもない。
+#[test]
+fn simultaneous_failures_in_one_root_are_handled_once_with_several_workers() {
+    let dir = common::native::scratch("roots-race");
+    let exe = dir.join("prog");
+    common::native::try_build(&[&format!("{HEAD}{CHILD_FAILS}")], "run", &exe, false)
+        .expect("ビルド");
+    for _ in 0..10 {
+        let r =
+            common::native::exec_env(&exe, &[], &[("SIGIL_RT_LIVE", "1"), ("SIGIL_WORKERS", "4")]);
+        assert_eq!(r.code, Some(0), "{}", r.stderr);
+        let mut ids: Vec<&str> = r.stdout.lines().collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            ["201", "202", "203", "204", "205", "206", "7"],
+            "{}",
+            r.stdout
+        );
+        assert!(r.stderr.contains("live: sigil_blocks=0"), "{}", r.stderr);
+        assert_eq!(r.stderr.matches("異常停止").count(), 6, "{}", r.stderr);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 親が取った守りが指す `Lock` の値は、作ったルートが異常停止しても、守りを放すまで捨てない（PR #398 の指摘）。
+#[test]
+fn a_guard_held_by_the_parent_keeps_the_value_after_the_creator_aborts() {
+    let o = ok(r#"
+fn z0() -> Int
+  intent "z"
+  requires none
+  ensures none
+  effects none
+{
+  return 0;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, task.spawn, task.suspend, task.share
+{
+  return task.roots(1, |g| {
+    let (tx, rx) = task.channel();
+    let s = g.reserve();
+    s.start(tx, move |c| {
+      let l = Lock.new(Tmp { v: 41 });
+      c.send(l.clone());
+      task.yield();
+      task.yield();
+      let z = 1 / z0();
+    }, move |c| { console.log(&200); });
+    let l2 = rx.recv();
+    match l2.acquire() {
+      Ok(gd) => {
+        task.yield();
+        task.yield();
+        task.yield();
+        console.log(&(gd.get().v + 1));
+      }
+      Err(e) => { console.log(&3); }
+    }
+    return 7;
+  });
+}
+"#);
+    assert_eq!((o.value.as_str(), o.output.as_str()), ("7", "200\n42\n"));
+    assert_eq!(count(&o.drops, "Tmp { v: 41 }"), 1, "{:?}", o.drops);
+}
+
+/// 起動したが一度も動いていない（中断しない）`on_abort` を、集まりの取り消しで捨てるときも、接続を破棄する
+/// （PR #398 の指摘）。
+#[test]
+fn an_unstarted_on_abort_drops_the_conn_when_the_group_is_cancelled() {
+    let body = r#"
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  return task.roots(2, |g| {
+    let s = g.reserve();
+    s.start(Conn { id: 1 }, move |c| { let z = 1 / (c.id - c.id); }, move |c| { let n = c.id; });
+    task.yield();
+    let mut z = 0;
+    return 1 / z;
+  });
+}
+"#;
+    // 隔離した停止の報告は、ネイティブでは標準エラーに出る（評価器の捕まえた実行では出ない）ので、
+    // 突き合わせの代わりに、評価器とネイティブの破棄の記録をそれぞれ比べる。
+    let src = format!("{HEAD}{body}");
+    let e = sigil::ir_eval::run_with(&src, "run", &[], &opts()).expect_err("止まる");
+    assert_eq!(count(&e.drops, "Conn { id: 1 }"), 1, "{:?}", e.drops);
+    let (ran, drops) = common::native::native_drops(&[&src], "run", &[]);
+    assert_eq!(ran.code, Some(70), "{}", ran.stderr);
+    assert_eq!(drops, e.drops.to_vec(), "{}", ran.stderr);
+}

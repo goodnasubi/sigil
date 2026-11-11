@@ -456,6 +456,9 @@ impl<'a> L<'a> {
                                 | LockAcquire
                                 | AtomicLoad
                                 | IoWaitFd
+                                | RootsScope
+                                | RootReserve
+                                | RootStart
                         ),
                         ..
                     }
@@ -715,7 +718,10 @@ impl<'a> L<'a> {
             "Shared" => ir::Ty::Shared(one(&args)),
             "Cell" => ir::Ty::Cell(one(&args)),
             // 並行処理の取っ手は評価器では番号（ADR 0026）。共有の部品は `Cell` と同じ入れ物。
-            "Scope" | "TaskHandle" | "Sender" | "Receiver" => ir::Ty::Int,
+            // `RootGroup`・`RootSlot`（ADR 0031 決定 4-1）も同じく番号。
+            "Scope" | "TaskHandle" | "Sender" | "Receiver" | "RootGroup" | "RootSlot" => {
+                ir::Ty::Int
+            }
             // `clone` が同じ実体を指す（ADR 0026 決定 3）ので、`Shared<Cell<T>>` の形にする。
             "SyncShared" | "Atomic" => ir::Ty::Shared(Box::new(ir::Ty::Cell(one(&args)))),
             // `Lock` は評価器では番号。`LockGuard` は破棄で解放する持ち手なので、破棄される型にする。

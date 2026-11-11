@@ -718,8 +718,12 @@ impl<'a> L<'a> {
             "Shared" => ir::Ty::Shared(one(&args)),
             "Cell" => ir::Ty::Cell(one(&args)),
             // 並行処理の取っ手は評価器では番号（ADR 0026）。共有の部品は `Cell` と同じ入れ物。
-            // `RootGroup`・`RootSlot`（ADR 0031 決定 4-1）も同じく番号。
-            "Scope" | "TaskHandle" | "Sender" | "Receiver" | "RootGroup" | "RootSlot" => {
+            "Scope" | "TaskHandle" | "Sender" | "Receiver" => ir::Ty::Int,
+            // `RootGroup`・`RootSlot`（ADR 0031 決定 4-1）も番号。ただし検査器の前置き型にまだ無く、
+            // 利用者が同じ名前の型を宣言できるので、宣言があればそちらを優先する（6-3d で前置き型にする）。
+            "RootGroup" | "RootSlot"
+                if !self.structs.contains_key(n) && !self.enums.contains_key(n) =>
+            {
                 ir::Ty::Int
             }
             // `clone` が同じ実体を指す（ADR 0026 決定 3）ので、`Shared<Cell<T>>` の形にする。

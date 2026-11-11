@@ -42,3 +42,13 @@ fn calling_task_roots_still_fails_with_the_existing_error() {
     let d = format!("{e:?}");
     assert!(d.contains("UnknownName") && d.contains("`task`"), "{d}");
 }
+
+/// `RootGroup`・`RootSlot` は検査器の前置き型にまだ無いので、利用者が同じ名前の構造体を宣言できる。
+/// lowering の型の写し（番号）は、利用者の宣言を優先しなければならない（PR #394 の指摘）。
+#[test]
+fn user_structs_named_root_group_and_root_slot_still_work() {
+    let src = "module m.t\n  targets server\n  trust none\n\nstruct RootGroup {\n  n: Int,\n}\n\nstruct RootSlot {\n  g: RootGroup,\n  k: Int,\n}\n\nfn t() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let s = RootSlot { g: RootGroup { n: 40 }, k: 2 };\n  return s.g.n + s.k;\n}\n";
+    let r =
+        run_with(src, "t", &[], &Options::captured()).expect("利用者の構造体はこれまでどおり動く");
+    assert_eq!(r.value, "42");
+}

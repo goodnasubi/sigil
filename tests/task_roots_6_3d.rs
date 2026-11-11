@@ -873,25 +873,96 @@ fn a_failing_child_in_a_scope_stops_its_root_only() {
 
 /// 並列のワーカーで、同じルートの子が同時に異常停止しても、そのルートの停止は 1 つのワーカーだけが行う
 /// （PR #398 の指摘）。毎回、全部の `on_abort` が 1 回ずつ動き、漏れもデッドロックもない。
+///
+/// `on_abort` は標準出力に書かず、接続が持つ通信路で親へ番号を送り、親が `task.roots` の後でまとめて返す。
+/// 並列のワーカーの `console.log` は、行の途中で別のワーカーの出力と混ざりうる（書き出しが行ごとに 1 回の
+/// 書き込みでない）ので、出力の行で数えると、正当な揺れで落ちる（CI の run 42961850931 で `202201` を観測した）。
+/// 番号の数・和・2 乗の和で、1..=6 がちょうど 1 回ずつ届いたことを確かめる。
+const CHILD_FAILS_COLLECT: &str = r#"
+struct Req {
+  id: Int,
+  tx: Sender<Int>,
+}
+
+fn boom(n: Int) -> Int
+  intent "b"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = 0;
+  let mut a = 0;
+  while i < 2000 {
+    a = a + i;
+    i = i + 1;
+  }
+  return a / (n - n);
+}
+
+fn work(id: Int) -> Int
+  intent "w"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  return task.scope(|s| {
+    let a = s.spawn(move || boom(id));
+    let b = s.spawn(move || boom(id));
+    let d = s.spawn(move || boom(id));
+    return a.join() + b.join() + d.join();
+  });
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend, task.share
+{
+  let (tx, rx) = task.channel();
+  let k = task.roots(4, |g| {
+    let mut i = 1;
+    while i <= 6 {
+      let s = g.reserve();
+      s.start(Req { id: i, tx: tx.clone() }, move |c| { let r = work(c.id); }, move |c| { c.tx.send(c.id); });
+      i = i + 1;
+    }
+    return 0;
+  });
+  let mut n = 0;
+  let mut sum = 0;
+  let mut sq = 0;
+  while n < 6 {
+    let v = rx.recv();
+    sum = sum + v;
+    sq = sq + v * v;
+    n = n + 1;
+  }
+  return k + sum * 1000 + sq;
+}
+"#;
+
 #[test]
 fn simultaneous_failures_in_one_root_are_handled_once_with_several_workers() {
+    // 評価器（とワーカー 1 のネイティブの突き合わせ）で、期待する値を確かめる: 和 21、2 乗の和 91。
+    let o = ok(CHILD_FAILS_COLLECT);
+    assert_eq!(o.value, "21091");
     let dir = common::native::scratch("roots-race");
     let exe = dir.join("prog");
-    common::native::try_build(&[&format!("{HEAD}{CHILD_FAILS}")], "run", &exe, false)
-        .expect("ビルド");
+    common::native::try_build(
+        &[&format!("{HEAD}{CHILD_FAILS_COLLECT}")],
+        "run",
+        &exe,
+        false,
+    )
+    .expect("ビルド");
     for _ in 0..10 {
         let r =
             common::native::exec_env(&exe, &[], &[("SIGIL_RT_LIVE", "1"), ("SIGIL_WORKERS", "4")]);
         assert_eq!(r.code, Some(0), "{}", r.stderr);
-        let mut ids: Vec<&str> = r.stdout.lines().collect();
-        ids.sort_unstable();
-        assert_eq!(
-            ids,
-            ["201", "202", "203", "204", "205", "206", "7"],
-            "{}",
-            r.stdout
-        );
+        assert_eq!(r.stdout, "21091\n", "{}", r.stderr);
         assert!(r.stderr.contains("live: sigil_blocks=0"), "{}", r.stderr);
+        // 停止の報告はルートごとに 1 件（報告どうしも行の途中で混ざりうるので、見出しの数で数える）。
         assert_eq!(r.stderr.matches("異常停止").count(), 6, "{}", r.stderr);
     }
     let _ = std::fs::remove_dir_all(&dir);

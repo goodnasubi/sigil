@@ -18,6 +18,8 @@ use cranelift_module::Module;
 const SILENT: i64 = 1 << 62;
 /// 塊の頭の第 1 語に立つ「`Lock` の守り」の印（ADR 0030 決定 1、PR 5-2d）。最後の参照を破棄するとき、`Lock` の解放を知らせる。
 const GUARD: i64 = 1 << 61;
+/// 塊の頭の第 1 語に立つ「`RootSlot`」の印（ADR 0031 決定 4-1）。最後の参照を破棄するとき、使われていなければ上限を返す。
+const ROOT_SLOT: i64 = 1 << 60;
 /// 解放した塊の参照の数の場所に書く印（`val.rs` の `FREED` と同じ）。
 const FREED: i64 = 0x5afe_dead_0000_0001;
 /// 二重解放の停止の報告（補足 G-4）。
@@ -126,6 +128,14 @@ impl<'a, 'p> Fx<'a, 'p> {
         let h = self.b.ins().iadd_imm_s(w, -16);
         let hw = self.ld(h, 0);
         let s = self.b.ins().bor_imm_s(hw, GUARD);
+        self.st(s, h, 0);
+    }
+
+    /// スロットの塊 `w`（[0 集まり][8 使用済み]）の頭にスロットの印を立てる。
+    pub(super) fn set_root_slot(&mut self, w: Value) {
+        let h = self.b.ins().iadd_imm_s(w, -16);
+        let hw = self.ld(h, 0);
+        let s = self.b.ins().bor_imm_s(hw, ROOT_SLOT);
         self.st(s, h, 0);
     }
 
@@ -415,7 +425,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let fv = self.ic(FREED);
         self.st(fv, h, 8);
         let hd = self.ld(h, 0);
-        let n = self.b.ins().band_imm_s(hd, !(SILENT | GUARD));
+        let n = self.b.ins().band_imm_s(hd, !(SILENT | GUARD | ROOT_SLOT));
         let total = self.b.ins().iadd_imm_s(n, 16);
         let eight = self.ic(8);
         self.rt("raw_free", &[h, total, eight]);
@@ -636,6 +646,27 @@ impl<'a, 'p> Fx<'a, 'p> {
                     self.b.switch_to_block(rel);
                     let l = self.ld(w, 8);
                     self.rt("sched_lock_release", &[l]);
+                    self.b.ins().jump(after, NOARGS);
+                    self.b.switch_to_block(after);
+                }
+                // `RootSlot`（頭にスロットの印）の最後の参照が消えた: 起動に使われていなければスロットを返す。
+                if self.cg.rt.contains_key("sched_slot_release") {
+                    let h = self.b.ins().iadd_imm_s(w, -16);
+                    let hw = self.ld(h, 0);
+                    let m = self.b.ins().band_imm_s(hw, ROOT_SLOT);
+                    let (chk, rel, after) = (
+                        self.b.create_block(),
+                        self.b.create_block(),
+                        self.b.create_block(),
+                    );
+                    self.b.ins().brif(m, chk, NOARGS, after, NOARGS);
+                    // スロットの塊だけが語 8（使用済み）を持つ。
+                    self.b.switch_to_block(chk);
+                    let used = self.ld(w, 8);
+                    self.b.ins().brif(used, after, NOARGS, rel, NOARGS);
+                    self.b.switch_to_block(rel);
+                    let g = self.ld(w, 0);
+                    self.rt("sched_slot_release", &[g]);
                     self.b.ins().jump(after, NOARGS);
                     self.b.switch_to_block(after);
                 }

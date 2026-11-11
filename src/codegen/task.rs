@@ -55,6 +55,8 @@ pub(crate) struct Plan {
     pub frame_fp: FuncId,
     pub sched_run: FuncId,
     pub worker_run: FuncId,
+    /// `task.roots` を使う（`uses_roots`）。
+    pub roots: bool,
 }
 
 /// ブロックしうる並行処理の操作か。
@@ -71,7 +73,24 @@ pub(crate) fn blocking(b: Builtin) -> bool {
             | AtomicLoad
             | IoWaitFd
             | TaskTimeout
+            | RootsScope
+            | RootReserve
     )
+}
+
+/// プログラムが複数ルートの入口（`task.roots`）を使うか（回収済みの検査・`LockBroken` の生成を足す）。
+fn uses_roots(p: &Program) -> bool {
+    p.funcs.iter().any(|f| {
+        f.blocks.iter().any(|b| {
+            matches!(
+                &b.term,
+                Term::Call {
+                    func: Callee::Builtin(Builtin::RootsScope),
+                    ..
+                }
+            )
+        })
+    })
 }
 
 fn visit_operand(o: &Operand, out: &mut Vec<usize>) {
@@ -258,6 +277,7 @@ pub(super) fn define_all(cg: &mut Cg<'_>) -> Result<(), CgError> {
         frame_fp,
         sched_run,
         worker_run,
+        roots: uses_roots(p),
     });
 
     let mut idx = 2_000_000u32;

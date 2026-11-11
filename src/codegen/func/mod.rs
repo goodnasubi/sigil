@@ -424,6 +424,20 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.scall(SFn::ReportStop, &[mp, ml]);
     }
 
+    /// 停止の報告を標準エラーに出して戻る（隔離したルートの異常停止。ADR 0031 決定 4-2）。
+    pub(super) fn report_stop_soft(&mut self, st: Value) {
+        let base = self.data_addr(self.cg.msg_table);
+        let idx = self.b.ins().iadd_imm_s(st, -1);
+        let off = self.b.ins().imul_imm_s(idx, 16);
+        let ent = self.b.ins().iadd(base, off);
+        let (mp, ml) = (self.ld(ent, 0), self.ld(ent, 8));
+        let two = self.ic(2);
+        self.scall(SFn::WriteAll, &[two, mp, ml]);
+        let (np, nl) = self.lit_ref(b"\n");
+        let two = self.ic(2);
+        self.scall(SFn::WriteAll, &[two, np, nl]);
+    }
+
     /// 確保器のシムの本体（ADR 0025 補足 B-2）: Sigil の関数 `target` を呼び、値を返す。
     /// 確保器の中の停止（算術のあふれなど）は、生成側の `sigil_report_stop` が報告を出して
     /// `exit_group(70)` で止める（補足 A-4・I-6）。戻らない。

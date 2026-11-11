@@ -155,8 +155,11 @@ impl<'a, 'p> Fx<'a, 'p> {
         for (bi, bb) in f.blocks.iter().enumerate() {
             if let Some(kind) = task::classify(&bb.term, &susp, ind) {
                 let call_blk = self.b.create_block();
-                let wait_blk = matches!(kind, SiteKind::Block(Builtin::TaskScope))
-                    .then(|| self.b.create_block());
+                let wait_blk = matches!(
+                    kind,
+                    SiteKind::Block(Builtin::TaskScope | Builtin::RootsScope)
+                )
+                .then(|| self.b.create_block());
                 sites.insert(
                     bi,
                     SiteInfo {
@@ -398,6 +401,11 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.timeout_site(si, args, dest, dty, next);
             return;
         }
+        if b == RootsScope {
+            self.roots_site(si, args, dest, dty, next, stop);
+            return;
+        }
+        let roots = self.cg.task.as_ref().is_some_and(|t| t.roots);
         // 操作を起こして、ブロックしなかったときの値（ブロックしたときは意味がない）を作る。
         let (r, force) = match b {
             TaskYield => {
@@ -425,11 +433,33 @@ impl<'a, 'p> Fx<'a, 'p> {
             }
             ChanRecv => {
                 let (c, _) = self.val(&args[0]);
-                (self.rt("sched_chan_recv", &[c]), false)
+                let r = self.rt("sched_chan_recv", &[c]);
+                if roots {
+                    self.dead_check("通信路", stop);
+                }
+                (r, false)
             }
             LockAcquire => {
                 let (l, _) = self.val(&args[0]);
-                (self.rt("sched_lock_acquire", &[l]), false)
+                let r = self.rt("sched_lock_acquire", &[l]);
+                if roots {
+                    self.dead_check("Lock", stop);
+                }
+                (r, false)
+            }
+            RootReserve => {
+                let (g, _) = self.val(&args[0]);
+                let frame = self.frame();
+                self.st(g, frame, self.site_off(k, 1));
+                let r = self.rt("sched_reserve", &[g]);
+                let closed = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
+                let code = self.cg.code_for(
+                    stop,
+                    Some(StopKind::StdRequiresViolated),
+                    Some("RootGroup.reserve: task.roots の範囲が終わっている"),
+                );
+                self.fail_if(closed, code);
+                (r, false)
             }
             _ => unreachable!("中断点でない操作"),
         };
@@ -448,7 +478,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.suspend_ret();
         if !force {
             self.b.switch_to_block(okb);
-            let v = self.post_block(b, r);
+            let v = self.post_block(b, r, k);
             self.finish_call(v, dty, dty, dest, next);
         }
         // 起こされた。取り消しならそのまま巻き戻す。
@@ -458,6 +488,18 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().brif(can, cb, NOARGS, rb, NOARGS);
         self.b.switch_to_block(cb);
         // 起こされたが再開前に取り消された: 渡された所有値を破棄する（評価器の cancel_task が resume を捨てるのと同じ）。
+        if b == RootReserve {
+            // 渡されたスロットを受け取る前に取り消された: スロットを返す（評価器では起床の値の破棄で返る）。
+            let has = self.rt("sched_has_resume", &[]);
+            let (rel, after) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(has, rel, NOARGS, after, NOARGS);
+            self.b.switch_to_block(rel);
+            self.rt("sched_take_resume", &[]);
+            let g = self.ld(self.frame(), self.site_off(k, 1));
+            self.rt("sched_slot_release", &[g]);
+            self.b.ins().jump(after, NOARGS);
+            self.b.switch_to_block(after);
+        }
         if matches!(b, TaskJoin | ChanRecv | AtomicLoad) {
             let has = self.rt("sched_has_resume", &[]);
             let (dropb, after) = (self.b.create_block(), self.b.create_block());
@@ -474,7 +516,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.jump_cleanup(c);
         self.b.switch_to_block(rb);
         let r2 = self.rt("sched_take_resume", &[]);
-        let v = self.post_block(b, r2);
+        let v = self.post_block(b, r2, k);
         self.finish_call(v, dty, dty, dest, next);
     }
 
@@ -569,20 +611,73 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
     }
 
-    /// 操作の結果の語を、型の値にする（`Lock` の取得は `Ok(LockGuard)` を作る）。
-    fn post_block(&mut self, b: Builtin, r: Value) -> Value {
-        if b == Builtin::LockAcquire {
-            // 守りの塊: [0 = 空（破棄で何も破棄しない）][8 = Lock のレコード]。破棄の知らせの印を頭に立てる。
-            let g = self.blk(16);
-            // 先頭の語は明示的に 0 にする（再利用された塊の古い値を、破棄が T の値として解放しないため）。
+    /// `cond` が真なら、移動して受け取った値 `v`（型 `t`）を破棄してから符号 `code` で巻き戻す。移動元の局所は
+    /// 空なので、後始末の連鎖では破棄されない（評価器は停止でも所有する値を破棄する）。
+    fn fail_dropping(&mut self, cond: Value, code: i64, t: &Ty, v: Value) {
+        let (bad, ok) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(cond, bad, NOARGS, ok, NOARGS);
+        self.b.switch_to_block(bad);
+        self.drop_val(t, v);
+        let c = self.ic(code);
+        self.jump_cleanup(c);
+        self.b.switch_to_block(ok);
+    }
+
+    /// 直前の操作が、回収済みの通信路・`Lock`（作ったルートが終わった。ADR 0031 決定 4-2）に当たっていたら停止に
+    /// する。回収済みかの判定は、操作と同じ排他の中でスケジューラが行い、ワーカー専用の印に残す（操作は行わない）。
+    fn dead_check(&mut self, what: &str, stop: usize) {
+        let dead = self.rt("sched_op_dead", &[]);
+        let code = self.cg.code_for(
+            stop,
+            Some(StopKind::StdRequiresViolated),
+            Some(&format!(
+                "回収済みの{what}を使った（作ったルートが終わっている。ADR 0031 決定 4-2）"
+            )),
+        );
+        self.fail_if(dead, code);
+    }
+
+    /// 操作の結果の語を、型の値にする（`Lock` の取得は `Ok(LockGuard)`、壊れていれば `Err(LockBroken)`、
+    /// `reserve` は `RootSlot` を作る）。
+    fn post_block(&mut self, b: Builtin, r: Value, k: usize) -> Value {
+        if b == Builtin::RootReserve {
+            // スロットの塊: [0 集まりの番号][8 使用済み]。頭にスロットの印を立てる（破棄で上限を返す）。
+            let g = self.ld(self.frame(), self.site_off(k, 1));
+            let sl = self.blk(16);
+            self.st(g, sl, 0);
             let z = self.ic(0);
-            self.st(z, g, 0);
-            self.st(r, g, 8);
-            self.set_guard(g);
-            self.mk_enum_c(0, &[g])
+            self.st(z, sl, 8);
+            self.set_root_slot(sl);
+            return sl;
+        }
+        if b == Builtin::LockAcquire && self.cg.task.as_ref().is_some_and(|t| t.roots) {
+            // 壊れた Lock（-1）: Err(LockBroken)。
+            let broken = self.b.ins().icmp_imm_s(IntCC::Equal, r, -1);
+            return self.branch(
+                broken,
+                |s| {
+                    let lb = s.blk(8);
+                    s.mk_enum_c(1, &[lb])
+                },
+                |s| s.guard_ok(r),
+            );
+        }
+        if b == Builtin::LockAcquire {
+            self.guard_ok(r)
         } else {
             r
         }
+    }
+
+    /// `Ok(LockGuard)`。守りの塊: [0 = 空（破棄で何も破棄しない）][8 = Lock のレコード]。破棄の知らせの印を頭に立てる。
+    fn guard_ok(&mut self, r: Value) -> Value {
+        let g = self.blk(16);
+        // 先頭の語は明示的に 0 にする（再利用された塊の古い値を、破棄が T の値として解放しないため）。
+        let z = self.ic(0);
+        self.st(z, g, 0);
+        self.st(r, g, 8);
+        self.set_guard(g);
+        self.mk_enum_c(0, &[g])
     }
 
     /// `task.scope(f)`: 範囲を作り、本体を子として呼び、戻ったら子のタスクの完了を待つ。
@@ -647,6 +742,92 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.finish_call(v, dty, dty, dest, next);
     }
 
+    /// `task.roots(limit, f)`: ルートの集まりを作り、本体を子として呼び、戻ったら起動したルートの終わりを待つ
+    /// （ADR 0031 決定 4-1）。本体が失敗・取り消されたら、起動したルートを起動の逆順に取り消す（決定 4-2 の (d)）。
+    fn roots_site(
+        &mut self,
+        si: &SiteInfo,
+        args: &[Operand],
+        dest: &Place,
+        dty: &Ty,
+        next: usize,
+        stop: usize,
+    ) {
+        let k = si.k;
+        let (limit, _) = self.val(&args[0]);
+        let lo = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, limit, 1);
+        let hi = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::SignedGreaterThan, limit, 4096);
+        let bad = self.b.ins().bor(lo, hi);
+        let code = self.cg.code_for(
+            stop,
+            Some(StopKind::StdRequiresViolated),
+            Some("task.roots: limit は 1 以上 4096 以下"),
+        );
+        self.fail_if(bad, code);
+        let frame = self.frame();
+        let (fv, _) = self.own(&args[1]);
+        let gid = self.rt("sched_roots_begin", &[limit]);
+        let aux1 = self.site_off(k, 1);
+        let aux2 = self.site_off(k, 2);
+        self.st(gid, frame, aux1);
+        let gref = self.b.ins().iadd_imm_s(frame, aux1 as i64);
+        let argv = self.zero_tmp(8);
+        self.st(gref, argv, 0);
+        let one = self.ic(1);
+        let start = self.cg.task.as_ref().expect("計画").fn_start;
+        let child = self.plan_fn(start, &[fv, argv, one, one])[0];
+        self.st(child, frame, self.site_off(k, 0));
+        let s = self.ic(1 + 2 * k as i64);
+        self.st(s, frame, 16);
+        self.b.ins().jump(si.call_blk, NOARGS);
+        self.b.switch_to_block(si.call_blk);
+        let (v, code) = self.child_step(k);
+        let (fail, okb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(code, fail, NOARGS, okb, NOARGS);
+        self.b.switch_to_block(fail);
+        let g = self.ld(self.frame(), aux1);
+        self.cancel_loop_by(Some(g), "sched_group_cancel_next");
+        self.jump_cleanup(code);
+        self.b.switch_to_block(okb);
+        let frame = self.frame();
+        let g = self.ld(frame, aux1);
+        let wait = self.rt("sched_roots_end", &[g]);
+        let (wb, done) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(wait, wb, NOARGS, done, NOARGS);
+        self.b.switch_to_block(wb);
+        self.st(v, frame, aux2);
+        let s2 = self.ic(2 + 2 * k as i64);
+        self.st(s2, frame, 16);
+        self.suspend_ret();
+        self.b.switch_to_block(done);
+        let (_, drain) = self.plan_ids();
+        self.plan_fn(drain, &[]);
+        self.finish_call(v, dty, dty, dest, next);
+        // 起動したルートがすべて終わって起こされた。取り消しなら、残っているルートを取り消してから巻き戻す。
+        let wblk = si.wait_blk.expect("roots の待ち");
+        self.b.switch_to_block(wblk);
+        let frame = self.frame();
+        let can = self.cancelling();
+        let (cb, rb) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(can, cb, NOARGS, rb, NOARGS);
+        self.b.switch_to_block(cb);
+        let g = self.ld(frame, aux1);
+        self.cancel_loop_by(Some(g), "sched_group_cancel_next");
+        let frame = self.frame();
+        let w = self.ld(frame, aux2);
+        let z = self.ic(0);
+        self.st(z, frame, aux2);
+        self.drop_val(dty, w);
+        let c = self.ic(CANCEL_CODE);
+        self.jump_cleanup(c);
+        self.b.switch_to_block(rb);
+        let v = self.ld(frame, aux2);
+        self.finish_call(v, dty, dty, dest, next);
+    }
+
     /// 中断しない並行処理の操作と、入れ子の呼び出しの中での中断点（評価器と同じ停止）。
     pub(super) fn task_builtin(
         &mut self,
@@ -669,6 +850,16 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (x, xt) = self.own(&args[1]);
                 let df = self.drop_addr(&xt);
                 self.rt("sched_chan_send", &[id, x, df]);
+                if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+                    // 回収済みなら送らずに戻る: 値はこちらが破棄してから停止する（評価器と同じ順）。
+                    let dead = self.rt("sched_op_dead", &[]);
+                    let code = self.cg.code_for(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("回収済みの通信路を使った（作ったルートが終わっている。ADR 0031 決定 4-2）"),
+                    );
+                    self.fail_dropping(dead, code, &xt, x);
+                }
                 (self.ic(0), u)
             }
             LockNew => {
@@ -701,6 +892,46 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let child = self.plan_fn(start, &[fv, argv, z, one])[0];
                 let rd = self.ld(child, 48);
                 (self.rt("sched_spawn", &[sid, child, rd]), u)
+            }
+            RootStart => {
+                let Some(start) = self.cg.task.as_ref().map(|t| t.fn_start) else {
+                    return Some((self.unsupported("タスクを起こす関数が変換されていない"), u));
+                };
+                // スロット: 使用済みなら停止。集まりが閉じていれば停止。
+                let (sl, slt) = self.own(&args[0]);
+                let used = self.ld(sl, 8);
+                let code = self.cg.code_for(
+                    stop,
+                    Some(StopKind::StdRequiresViolated),
+                    Some("RootSlot.start: 使えないスロット"),
+                );
+                self.fail_dropping(used, code, &slt, sl);
+                let gid = self.ld(sl, 0);
+                let closed = self.rt("sched_group_closed", &[gid]);
+                let code = self.cg.code_for(
+                    stop,
+                    Some(StopKind::StdRequiresViolated),
+                    Some("RootSlot.start: task.roots の範囲が終わっている"),
+                );
+                self.fail_dropping(closed, code, &slt, sl);
+                // スロットを消費する（以後の破棄では上限を返さない。上限はルートの終わりで返す）。
+                let one = self.ic(1);
+                self.st(one, sl, 8);
+                self.drop_val(&slt, sl);
+                let (conn, ct) = self.own(&args[1]);
+                let (gv, _) = self.own(&args[2]);
+                let (oa, oat) = self.own(&args[3]);
+                let cd = self.drop_addr(&ct);
+                let od = self.drop_addr(&oat);
+                // 接続はルートの外（起動の記録の語 2）が持ち、g へはその語の番地（借用）を渡す。
+                let rr = self.rt("sched_root_new", &[gid, conn, cd, oa, od]);
+                let cref = self.b.ins().iadd_imm_s(rr, 16);
+                let argv = self.zero_tmp(8);
+                self.st(cref, argv, 0);
+                let child = self.plan_fn(start, &[gv, argv, one, one])[0];
+                let rd = self.ld(child, 48);
+                self.rt("sched_root_launch", &[rr, child, rd]);
+                (self.ic(0), u)
             }
             TaskAllOk | TaskRace => (
                 self.unsupported(
@@ -762,6 +993,18 @@ impl<'a, 'p> Fx<'a, 'p> {
         let (cb, go) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(can, cb, NOARGS, go, NOARGS);
         self.b.switch_to_block(cb);
+        // 一度も実行せずに取り消された: 所有する引数（on_abort の接続）を破棄する。
+        let df = self.ld(frame, HDR + 24);
+        let (dropb, ret) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(df, dropb, NOARGS, ret, NOARGS);
+        self.b.switch_to_block(dropb);
+        let a0 = self.ld(frame, HDR + 16);
+        let z = self.ic(0);
+        self.st(z, frame, HDR + 24);
+        let sig = self.b.import_signature(shim_sig(self.cg.cc, 1, 'v'));
+        self.b.ins().call_indirect(sig, df, &[a0]);
+        self.b.ins().jump(ret, NOARGS);
+        self.b.switch_to_block(ret);
         let z = self.ic(0);
         let c = self.ic(CANCEL_CODE);
         self.b.ins().return_(&[z, c]);
@@ -859,7 +1102,8 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().jump(merge, &[BlockArg::Value(child)]);
 
         self.b.switch_to_block(pb);
-        let sz = self.ic(HDR as i64 + 24);
+        // [関数の値][引数の数][引数][引数の破棄（0 なら所有しない。on_abort の接続だけが使う）]
+        let sz = self.ic(HDR as i64 + 32);
         let eight = self.ic(8);
         let fr = self.rt("raw_alloc", &[sz, eight]);
         let z = self.ic(0);
@@ -1160,11 +1404,32 @@ impl<'a, 'p> Fx<'a, 'p> {
             Some("デッドロック（進行できるタスクがない）"),
         );
         let c = self.ic(code);
+        if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+            // 起動したルートが生きていれば、親ではなくそのルートを止める（ADR 0031 決定 4-2）。
+            let rr = self.rt("sched_deadlock_root", &[]);
+            let (iso, glob) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(rr, iso, NOARGS, glob, NOARGS);
+            self.b.switch_to_block(iso);
+            self.isolate_root(rr, c);
+            self.rt("sched_step_end", &[]);
+            self.b.ins().jump(head, NOARGS);
+            self.b.switch_to_block(glob);
+        }
         self.rt("sched_fail", &[c]);
         let z = self.ic(0);
         self.b.ins().return_(&[z, c]);
 
         self.b.switch_to_block(run);
+        if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+            // タスクを動かす前に、巻き戻しの印を下ろす。
+            let base = self.region_base();
+            let ua = self
+                .b
+                .ins()
+                .iadd_imm_s(base, crate::codegen::TCB_UNWIND_OFF);
+            let z = self.ic(0);
+            self.st(z, ua, 0);
+        }
         let sig = self.sigref(1);
         let stepf = self.ld(f, 0);
         let inst = self.b.ins().call_indirect(sig, stepf, &[f]);
@@ -1201,10 +1466,71 @@ impl<'a, 'p> Fx<'a, 'p> {
 
         self.b.switch_to_block(fail);
         self.plan_fn(done, &[f]);
+        if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+            // 起動したルートの異常停止は、そのルートだけを止める（隔離。ADR 0031 決定 4-2）。
+            let rr = self.rt("sched_root_abort", &[r[1]]);
+            let (iso, glob, chk, taken) = (
+                self.b.create_block(),
+                self.b.create_block(),
+                self.b.create_block(),
+                self.b.create_block(),
+            );
+            self.b.ins().brif(rr, chk, NOARGS, glob, NOARGS);
+            // 同じルートの停止を別のワーカーが引き受けている（-1）: そのワーカーに任せて続ける（報告はルートごとに 1 件）。
+            self.b.switch_to_block(chk);
+            let other = self.b.ins().icmp_imm_s(IntCC::Equal, rr, -1);
+            self.b.ins().brif(other, taken, NOARGS, iso, NOARGS);
+            self.b.switch_to_block(taken);
+            self.plan_fn(drain, &[]);
+            self.rt("sched_step_end", &[]);
+            self.b.ins().jump(head, NOARGS);
+            self.b.switch_to_block(iso);
+            self.isolate_root(rr, r[1]);
+            self.rt("sched_step_end", &[]);
+            self.b.ins().jump(head, NOARGS);
+            self.b.switch_to_block(glob);
+        }
         self.rt("sched_fail", &[r[1]]);
         self.rt("sched_step_end", &[]);
         let z = self.ic(0);
         self.b.ins().return_(&[z, r[1]]);
+    }
+
+    /// 起動したルート（記録 `rr`）を止める: 停止を報告し、そのルートのタスクを作った順の逆に巻き戻し、作った通信路と
+    /// `Lock` を捨てる。`g` のルートなら、接続を破棄せずに新しいルートで `on_abort(conn)` を起動する。
+    fn isolate_root(&mut self, rr: Value, code: Value) {
+        self.report_stop_soft(code);
+        self.cancel_loop_by(Some(rr), "sched_root_cancel_next");
+        let again = self.rt("sched_root_abort_end", &[rr]);
+        let (re, end) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(again, re, NOARGS, end, NOARGS);
+        self.b.switch_to_block(re);
+        let start = self.cg.task.as_ref().expect("計画").fn_start;
+        let oa = self.ld(again, 32);
+        let conn = self.ld(again, 16);
+        let cd = self.ld(again, 24);
+        let argv = self.zero_tmp(8);
+        self.st(conn, argv, 0);
+        let one = self.ic(1);
+        let child = self.plan_fn(start, &[oa, argv, one, one])[0];
+        // 中断しない on_abort（sigil_plain_step の枠）は、実行前に取り消されたときに接続を破棄できるよう破棄の関数を持たせる。
+        let plain = self.cg.task.as_ref().expect("計画").plain_step;
+        let pr = self.cg.m.declare_func_in_func(plain, self.b.func);
+        let pa = self.b.ins().func_addr(types::I64, pr);
+        let stepf = self.ld(child, 0);
+        let is_plain = self.b.ins().icmp(IntCC::Equal, stepf, pa);
+        let (setb, cont) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(is_plain, setb, NOARGS, cont, NOARGS);
+        self.b.switch_to_block(setb);
+        self.st(cd, child, HDR + 24);
+        self.b.ins().jump(cont, NOARGS);
+        self.b.switch_to_block(cont);
+        let rd = self.ld(child, 48);
+        self.rt("sched_root_launch", &[again, child, rd]);
+        self.b.ins().jump(end, NOARGS);
+        self.b.switch_to_block(end);
+        let (_, drain) = self.plan_ids();
+        self.plan_fn(drain, &[]);
     }
 
     /// 残りのタスクを新しいものから順に取り消し、後始末をして、符号 `code` の停止を返す。

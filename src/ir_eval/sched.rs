@@ -1383,10 +1383,8 @@ impl<'p> M<'p> {
                 }
             }
             RootStart => {
+                // スロットだけを先に受け取って検べる（停止するときは、接続はまだ局所にあり、後始末で破棄される）。
                 let slot = self.owned(locals, &args[0]);
-                let conn = self.owned(locals, &args[1]);
-                let g = self.read(locals, &args[2]);
-                let on_abort = self.read(locals, &args[3]);
                 let tok = match &slot {
                     Val::RootSlot(t) if !t.used.get() => Rc::clone(t),
                     _ => {
@@ -1409,6 +1407,9 @@ impl<'p> M<'p> {
                 tok.used.set(true);
                 drop(tok);
                 drop(slot);
+                let conn = self.owned(locals, &args[1]);
+                let g = self.read(locals, &args[2]);
+                let on_abort = self.read(locals, &args[3]);
                 let conn_slot = new_slot(conn);
                 let cref = Val::Ref(Ptr {
                     slot: Rc::clone(&conn_slot),

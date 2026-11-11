@@ -1139,3 +1139,62 @@ fn run() -> Int
         "{drops:?}"
     );
 }
+
+/// 範囲の外へ持ち出したスロットの `start` が停止するとき、スロットは破棄される（起動したルートの中で繰り返しても
+/// 漏れない。PR #398 の指摘）。停止は隔離され、親は動き続ける。
+const START_AFTER_END_IN_ROOTS: &str = r#"
+fn inner(c: &Conn)
+  intent "i"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend
+{
+  let s = task.roots(1, |h| { return h.reserve(); });
+  s.start(Conn { id: c.id + 10 }, move |d| { }, move |d| { });
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, task.spawn, task.suspend
+{
+  return task.roots(2, |g| {
+    let mut i = 1;
+    while i <= 3 {
+      let s = g.reserve();
+      s.start(Conn { id: i }, move |c| { inner(&c); }, move |c| { console.log(&(200 + c.id)); });
+      i = i + 1;
+    }
+    return 7;
+  });
+}
+"#;
+
+#[test]
+fn a_slot_is_dropped_when_start_stops_after_the_group_ended() {
+    let o = ok(START_AFTER_END_IN_ROOTS);
+    assert_eq!(
+        (o.value.as_str(), o.output.as_str()),
+        ("7", "201\n202\n203\n")
+    );
+    let dir = common::native::scratch("roots-slot-leak");
+    let exe = dir.join("prog");
+    common::native::try_build(
+        &[&format!("{HEAD}{START_AFTER_END_IN_ROOTS}")],
+        "run",
+        &exe,
+        false,
+    )
+    .expect("ビルド");
+    let r = common::native::exec_env(&exe, &[], &[("SIGIL_RT_LIVE", "1")]);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    assert!(r.stderr.contains("live: sigil_blocks=0"), "{}", r.stderr);
+    assert_eq!(
+        r.stderr.matches("範囲が終わっている").count(),
+        3,
+        "{}",
+        r.stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

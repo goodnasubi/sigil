@@ -611,6 +611,18 @@ impl<'a, 'p> Fx<'a, 'p> {
         }
     }
 
+    /// `cond` が真なら、移動して受け取った値 `v`（型 `t`）を破棄してから符号 `code` で巻き戻す。移動元の局所は
+    /// 空なので、後始末の連鎖では破棄されない（評価器は停止でも所有する値を破棄する）。
+    fn fail_dropping(&mut self, cond: Value, code: i64, t: &Ty, v: Value) {
+        let (bad, ok) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(cond, bad, NOARGS, ok, NOARGS);
+        self.b.switch_to_block(bad);
+        self.drop_val(t, v);
+        let c = self.ic(code);
+        self.jump_cleanup(c);
+        self.b.switch_to_block(ok);
+    }
+
     /// 直前の操作が、回収済みの通信路・`Lock`（作ったルートが終わった。ADR 0031 決定 4-2）に当たっていたら停止に
     /// する。回収済みかの判定は、操作と同じ排他の中でスケジューラが行い、ワーカー専用の印に残す（操作は行わない）。
     fn dead_check(&mut self, what: &str, stop: usize) {
@@ -841,18 +853,12 @@ impl<'a, 'p> Fx<'a, 'p> {
                 if self.cg.task.as_ref().is_some_and(|t| t.roots) {
                     // 回収済みなら送らずに戻る: 値はこちらが破棄してから停止する（評価器と同じ順）。
                     let dead = self.rt("sched_op_dead", &[]);
-                    let (db, cont) = (self.b.create_block(), self.b.create_block());
-                    self.b.ins().brif(dead, db, NOARGS, cont, NOARGS);
-                    self.b.switch_to_block(db);
-                    self.drop_val(&xt, x);
                     let code = self.cg.code_for(
                         stop,
                         Some(StopKind::StdRequiresViolated),
                         Some("回収済みの通信路を使った（作ったルートが終わっている。ADR 0031 決定 4-2）"),
                     );
-                    let c = self.ic(code);
-                    self.jump_cleanup(c);
-                    self.b.switch_to_block(cont);
+                    self.fail_dropping(dead, code, &xt, x);
                 }
                 (self.ic(0), u)
             }
@@ -899,7 +905,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                     Some(StopKind::StdRequiresViolated),
                     Some("RootSlot.start: 使えないスロット"),
                 );
-                self.fail_if(used, code);
+                self.fail_dropping(used, code, &slt, sl);
                 let gid = self.ld(sl, 0);
                 let closed = self.rt("sched_group_closed", &[gid]);
                 let code = self.cg.code_for(
@@ -907,7 +913,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                     Some(StopKind::StdRequiresViolated),
                     Some("RootSlot.start: task.roots の範囲が終わっている"),
                 );
-                self.fail_if(closed, code);
+                self.fail_dropping(closed, code, &slt, sl);
                 // スロットを消費する（以後の破棄では上限を返さない。上限はルートの終わりで返す）。
                 let one = self.ic(1);
                 self.st(one, sl, 8);

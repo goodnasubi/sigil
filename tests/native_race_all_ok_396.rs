@@ -295,6 +295,7 @@ fn inner(mode: Int) -> Token
   ensures none
   effects task.spawn, task.suspend
 {
+  let held = Token { id: 90 };
   if mode == 0 {
     let mut gs = List.new();
     gs.push(|| Token { id: 1 });
@@ -371,6 +372,26 @@ fn multiple_workers_finish_both_combinators_without_leaks() {
             assert!(["7", "9"].contains(&got.stdout.trim()));
         }
         assert!(got.stderr.contains("sigil_blocks=0"), "{}", got.stderr);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn multiple_workers_cancel_nested_selections_without_leaks() {
+    let src = source(CANCELLED_RESULTS);
+    let dir = common::native::scratch("nested-selection-workers");
+    let exe = dir.join("prog");
+    common::native::try_build(&[&src], "cancel_selected", &exe, false).unwrap();
+    for mode in ["0", "1", "2"] {
+        for _ in 0..10 {
+            let got = common::native::exec_env(
+                &exe,
+                &[mode.to_string()],
+                &[("SIGIL_WORKERS", "4"), ("SIGIL_RT_LIVE", "1")],
+            );
+            assert_eq!(got.code, Some(0), "{}", got.stderr);
+            assert!(got.stderr.contains("sigil_blocks=0"), "{}", got.stderr);
+        }
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

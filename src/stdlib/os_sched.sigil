@@ -15,7 +15,7 @@ module std.os.sched
 //   の旗を立てて 0 を返す。生成コードは旗を見て、タスクの状態を保存して中断を返す。起こされるときの値は `take_resume` で渡る。
 // - `Lock` の解放は、評価器と同じく遅延して反映する（`lock_release` は事象を積むだけで、次の `lock_acquire` の入口と
 //   `next_task` の入口で `settle` が次の待機者へ渡す）。タスクの起こす順序が評価器と一致する。
-// - 範囲は通常の範囲（`task.scope`）だけ。`timeout`・`race`・`all_ok` は未対応（生成コードがビルドで止める）。
+// - `task.scope`・`timeout`・`race`・`all_ok` の範囲を管理する。選択する範囲は最初の完了／Err を排他の下で記録する。
 // - 異常停止の隔離（ルートタスク単位）と `LockBroken` は、`task.roots` が起動したルートについて持つ（ADR 0031 決定 4、
 //   PR 6-3d）。入口のルート（番号 0）の異常停止は、従来どおりプログラム全体の停止。タスクは属するルート（T_ROOT）を持つ。
 // - 共有の表・待ち行列・通知の世代は 1 本の futex 排他で守り、タスク本体は排他の外で並列に実行する。
@@ -46,7 +46,8 @@ module std.os.sched
 //
 // タスクのレコードの語: 0 状態, 1 枠, 2 起床の値, 3 結果, 4 結果の破棄, 5 属する範囲, 6 合流待ち, 7 実行可能の次,
 // 8 待機の次, 9 番号, 10 眠りの時刻, 11 眠りの連番, 12 眠りの次, 13 待っている範囲, 14 結果あり, 15 兄弟の次。
-// 範囲: 0 生きている子の数, 1 待っているタスク, 2 子の先頭, 3 子の末尾。
+// 範囲: 0 生きている子の数, 1 待っているタスク, 2 子の先頭, 3 子の末尾, 4 作ったタスク,
+// 5 選択の種類（0 通常、1 race、2 all_ok）, 6 最初に完了した子／Err の子, 7 敗者の巻き戻し中, 8 全子の登録済み。
 // チャネル: 0 項の先頭, 1 項の末尾（項は [次][値][破棄]）, 2 待機の先頭, 3 待機の末尾。
 // Lock: 0 値（番地そのもの）, 1 保持者, 2 待機の先頭, 3 待機の末尾, 4 値の破棄。
 
@@ -99,7 +100,9 @@ global T_ROOT: Int = 26
 global T_SROOT: Int = 27
 // 異常停止したルートのタスク。このタスクが放した Lock は壊れる（ADR 0026 決定 4）。
 global T_BREAK: Int = 28
-global T_WORDS: Int = 29
+// 選択した子のworkerが敗者を巻き戻している間1。ST_DONEでも外側の取り消しはこの完了を待つ。
+global T_SELECTING: Int = 29
+global T_WORDS: Int = 30
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -1035,9 +1038,152 @@ fn scope_begin_locked() -> Int
 {
   let s = sched();
   bump(s);
-  let sc = rec(5);
+  let sc = rec(9);
   st(sc, 4, ld(s, S_CUR));
   return tab_push(s, S_SCOPES, sc);
+}
+
+// race／all_ok の登録と完了の選択。子が登録中に別ワーカーで完了しても、選択を失わない。
+pub fn select_begin(mode: Int) -> Int
+  intent "選択する範囲を作る"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let sid = scope_begin_locked();
+  st(tab_get(sched(), S_SCOPES, sid), 5, mode);
+  mutex_unlock();
+  return sid;
+}
+
+pub fn select_wait(sid: Int) -> Int
+  intent "最初の完了または全成功を待つ。選択した子の番号 + 1、全成功なら 0"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let s = sched();
+  let sc = tab_get(s, S_SCOPES, sid);
+  // 全子を登録してから実行可能にする。登録中に選択と巻き戻しが終わる競合を防ぐ。
+  if ld(sc, 8) == 0 {
+    st(sc, 8, 1);
+    let mut c = ld(sc, 2);
+    while c != 0 { ready_push(s, c); c = ld(c, T_SIB); }
+    notify();
+  }
+  let picked = ld(sc, 6);
+  let mut outcome = 0;
+  if picked != 0 && ld(sc, 7) == 0 {
+    outcome = ld(picked, T_ID) + 1;
+  } else {
+    if ld(sc, 0) != 0 || ld(sc, 7) != 0 {
+      let t = ld(s, S_CUR);
+      st(sc, 1, t);
+      st(t, T_STATE, ST_SCOPING);
+      st(t, T_WAITSCOPE, sid);
+      st(s, S_BLOCKED, 1);
+    }
+  }
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn select_result(sid: Int, index: Int) -> Int
+  intent "入力順 index の成功した子の結果の所有権を渡す"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let sc = tab_get(sched(), S_SCOPES, sid);
+  let mut c = ld(sc, 2);
+  let mut i = 0;
+  while i < index { c = ld(c, T_SIB); i = i + 1; }
+  let v = ld(c, T_RESULT);
+  st(c, T_HASRES, 0);
+  mutex_unlock();
+  return v;
+}
+
+fn select_discard_locked(s: Int, sc: Int) -> Bool
+  intent "all_ok の蓄積成功値を入力順の逆でごみに積む"
+  requires none
+  ensures none
+  effects none
+{
+  let mut discarded = false;
+  let mut c = tmo_last_child(sc, 0);
+  while c != 0 {
+    if ld(c, T_HASRES) != 0 && ld(ld(c, T_RESULT), 0) == 0 {
+      st(c, T_HASRES, 0);
+      garbage_push(s, ld(c, T_RESULT), ld(c, T_RETDROP));
+      discarded = true;
+    }
+    c = tmo_last_child(sc, c);
+  }
+  return discarded;
+}
+
+pub fn select_discard(sid: Int)
+  intent "all_ok が蓄えた成功値を入力順の逆に捨てる"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let s = sched();
+  let sc = tab_get(s, S_SCOPES, sid);
+  if ld(sc, 5) == 2 { select_discard_locked(s, sc); }
+  mutex_unlock();
+}
+
+pub fn select_finish(sid: Int)
+  intent "敗者の巻き戻しが終わってから選択の待ち手を起こす"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let s = sched();
+  let sc = tab_get(s, S_SCOPES, sid);
+  st(sc, 7, 0);
+  st(ld(s, S_CUR), T_SELECTING, 0);
+  let w = ld(sc, 1);
+  if w != 0 {
+    st(sc, 1, 0);
+    st(w, T_WAITSCOPE, 0 - 1);
+    if ld(w, T_CANCEL) == 0 && ld(w, T_STATE) == ST_SCOPING { wake(s, w, 0, false); }
+  }
+  notify();
+  mutex_unlock();
+}
+
+pub fn select_done(sid: Int) -> Int
+  intent "all_ok が全成功済みかを返す（取り消された親の再開で結果を構成するため）"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let sc = tab_get(sched(), S_SCOPES, sid);
+  let mut done = 0;
+  if ld(sc, 0) == 0 && ld(sc, 6) == 0 { done = 1; }
+  mutex_unlock();
+  return done;
+}
+
+fn select_keeps_result(s: Int, t: Int) -> Bool
+  intent "all_ok の成功値は範囲に属し、タスク単位の取り消しでは捨てない"
+  requires none
+  ensures none
+  effects none
+{
+  let sid = ld(t, T_SCOPE);
+  if sid < 0 { return false; }
+  let sc = tab_get(s, S_SCOPES, sid);
+  return ld(sc, 5) == 2 && ld(ld(t, T_RESULT), 0) == 0;
 }
 
 fn finish_scope(s: Int, sc: Int)
@@ -1089,7 +1235,7 @@ fn spawn_locked(sid: Int, frame: Int, retdrop: Int) -> Int
   let t = new_task(s, frame, retdrop, sid);
   // 取り消しの待機中に動いている親が作った子も、選択不能にして走査に含める。
   let cur = ld(s, S_CUR);
-  if cur != 0 && ld(cur, T_CANCEL) != 0 { st(t, T_CANCEL, 1); }
+  if (cur != 0 && ld(cur, T_CANCEL) != 0) || ld(sc, 6) != 0 { st(t, T_CANCEL, 1); }
   if cur != 0 { st(t, T_ROOT, ld(cur, T_ROOT)); } else { st(t, T_ROOT, t); }
   st(sc, 0, ld(sc, 0) + 1);
   let tail = ld(sc, 3);
@@ -1099,7 +1245,7 @@ fn spawn_locked(sid: Int, frame: Int, retdrop: Int) -> Int
     st(tail, T_SIB, t);
   }
   st(sc, 3, t);
-  ready_push(s, t);
+  if ld(sc, 5) == 0 { ready_push(s, t); }
   return ld(t, T_ID);
 }
 
@@ -1124,8 +1270,8 @@ fn join_locked(tid: Int) -> Int
   return 0;
 }
 
-fn finish_task_locked(v: Int)
-  intent "現在のタスクが値 v で完了した。合流待ちと範囲の待ち手を起こす"
+fn finish_task_locked(v: Int) -> Int
+  intent "現在のタスクが値 v で完了した。合流待ちと範囲の待ち手を起こす。選択した子なら、先に敗者を巻き戻す範囲の番号 + 1 を返す（それ以外は0）"
   requires none
   ensures none
   effects none
@@ -1138,13 +1284,13 @@ fn finish_task_locked(v: Int)
   let sr = ld(t, T_SROOT);
   if sr != 0 {
     root_finished(s, sr, true);
-    return;
+    return 0;
   }
   let sid = ld(t, T_SCOPE);
   if sid < 0 {
     st(s, S_RDONE, 1);
     st(s, S_RRES, v);
-    return;
+    return 0;
   }
   let j = ld(t, T_JOINER);
   st(t, T_JOINER, 0);
@@ -1160,6 +1306,30 @@ fn finish_task_locked(v: Int)
   if live > 0 {
     st(sc, 0, live - 1);
   }
+  let mode = ld(sc, 5);
+  if mode != 0 {
+    if ld(sc, 6) == 0 && (mode == 1 || ld(v, 0) == 1) {
+      st(sc, 6, t);
+      st(sc, 7, 1);
+      st(t, T_SELECTING, 1);
+      // 値は親の起床値へ先に移す。外側から取り消されても、親の局所のあとで破棄する。
+      let parent = ld(sc, 4);
+      st(parent, T_RESUME, v);
+      st(parent, T_HASRESUME, 1);
+      st(t, T_HASRES, 0);
+      mark_cancel(s, sid, t);
+      return sid + 1;
+    }
+    if ld(sc, 6) == 0 && ld(sc, 0) == 0 {
+      let w = ld(sc, 1);
+      if w != 0 {
+        st(sc, 1, 0);
+        st(w, T_WAITSCOPE, 0 - 1);
+        wake(s, w, 0, false);
+      }
+    }
+    return 0;
+  }
   if ld(sc, 0) == 0 {
     let w = ld(sc, 1);
     if w != 0 {
@@ -1169,6 +1339,7 @@ fn finish_task_locked(v: Int)
       wake(s, w, 0, false);
     }
   }
+  return 0;
 }
 
 fn yield_val_locked(v: Int)
@@ -1716,7 +1887,7 @@ fn mark_root(s: Int, root: Int, me: Int) -> Bool
     let t = tab_get(s, S_TASKS, j);
     if ld(t, T_ROOT) == root {
       st(t, T_BREAK, 1);
-      if t != me && ld(t, T_STATE) != ST_DONE {
+      if t != me && (ld(t, T_STATE) != ST_DONE || ld(t, T_SELECTING) != 0) {
         st(t, T_CANCEL, 1);
         if ld(t, T_ACTIVE) != 0 { active = true; }
       }
@@ -1737,7 +1908,7 @@ fn root_pick(s: Int, root: Int, me: Int, i0: Int, pos: Int, rr: Int) -> Int
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
     if t != me && ld(t, T_ROOT) == root {
-      if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
+      if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 && !select_keeps_result(s, t) {
         st(t, T_HASRES, 0);
         garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
         st(rr, pos, i + 1);
@@ -1867,7 +2038,7 @@ fn mark_group(s: Int, gid: Int, me: Int) -> Bool
       let mut j = 0;
       while j < ld(s, S_TASKS + 1) {
         let t = tab_get(s, S_TASKS, j);
-        if t != me && ld(t, T_ROOT) == root && ld(t, T_STATE) != ST_DONE {
+        if t != me && ld(t, T_ROOT) == root && (ld(t, T_STATE) != ST_DONE || ld(t, T_SELECTING) != 0) {
           st(t, T_CANCEL, 1);
           if ld(t, T_ACTIVE) != 0 { active = true; }
         }
@@ -1960,7 +2131,7 @@ fn cancel_next_locked() -> Int
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
     // 完了済みで受け取られていない結果は、走査のこの位置で破棄させる（-1 を返し、呼び出し側が先にごみの列を空にする）。
-    if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
+    if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 && !select_keeps_result(s, t) {
       st(t, T_HASRES, 0);
       garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
       st(s, S_CANCEL_I, i);
@@ -2021,8 +2192,8 @@ fn mark_cancel(s: Int, sid: Int, me: Int) -> Bool
     let t = tab_get(s, S_TASKS, j);
     if t != me && in_scope(s, t, sid) {
       st(t, T_CANCEL, 1);
-      // 終わったタスク（異常停止して枠を片付け済みで、ワーカーがまだ step_end していないものを含む）は待たない。
-      if ld(t, T_ACTIVE) != 0 && ld(t, T_STATE) != ST_DONE { active = true; }
+      // 完了した子でも、選択の敗者を巻き戻している間は待つ。それ以外の完了済みタスクは待たない。
+      if ld(t, T_ACTIVE) != 0 && (ld(t, T_STATE) != ST_DONE || ld(t, T_SELECTING) != 0) { active = true; }
     }
     j = j + 1;
   }
@@ -2064,6 +2235,9 @@ fn tmo_pick(s: Int, sid: Int) -> Int
   effects none
 {
   let sc = tab_get(s, S_SCOPES, sid);
+  if ld(sc, 5) == 2 && (ld(sc, 0) != 0 || ld(sc, 6) != 0) {
+    if select_discard_locked(s, sc) { return 0 - 1; }
+  }
   let mut c = tmo_last_child(sc, 0);
   while c != 0 {
     // 子 c が作った範囲（新しい順）の子孫を先に。
@@ -2076,7 +2250,7 @@ fn tmo_pick(s: Int, sid: Int) -> Int
         if r != 0 { return r; }
       }
     }
-    if ld(c, T_STATE) == ST_DONE && ld(c, T_HASRES) != 0 {
+    if ld(c, T_STATE) == ST_DONE && ld(c, T_HASRES) != 0 && !select_keeps_result(s, c) {
       st(c, T_HASRES, 0);
       garbage_push(s, ld(c, T_RESULT), ld(c, T_RETDROP));
       return 0 - 1;
@@ -2129,7 +2303,7 @@ fn scope_cancel_next_locked(sid: Int) -> Int
     i = i - 1;
     let t = tab_get(s, S_TASKS, i);
     if t != me && in_scope(s, t, sid) {
-      if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
+      if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 && !select_keeps_result(s, t) {
         st(t, T_HASRES, 0);
         garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
         st(s, S_SCAN, i);
@@ -2217,7 +2391,7 @@ fn release_locked()
   let ns = ld(s, S_SCOPES + 1);
   let mut j = 0;
   while j < ns {
-    rec_free(tab_get(s, S_SCOPES, j), 5);
+    rec_free(tab_get(s, S_SCOPES, j), 9);
     j = j + 1;
   }
   tab_free(s, S_SCOPES);
@@ -2464,16 +2638,17 @@ pub fn task_join(tid: Int) -> Int
   return outcome;
 }
 
-pub fn finish_task(v: Int)
+pub fn finish_task(v: Int) -> Int
   intent "排他の下で finish_task を行う"
   requires none
   ensures none
   effects none
 {
   mutex_lock();
-  finish_task_locked(v);
+  let selected = finish_task_locked(v);
   notify();
   mutex_unlock();
+  return selected;
 }
 
 pub fn io_wait(fd: Int, events: Int) -> Int

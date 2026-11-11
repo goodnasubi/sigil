@@ -397,6 +397,10 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.scope_site(si, args, dest, dty, next);
             return;
         }
+        if matches!(b, TaskRace | TaskAllOk) {
+            self.select_site(si, b, args, dest, dty, next, stop);
+            return;
+        }
         if b == TaskTimeout {
             self.timeout_site(si, args, dest, dty, next);
             return;
@@ -598,6 +602,124 @@ impl<'a, 'p> Fx<'a, 'p> {
         let r2 = self.rt("sched_take_resume", &[]);
         let some = self.mk_enum_c(0, &[r2]);
         self.finish_call(some, dty, dty, dest, next);
+    }
+
+    /// race／all_ok は全クロージャを入力順に起こし、選択が確定してから所有値を回収する。
+    #[allow(clippy::too_many_arguments)]
+    fn select_site(
+        &mut self,
+        si: &SiteInfo,
+        b: Builtin,
+        args: &[Operand],
+        dest: &Place,
+        dty: &Ty,
+        next: usize,
+        stop: usize,
+    ) {
+        let (list, _) = self.val(&args[0]);
+        let n = self.rt("list_len", &[list]);
+        if b == Builtin::TaskRace {
+            let empty = self.b.ins().icmp_imm_s(IntCC::Equal, n, 0);
+            let code = self.cg.code_for(
+                stop,
+                Some(StopKind::StdRequiresViolated),
+                Some("task.race: 空の一覧"),
+            );
+            self.fail_if(empty, code);
+        }
+        let (list, _) = self.own(&args[0]);
+        let mode = self.ic(if b == Builtin::TaskRace { 1 } else { 2 });
+        let sid = self.rt("sched_select_begin", &[mode]);
+        let aux1 = self.site_off(si.k, 1);
+        let aux2 = self.site_off(si.k, 2);
+        self.st(sid, self.frame(), aux1);
+        self.st(n, self.frame(), aux2);
+        let start = self.cg.task.as_ref().expect("計画").fn_start;
+        self.loop_range(n, |s, i| {
+            let slot = s.rt("list_get", &[list, i]);
+            let fv = s.ld(slot, 0);
+            let argv = s.zero_tmp(8);
+            let z = s.ic(0);
+            let one = s.ic(1);
+            let child = s.plan_fn(start, &[fv, argv, z, one])[0];
+            let rd = s.ld(child, 48);
+            s.rt("sched_spawn", &[sid, child, rd]);
+        });
+        // 要素の所有権は各タスクの枠へ渡したので、一覧の器だけ返す。
+        self.rt("list_free", &[list]);
+        self.b.ins().jump(si.call_blk, NOARGS);
+        self.b.switch_to_block(si.call_blk);
+        let can = self.cancelling();
+        let (cb, wait) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(can, cb, NOARGS, wait, NOARGS);
+        self.b.switch_to_block(cb);
+        let sid = self.ld(self.frame(), aux1);
+        let has = self.rt("sched_has_resume", &[]);
+        let (resume, partial) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(has, resume, NOARGS, partial, NOARGS);
+        self.b.switch_to_block(resume);
+        let value = self.rt("sched_take_resume", &[]);
+        let df = self.drop_addr(dty);
+        self.rt("sched_defer_drop", &[value, df]);
+        let c = self.ic(CANCEL_CODE);
+        self.jump_cleanup(c);
+        self.b.switch_to_block(partial);
+        if b == Builtin::TaskAllOk {
+            let done = self.rt("sched_select_done", &[sid]);
+            let (full, pending) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(done, full, NOARGS, pending, NOARGS);
+            self.b.switch_to_block(full);
+            let n = self.ld(self.frame(), aux2);
+            let value = self.all_ok_value(sid, n);
+            let df = self.drop_addr(dty);
+            self.rt("sched_defer_drop", &[value, df]);
+            let c = self.ic(CANCEL_CODE);
+            self.jump_cleanup(c);
+            self.b.switch_to_block(pending);
+            self.rt("sched_select_discard", &[sid]);
+            let (_, drain) = self.plan_ids();
+            self.plan_fn(drain, &[]);
+        }
+        let c = self.ic(CANCEL_CODE);
+        self.jump_cleanup(c);
+        self.b.switch_to_block(wait);
+        let sid = self.ld(self.frame(), aux1);
+        let picked = self.rt("sched_select_wait", &[sid]);
+        let blocked = self.rt("sched_blocked", &[]);
+        let (suspend, ready) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(blocked, suspend, NOARGS, ready, NOARGS);
+        self.b.switch_to_block(suspend);
+        let state = self.ic(1 + 2 * si.k as i64);
+        self.st(state, self.frame(), 16);
+        self.suspend_ret();
+        self.b.switch_to_block(ready);
+        if b == Builtin::TaskAllOk {
+            let (err, ok) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(picked, err, NOARGS, ok, NOARGS);
+            self.b.switch_to_block(ok);
+            let n = self.ld(self.frame(), aux2);
+            let value = self.all_ok_value(sid, n);
+            self.finish_call(value, dty, dty, dest, next);
+            self.b.switch_to_block(err);
+        }
+        let value = self.rt("sched_take_resume", &[]);
+        self.finish_call(value, dty, dty, dest, next);
+    }
+
+    /// 完了した all_ok の結果を、入力順の一覧へ移す。
+    fn all_ok_value(&mut self, sid: Value, n: Value) -> Value {
+        let eight = self.ic(8);
+        let out = self.rt("list_new", &[eight]);
+        self.loop_range(n, |s, i| {
+            let result = s.rt("sched_select_result", &[sid, i]);
+            let value = s.ld(result, 8);
+            let free = s.cg.blkfree_nz.expect("塊の解放");
+            s.plan_fn(free, &[result]);
+            let slot = s.zero_tmp(8);
+            s.st(value, slot, 0);
+            s.rt("list_push", &[out, slot]);
+        });
+        self.mk_enum_c(0, &[out])
     }
 
     /// `Option<T>` の `T`。
@@ -933,12 +1055,6 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.rt("sched_root_launch", &[rr, child, rd]);
                 (self.ic(0), u)
             }
-            TaskAllOk | TaskRace => (
-                self.unsupported(
-                    "task.all_ok・task.race はネイティブ出力未対応（取り消しの意味を要する。ADR 0030 の 5-2g）",
-                ),
-                u,
-            ),
             // 入れ子の呼び出し（関数値の呼び出しを経る組み込みの中）では、タスクを中断できない（評価器と同じ停止）。
             b if task::blocking(b) => {
                 if self.cg.rt.contains_key("sched_start") {
@@ -1459,7 +1575,19 @@ impl<'a, 'p> Fx<'a, 'p> {
 
         self.b.switch_to_block(okb);
         self.plan_fn(done, &[f]);
-        self.rt("sched_finish_task", &[r[0]]);
+        let selected = self.rt("sched_finish_task", &[r[0]]);
+        let (cancel, finished) = (self.b.create_block(), self.b.create_block());
+        self.b
+            .ins()
+            .brif(selected, cancel, NOARGS, finished, NOARGS);
+        self.b.switch_to_block(cancel);
+        let sid = self.b.ins().iadd_imm_s(selected, -1);
+        self.rt("sched_select_discard", &[sid]);
+        self.plan_fn(drain, &[]);
+        self.cancel_loop_by(Some(sid), "sched_tmo_cancel_next");
+        self.rt("sched_select_finish", &[sid]);
+        self.b.ins().jump(finished, NOARGS);
+        self.b.switch_to_block(finished);
         self.plan_fn(drain, &[]);
         self.rt("sched_step_end", &[]);
         self.b.ins().jump(head, NOARGS);

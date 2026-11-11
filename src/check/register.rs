@@ -271,6 +271,11 @@ impl Ck {
             ("sleep(millis: Int)", "clock, task.suspend"),
             ("yield()", "task.suspend"),
             ("channel<T>() -> (Sender<T>, Receiver<T>)", "none"),
+            // 複数ルートの入口（ADR 0031 決定 4-1、PR 6-3d）。
+            (
+                "roots<T>(limit: Int, f: fn(&RootGroup) -> T) -> T",
+                "task.suspend, of(f)",
+            ),
         ];
         for (sig, effects) in task_fns {
             let (name, s) = self.std_sig(&crate::stdlib::free_source(
@@ -282,6 +287,17 @@ impl Ck {
         }
 
         let task_impls: &[(&str, &[(&str, &str)])] = &[
+            (
+                "RootGroup",
+                &[("reserve(self: &RootGroup) -> RootSlot", "task.suspend")],
+            ),
+            (
+                "RootSlot",
+                &[(
+                    "start<C: Sendable>(self: RootSlot, conn: C, g: fn(&C) -> Unit, on_abort: fn(C) -> Unit)",
+                    "task.spawn, of(g), of(on_abort)",
+                )],
+            ),
             (
                 "Scope",
                 &[(

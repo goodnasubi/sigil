@@ -228,6 +228,9 @@ const PRELUDE_TYPES: &[&str] = &[
     "LockGuard",
     "LockBroken",
     "Atomic",
+    // 複数ルートの入口の前置き型（ADR 0031 決定 4-1）。
+    "RootGroup",
+    "RootSlot",
 ];
 /// 型名を付けずに書く値（`Option`・`Result` の値）。
 const PRELUDE_VALUES: &[(&str, &str)] = &[
@@ -379,6 +382,8 @@ struct Ck {
     /// 型が決まっていない値の移動の後の使用。型が決まって `Copyable` でないと分かればエラーにする。
     moved_pending: Vec<(Ty, Error)>,
     last_closure: Vec<Atom>,
+    /// 直前の `args` で、各引数を検査し終えた時点のクロージャの記録の数（`RootSlot.start` の検査が使う）。
+    last_arg_marks: Vec<usize>,
     inferred: Vec<Atom>,
     /// いま検査しているクロージャの枠（外側から内側の順）。
     frames: Vec<Frame>,
@@ -683,6 +688,7 @@ fn analyze(
         sig_checks: vec![],
         moved_pending: vec![],
         last_closure: vec![],
+        last_arg_marks: vec![],
         inferred: vec![],
         frames: vec![],
         closure_arg: false,

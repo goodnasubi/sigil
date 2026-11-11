@@ -413,7 +413,16 @@ impl Ck {
         // `Scope.spawn` は、渡すクロージャに追加の検査が要る（ADR 0026 決定 3）。
         if owner == "Scope" && name == "spawn" {
             let handle = substitute(&sig.ret, &m);
-            self.check_spawn(args.first(), &handle)?;
+            self.check_spawn(args.first(), None, &handle)?;
+        }
+        // `RootSlot.start` の `g` と `on_abort` も、起動したルートで走る脱出するクロージャ（ADR 0031 決定 4-1）。
+        // 戻り値は `Unit` に限るので、(c) の検査は当たらない。
+        if owner == "RootSlot" && name == "start" {
+            let marks = std::mem::take(&mut self.last_arg_marks);
+            for i in 1..args.len().min(3) {
+                let rec = marks.get(i).and_then(|m| m.checked_sub(1));
+                self.check_spawn(args.get(i), rec, &Ty::Unit)?;
+            }
         }
         self.check_overlap(mark)?;
         let ret = substitute(&sig.ret, &m);
@@ -441,7 +450,12 @@ impl Ck {
                     "関数の型には `clone` がない（関数の値は引数に渡しても移動しないので、別名を作らずに元の名前を使う）",
                 )
             }
-            Ty::Named(n, _) if matches!(n.as_str(), "Scope" | "TaskHandle" | "LockGuard") => {
+            Ty::Named(n, _)
+                if matches!(
+                    n.as_str(),
+                    "Scope" | "TaskHandle" | "LockGuard" | "RootGroup" | "RootSlot"
+                ) =>
+            {
                 return self.err(
                     ErrorKind::NoSuchMember,
                     format!("`{shown}` には `clone` がない（タスクの持ち手・スコープ・ロックの持ち手は複製できない。ADR 0026 決定 3）"),
@@ -478,6 +492,7 @@ impl Ck {
             );
         }
         let sp = self.span;
+        let mut marks: Vec<usize> = Vec::with_capacity(args.len());
         let mut gained: Vec<Atom> = vec![];
         let mut srcs: Vec<Src> = vec![];
         for (i, (p, a)) in params.iter().zip(args).enumerate() {
@@ -553,7 +568,9 @@ impl Ck {
             if let Ty::Fn(_, _, Some(d)) = self.zonk(p) {
                 self.check_fn_insert(&d, a, &t, if closure { Some(&arg_ce) } else { None })?;
             }
+            marks.push(self.cur_closures.len());
         }
+        self.last_arg_marks = marks;
         for t in &eff.terms {
             if let EffTerm::Cat(c) = t {
                 self.add_eff(Atom::Cat(c.clone()));

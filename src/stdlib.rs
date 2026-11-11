@@ -66,6 +66,9 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("LockGuard", 1, Layer::Core),
     ("LockBroken", 0, Layer::Core),
     ("Atomic", 1, Layer::Core),
+    // 複数ルートの入口の前置き型（ADR 0031 決定 4-1、PR 6-3d）。`Scope` と同じく性質を持たない。
+    ("RootGroup", 0, Layer::Core),
+    ("RootSlot", 0, Layer::Core),
 ];
 
 pub mod core_sigil;

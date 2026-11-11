@@ -16,7 +16,8 @@ use crate::exec::StopKind;
 use crate::ir::*;
 
 use super::value::{
-    list_of, new_slot, shadow, with_val, Agg, GuardTok, Ptr, Tag, Val, LOCK_EVENTS, UNWINDING,
+    list_of, new_slot, shadow, with_val, Agg, GuardTok, Ptr, RootSlotTok, Tag, Val, LOCK_EVENTS,
+    ROOT_EVENTS, UNWINDING,
 };
 use super::{Slot, E, M};
 
@@ -73,6 +74,8 @@ enum State {
     Scoping,
     Sleeping,
     IoWait,
+    /// `RootGroup.reserve` で、空きのスロットを待っている。
+    RootWait,
     Done,
 }
 
@@ -91,6 +94,8 @@ struct Task {
     root: usize,
     /// 直近の `task.yield` での（枠の指紋, 共有の状態の版, 同じ状態が 2 回続いたか）。
     spin: Option<(u64, u64, bool)>,
+    /// `RootSlot.start` が起動したルートタスク（`g` または `on_abort`）なら、その記録の番号（`Sched.started`）。
+    started: Option<usize>,
 }
 
 #[derive(Default)]
@@ -104,6 +109,45 @@ enum ScopeKind {
     AllOk {
         results: Vec<Option<Val>>,
     },
+    /// `task.roots` の本体（`Sched.groups` の番号）。`live` は起動済みで終わっていないルートの数。
+    Roots {
+        group: usize,
+    },
+}
+
+/// `task.roots` のルートの集まり（ADR 0031 決定 4-1）。
+struct GroupSt {
+    /// 本体の枠が待つ範囲（`ScopeKind::Roots`）。
+    sid: usize,
+    limit: usize,
+    /// 使っているスロットの数（予約済みの `RootSlot` と、起動済みで終わっていないルート）。
+    used: usize,
+    /// 本体が戻った、または集まりが取り消された。以後の `reserve`・`start` は停止にする。
+    closed: bool,
+    /// 空きを待っている `reserve` のタスク（到着順）。
+    waiters: VecDeque<usize>,
+    /// 起動したルートの記録（`Sched.started` の番号。起動の順）。
+    starts: Vec<usize>,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Phase {
+    /// `g(&conn)` を実行している。
+    Body,
+    /// `g` のルートが異常停止し、`on_abort(conn)` を実行している（決定 4-2 の案 2）。
+    Abort,
+    Done,
+}
+
+/// 起動したルート 1 つの記録。接続（`conn`）はルートの外のここが所有し、ルートの中のタスクは借用だけを持つ。
+struct StartedSt {
+    group: usize,
+    /// いま走っているルートタスクの番号（`g` のルート、のち `on_abort` のルート）。
+    task: usize,
+    /// 接続の置き場。`g` へは借用で渡す。`on_abort` へ渡したら空になる。
+    conn: Slot,
+    on_abort: Option<Val>,
+    phase: Phase,
 }
 
 #[derive(Default)]
@@ -120,6 +164,8 @@ struct Chan {
     waiters: VecDeque<usize>,
     /// 作ったルートタスク。
     root: usize,
+    /// 作ったルートが終わって回収した（以後の使用は停止。ADR 0031 決定 4-2）。
+    reclaimed: bool,
 }
 
 /// `Lock` の状態。値は `Lock.new` で渡されたもの（評価器では番号で指す）。
@@ -132,6 +178,8 @@ struct LockSt {
     broken: bool,
     /// 作ったルートタスク。ホストが共有するものは `usize::MAX`。
     root: usize,
+    /// 作ったルート（`task.roots` が起動したもの）が正常に終わって回収した（以後の取得は停止）。
+    reclaimed: bool,
 }
 
 /// 確保器（ADR 0025 決定 3）の関数か。核の `std.alloc` と OS 層の `std.os.alloc` の中。
@@ -206,7 +254,7 @@ fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32, n: &mut usize) -> bool {
             Ok(b) => (18u8, &*b).hash(h),
             Err(_) => return false,
         },
-        Val::Guard(_) => return false,
+        Val::Guard(_) | Val::RootSlot(_) => return false,
     }
     true
 }
@@ -254,6 +302,9 @@ pub(super) struct Sched {
     /// 異常停止の巻き戻しが確保器の関数の枠を通った（プロセス全体の停止にする）。
     alloc_stop: bool,
     sleepers: Vec<(i64, u64, Wake)>,
+    /// `task.roots` の集まりと、起動したルートの記録（ADR 0031 決定 4）。
+    groups: Vec<GroupSt>,
+    started: Vec<StartedSt>,
     /// 外の待ち（`raw.io_wait_fd`）の登録。素の `fd` をキーとし、`(タスク番号, イベントマスク)` の一覧を持つ。
     io_waiters: BTreeMap<i32, Vec<(usize, i16)>>,
     /// 実時間モードの起点 `(開始時刻, その時点の仮想時計)`。最初の `raw.io_wait_fd` 登録で設定され、以後は戻らない（ADR 0031 決定 1-3）。
@@ -282,6 +333,8 @@ impl Sched {
             results: vec![],
             alloc_stop: false,
             sleepers: vec![],
+            groups: vec![],
+            started: vec![],
             io_waiters: BTreeMap::new(),
             realtime: None,
             clock: 0,
@@ -304,6 +357,7 @@ impl Sched {
             waiters: VecDeque::new(),
             broken: false,
             root: usize::MAX,
+            reclaimed: false,
         });
         self.locks.len() - 1
     }
@@ -356,6 +410,9 @@ fn is_task_op(b: Builtin) -> bool {
     matches!(
         b,
         IoWaitFd
+            | RootsScope
+            | RootReserve
+            | RootStart
             | TaskScope
             | TaskAllOk
             | TaskRace
@@ -655,6 +712,10 @@ impl<'p> M<'p> {
                         return Run::Done(v);
                     }
                     if let Some(sid) = sc {
+                        // `task.roots` の本体が戻ったら、以後の起動を止める（起動済みのルートは待つ）。
+                        if let ScopeKind::Roots { group } = self.sch.scopes[sid].kind {
+                            self.sch.groups[group].closed = true;
+                        }
                         if self.sch.scopes[sid].live > 0 {
                             let cur = self.sch.cur;
                             self.sch.scopes[sid].waiter = Some(cur);
@@ -715,6 +776,10 @@ impl<'p> M<'p> {
                     drop(r);
                 }
             }
+            ScopeKind::Roots { group } => {
+                let g = *group;
+                self.cancel_roots(g);
+            }
             _ => {}
         }
         let kids = std::mem::take(&mut self.sch.scopes[sid].children);
@@ -749,6 +814,9 @@ impl<'p> M<'p> {
         }
         for l in &mut self.sch.locks {
             l.waiters.retain(|&x| x != t);
+        }
+        for g in &mut self.sch.groups {
+            g.waiters.retain(|&x| x != t);
         }
         for other in &mut self.sch.tasks {
             if other.joiner == Some(t) {
@@ -807,6 +875,7 @@ impl<'p> M<'p> {
             waiting_scope: None,
             root,
             spin: None,
+            started: None,
         });
         self.sch.scopes[sid].live += 1;
         self.sch.scopes[sid].children.push(tid);
@@ -1150,6 +1219,10 @@ impl<'p> M<'p> {
             ChanSend => {
                 let id = self.read_int(locals, &args[0]) as usize;
                 let v = self.owned(locals, &args[1]);
+                if self.sch.chans[id].reclaimed {
+                    drop(v);
+                    return Op::Fail(self.reclaimed_stop(stop, "通信路"));
+                }
                 if let Some(w) = self.sch.chans[id].waiters.pop_front() {
                     self.wake(w, Some(v));
                 } else {
@@ -1159,6 +1232,9 @@ impl<'p> M<'p> {
             }
             ChanRecv => {
                 let id = self.read_int(locals, &args[0]) as usize;
+                if self.sch.chans[id].reclaimed {
+                    return Op::Fail(self.reclaimed_stop(stop, "通信路"));
+                }
                 if let Some(v) = self.sch.chans[id].q.pop_front() {
                     Op::Val(v)
                 } else {
@@ -1207,6 +1283,7 @@ impl<'p> M<'p> {
                     waiters: VecDeque::new(),
                     broken: false,
                     root,
+                    reclaimed: false,
                 });
                 Op::Val(Val::Int(id as i64))
             }
@@ -1214,6 +1291,9 @@ impl<'p> M<'p> {
                 // 直前の破棄による解放を先に反映する。
                 self.settle_locks();
                 let id = self.read_int(locals, &args[0]) as usize;
+                if self.sch.locks[id].reclaimed {
+                    return Op::Fail(self.reclaimed_stop(stop, "Lock"));
+                }
                 let l = &mut self.sch.locks[id];
                 if l.broken {
                     Op::Val(self.lock_broken())
@@ -1244,12 +1324,262 @@ impl<'p> M<'p> {
                     )),
                 }
             }
+            RootsScope => {
+                let limit = self.read_int(locals, &args[0]);
+                if !(1..=4096).contains(&limit) {
+                    return Op::Fail(self.stop_at(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("task.roots: limit は 1 以上 4096 以下"),
+                    ));
+                }
+                let f = self.read(locals, &args[1]);
+                let sid = self.sch.scopes.len();
+                let gid = self.sch.groups.len();
+                self.sch.scopes.push(ScopeSt {
+                    kind: ScopeKind::Roots { group: gid },
+                    ..ScopeSt::default()
+                });
+                self.sch.groups.push(GroupSt {
+                    sid,
+                    limit: limit as usize,
+                    used: 0,
+                    closed: false,
+                    waiters: VecDeque::new(),
+                    starts: vec![],
+                });
+                let gref = Val::Ref(Ptr {
+                    slot: new_slot(Val::Int(gid as i64)),
+                    path: vec![],
+                });
+                match self.resolve_callee(&f, vec![gref]) {
+                    Some((g, a)) => Op::Push(g, a, Some(sid)),
+                    None => Op::Val(Val::Unit),
+                }
+            }
+            RootReserve => {
+                self.settle_roots();
+                let gid = self.read_int(locals, &args[0]) as usize;
+                let g = &mut self.sch.groups[gid];
+                if g.closed {
+                    return Op::Fail(self.stop_at(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("RootGroup.reserve: task.roots の範囲が終わっている"),
+                    ));
+                }
+                if g.used < g.limit {
+                    g.used += 1;
+                    Op::Val(root_slot(gid))
+                } else {
+                    g.waiters.push_back(cur);
+                    self.sch.tasks[cur].state = State::RootWait;
+                    Op::Block
+                }
+            }
+            RootStart => {
+                let slot = self.owned(locals, &args[0]);
+                let conn = self.owned(locals, &args[1]);
+                let g = self.read(locals, &args[2]);
+                let on_abort = self.read(locals, &args[3]);
+                let tok = match &slot {
+                    Val::RootSlot(t) if !t.used.get() => Rc::clone(t),
+                    _ => {
+                        return Op::Fail(self.stop_at(
+                            stop,
+                            Some(StopKind::StdRequiresViolated),
+                            Some("RootSlot.start: 使えないスロット"),
+                        ))
+                    }
+                };
+                let gid = tok.group;
+                if self.sch.groups[gid].closed {
+                    return Op::Fail(self.stop_at(
+                        stop,
+                        Some(StopKind::StdRequiresViolated),
+                        Some("RootSlot.start: task.roots の範囲が終わっている"),
+                    ));
+                }
+                // スロットを消費する（以後の破棄では上限を返さない。上限はルートの終わりで返す）。
+                tok.used.set(true);
+                drop(tok);
+                drop(slot);
+                let conn_slot = new_slot(conn);
+                let cref = Val::Ref(Ptr {
+                    slot: Rc::clone(&conn_slot),
+                    path: vec![],
+                });
+                let Some((fid, a)) = self.resolve_callee(&g, vec![cref]) else {
+                    drop(conn_slot.replace(Val::Empty));
+                    drop(on_abort);
+                    self.release_slot(gid);
+                    return Op::Val(Val::Unit);
+                };
+                let si = self.sch.started.len();
+                let tid = self.start_root_task(fid, a, stop, si);
+                self.sch.started.push(StartedSt {
+                    group: gid,
+                    task: tid,
+                    conn: conn_slot,
+                    on_abort: Some(on_abort),
+                    phase: Phase::Body,
+                });
+                self.sch.groups[gid].starts.push(si);
+                let sid = self.sch.groups[gid].sid;
+                self.sch.scopes[sid].live += 1;
+                Op::Val(Val::Unit)
+            }
             _ => Op::Fail(self.stop_at(
                 stop,
                 Some(StopKind::StdRequiresViolated),
                 Some("未対応のタスク操作"),
             )),
         }
+    }
+
+    /// 新しいルートタスクを起動する（`RootSlot.start` の `g`、または異常停止の後の `on_abort`）。
+    fn start_root_task(&mut self, fid: FuncId, args: Vec<Val>, stop: StopId, si: usize) -> usize {
+        let frame = self.new_frame(fid, args, stop, None);
+        let tid = self.sch.tasks.len();
+        self.sch.tasks.push(Task {
+            frames: vec![frame],
+            state: State::Ready,
+            resume: None,
+            result: None,
+            scope: None,
+            slot_idx: 0,
+            joiner: None,
+            waiting_scope: None,
+            root: tid,
+            spin: None,
+            started: Some(si),
+        });
+        self.sch.ready.push_back(tid);
+        tid
+    }
+
+    /// スロットを 1 つ返す。`reserve` で待っているタスクがあれば、そのまま渡して起こす。
+    fn release_slot(&mut self, gid: usize) {
+        let g = &mut self.sch.groups[gid];
+        if !g.closed {
+            if let Some(w) = g.waiters.pop_front() {
+                self.wake(w, Some(root_slot(gid)));
+                return;
+            }
+        }
+        g.used = g.used.saturating_sub(1);
+    }
+
+    /// 起動せずに破棄された `RootSlot` の知らせを反映する。
+    fn settle_roots(&mut self) {
+        let events = ROOT_EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        for gid in events {
+            if gid < self.sch.groups.len() {
+                self.release_slot(gid);
+            }
+        }
+    }
+
+    /// 起動したルートが終わった（正常終了、または `on_abort` の異常停止の後始末の済み）。接続と `on_abort` を
+    /// 破棄し、スロットを返す。集まりの本体が待っていて、これが最後なら起こす。
+    fn root_finished(&mut self, si: usize) {
+        let r = self.sch.started[si].task;
+        self.reclaim_root(r);
+        let st = &mut self.sch.started[si];
+        st.phase = Phase::Done;
+        let conn = st.conn.replace(Val::Empty);
+        let oa = st.on_abort.take();
+        let gid = st.group;
+        drop(conn);
+        drop(oa);
+        self.release_slot(gid);
+        let sid = self.sch.groups[gid].sid;
+        let sc = &mut self.sch.scopes[sid];
+        sc.live = sc.live.saturating_sub(1);
+        if sc.live == 0 {
+            if let Some(w) = sc.waiter.take() {
+                self.sch.tasks[w].waiting_scope = None;
+                self.finish_scope(sid);
+                self.wake(w, None);
+            }
+        }
+    }
+
+    /// 起動したルート `root` が終わった後、そのルートで作った通信路の項と `Lock` の値を捨てる（要求ごとに
+    /// 積み上がらないように。ADR 0031 決定 4-2）。待機者・保持者がいるもの（持ち手がルートの外へ出て使われて
+    /// いる）は残す。回収したものは記録し、外へ出た持ち手で後から使うと停止にする（黙って値を失わない）。
+    fn reclaim_root(&mut self, root: usize) {
+        // 終わったタスクの `LockGuard` の破棄（解放）を先に反映する。
+        self.settle_locks();
+        let mut dead = vec![];
+        for ch in self.sch.chans.iter_mut() {
+            if ch.root == root && !ch.reclaimed && ch.waiters.is_empty() {
+                ch.reclaimed = true;
+                dead.extend(std::mem::take(&mut ch.q));
+            }
+        }
+        for l in self.sch.locks.iter_mut() {
+            if l.root == root && !l.reclaimed && l.holder.is_none() && l.waiters.is_empty() {
+                l.reclaimed = true;
+                dead.push(l.value.replace(Val::Unit));
+            }
+        }
+        drop(dead);
+    }
+
+    /// 回収済みの通信路・`Lock` の使用の停止。
+    fn reclaimed_stop(&self, stop: StopId, what: &str) -> E {
+        self.stop_at(
+            stop,
+            Some(StopKind::StdRequiresViolated),
+            Some(&format!(
+                "回収済みの{what}を使った（作ったルートが終わっている。ADR 0031 決定 4-2）"
+            )),
+        )
+    }
+
+    /// 起動したルートが異常停止した（そのルートのタスクは `stop_root` で破棄済み）。`g` のルートなら、接続を
+    /// 破棄せずに、同じスロットの新しいルートで `on_abort(conn)` を実行する。`on_abort` のルートなら、
+    /// それ以上は続けない（接続は `on_abort` の枠と一緒に破棄済み。ADR 0031 決定 4-2 の案 2）。
+    fn root_aborted(&mut self, si: usize, e: &E) {
+        if !self.capture {
+            eprintln!("{e}");
+        }
+        if self.sch.started[si].phase == Phase::Body {
+            let conn = self.sch.started[si].conn.replace(Val::Empty);
+            let oa = self.sch.started[si].on_abort.take();
+            let call = oa.as_ref().and_then(|f| self.resolve_callee(f, vec![conn]));
+            drop(oa);
+            if let Some((fid, a)) = call {
+                let tid = self.start_root_task(fid, a, 0, si);
+                self.sch.started[si].task = tid;
+                self.sch.started[si].phase = Phase::Abort;
+                return;
+            }
+        }
+        self.root_finished(si);
+    }
+
+    /// 集まりの取り消し（本体の取り消し・異常停止）。起動済みのルートを起動の逆順に取り消し、`on_abort` を
+    /// 呼ばずに接続を破棄する（決定 4-2 の (d)）。
+    fn cancel_roots(&mut self, gid: usize) {
+        self.sch.groups[gid].closed = true;
+        self.sch.groups[gid].waiters.clear();
+        let starts = self.sch.groups[gid].starts.clone();
+        for si in starts.into_iter().rev() {
+            if self.sch.started[si].phase == Phase::Done {
+                continue;
+            }
+            let r = self.sch.started[si].task;
+            self.stop_root_inner(r);
+            let st = &mut self.sch.started[si];
+            st.phase = Phase::Done;
+            let conn = st.conn.replace(Val::Empty);
+            let oa = st.on_abort.take();
+            drop(conn);
+            drop(oa);
+        }
+        self.sch.groups[gid].used = 0;
     }
 
     /// `Err(LockBroken)`。
@@ -1311,6 +1641,8 @@ impl<'p> M<'p> {
             return;
         };
         match &mut self.sch.scopes[sid].kind {
+            // 起動したルートは範囲の子でない（`Task.scope` を持たない）ので、ここへは来ない。
+            ScopeKind::Roots { .. } => drop(v),
             ScopeKind::Normal => {
                 match joiner {
                     Some(j) => self.wake(j, Some(v)),
@@ -1515,6 +1847,7 @@ impl<'p> M<'p> {
             let q = std::mem::take(&mut ch.q);
             drop(q);
             ch.waiters.clear();
+            ch.reclaimed = true;
         }
         let mut dead = vec![];
         for l in self.sch.locks.iter_mut().filter(|l| l.root == root) {
@@ -1523,6 +1856,34 @@ impl<'p> M<'p> {
             dead.push(l.value.replace(Val::Unit));
         }
         drop(dead);
+    }
+
+    /// 進行できるタスクがない（デッドロック）。結果の出ていないルートのうち一番新しいものを 1 つだけ止める。
+    /// `task.roots` が起動したルートが生きていれば、その中の一番新しいものを先に止め、異常停止と同じ後始末
+    /// （`on_abort`）をする（隔離。ADR 0031 決定 4-2）。親や兄弟のルートは止めない。
+    fn stop_deadlocked(&mut self) {
+        let e = self.stop_at(
+            0,
+            Some(StopKind::StdRequiresViolated),
+            Some("デッドロック（進行できるタスクがない）"),
+        );
+        let started = (0..self.sch.started.len())
+            .filter(|&si| self.sch.started[si].phase != Phase::Done)
+            .max_by_key(|&si| self.sch.started[si].task);
+        if let Some(si) = started {
+            let root = self.sch.started[si].task;
+            self.stop_root(root);
+            self.root_aborted(si, &e);
+            return;
+        }
+        if let Some(i) = (0..self.sch.roots.len())
+            .rev()
+            .find(|&i| self.sch.results[i].is_none())
+        {
+            let root = self.sch.roots[i];
+            self.stop_root(root);
+            self.sch.results[i] = Some(Err(e));
+        }
     }
 
     /// ルートタスクを実行する。既定は決定的な FIFO（`schedule_seed` 指定時は種による攪拌）で、中断点でだけ切り替える。
@@ -1549,6 +1910,7 @@ impl<'p> M<'p> {
                 waiting_scope: None,
                 root: tid,
                 spin: None,
+                started: None,
             });
             self.sch.roots.push(tid);
             self.sch.results.push(None);
@@ -1569,24 +1931,14 @@ impl<'p> M<'p> {
                     .collect());
             }
             self.settle_locks();
+            self.settle_roots();
             if self.sch.realtime.is_some() {
                 self.poll_realtime(false);
             }
             let Some(t) = self.sch.pop_ready() else {
                 if self.sch.realtime.is_some() {
                     if self.sch.sleepers.is_empty() && self.sch.io_waiters.is_empty() {
-                        if let Some(i) = (0..self.sch.roots.len())
-                            .rev()
-                            .find(|&i| self.sch.results[i].is_none())
-                        {
-                            let root = self.sch.roots[i];
-                            self.stop_root(root);
-                            self.sch.results[i] = Some(Err(self.stop_at(
-                                0,
-                                Some(StopKind::StdRequiresViolated),
-                                Some("デッドロック（進行できるタスクがない）"),
-                            )));
-                        }
+                        self.stop_deadlocked();
                         continue;
                     }
                     self.poll_realtime(true);
@@ -1596,18 +1948,7 @@ impl<'p> M<'p> {
                     // 進行できるタスクがない。結果の出ていないルートタスクのうち一番新しいものを 1 つだけ
                     // デッドロックとして止め、次の反復で進行できるかを判定し直す（止めたことで起きた
                     // ルートタスクを、続けて潰さない）。
-                    if let Some(i) = (0..self.sch.roots.len())
-                        .rev()
-                        .find(|&i| self.sch.results[i].is_none())
-                    {
-                        let root = self.sch.roots[i];
-                        self.stop_root(root);
-                        self.sch.results[i] = Some(Err(self.stop_at(
-                            0,
-                            Some(StopKind::StdRequiresViolated),
-                            Some("デッドロック（進行できるタスクがない）"),
-                        )));
-                    }
+                    self.stop_deadlocked();
                     continue;
                 }
                 self.advance_clock();
@@ -1664,6 +2005,10 @@ impl<'p> M<'p> {
                     if let Some(i) = self.sch.roots.iter().position(|&r| r == t) {
                         self.sch.tasks[t].state = State::Done;
                         self.sch.results[i] = Some(Ok(v));
+                    } else if let Some(si) = self.sch.tasks[t].started {
+                        self.sch.tasks[t].state = State::Done;
+                        drop(v);
+                        self.root_finished(si);
                     } else {
                         self.complete(t, v);
                     }
@@ -1682,11 +2027,23 @@ impl<'p> M<'p> {
                     self.stop_root(root);
                     if let Some(i) = self.sch.roots.iter().position(|&r| r == root) {
                         self.sch.results[i] = Some(Err(e));
+                    } else if let Some(si) = self.sch.tasks[root].started {
+                        // 起動したルートの異常停止は、そのルートだけを止める（ADR 0031 決定 4-2）。
+                        self.root_aborted(si, &e);
+                        drop(e);
                     }
                 }
             }
         }
     }
+}
+
+/// 未使用の `RootSlot`（起動の権利）。
+fn root_slot(gid: usize) -> Val {
+    Val::RootSlot(Rc::new(RootSlotTok {
+        group: gid,
+        used: std::cell::Cell::new(false),
+    }))
 }
 
 /// `Atomic` / `SyncShared` の中身の入れ物。`Val::Shared` を外して見る（`SharedGet` と同じ形）。

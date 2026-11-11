@@ -25,6 +25,8 @@ pub(super) enum Val {
     Addr(usize),
     /// 取得した `Lock` の持ち手（`LockGuard`）。最後の写しの破棄で `Lock` を解放する。
     Guard(Rc<GuardTok>),
+    /// `RootGroup.reserve` が返す起動の権利（`RootSlot`。ADR 0031 決定 4-1）。起動せずに最後の写しを破棄すると上限が返る。
+    RootSlot(Rc<RootSlotTok>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,7 +76,24 @@ impl Drop for GuardTok {
     }
 }
 
+/// `RootSlot` の実体。`start` が消費すると `used` が立ち、以後の破棄は何もしない。
+/// 消費されずに破棄されたら、集まりの番号を `ROOT_EVENTS` に積む（スケジューラが上限を返す）。
+pub(super) struct RootSlotTok {
+    pub(super) group: usize,
+    pub(super) used: StdCell<bool>,
+}
+
+impl Drop for RootSlotTok {
+    fn drop(&mut self) {
+        if !self.used.get() {
+            let _ = ROOT_EVENTS.try_with(|e| e.borrow_mut().push(self.group));
+        }
+    }
+}
+
 thread_local! {
+    /// 起動せずに破棄された `RootSlot` の集まりの番号。
+    pub(super) static ROOT_EVENTS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     /// 異常停止の巻き戻し（後始末の基本ブロック）を実行している間だけ真。
     pub(super) static UNWINDING: StdCell<bool> = const { StdCell::new(false) };
     /// `LockGuard` の破棄の知らせ（`Lock` の番号と、巻き戻しの最中だったか）。
@@ -221,6 +240,7 @@ pub(super) fn shadow(v: &Val) -> Val {
         Val::Shared(s) => Val::Shared(s.clone()),
         Val::Bytes(b) => Val::Bytes(b.clone()),
         Val::Guard(g) => Val::Guard(g.clone()),
+        Val::RootSlot(t) => Val::RootSlot(t.clone()),
     }
 }
 
@@ -381,6 +401,7 @@ pub(super) fn show_val(ts: &[TypeDef], v: &Val, quote: bool) -> String {
         Val::Shared(s) => format!("Shared({})", show_val(ts, s, true)),
         Val::Bytes(b) => format!("Bytes({:?})", *b.borrow()),
         Val::Guard(_) => "LockGuard".into(),
+        Val::RootSlot(_) => "RootSlot".into(),
     }
 }
 

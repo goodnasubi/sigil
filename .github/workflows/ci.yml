@@ -68,4 +68,4 @@ jobs:
         run: scripts/native-report.sh
         env:
           SIGIL_NATIVE_MAX_SKIP: "20"
-          SIGIL_NATIVE_MIN_CHECKED: "400"
+          SIGIL_NATIVE_MIN_CHECKED: "1500"

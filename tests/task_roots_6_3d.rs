@@ -1,11 +1,11 @@
 //! ADR 0031 決定 4（PR 6-3d）: 複数ルートの入口 `task.roots`・`RootGroup.reserve`・`RootSlot.start`、
 //! ルート単位の隔離、ルートをまたぐ `LockBroken`、ルートの漏れの試験（評価器）。
 //!
-//! ネイティブの実体は後続の PR なので、ここでは評価器を直接呼ぶ（`tests/common` の突き合わせを通さない。
-//! ネイティブはビルドで「未実装」として止まる）。
+//! 評価器の結果を、`tests/common` がネイティブの実行ファイル（`SIGIL_WORKERS=1`）の出力・破棄の順序と突き合わせる。
 
+mod common;
+use common::run_with;
 use sigil::exec::{Options, Outcome, RunError, StopKind};
-use sigil::ir_eval::run_with;
 
 const HEAD: &str = r#"module m.a
   targets server
@@ -40,8 +40,10 @@ fn stop(body: &str) -> (StopKind, String, Vec<String>, String) {
     }
 }
 
+/// 検査のエラーは実行ファイルを作らないので、評価器を直接呼ぶ（突き合わせの「飛ばし」に数えない）。
 fn check_err(body: &str) -> String {
-    let e = run_with(&format!("{HEAD}{body}"), "run", &[], &opts()).expect_err("検査で止まる");
+    let e = sigil::ir_eval::run_with(&format!("{HEAD}{body}"), "run", &[], &opts())
+        .expect_err("検査で止まる");
     match e.error {
         RunError::Check(c) => format!("{:?} {}", c.kind, c.message),
         other => panic!("{other:?}"),
@@ -640,5 +642,116 @@ fn run() -> Int
         ));
         assert_eq!(kind, StopKind::StdRequiresViolated, "{detail}");
         assert!(detail.contains("回収済み"), "{detail}");
+    }
+}
+
+/// ネイティブの漏れの試験: 異常停止したルートを含めて、終わった時点で生きている塊が無く、停止の報告は標準エラーに
+/// 1 件だけ出る。並列のワーカーでも値と漏れは同じ（ワーカーの数で結果が変わらない）。
+#[test]
+fn native_no_blocks_leak_after_isolated_abort_with_one_or_more_workers() {
+    let src = format!(
+        r#"{HEAD}{WORK}
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects task.spawn, task.suspend, task.share, clock
+{{
+  return task.roots(4, |g| {{
+    let mut i = 1;
+    while i <= 3 {{
+      let s = g.reserve();
+      s.start(Conn {{ id: i }}, move |c| {{ let r = work(&c); }}, move |c| {{ let n = c.id; }});
+      i = i + 1;
+    }}
+    return 7;
+  }});
+}}
+"#
+    );
+    let dir = common::native::scratch("roots-leak");
+    let exe = dir.join("prog");
+    common::native::try_build(&[&src], "run", &exe, false).expect("ビルド");
+    for workers in ["1", "4"] {
+        let r = common::native::exec_env(
+            &exe,
+            &[],
+            &[("SIGIL_RT_LIVE", "1"), ("SIGIL_WORKERS", workers)],
+        );
+        assert_eq!(r.code, Some(0), "{workers}: {}", r.stderr);
+        assert_eq!(r.stdout, "7\n", "{workers}: {}", r.stderr);
+        assert!(
+            r.stderr.contains("live: sigil_blocks=0"),
+            "{workers}: {}",
+            r.stderr
+        );
+        assert_eq!(
+            r.stderr.matches("0 での除算").count(),
+            1,
+            "{workers}: {}",
+            r.stderr
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 起動したルートの中に範囲（子のタスク）があっても、集まりの取り消し（`task.timeout`）で全部が巻き戻され、
+/// 外側の取り消しも正しく終わる（ネイティブで、入れ子の取り消しの状態を退避する）。
+#[test]
+fn cancelling_the_group_unwinds_scopes_inside_started_roots() {
+    let o = ok(r#"
+fn nap(c: &Conn)
+  intent "n"
+  requires none
+  ensures none
+  effects clock, task.suspend, task.spawn
+{
+  let id = c.id;
+  let v = task.scope(|s| {
+    let h = s.spawn(move || {
+      let t = Tmp { v: id };
+      task.sleep(1000 + id);
+      return id;
+    });
+    task.yield();
+    return h.join();
+  });
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, clock, task.spawn, task.suspend
+{
+  let r = task.timeout(50, || task.roots(2, |g| {
+    let mut i = 1;
+    while i <= 4 {
+      let s = g.reserve();
+      s.start(Conn { id: i }, move |c| { nap(&c); }, move |c| { console.log(&(200 + c.id)); });
+      i = i + 1;
+    }
+    return 7;
+  }));
+  match r {
+    Some(v) => { return v; }
+    None => { return 0 - 1; }
+  }
+}
+"#);
+    assert_eq!((o.value.as_str(), o.output.as_str()), ("-1", ""));
+    for i in 1..=2 {
+        assert_eq!(
+            count(&o.drops, &format!("Conn {{ id: {i} }}")),
+            1,
+            "{:?}",
+            o.drops
+        );
+        assert_eq!(
+            count(&o.drops, &format!("Tmp {{ v: {i} }}")),
+            1,
+            "{:?}",
+            o.drops
+        );
     }
 }

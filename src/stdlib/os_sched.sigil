@@ -16,7 +16,8 @@ module std.os.sched
 // - `Lock` の解放は、評価器と同じく遅延して反映する（`lock_release` は事象を積むだけで、次の `lock_acquire` の入口と
 //   `next_task` の入口で `settle` が次の待機者へ渡す）。タスクの起こす順序が評価器と一致する。
 // - 範囲は通常の範囲（`task.scope`）だけ。`timeout`・`race`・`all_ok` は未対応（生成コードがビルドで止める）。
-// - 異常停止の隔離（ルートタスク単位）と `LockBroken` は、ルートタスクが 1 つの間は観測できないので持たない（5-2g）。
+// - 異常停止の隔離（ルートタスク単位）と `LockBroken` は、`task.roots` が起動したルートについて持つ（ADR 0031 決定 4、
+//   PR 6-3d）。入口のルート（番号 0）の異常停止は、従来どおりプログラム全体の停止。タスクは属するルート（T_ROOT）を持つ。
 // - 共有の表・待ち行列・通知の世代は 1 本の futex 排他で守り、タスク本体は排他の外で並列に実行する。
 // - 中断時の枠の保存が終わるまで T_ACTIVE を保ち、待機中に起こされても別ワーカーは枠を再開しない。
 // - S_CUR・S_BLOCKED・S_YIELDED と取り消しの走査位置は、生成コードが整列スタック内のワーカー専用領域へ振り分ける。
@@ -92,7 +93,13 @@ global T_TMO: Int = 22
 global T_FIRED: Int = 23
 global T_WOBJ: Int = 24
 global T_WIH: Int = 25
-global T_WORDS: Int = 26
+// 属するルートタスクのレコード（ルートタスク自身は自分。ADR 0031 決定 4）。
+global T_ROOT: Int = 26
+// `task.roots` が起動したルートタスク（`g`・`on_abort`）なら、その起動の記録（そうでなければ 0）。
+global T_SROOT: Int = 27
+// 異常停止したルートのタスク。このタスクが放した Lock は壊れる（ADR 0026 決定 4）。
+global T_BREAK: Int = 28
+global T_WORDS: Int = 29
 
 global ST_READY: Int = 1
 global ST_RUNNING: Int = 2
@@ -103,6 +110,7 @@ global ST_SCOPING: Int = 6
 global ST_SLEEPING: Int = 7
 global ST_DONE: Int = 8
 global ST_IOWAIT: Int = 9
+global ST_ROOTWAIT: Int = 10
 
 global S_TASKS: Int = 0
 global S_SCOPES: Int = 3
@@ -138,7 +146,53 @@ global S_IOPEND: Int = 38
 global S_RT0: Int = 39
 global S_RTCLK0: Int = 40
 global S_TIMER_AT: Int = 41
-global S_WORDS: Int = 42
+// ルートの集まり（task.roots）の表と、起動したルートの記録の表（ADR 0031 決定 4）。
+global S_GROUPS: Int = 42
+global S_STARTED: Int = 45
+// デッドロックで起動したルートを止めている間 1（他のワーカーはデッドロックを判定せずに待つ）。
+global S_ISO: Int = 48
+global S_WORDS: Int = 49
+
+// ルートの集まりのレコードの語: 0 待つ範囲, 1 上限, 2 使っているスロット, 3 閉じた, 4 reserve の待機の先頭, 5 同末尾,
+// 6 取り消しの走査位置（起動の記録の添字 + 1。0 は未開始）, 7 取り消しを始めたタスク, 8 ルートの中の走査位置（タスクの添字 + 1）。
+global G_SID: Int = 0
+global G_LIMIT: Int = 1
+global G_USED: Int = 2
+global G_CLOSED: Int = 3
+global G_WQ: Int = 4
+global G_CI: Int = 6
+global G_ME: Int = 7
+global G_TI: Int = 8
+// 取り消しの間、外側の取り消し（task.timeout・範囲）の S_SAVED・S_SCAN を退避する所。
+global G_SAVED: Int = 9
+global G_SCAN: Int = 10
+global G_WORDS: Int = 11
+// 起動の記録の語: 0 集まり, 1 いまのルートタスク, 2 接続の語, 3 接続の破棄, 4 on_abort の関数の値, 5 その破棄, 6 段階,
+// 7 取り消しの走査位置（タスクの添字 + 1）, 8 取り消しを始めたタスク。
+global R_GROUP: Int = 0
+global R_TASK: Int = 1
+global R_CONN: Int = 2
+global R_CONNDROP: Int = 3
+global R_ABORT: Int = 4
+global R_ABORTDROP: Int = 5
+global R_PHASE: Int = 6
+global R_CI: Int = 7
+global R_ME: Int = 8
+global R_SAVED: Int = 9
+global R_SCAN: Int = 10
+global R_WORDS: Int = 11
+// 段階: 1 g を実行中, 2 on_abort を実行中, 3 終わった。
+global PH_BODY: Int = 1
+global PH_ABORT: Int = 2
+global PH_DONE: Int = 3
+// チャネル: 4 作ったルート, 5 回収済み。Lock: 5 作ったルート, 6 壊れた, 7 回収済み。
+global C_ROOT: Int = 4
+global C_DEAD: Int = 5
+global C_WORDS: Int = 6
+global L_ROOT: Int = 5
+global L_BROKEN: Int = 6
+global L_DEAD: Int = 7
+global L_WORDS: Int = 8
 
 // 期限用のトークン（タスクのトークンは 番号 + 1 で、これより小さい。std.os.io の範囲は 1..2147483646）。
 global TIMER_TOKEN: Int = 2147483646
@@ -495,12 +549,13 @@ fn start_locked(frame: Int, retdrop: Int) -> Int
 {
   let s = sched();
   let t = new_task(s, frame, retdrop, 0 - 1);
+  st(t, T_ROOT, t);
   ready_push(s, t);
   return 0;
 }
 
 fn settle(s: Int)
-  intent "積んだ Lock の解放を反映する。待機者がいれば先頭に渡して起こす"
+  intent "積んだ Lock の解放を反映する。待機者がいれば先頭に渡して起こす。異常停止したルートのタスクが放した Lock は壊し、待機者をすべて -1（LockBroken）で起こす。別のワーカーで実行中のタスクが放したものは、そのタスクが止まるまで残す（異常停止の巻き戻しかを、止まってから決めるため）"
   requires none
   ensures none
   effects none
@@ -508,16 +563,34 @@ fn settle(s: Int)
   let mut e = ld(s, S_EHEAD);
   st(s, S_EHEAD, 0);
   st(s, S_ETAIL, 0);
+  let me = ld(s, S_CUR);
   while e != 0 {
     let nx = ld(e, 0);
     let l = ld(e, 1);
-    st(l, 1, 0);
-    let w = wq_pop(l, 2);
-    if w != 0 {
-      st(l, 1, w);
-      wake(s, w, l, true);
+    let rel = ld(e, 2);
+    st(e, 0, 0);
+    if rel != 0 && rel != me && ld(rel, T_ACTIVE) != 0 && ld(rel, T_BREAK) == 0 {
+      let tail = ld(s, S_ETAIL);
+      if tail == 0 { st(s, S_EHEAD, e); } else { st(tail, 0, e); }
+      st(s, S_ETAIL, e);
+    } else {
+      st(l, 1, 0);
+      if rel != 0 && ld(rel, T_BREAK) != 0 { st(l, L_BROKEN, 1); }
+      if ld(l, L_BROKEN) != 0 {
+        let mut w = wq_pop(l, 2);
+        while w != 0 {
+          wake(s, w, 0 - 1, true);
+          w = wq_pop(l, 2);
+        }
+      } else {
+        let w = wq_pop(l, 2);
+        if w != 0 {
+          st(l, 1, w);
+          wake(s, w, l, true);
+        }
+      }
+      rec_free(e, 3);
     }
-    rec_free(e, 2);
     e = nx;
   }
 }
@@ -828,7 +901,7 @@ fn idle_locked() -> Int
 {
   let s = sched();
   if ld(s, S_STOP) != 0 || ld(s, S_RDONE) != 0 { return 1; }
-  if ld(s, S_ACTIVE) != 0 {
+  if ld(s, S_ACTIVE) != 0 || ld(s, S_ISO) != 0 {
     wait_event(s);
     return 1;
   }
@@ -838,6 +911,8 @@ fn idle_locked() -> Int
     if ld(s, S_RHEAD) != 0 { return 1; }
     if ld(s, S_IOPEND) == 0 && ld(s, S_SLEEP) == 0 {
       st(s, S_CUR, 0);
+      // デッドロックの判定はこのワーカーが引き受ける（他のワーカーは S_ISO が戻るまで待つ）。
+      st(s, S_ISO, 1);
       return 0;
     }
     wait_event(s);
@@ -847,6 +922,7 @@ fn idle_locked() -> Int
   if ld(s, S_SLEEP) == 0 {
     // デッドロック: 最後にブロックしたタスクも取り消しの対象にする（枠はまだ片付けられていない）。
     st(s, S_CUR, 0);
+    st(s, S_ISO, 1);
     return 0;
   }
   advance_clock(s);
@@ -1009,6 +1085,7 @@ fn spawn_locked(sid: Int, frame: Int, retdrop: Int) -> Int
   // 取り消しの待機中に動いている親が作った子も、選択不能にして走査に含める。
   let cur = ld(s, S_CUR);
   if cur != 0 && ld(cur, T_CANCEL) != 0 { st(t, T_CANCEL, 1); }
+  if cur != 0 { st(t, T_ROOT, ld(cur, T_ROOT)); } else { st(t, T_ROOT, t); }
   st(sc, 0, ld(sc, 0) + 1);
   let tail = ld(sc, 3);
   if tail == 0 {
@@ -1053,6 +1130,11 @@ fn finish_task_locked(v: Int)
   let t = ld(s, S_CUR);
   st(t, T_STATE, ST_DONE);
   st(t, T_FRAME, 0);
+  let sr = ld(t, T_SROOT);
+  if sr != 0 {
+    root_finished(s, sr, true);
+    return;
+  }
   let sid = ld(t, T_SCOPE);
   if sid < 0 {
     st(s, S_RDONE, 1);
@@ -1231,7 +1313,9 @@ fn chan_new_locked() -> Int
 {
   let s = sched();
   bump(s);
-  return tab_push(s, S_CHANS, rec(4));
+  let c = rec(C_WORDS);
+  st(c, C_ROOT, cur_root(s));
+  return tab_push(s, S_CHANS, c);
 }
 
 fn chan_send_locked(id: Int, v: Int, dropfn: Int)
@@ -1297,9 +1381,10 @@ fn lock_new_locked(v: Int, dropfn: Int) -> Int
 {
   let s = sched();
   bump(s);
-  let l = rec(5);
+  let l = rec(L_WORDS);
   st(l, 0, v);
   st(l, 4, dropfn);
+  st(l, L_ROOT, cur_root(s));
   return tab_push(s, S_LOCKS, l);
 }
 
@@ -1314,6 +1399,7 @@ fn lock_acquire_locked(id: Int) -> Int
   settle(s);
   let l = tab_get(s, S_LOCKS, id);
   let cur = ld(s, S_CUR);
+  if ld(l, L_BROKEN) != 0 { return 0 - 1; }
   if ld(l, 1) == 0 {
     st(l, 1, cur);
     return l;
@@ -1331,8 +1417,9 @@ fn lock_release_locked(l: Int)
   effects none
 {
   let s = sched();
-  let e = rec(2);
+  let e = rec(3);
   st(e, 1, l);
+  st(e, 2, ld(s, S_CUR));
   let tail = ld(s, S_ETAIL);
   if tail == 0 {
     st(s, S_EHEAD, e);
@@ -1340,6 +1427,490 @@ fn lock_release_locked(l: Int)
     st(tail, 0, e);
   }
   st(s, S_ETAIL, e);
+}
+
+// --- 複数ルート（task.roots。ADR 0031 決定 4） ---
+
+fn cur_root(s: Int) -> Int
+  intent "現在のタスクが属するルートタスクのレコード（現在のタスクがなければ 0）"
+  requires none
+  ensures none
+  effects none
+{
+  let cur = ld(s, S_CUR);
+  if cur == 0 { return 0; }
+  return ld(cur, T_ROOT);
+}
+
+fn roots_begin_locked(limit: Int) -> Int
+  intent "ルートの集まりを作って番号を返す。本体の終わりを待つ範囲を 1 つ作る"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let sid = scope_begin_locked();
+  let g = rec(G_WORDS);
+  st(g, G_SID, sid);
+  st(g, G_LIMIT, limit);
+  return tab_push(s, S_GROUPS, g);
+}
+
+fn roots_end_locked(gid: Int) -> Int
+  intent "集まりの本体が戻った。以後の起動を止め、起動したルートが生きていれば現在のタスクを待たせて 1、いなければ 0"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let g = tab_get(s, S_GROUPS, gid);
+  st(g, G_CLOSED, 1);
+  return scope_end_locked(ld(g, G_SID));
+}
+
+fn group_closed_locked(gid: Int) -> Int
+  intent "集まりが閉じているか（1 / 0）"
+  requires none
+  ensures none
+  effects none
+{
+  return ld(tab_get(sched(), S_GROUPS, gid), G_CLOSED);
+}
+
+fn reserve_locked(gid: Int) -> Int
+  intent "スロットを 1 つ取る。取れたら 1、上限なら現在のタスクを待たせて 0、集まりが閉じていれば -1"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  bump(s);
+  let g = tab_get(s, S_GROUPS, gid);
+  if ld(g, G_CLOSED) != 0 { return 0 - 1; }
+  if ld(g, G_USED) < ld(g, G_LIMIT) {
+    st(g, G_USED, ld(g, G_USED) + 1);
+    return 1;
+  }
+  let cur = ld(s, S_CUR);
+  wq_push(g, G_WQ, cur);
+  st(cur, T_STATE, ST_ROOTWAIT);
+  st(s, S_BLOCKED, 1);
+  return 0;
+}
+
+fn release_slot(s: Int, gid: Int)
+  intent "スロットを 1 つ返す。reserve で待っているタスクがいれば、そのまま渡して起こす（起床の値 1）"
+  requires none
+  ensures none
+  effects none
+{
+  bump(s);
+  let g = tab_get(s, S_GROUPS, gid);
+  if ld(g, G_CLOSED) == 0 {
+    let w = wq_pop(g, G_WQ);
+    if w != 0 {
+      wake(s, w, 1, true);
+      return;
+    }
+  }
+  if ld(g, G_USED) > 0 { st(g, G_USED, ld(g, G_USED) - 1); }
+}
+
+fn root_new_locked(gid: Int, conn: Int, conndrop: Int, oa: Int, oadrop: Int) -> Int
+  intent "起動の記録を作って番地を返す。接続とその破棄の関数、on_abort の関数の値とその破棄の関数を持つ"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let r = rec(R_WORDS);
+  st(r, R_GROUP, gid);
+  st(r, R_CONN, conn);
+  st(r, R_CONNDROP, conndrop);
+  st(r, R_ABORT, oa);
+  st(r, R_ABORTDROP, oadrop);
+  tab_push(s, S_STARTED, r);
+  return r;
+}
+
+fn root_launch_locked(r: Int, frame: Int, retdrop: Int)
+  intent "起動の記録 r のルートタスクを作って実行可能にする。最初（g）なら起動済みの数に足す。on_abort なら、接続と on_abort は枠が持つ"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  bump(s);
+  let t = new_task(s, frame, retdrop, 0 - 1);
+  st(t, T_ROOT, t);
+  st(t, T_SROOT, r);
+  st(r, R_TASK, t);
+  if ld(r, R_PHASE) == 0 {
+    st(r, R_PHASE, PH_BODY);
+    let g = tab_get(s, S_GROUPS, ld(r, R_GROUP));
+    let sc = tab_get(s, S_SCOPES, ld(g, G_SID));
+    st(sc, 0, ld(sc, 0) + 1);
+  } else {
+    st(r, R_CONN, 0);
+    st(r, R_CONNDROP, 0);
+    st(r, R_ABORT, 0);
+    st(r, R_ABORTDROP, 0);
+  }
+  ready_push(s, t);
+}
+
+fn reclaim_root(s: Int, root: Int)
+  intent "正常に終わったルートで作った通信路の項と Lock の値をごみの列に積み、回収済みにする（待機者・保持者のいるものは残す）"
+  requires none
+  ensures none
+  effects none
+{
+  settle(s);
+  let nc = ld(s, S_CHANS + 1);
+  let mut j = 0;
+  while j < nc {
+    let c = tab_get(s, S_CHANS, j);
+    if ld(c, C_ROOT) == root && ld(c, C_DEAD) == 0 && ld(c, 2) == 0 {
+      st(c, C_DEAD, 1);
+      chan_drain(s, c);
+    }
+    j = j + 1;
+  }
+  let nl = ld(s, S_LOCKS + 1);
+  let mut k = 0;
+  while k < nl {
+    let l = tab_get(s, S_LOCKS, k);
+    if ld(l, L_ROOT) == root && ld(l, L_DEAD) == 0 && ld(l, 1) == 0 && ld(l, 2) == 0 {
+      st(l, L_DEAD, 1);
+      garbage_push(s, ld(l, 0), ld(l, 4));
+      st(l, 0, 0);
+      st(l, 4, 0);
+    }
+    k = k + 1;
+  }
+}
+
+fn chan_drain(s: Int, c: Int)
+  intent "チャネルの項をすべてごみの列に積み（積んだ順）、項を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut it = ld(c, 0);
+  while it != 0 {
+    let nx = ld(it, 0);
+    garbage_push(s, ld(it, 1), ld(it, 2));
+    rec_free(it, 3);
+    it = nx;
+  }
+  st(c, 0, 0);
+  st(c, 1, 0);
+}
+
+fn stop_root_rest(s: Int, root: Int)
+  intent "止めたルートの残り（評価器の stop_root_inner のタスクの後の部分）: 作った通信路の項を捨てて回収済みにし、作った Lock を壊して値を捨てる"
+  requires none
+  ensures none
+  effects none
+{
+  let nc = ld(s, S_CHANS + 1);
+  let mut j = 0;
+  while j < nc {
+    let c = tab_get(s, S_CHANS, j);
+    if ld(c, C_ROOT) == root {
+      chan_drain(s, c);
+      while wq_pop(c, 2) != 0 { }
+      st(c, C_DEAD, 1);
+    }
+    j = j + 1;
+  }
+  let nl = ld(s, S_LOCKS + 1);
+  let mut k = 0;
+  while k < nl {
+    let l = tab_get(s, S_LOCKS, k);
+    if ld(l, L_ROOT) == root {
+      while wq_pop(l, 2) != 0 { }
+      st(l, L_BROKEN, 1);
+      garbage_push(s, ld(l, 0), ld(l, 4));
+      st(l, 0, 0);
+      st(l, 4, 0);
+    }
+    k = k + 1;
+  }
+}
+
+fn root_finished(s: Int, r: Int, reclaim: Bool)
+  intent "起動したルートが終わった: 回収し（正常終了のとき）、接続と on_abort を積み、スロットを返し、最後なら集まりの本体を起こす"
+  requires none
+  ensures none
+  effects none
+{
+  bump(s);
+  if reclaim { reclaim_root(s, ld(r, R_TASK)); }
+  st(r, R_PHASE, PH_DONE);
+  garbage_push(s, ld(r, R_CONN), ld(r, R_CONNDROP));
+  garbage_push(s, ld(r, R_ABORT), ld(r, R_ABORTDROP));
+  st(r, R_CONN, 0);
+  st(r, R_ABORT, 0);
+  let gid = ld(r, R_GROUP);
+  release_slot(s, gid);
+  let g = tab_get(s, S_GROUPS, gid);
+  let sc = tab_get(s, S_SCOPES, ld(g, G_SID));
+  if ld(sc, 0) > 0 { st(sc, 0, ld(sc, 0) - 1); }
+  if ld(sc, 0) == 0 {
+    let w = ld(sc, 1);
+    if w != 0 {
+      st(sc, 1, 0);
+      st(w, T_WAITSCOPE, 0 - 1);
+      finish_scope(s, sc);
+      wake(s, w, 0, false);
+    }
+  }
+}
+
+fn mark_root(s: Int, root: Int, me: Int) -> Bool
+  intent "ルート root の全タスク（me を除く）を選択不能にし、壊す印を立てる。実行中のものがあれば true"
+  requires none
+  ensures none
+  effects none
+{
+  let mut active = false;
+  let mut j = 0;
+  while j < ld(s, S_TASKS + 1) {
+    let t = tab_get(s, S_TASKS, j);
+    if ld(t, T_ROOT) == root {
+      st(t, T_BREAK, 1);
+      if t != me && ld(t, T_STATE) != ST_DONE {
+        st(t, T_CANCEL, 1);
+        if ld(t, T_ACTIVE) != 0 { active = true; }
+      }
+    }
+    j = j + 1;
+  }
+  return active;
+}
+
+fn root_pick(s: Int, root: Int, me: Int, i0: Int, pos: Int, rr: Int) -> Int
+  intent "ルート root のタスクを添字 i0 から下へ作った順の逆にたどり、次に巻き戻す枠を返す（完了済みの未回収の結果は積んで -1、尽きたら 0）。走査位置はレコード rr の語 pos に置く"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = i0;
+  while i > 0 {
+    i = i - 1;
+    let t = tab_get(s, S_TASKS, i);
+    if t != me && ld(t, T_ROOT) == root {
+      if ld(t, T_STATE) == ST_DONE && ld(t, T_HASRES) != 0 {
+        st(t, T_HASRES, 0);
+        garbage_push(s, ld(t, T_RESULT), ld(t, T_RETDROP));
+        st(rr, pos, i + 1);
+        return 0 - 1;
+      }
+      if ld(t, T_STATE) != ST_DONE && ld(t, T_FRAME) != 0 {
+        unwait(s, t);
+        st(rr, pos, i + 1);
+        st(s, S_CUR, t);
+        st(t, T_STATE, ST_DONE);
+        let f = ld(t, T_FRAME);
+        st(t, T_FRAME, 0);
+        return f;
+      }
+    }
+  }
+  return 0;
+}
+
+fn root_abort_locked(code: Int) -> Int
+  intent "現在のタスクが異常停止した。task.roots が起動したルートに属していれば、そのルートを止める準備をして起動の記録を返す（隔離。ADR 0031 決定 4-2）。そうでなければ 0（プログラム全体の停止）"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let t = ld(s, S_CUR);
+  if t == 0 || code <= 0 { return 0; }
+  let root = ld(t, T_ROOT);
+  let r = ld(root, T_SROOT);
+  if r == 0 || ld(r, R_PHASE) == PH_DONE { return 0; }
+  st(t, T_STATE, ST_DONE);
+  st(t, T_FRAME, 0);
+  st(t, T_BREAK, 1);
+  bump(s);
+  return r;
+}
+
+fn deadlock_root_locked() -> Int
+  intent "デッドロック: 生きている起動したルートのうち一番新しいもの（ルートタスクの番号が最大）の記録。なければ 0"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let n = ld(s, S_STARTED + 1);
+  let mut best = 0;
+  let mut i = 0;
+  while i < n {
+    let r = tab_get(s, S_STARTED, i);
+    let ph = ld(r, R_PHASE);
+    if ph == PH_BODY || ph == PH_ABORT {
+      if best == 0 || ld(ld(r, R_TASK), T_ID) > ld(ld(best, R_TASK), T_ID) { best = r; }
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+fn root_cancel_next_locked(r: Int) -> Int
+  intent "止めるルートのタスクを、作った順の逆に 1 つずつ巻き戻す枠を返す。尽きたら 0 で、現在のタスクを元に戻す"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let root = ld(r, R_TASK);
+  if ld(r, R_CI) == 0 {
+    let me = ld(s, S_CUR);
+    st(r, R_ME, me);
+    // 巻き戻す枠の中の範囲の取り消しが新しく始められるよう、外側の取り消しの状態を退避する（終わりで戻す）。
+    st(r, R_SAVED, ld(s, S_SAVED));
+    st(r, R_SCAN, ld(s, S_SCAN));
+    st(s, S_SAVED, 0);
+    while mark_root(s, root, me) { wait_event(s); }
+    st(r, R_CI, ld(s, S_TASKS + 1) + 1);
+  }
+  let me = ld(r, R_ME);
+  let f = root_pick(s, root, me, ld(r, R_CI) - 1, R_CI, r);
+  if f == 0 {
+    st(s, S_CUR, me);
+    st(s, S_SAVED, ld(r, R_SAVED));
+    st(s, S_SCAN, ld(r, R_SCAN));
+    st(r, R_CI, 0);
+  }
+  return f;
+}
+
+fn root_abort_end_locked(r: Int) -> Int
+  intent "止めたルートのタスクを巻き戻した後: 作った通信路と Lock を捨てて、壊れた Lock の待機者を起こす。g のルートなら on_abort を起動する記録を返し（生成コードが起動する）、on_abort のルートなら終わりにして 0"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  bump(s);
+  stop_root_rest(s, ld(r, R_TASK));
+  settle(s);
+  if ld(r, R_PHASE) == PH_BODY && ld(r, R_ABORT) != 0 {
+    st(r, R_PHASE, PH_ABORT);
+    return r;
+  }
+  root_finished(s, r, false);
+  return 0;
+}
+
+fn mark_group(s: Int, gid: Int, me: Int) -> Bool
+  intent "集まり gid の生きている起動したルートの全タスクを選択不能にする。実行中のものがあれば true"
+  requires none
+  ensures none
+  effects none
+{
+  let mut active = false;
+  let n = ld(s, S_STARTED + 1);
+  let mut i = 0;
+  while i < n {
+    let r = tab_get(s, S_STARTED, i);
+    if ld(r, R_GROUP) == gid && ld(r, R_PHASE) != PH_DONE && ld(r, R_PHASE) != 0 {
+      let root = ld(r, R_TASK);
+      let mut j = 0;
+      while j < ld(s, S_TASKS + 1) {
+        let t = tab_get(s, S_TASKS, j);
+        if t != me && ld(t, T_ROOT) == root && ld(t, T_STATE) != ST_DONE {
+          st(t, T_CANCEL, 1);
+          if ld(t, T_ACTIVE) != 0 { active = true; }
+        }
+        j = j + 1;
+      }
+    }
+    i = i + 1;
+  }
+  return active;
+}
+
+fn group_cancel_next_locked(gid: Int) -> Int
+  intent "集まりの取り消し: 起動したルートを起動の逆順に、各ルートのタスクを作った順の逆に巻き戻す枠を返す。ルートごとに、残りを捨てて接続と on_abort を積み -1 を返す（on_abort は呼ばない。ADR 0031 決定 4-2 の (d)）。尽きたら 0"
+  requires none
+  ensures none
+  effects none
+{
+  let s = sched();
+  let g = tab_get(s, S_GROUPS, gid);
+  if ld(g, G_CI) == 0 {
+    st(g, G_CLOSED, 1);
+    while wq_pop(g, G_WQ) != 0 { }
+    let me = ld(s, S_CUR);
+    st(g, G_ME, me);
+    st(g, G_SAVED, ld(s, S_SAVED));
+    st(g, G_SCAN, ld(s, S_SCAN));
+    st(s, S_SAVED, 0);
+    while mark_group(s, gid, me) { wait_event(s); }
+    st(g, G_CI, ld(s, S_STARTED + 1) + 1);
+    st(g, G_TI, 0);
+    let sc = tab_get(s, S_SCOPES, ld(g, G_SID));
+    st(sc, 0, 0);
+    st(sc, 1, 0);
+  }
+  let me = ld(g, G_ME);
+  let mut ci = ld(g, G_CI) - 1;
+  while ci > 0 {
+    let r = tab_get(s, S_STARTED, ci - 1);
+    if ld(r, R_GROUP) == gid && ld(r, R_PHASE) != PH_DONE && ld(r, R_PHASE) != 0 {
+      let root = ld(r, R_TASK);
+      let mut ti = ld(g, G_TI);
+      if ti == 0 { ti = ld(s, S_TASKS + 1) + 1; }
+      let f = root_pick(s, root, me, ti - 1, G_TI, g);
+      if f != 0 {
+        // 同じルートを続ける（次の呼び出しも ci から見る）。
+        st(g, G_CI, ci + 1);
+        return f;
+      }
+      // このルートのタスクは尽きた: 残りを捨てて、接続と on_abort を積む。
+      stop_root_rest(s, root);
+      st(r, R_PHASE, PH_DONE);
+      garbage_push(s, ld(r, R_CONN), ld(r, R_CONNDROP));
+      garbage_push(s, ld(r, R_ABORT), ld(r, R_ABORTDROP));
+      st(r, R_CONN, 0);
+      st(r, R_ABORT, 0);
+      st(g, G_TI, 0);
+      st(g, G_CI, ci);
+      return 0 - 1;
+    }
+    ci = ci - 1;
+    st(g, G_TI, 0);
+  }
+  st(g, G_USED, 0);
+  st(g, G_CI, 0);
+  st(s, S_CUR, me);
+  st(s, S_SAVED, ld(g, G_SAVED));
+  st(s, S_SCAN, ld(g, G_SCAN));
+  return 0;
+}
+
+fn chan_dead_locked(id: Int) -> Int
+  intent "チャネルが回収済みか（1 / 0）"
+  requires none
+  ensures none
+  effects none
+{
+  return ld(tab_get(sched(), S_CHANS, id), C_DEAD);
+}
+
+fn lock_dead_locked(id: Int) -> Int
+  intent "Lock が回収済みか（1 / 0）"
+  requires none
+  ensures none
+  effects none
+{
+  return ld(tab_get(sched(), S_LOCKS, id), L_DEAD);
 }
 
 // --- 取り消しと後始末 ---
@@ -1632,17 +2203,31 @@ fn release_locked()
       rec_free(it, 3);
       it = nx;
     }
-    rec_free(c, 4);
+    rec_free(c, C_WORDS);
     k = k + 1;
   }
   tab_free(s, S_CHANS);
   let nl = ld(s, S_LOCKS + 1);
   let mut m = 0;
   while m < nl {
-    rec_free(tab_get(s, S_LOCKS, m), 5);
+    rec_free(tab_get(s, S_LOCKS, m), L_WORDS);
     m = m + 1;
   }
   tab_free(s, S_LOCKS);
+  let ng = ld(s, S_GROUPS + 1);
+  let mut gi = 0;
+  while gi < ng {
+    rec_free(tab_get(s, S_GROUPS, gi), G_WORDS);
+    gi = gi + 1;
+  }
+  tab_free(s, S_GROUPS);
+  let nr = ld(s, S_STARTED + 1);
+  let mut ri = 0;
+  while ri < nr {
+    rec_free(tab_get(s, S_STARTED, ri), R_WORDS);
+    ri = ri + 1;
+  }
+  tab_free(s, S_STARTED);
   rec_free(s, S_WORDS);
   clear_sched();
 }
@@ -2060,6 +2645,172 @@ pub fn collect_garbage()
   mutex_unlock();
 }
 
+pub fn roots_begin(limit: Int) -> Int
+  intent "排他の下で roots_begin を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = roots_begin_locked(limit);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn roots_end(gid: Int) -> Int
+  intent "排他の下で roots_end を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = roots_end_locked(gid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn group_closed(gid: Int) -> Int
+  intent "排他の下で group_closed を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = group_closed_locked(gid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn reserve(gid: Int) -> Int
+  intent "排他の下で reserve を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = reserve_locked(gid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn root_new(gid: Int, conn: Int, conndrop: Int, oa: Int, oadrop: Int) -> Int
+  intent "排他の下で root_new を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = root_new_locked(gid, conn, conndrop, oa, oadrop);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn root_abort(code: Int) -> Int
+  intent "排他の下で root_abort を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = root_abort_locked(code);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn deadlock_root() -> Int
+  intent "排他の下で deadlock_root を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = deadlock_root_locked();
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn root_cancel_next(r: Int) -> Int
+  intent "排他の下で root_cancel_next を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = root_cancel_next_locked(r);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn root_abort_end(r: Int) -> Int
+  intent "排他の下で root_abort_end を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = root_abort_end_locked(r);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn group_cancel_next(gid: Int) -> Int
+  intent "排他の下で group_cancel_next を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = group_cancel_next_locked(gid);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn chan_dead(id: Int) -> Int
+  intent "排他の下で chan_dead を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = chan_dead_locked(id);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn lock_dead(id: Int) -> Int
+  intent "排他の下で lock_dead を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  let outcome = lock_dead_locked(id);
+  mutex_unlock();
+  return outcome;
+}
+
+pub fn slot_release(gid: Int)
+  intent "排他の下で、起動せずに捨てた RootSlot のスロットを返す"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  release_slot(sched(), gid);
+  mutex_unlock();
+}
+
+pub fn root_launch(r: Int, frame: Int, retdrop: Int)
+  intent "排他の下で root_launch を行う"
+  requires none
+  ensures none
+  effects none
+{
+  mutex_lock();
+  root_launch_locked(r, frame, retdrop);
+  mutex_unlock();
+}
+
 pub fn release()
   intent "全ワーカー合流後、主スレッドが状態を返す"
   requires none
@@ -2143,6 +2894,8 @@ pub fn step_end()
     st(s, S_ACTIVE, ld(s, S_ACTIVE) - 1);
   }
   st(s, S_CUR, 0);
+  // デッドロックで起動したルートを止め終えた（on_abort の起動まで済んでいる）。
+  st(s, S_ISO, 0);
   notify();
   mutex_unlock();
 }

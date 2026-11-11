@@ -102,6 +102,21 @@ pub const SCHED_FNS: &[(&str, &str)] = &[
     ("tmo_cancel_next", "sched_tmo_cancel_next"),
     ("tmo_fired", "sched_tmo_fired"),
     ("yield_val", "sched_yield_val"),
+    // 複数ルート（ADR 0031 決定 4、PR 6-3d）。
+    ("roots_begin", "sched_roots_begin"),
+    ("roots_end", "sched_roots_end"),
+    ("group_closed", "sched_group_closed"),
+    ("reserve", "sched_reserve"),
+    ("slot_release", "sched_slot_release"),
+    ("root_new", "sched_root_new"),
+    ("root_launch", "sched_root_launch"),
+    ("root_abort", "sched_root_abort"),
+    ("deadlock_root", "sched_deadlock_root"),
+    ("root_cancel_next", "sched_root_cancel_next"),
+    ("root_abort_end", "sched_root_abort_end"),
+    ("group_cancel_next", "sched_group_cancel_next"),
+    ("chan_dead", "sched_chan_dead"),
+    ("lock_dead", "sched_lock_dead"),
 ];
 
 /// `Path` の操作の Sigil 実装のモジュール名と入口の関数（結合後の名前。補足 C-7、PR 3-6b）。純粋な核のモジュール。

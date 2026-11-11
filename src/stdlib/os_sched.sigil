@@ -152,6 +152,8 @@ global S_STARTED: Int = 45
 // デッドロックで起動したルートを止めている間 1（他のワーカーはデッドロックを判定せずに待つ）。
 global S_ISO: Int = 48
 global S_WORDS: Int = 49
+// ワーカー専用の語（共有の塊の外。生成コードの TCB_UNWIND_OFF）: 異常停止の巻き戻しの途中なら 1。
+global S_UNWIND: Int = 50
 
 // ルートの集まりのレコードの語: 0 待つ範囲, 1 上限, 2 使っているスロット, 3 閉じた, 4 reserve の待機の先頭, 5 同末尾,
 // 6 取り消しの走査位置（起動の記録の添字 + 1。0 は未開始）, 7 取り消しを始めたタスク, 8 ルートの中の走査位置（タスクの添字 + 1）。
@@ -218,7 +220,7 @@ fn slot(p: Int, i: Int) -> Int
   effects none
   unchecked "SCHED は起動前に初期化され、全ワーカーの合流まで不変。local は生成コードが整列スタックから求める"
 {
-  if p == SCHED && (i == S_CUR || i == S_BLOCKED || i == S_YIELDED || i == S_SAVED || i == S_SCAN || i == S_CANCEL_I) {
+  if p == SCHED && (i == S_CUR || i == S_BLOCKED || i == S_YIELDED || i == S_SAVED || i == S_SCAN || i == S_CANCEL_I || i == S_UNWIND) {
     return local() + 8 * i;
   }
   return p + 8 * i;
@@ -559,7 +561,7 @@ fn start_locked(frame: Int, retdrop: Int) -> Int
 }
 
 fn settle(s: Int)
-  intent "積んだ Lock の解放を反映する。待機者がいれば先頭に渡して起こす。異常停止したルートのタスクが放した Lock は壊し、待機者をすべて -1（LockBroken）で起こす。別のワーカーで実行中のタスクが放したものは、そのタスクが止まるまで残す（異常停止の巻き戻しかを、止まってから決めるため）"
+  intent "積んだ Lock の解放を反映する。待機者がいれば先頭に渡して起こす。異常停止の巻き戻しの途中に放したもの（解放ごとに記録した印）は Lock を壊し、待機者をすべて -1（LockBroken）で起こす"
   requires none
   ensures none
   effects none
@@ -567,40 +569,31 @@ fn settle(s: Int)
   let mut e = ld(s, S_EHEAD);
   st(s, S_EHEAD, 0);
   st(s, S_ETAIL, 0);
-  let me = ld(s, S_CUR);
   while e != 0 {
     let nx = ld(e, 0);
     let l = ld(e, 1);
-    let rel = ld(e, 2);
-    st(e, 0, 0);
-    if rel != 0 && rel != me && ld(rel, T_ACTIVE) != 0 && ld(rel, T_BREAK) == 0 {
-      let tail = ld(s, S_ETAIL);
-      if tail == 0 { st(s, S_EHEAD, e); } else { st(tail, 0, e); }
-      st(s, S_ETAIL, e);
-    } else {
-      st(l, 1, 0);
-      if rel != 0 && ld(rel, T_BREAK) != 0 { st(l, L_BROKEN, 1); }
-      if ld(l, L_DROPLATER) != 0 {
-        st(l, L_DROPLATER, 0);
-        garbage_push(s, ld(l, 0), ld(l, 4));
-        st(l, 0, 0);
-        st(l, 4, 0);
-      }
-      if ld(l, L_BROKEN) != 0 {
-        let mut w = wq_pop(l, 2);
-        while w != 0 {
-          wake(s, w, 0 - 1, true);
-          w = wq_pop(l, 2);
-        }
-      } else {
-        let w = wq_pop(l, 2);
-        if w != 0 {
-          st(l, 1, w);
-          wake(s, w, l, true);
-        }
-      }
-      rec_free(e, 3);
+    st(l, 1, 0);
+    if ld(e, 2) != 0 { st(l, L_BROKEN, 1); }
+    if ld(l, L_DROPLATER) != 0 {
+      st(l, L_DROPLATER, 0);
+      garbage_push(s, ld(l, 0), ld(l, 4));
+      st(l, 0, 0);
+      st(l, 4, 0);
     }
+    if ld(l, L_BROKEN) != 0 {
+      let mut w = wq_pop(l, 2);
+      while w != 0 {
+        wake(s, w, 0 - 1, true);
+        w = wq_pop(l, 2);
+      }
+    } else {
+      let w = wq_pop(l, 2);
+      if w != 0 {
+        st(l, 1, w);
+        wake(s, w, l, true);
+      }
+    }
+    rec_free(e, 3);
     e = nx;
   }
 }
@@ -1429,7 +1422,11 @@ fn lock_release_locked(l: Int)
   let s = sched();
   let e = rec(3);
   st(e, 1, l);
-  st(e, 2, ld(s, S_CUR));
+  // 解放の時点で、異常停止の巻き戻しの途中か、止めているルートのタスクの取り消しか（評価器の UNWINDING と同じく解放ごとに決める）。
+  let cur = ld(s, S_CUR);
+  let mut brk = ld(s, S_UNWIND);
+  if cur != 0 && ld(cur, T_BREAK) != 0 { brk = 1; }
+  st(e, 2, brk);
   let tail = ld(s, S_ETAIL);
   if tail == 0 {
     st(s, S_EHEAD, e);

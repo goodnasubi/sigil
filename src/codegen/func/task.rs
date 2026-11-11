@@ -1398,6 +1398,16 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[z, c]);
 
         self.b.switch_to_block(run);
+        if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+            // タスクを動かす前に、巻き戻しの印を下ろす。
+            let base = self.region_base();
+            let ua = self
+                .b
+                .ins()
+                .iadd_imm_s(base, crate::codegen::TCB_UNWIND_OFF);
+            let z = self.ic(0);
+            self.st(z, ua, 0);
+        }
         let sig = self.sigref(1);
         let stepf = self.ld(f, 0);
         let inst = self.b.ins().call_indirect(sig, stepf, &[f]);

@@ -396,11 +396,15 @@ pub(crate) const TCB_SB_OFF: i64 = TCB_WS_OFF + WS_BYTES as i64;
 /// ワーカー専用のスケジューラ状態（30 語）と取り消しの旗。表示バッファの後の予約領域。
 pub(crate) const TCB_SCHED_OFF: i64 = 81920;
 pub(crate) const TCB_CANCEL_OFF: i64 = TCB_SCHED_OFF + 512;
+/// 異常停止の巻き戻しの途中か（ワーカー専用。`std.os.sched` の `S_UNWIND`＝語 50。`task.roots` を使うプログラムだけが書く）。
+/// この間に放した `Lock` は壊れる（評価器の `UNWINDING`。ADR 0026 決定 4）。
+pub(crate) const TCB_UNWIND_OFF: i64 = TCB_SCHED_OFF + 8 * 50;
 pub(crate) const STACK_LIMIT_OFF: i64 = STACK_REGION / 4;
 // 作業の列と表示バッファが、スタックの下限より下（スタックが届かない所）に収まる。
 const _: () = assert!(TCB_SB_OFF + SB_BYTES as i64 <= TCB_SCHED_OFF);
 const _: () = assert!(TCB_SCHED_OFF + 30 * 8 <= TCB_CANCEL_OFF);
 const _: () = assert!(TCB_CANCEL_OFF + 8 <= STACK_LIMIT_OFF);
+const _: () = assert!(TCB_UNWIND_OFF + 8 <= TCB_CANCEL_OFF);
 
 impl<'p> Cg<'p> {
     pub fn sig(&self, n: usize) -> Signature {

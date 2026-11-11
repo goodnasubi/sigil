@@ -973,3 +973,65 @@ fn run() -> Int
     assert_eq!(ran.code, Some(70), "{}", ran.stderr);
     assert_eq!(drops, e.drops.to_vec(), "{}", ran.stderr);
 }
+
+/// 正常に放した `Lock` は、その後でルートが異常停止しても壊れない（壊れるのは巻き戻しの途中に放したものだけ。
+/// PR #398 の指摘）。`on_abort` の取得は `Ok`。
+const RELEASED_THEN_ABORT: &str = r#"
+fn z0() -> Int
+  intent "z"
+  requires none
+  ensures none
+  effects none
+{
+  return 0;
+}
+
+fn run() -> Int
+  intent "r"
+  requires none
+  ensures none
+  effects console, task.spawn, task.suspend, task.share
+{
+  return task.roots(1, |g| {
+    let s = g.reserve();
+    s.start(Lock.new(5), move |l| {
+      match l.acquire() {
+        Ok(gd) => { console.log(&1); }
+        Err(e) => { console.log(&9); }
+      }
+      let q = 1 / z0();
+    }, move |l| {
+      match l.acquire() {
+        Ok(gd) => { console.log(&2); }
+        Err(e) => { console.log(&3); }
+      }
+    });
+    return 7;
+  });
+}
+"#;
+
+#[test]
+fn a_lock_released_normally_before_an_abort_is_not_broken() {
+    let o = ok(RELEASED_THEN_ABORT);
+    assert_eq!((o.value.as_str(), o.output.as_str()), ("7", "1\n2\n"));
+    let dir = common::native::scratch("roots-released");
+    let exe = dir.join("prog");
+    common::native::try_build(
+        &[&format!("{HEAD}{RELEASED_THEN_ABORT}")],
+        "run",
+        &exe,
+        false,
+    )
+    .expect("ビルド");
+    for _ in 0..5 {
+        let r = common::native::exec_env(&exe, &[], &[("SIGIL_WORKERS", "4")]);
+        assert_eq!(
+            (r.code, r.stdout.as_str()),
+            (Some(0), "1\n2\n7\n"),
+            "{}",
+            r.stderr
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

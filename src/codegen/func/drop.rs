@@ -35,6 +35,25 @@ impl<'a, 'p> Fx<'a, 'p> {
         };
         let a = self.pending_addr();
         self.st(code, a, 0);
+        // 取り消しでない巻き戻し（異常停止）に入った印。この後で放す `Lock` は壊れる（評価器の `UNWINDING`）。
+        if self.cg.task.as_ref().is_some_and(|t| t.roots) {
+            let base = self.region_base();
+            let ca = self
+                .b
+                .ins()
+                .iadd_imm_s(base, crate::codegen::TCB_CANCEL_OFF);
+            let can = self.ld(ca, 0);
+            let one = self.ic(1);
+            let z = self.ic(0);
+            let v = self.b.ins().select(can, z, one);
+            let ua = self
+                .b
+                .ins()
+                .iadd_imm_s(base, crate::codegen::TCB_UNWIND_OFF);
+            let old = self.ld(ua, 0);
+            let v = self.b.ins().bor(v, old);
+            self.st(v, ua, 0);
+        }
         self.b.ins().jump(c, NOARGS);
     }
 

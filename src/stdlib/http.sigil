@@ -28,6 +28,12 @@ module std.http
 //   - 符号化した本文: 本文の部分として受け取ったバイト数（`Content-Length` の本文、または大きさの行・塊・塊の後の CRLF・
 //     最後の塊・トレーラー・終わりの空行）。超えたら 413。
 
+// - 接続（ADR 0032 決定 3・4-2・5-2、PR 6-3g-c）: `HttpConn` は `TcpStream` と送信の段階（`Atomic<Int>`: 0 待ち・1 読み取り中・
+//   2 ハンドラ中・3 送信中）を持つ。`serve_conn` は段階を移るたびに書き換え、`abort_conn` は段階で分ける。時間の上限は段階ごとに
+//   1 つの `task.timeout` で包む（判断点 F の案 F1）。応答は書く前に S1〜S7 で確かめる。
+//   `std.http` は `trust none` なので標準エラーへは書けない。ハンドラの誤りの記録は、500 を書いた後に契約違反の異常停止
+//   （`handler_fault`）を起こして、処理系の停止の報告（標準エラー）に任せる。ルートの隔離（ADR 0031 決定 4）が接続の中で止める。
+
 use std.http.limits.defaults;
 
 pub struct HttpHeader {
@@ -42,6 +48,26 @@ pub struct HttpRequest {
   req_version: Int,
   req_headers: List<HttpHeader>,
   req_body: Bytes,
+}
+
+pub struct HttpConn {
+  stream: TcpStream,
+  stage: Atomic<Int>,
+}
+
+// 読みの 1 回分のバッファと、解釈に渡した位置（`pos`。`data` の `pos` 以降が未処理）。
+struct HttpBuf {
+  data: Bytes,
+  pos: Int,
+}
+
+// 要求を読む段階の結果。
+enum HttpStep {
+  Got(HttpRequest),
+  HeadDone,
+  Eof,
+  Bad(HttpError),
+  Broken,
 }
 
 pub struct HttpResponse {
@@ -1049,5 +1075,503 @@ impl HttpResponse {
     effects none
   {
     return self.res_body.clone();
+  }
+}
+
+// ---- 接続（PR 6-3g-c） ----
+
+pub fn conn(s: TcpStream) -> HttpConn
+  intent "接続を HttpConn に包む（送信の段階は待ち）。ルートへ移して serve_conn・abort_conn で使う"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpConn { stream: s, stage: Atomic.new(0) };
+}
+
+fn push_str(b: &mut Bytes, s: &String)
+  intent "文字列のバイトを b の末尾に足す"
+  requires none
+  ensures none
+  effects none
+{
+  let x = s.as_bytes();
+  b.extend(&x);
+}
+
+fn push_dec(b: &mut Bytes, n: Int)
+  intent "0 以上の整数を 10 進で b の末尾に足す"
+  requires none
+  ensures none
+  effects none
+{
+  if n <= 0 {
+    b.push(48);
+    return;
+  }
+  let mut digits = Bytes.new();
+  let mut v = n;
+  while v > 0 {
+    digits.push(48 + v % 10);
+    v = v / 10;
+  }
+  let mut i = digits.len();
+  while i > 0 {
+    i = i - 1;
+    b.push(digits.get(i).unwrap_or(48));
+  }
+}
+
+fn reason(status: Int) -> String
+  intent "状態コードの理由句（知らない状態は空でない固定の語）"
+  requires none
+  ensures none
+  effects none
+{
+  if status == 200 { return "OK"; }
+  if status == 201 { return "Created"; }
+  if status == 202 { return "Accepted"; }
+  if status == 204 { return "No Content"; }
+  if status == 205 { return "Reset Content"; }
+  if status == 206 { return "Partial Content"; }
+  if status == 301 { return "Moved Permanently"; }
+  if status == 302 { return "Found"; }
+  if status == 303 { return "See Other"; }
+  if status == 304 { return "Not Modified"; }
+  if status == 307 { return "Temporary Redirect"; }
+  if status == 308 { return "Permanent Redirect"; }
+  if status == 400 { return "Bad Request"; }
+  if status == 401 { return "Unauthorized"; }
+  if status == 403 { return "Forbidden"; }
+  if status == 404 { return "Not Found"; }
+  if status == 405 { return "Method Not Allowed"; }
+  if status == 408 { return "Request Timeout"; }
+  if status == 409 { return "Conflict"; }
+  if status == 411 { return "Length Required"; }
+  if status == 413 { return "Content Too Large"; }
+  if status == 414 { return "URI Too Long"; }
+  if status == 415 { return "Unsupported Media Type"; }
+  if status == 417 { return "Expectation Failed"; }
+  if status == 422 { return "Unprocessable Content"; }
+  if status == 429 { return "Too Many Requests"; }
+  if status == 431 { return "Request Header Fields Too Large"; }
+  if status == 500 { return "Internal Server Error"; }
+  if status == 501 { return "Not Implemented"; }
+  if status == 502 { return "Bad Gateway"; }
+  if status == 503 { return "Service Unavailable"; }
+  if status == 504 { return "Gateway Timeout"; }
+  if status == 505 { return "HTTP Version Not Supported"; }
+  return "Status";
+}
+
+fn render(status: Int, headers: &List<HttpHeader>, body: &Bytes, head_only: Bool, close: Bool) -> Bytes
+  intent "応答のバイト列を組み立てる（ADR 0032 決定 5-2 の S3〜S7。204・304 は Content-Length を送らず、205 は 0、HEAD は本文を送らない。close なら Connection: close）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  push_str(&mut out, &"HTTP/1.1 ");
+  push_dec(&mut out, status);
+  out.push(32);
+  push_str(&mut out, &reason(status));
+  push_str(&mut out, &"\r\n");
+  let mut i = 0;
+  while i < headers.len() {
+    match headers.get(i) {
+      Some(h) => {
+        push_str(&mut out, &h.h_name);
+        push_str(&mut out, &": ");
+        out.extend(&h.h_value);
+        push_str(&mut out, &"\r\n");
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  let no_body = status == 204 || status == 205 || status == 304;
+  if status == 205 {
+    push_str(&mut out, &"content-length: 0\r\n");
+  } else if !(status == 204 || status == 304) {
+    push_str(&mut out, &"content-length: ");
+    push_dec(&mut out, body.len());
+    push_str(&mut out, &"\r\n");
+  }
+  if close {
+    push_str(&mut out, &"connection: close\r\n");
+  }
+  push_str(&mut out, &"\r\n");
+  if !head_only && !no_body {
+    out.extend(&body);
+  }
+  return out;
+}
+
+fn response_fault(res: &HttpResponse, head_only: Bool, max_body: Int) -> Int
+  intent "ハンドラが返した応答の誤りの番号（0 は正しい）。1 状態が範囲外（S2）、2 見出しの名前か値が不正・ライブラリが付ける見出し（S1）、3 本文が空でない 204・205・304（S3〜S5）、4 本文が上限を超える"
+  requires none
+  ensures none
+  effects none
+{
+  if res.res_status < 200 || res.res_status > 599 {
+    return 1;
+  }
+  let mut i = 0;
+  while i < res.res_headers.len() {
+    match res.res_headers.get(i) {
+      Some(h) => {
+        let n = h.h_name.as_bytes();
+        if n.len() == 0 || !all_tchar(&n, 0, n.len()) {
+          return 2;
+        }
+        // 文字列の書き出しとの `==` はネイティブで書き出しの塊が漏れる（別 Issue で報告）ので、Bytes で比べる。
+        if n == "content-length".as_bytes() || n == "transfer-encoding".as_bytes() || n == "connection".as_bytes() {
+          return 2;
+        }
+        let mut k = 0;
+        while k < h.h_value.len() {
+          let c = h.h_value.get(k).unwrap_or(0);
+          if c == 13 || c == 10 || c == 0 {
+            return 2;
+          }
+          k = k + 1;
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  if (res.res_status == 204 || res.res_status == 205 || res.res_status == 304) && res.res_body.len() > 0 {
+    return 3;
+  }
+  if res.res_body.len() > max_body {
+    return 4;
+  }
+  return 0;
+}
+
+fn has_token(v: &Bytes, tok: &String) -> Bool
+  intent "値が、コンマで区切った並びの中に tok（小文字）を、大文字小文字を区別せず前後の空白を除いて含むか"
+  requires none
+  ensures none
+  effects none
+{
+  let want = tok.as_bytes();
+  let mut start = 0;
+  let mut i = 0;
+  while i <= v.len() {
+    let at_end = i == v.len();
+    if at_end || v.get(i).unwrap_or(0) == 44 {
+      let mut a = start;
+      let mut z = i;
+      while a < z && ows_at(&v, a) {
+        a = a + 1;
+      }
+      while z > a && ows_at(&v, z - 1) {
+        z = z - 1;
+      }
+      if lower_of(&v, a, z) == want {
+        return true;
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn wants_close(req: &HttpRequest) -> Bool
+  intent "要求の後に接続を閉じるか（HTTP/1.0、または Connection に close）"
+  requires none
+  ensures none
+  effects none
+{
+  if req.req_version != 11 {
+    return true;
+  }
+  let mut i = 0;
+  while i < req.req_headers.len() {
+    match req.req_headers.get(i) {
+      Some(h) => {
+        if h.h_name.as_bytes() == "connection".as_bytes() && has_token(&h.h_value, &"close") {
+          return true;
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn handler_fault(code: Int)
+  intent "ハンドラの誤りを異常停止（契約違反）にして、処理系の停止の報告（標準エラー）に記録させる。std.http は信頼基盤を足さないので標準エラーへ直接は書かない"
+  requires code == 0
+  ensures none
+  effects none
+{
+}
+
+fn send(c: &HttpConn, limits: &HttpLimits, data: &Bytes) -> Bool
+  intent "data を送信の時間の上限の内側で全部書く。書けたら true。時間切れ・書けない接続は false"
+  requires none
+  ensures none
+  effects net.server, clock, task.spawn, task.suspend, task.share
+{
+  c.stage.store(3);
+  match task.timeout(limits.send_ms(), || c.stream.write_all(&data)) {
+    Some(r) => {
+      match r {
+        Ok(u) => {
+          return true;
+        }
+        Err(e) => {
+          return false;
+        }
+      }
+    }
+    None => {
+      return false;
+    }
+  }
+}
+
+fn finish_close(c: &HttpConn)
+  intent "書き込み側を閉じる（読み側は残す）。接続の破棄は呼び出し元の値の破棄で行う"
+  requires none
+  ensures none
+  effects net.server
+{
+  match c.stream.shutdown() {
+    Ok(u) => {}
+    Err(e) => {}
+  }
+}
+
+fn send_error(c: &HttpConn, limits: &HttpLimits, status: Int)
+  intent "本文が空で Connection: close を付けた応答（固定の文は 6-4）を送って閉じる"
+  requires none
+  ensures none
+  effects net.server, clock, task.spawn, task.suspend, task.share
+{
+  let none_headers = List.new();
+  let bytes = render(status, &none_headers, &Bytes.new(), false, true);
+  let ok = send(&c, &limits, &bytes);
+  finish_close(&c);
+}
+
+fn read_step(c: &HttpConn, p: &mut HttpParser, b: &mut HttpBuf, body: Bool, max: Int) -> HttpStep
+  intent "解釈器に未処理のバイトを渡し、足りなければ読んで続ける。body が false なら見出しを読み終えた時点で HeadDone を返す"
+  requires 1 <= max && max <= 65536
+  ensures none
+  effects net.server, task.suspend
+{
+  while true {
+    if b.pos < b.data.len() {
+      match p.feed(&b.data, b.pos) {
+        Ok(prog) => {
+          match prog {
+            HttpProgress.NeedMore => {
+              b.pos = b.data.len();
+              if !body && p.in_body() {
+                return HttpStep.HeadDone;
+              }
+            }
+            HttpProgress.Done(req, next) => {
+              b.pos = next;
+              return HttpStep.Got(req);
+            }
+          }
+        }
+        Err(e) => {
+          return HttpStep.Bad(e);
+        }
+      }
+    } else {
+      match c.stream.read(max) {
+        Ok(d) => {
+          if d.len() == 0 {
+            return HttpStep.Eof;
+          }
+          b.data = d;
+          b.pos = 0;
+        }
+        Err(e) => {
+          return HttpStep.Broken;
+        }
+      }
+    }
+  }
+  return HttpStep.Broken;
+}
+
+fn is_head_done(s: &HttpStep) -> Bool
+  intent "見出しの終わりまで読んだ結果か（本文の段階へ移る）"
+  requires none
+  ensures none
+  effects none
+{
+  match s {
+    HttpStep.HeadDone => {
+      return true;
+    }
+    HttpStep.Got(r) => {
+      return false;
+    }
+    HttpStep.Eof => {
+      return false;
+    }
+    HttpStep.Bad(e) => {
+      return false;
+    }
+    HttpStep.Broken => {
+      return false;
+    }
+  }
+}
+
+fn read_max(limits: &HttpLimits) -> Int
+  intent "1 回の読みの大きさ（65536 以下で、上限の和より大きくしない）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut m = limits.request_line() + limits.head() + limits.encoded_body();
+  if m > 65536 {
+    m = 65536;
+  }
+  if m < 1 {
+    m = 1;
+  }
+  return m;
+}
+
+pub fn serve_conn(c: &HttpConn, limits: &HttpLimits, h: fn(&HttpRequest) -> HttpResponse) -> Unit
+  intent "1 つの接続の要求を順に読み、ハンドラを呼び、応答を送る（持続接続・パイプライン・100-continue・時間と回数の上限・応答の検査）"
+  requires none
+  ensures none
+  effects net.server, clock, task.spawn, task.suspend, task.share, of(h)
+{
+  let max = read_max(&limits);
+  let mut p = parser(&limits);
+  let mut b = HttpBuf { data: Bytes.new(), pos: 0 };
+  let mut n = 0;
+  let mut go = true;
+  while go {
+    c.stage.store(0);
+    if n > 0 && b.pos >= b.data.len() {
+      match task.timeout(limits.idle_ms(), || c.stream.read(max)) {
+        Some(r) => {
+          match r {
+            Ok(d) => {
+              if d.len() == 0 {
+                finish_close(&c);
+                return;
+              }
+              b.data = d;
+              b.pos = 0;
+            }
+            Err(e) => {
+              return;
+            }
+          }
+        }
+        None => {
+          finish_close(&c);
+          return;
+        }
+      }
+    }
+    c.stage.store(1);
+    let mut step = HttpStep.Broken;
+    match task.timeout(limits.head_ms(), || read_step(&c, &mut p, &mut b, false, max)) {
+      Some(s) => {
+        step = s;
+      }
+      None => {
+        if p.consumed() == 0 {
+          finish_close(&c);
+        } else {
+          send_error(&c, &limits, 408);
+        }
+        return;
+      }
+    }
+    if is_head_done(&step) {
+      if p.wants_continue() {
+        let cont = "HTTP/1.1 100 Continue\r\n\r\n".as_bytes();
+        if !send(&c, &limits, &cont) {
+          return;
+        }
+        c.stage.store(1);
+      }
+      match task.timeout(limits.body_ms(), || read_step(&c, &mut p, &mut b, true, max)) {
+        Some(s) => {
+          step = s;
+        }
+        None => {
+          send_error(&c, &limits, 408);
+          return;
+        }
+      }
+    }
+    match step {
+      HttpStep.Bad(e) => {
+        send_error(&c, &limits, e.status());
+        return;
+      }
+      HttpStep.Eof => {
+        return;
+      }
+      HttpStep.Broken => {
+        return;
+      }
+      HttpStep.HeadDone => {
+        return;
+      }
+      HttpStep.Got(req) => {
+        n = n + 1;
+        c.stage.store(2);
+        let head_only = req.req_method.as_bytes() == "HEAD".as_bytes();
+        let mut close = wants_close(&req) || n >= limits.requests();
+        match task.timeout(limits.handler_ms(), || h(&req)) {
+          None => {
+            send_error(&c, &limits, 503);
+            return;
+          }
+          Some(res) => {
+            let fault = response_fault(&res, head_only, limits.response_body());
+            if fault != 0 {
+              send_error(&c, &limits, 500);
+              c.stage.store(0);
+              handler_fault(fault);
+              return;
+            }
+            let bytes = render(res.res_status, &res.res_headers, &res.res_body, head_only, close);
+            if !send(&c, &limits, &bytes) {
+              return;
+            }
+          }
+        }
+        if close {
+          finish_close(&c);
+          go = false;
+        }
+      }
+    }
+  }
+}
+
+pub fn abort_conn(c: HttpConn, limits: &HttpLimits) -> Unit
+  intent "異常停止した接続の後始末。読み取り中・ハンドラ中は固定の 500（Connection: close、本文なし）を書いて閉じ、送信中・待ちは何も書かずに閉じる（ADR 0032 決定 3-2）"
+  requires none
+  ensures none
+  effects net.server, clock, task.spawn, task.suspend, task.share
+{
+  let stage = c.stage.load();
+  if stage == 1 || stage == 2 {
+    send_error(&c, &limits, 500);
+  } else {
+    finish_close(&c);
   }
 }

@@ -133,7 +133,17 @@ impl Ck {
                                 format!("フィールド `{}` が二重にある", f.name),
                             );
                         }
-                        fields.push((f.name.clone(), self.resolve(&f.ty, Pos::Placed)?));
+                        // 埋め込みモジュール由来の型（`std.http` の `HttpConn` が `TcpStream` を持つ）の中身には、入口の `targets` に
+                        // `bare` があっても「核のモジュールでの OS 層の項目の使用」の規則をかけない（`check_fn_origin` と同じ理由）。
+                        let core = self.core;
+                        if is_embedded_name(&s.name)
+                            || crate::stdlib::HTTP_TYPES.contains(&s.name.as_str())
+                        {
+                            self.core = false;
+                        }
+                        let ty = self.resolve(&f.ty, Pos::Placed);
+                        self.core = core;
+                        fields.push((f.name.clone(), ty?));
                     }
                     self.tparams.clear();
                     let params = s.generics.iter().map(|g| g.name.clone()).collect();
@@ -204,7 +214,15 @@ impl Ck {
                             format!("関数 `{}` が二重に宣言されている", f.name),
                         );
                     }
-                    let sig = self.signature(f, None, &[], &[])?;
+                    // 埋め込みモジュールの関数のシグネチャには、入口の `targets` の `bare` による OS 層の項目の規則をかけない
+                    // （`std.http.conn` が `TcpStream` を受ける。`check_fn_origin` と同じ理由）。
+                    let core = self.core;
+                    if is_embedded_name(&f.name) {
+                        self.core = false;
+                    }
+                    let sig = self.signature(f, None, &[], &[]);
+                    self.core = core;
+                    let sig = sig?;
                     self.fns.insert(f.name.clone(), sig);
                 }
                 Item::Global(g) => {

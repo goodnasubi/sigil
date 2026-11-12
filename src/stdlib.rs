@@ -82,6 +82,8 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // （`HTTP_ERROR_ARMS`・`HTTP_PROGRESS_ARMS`）。ほかは中身を見せない型で、`Sendable`・`Shareable` だけを持つ。
     ("HttpLimits", 0, Layer::Os),
     ("HttpParser", 0, Layer::Os),
+    // 接続（ADR 0032 決定 3-2、PR 6-3g-c）。`TcpStream` を持つので `Sendable` だけで、`Shareable` でない。
+    ("HttpConn", 0, Layer::Os),
     ("HttpProgress", 0, Layer::Os),
     ("HttpRequest", 0, Layer::Os),
     ("HttpHeader", 0, Layer::Os),
@@ -113,6 +115,7 @@ pub const HTTP_PROGRESS_ARMS: &[(&str, &[&str])] =
 pub const HTTP_TYPES: &[&str] = &[
     "HttpLimits",
     "HttpParser",
+    "HttpConn",
     "HttpProgress",
     "HttpRequest",
     "HttpHeader",
@@ -370,6 +373,20 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "http",
         "parser(limits: &HttpLimits) -> HttpParser",
         "none",
+    ),
+    // 接続（ADR 0032 決定 2-3・3-2、PR 6-3g-c）。`serve_conn` の効果はハンドラの効果を足す（`of(h)`）。
+    (Layer::Os, "http", "conn(s: TcpStream) -> HttpConn", "none"),
+    (
+        Layer::Os,
+        "http",
+        "serve_conn(c: &HttpConn, limits: &HttpLimits, h: fn(&HttpRequest) -> HttpResponse) -> Unit",
+        "net.server, clock, task.spawn, task.suspend, task.share, of(h)",
+    ),
+    (
+        Layer::Os,
+        "http",
+        "abort_conn(c: HttpConn, limits: &HttpLimits) -> Unit",
+        "net.server, clock, task.spawn, task.suspend, task.share",
     ),
 ];
 
@@ -761,6 +778,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
                 "with_response_body(self: HttpLimits, v: Int) -> HttpLimits",
                 "none",
             ),
+            ("memory_bound(self: &HttpLimits) -> Int", "none"),
         ],
     ),
     (
@@ -1021,6 +1039,11 @@ mod tests {
             "HttpLimits.response_body",
             "HttpLimits.with_response_body",
             "HttpParser",
+            "HttpConn",
+            "HttpLimits.memory_bound",
+            "http.conn",
+            "http.serve_conn",
+            "http.abort_conn",
             "HttpParser.feed",
             "HttpParser.consumed",
             "HttpParser.held",
@@ -1064,9 +1087,26 @@ mod tests {
     }
 
     #[test]
-    fn http_is_trust_none_without_io_or_raw_ops() {
-        // 信頼基盤の増分は 0（`trust none`、`unchecked`・`raw.*` なし）。I/O をせず、`fs.read`・`fs.write` を持たない
-        // （ディレクトリの横断を持ち込まない。ADR 0032 決定 6）。
+    fn http_is_trust_none_and_has_no_fs_effects() {
+        // 信頼基盤の増分は 0（`trust none`、`unchecked`・`raw.*` なし）。ファイルの効果（`fs.read`・`fs.write`）を持たない
+        // （ディレクトリの横断を持ち込まない。ADR 0032 決定 6）。接続（6-3g-c）の関数が持てる効果は、ソケットと時間と
+        // タスクの効果だけ（`net.server`・`clock`・`task.*`・`of(h)`）。解釈器と型の関数は I/O をしない（`none`）。
+        let allowed = [
+            "none",
+            "net.server",
+            "clock",
+            "task.spawn",
+            "task.suspend",
+            "task.share",
+        ];
+        let check_effects = |m: &str, eff: &str| {
+            for e in eff.split(',').map(str::trim) {
+                assert!(
+                    allowed.contains(&e) || e.starts_with("of("),
+                    "{m}: 許していない効果 {e}"
+                );
+            }
+        };
         for (m, src) in http_sources() {
             let f = crate::parser::parse(src).unwrap();
             assert_eq!(f.module.name.join("."), m);
@@ -1074,15 +1114,18 @@ mod tests {
             for line in src.lines().map(str::trim).filter(|l| !l.starts_with("//")) {
                 assert!(!line.starts_with("unchecked"), "{m}: {line}");
                 assert!(!line.contains("raw."), "{m}: {line}");
-                if line.starts_with("effects ") {
-                    assert_eq!(line, "effects none", "{m}");
+                assert!(!line.contains("fs."), "{m}: {line}");
+                if let Some(eff) = line.strip_prefix("effects ") {
+                    check_effects(m, eff);
                 }
             }
         }
-        // 表の行（名前空間 `http` と `Http` で始まる型のメソッド）の効果も none（`fs.*` を持たない）。
+        // 表の行（名前空間 `http` と `Http` で始まる型のメソッド）の効果。`fs.*` を持たない。
         for (_, ns, sig, eff) in NAMESPACED_FNS {
             if *ns == "http" {
-                assert_eq!(*eff, "none", "{sig}");
+                check_effects(sig, eff);
+                let io = !sig.starts_with("default_limits") && !sig.starts_with("parser");
+                assert_eq!(*eff != "none", io && !sig.starts_with("conn("), "{sig}");
             }
         }
         for (_, head, fns) in IMPLS {

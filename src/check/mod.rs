@@ -240,6 +240,7 @@ const PRELUDE_TYPES: &[&str] = &[
     // 前置きの名前にする（`crate::stdlib::HTTP_TYPES` と同じ並び）。
     "HttpLimits",
     "HttpParser",
+    "HttpConn",
     "HttpProgress",
     "HttpRequest",
     "HttpHeader",

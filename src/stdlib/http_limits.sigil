@@ -357,4 +357,13 @@ impl HttpLimits {
     l.lim_response_body = v;
     return l;
   }
+
+  pub fn memory_bound(self: &HttpLimits) -> Int
+    intent "同時の接続がすべて上限いっぱいのときの最悪のメモリ（バイト。ADR 0032 決定 4-4: 接続数 × (要求の行 + 見出しの部分 + 復号した本文 + 応答の本文 + 読みのバッファ 64 KiB + S_http 16 KiB)）。起動の時に標準エラーへ出す行の値（出す側は 6-4）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_conns * (self.lim_request_line + self.lim_head + self.lim_body + self.lim_response_body + 65536 + 16384);
+  }
 }

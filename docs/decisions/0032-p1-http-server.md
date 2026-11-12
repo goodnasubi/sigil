@@ -405,3 +405,57 @@ ADR 0030 補足 D の方針（差は表に固定する）に従う。`std.http` 
 - 決定 4-4 の式の `S_http` は未知。評価器で 1 MiB の本文を扱う時間も測っていない（テストの大きさの調整が要りうる）。
 - 決定 5 の規則は RFC 9112 の知識に基づき、既存の前段（中継）の振る舞いとの突き合わせはしていない。厳しい側の規則で、正しい前段の要求を拒む例が見つかったら、本 ADR を改訂する。
 - 候補の案出しと推奨を同じ者（Claude）が行っており、偏りがありうる（ADR 0020 の根拠の限界と同じ）。
+
+---
+
+## 補足 A: 6-3g-b の実装の記録（Issue #409）
+
+決定 2-2 の「型の細目は 6-3g-b で決め、補足に記録する」と、決定 4-3 の「上限の上限」の記録。どれも本文の決定（判断点 A〜I）を変えない。
+
+### A-1. 型の名前と形
+
+| 本文の見込み | 実装 | 理由 |
+|---|---|---|
+| `Request`・`Header`・`Response`・`Parser`・`Progress` | `HttpRequest`・`HttpHeader`・`HttpResponse`・`HttpParser`・`HttpProgress`（`HttpLimits`・`HttpError` はそのまま） | 型の名前は平らな名前空間（ADR 0021）。既存の試験と利用者のコードに `Request`・`Response` の宣言があり、前置きの名前にすると壊れる。前置きにしない（利用者が同名の型を宣言できる）と、表のシグネチャの型と取り違える。`Http` で始めて前置きの名前にした（`TcpStream` と同じ扱い） |
+| フィールドを公開するか | 公開しない。取り出す関数（`method()`・`path()`・`query()`・`version()`・`headers()`・`header(name)`・`body()`・`body_len()`、`HttpHeader.name()`・`value()`）で、写しを返す | 表の型は中身を見せない型（`Secret`・`TcpStream` と同じ作法）。Sigil で書いた関数は場所への参照を返せない |
+| `feed(self, data) -> Result<Progress, HttpError>`、`Progress` は「足りない」か「要求と読み越したバイト列」 | `feed(self: &mut HttpParser, data: &Bytes, start: Int)`、`HttpProgress.NeedMore` か `HttpProgress.Done(HttpRequest, Int)`。`Int` は `data` の中の次の位置で、読み越しは `data[next..]` | 読み越しを要求ごとに写すと、1 回の読み（最大 64 KiB）に多数の小さい要求を並べた入力で計算量が 2 乗になる（決定 2-3 の計算量の理由と同じ）。位置で返せば各バイトを定数回だけ見る |
+| — | `consumed()`（失敗までに消費したバイト数）・`held()`（保持の大きさ）・`in_body()`・`wants_continue()` | 決定 7・8 の突き合わせの「`Err` の腕と消費したバイト数」と保持の性質、6-3g-c の時間の段階と `100 Continue` |
+| `HttpError` の腕 | 本文の 8 つ（`BadRequest`・`UriTooLong`・`HeadersTooLarge`・`BodyTooLarge`・`NotImplemented`・`VersionNotSupported`・`ExpectationFailed`・`Timeout`）。`status()` が状態コードへ写す | 解釈器は `Timeout` を返さない（6-3g-c） |
+| `HttpResponse` | `HttpResponse.new(status, body)`（`requires 200 <= status && status <= 599`）・`with_header`・`status()`・`headers()`・`body()` | 見出しの検査と `Content-Length` の付与は送る側（6-3g-c、決定 5-2・6） |
+| `HttpLimits` を起動したルートへ渡す方法（決定 2-3 の確かめ） | `HttpLimits` は `Int` だけを持ち、`Sendable`・`Shareable`（複製・比較はできない）。タスクのクロージャへ `move` で移せる。外側のクロージャがとらえた値を内側の `move` で移すことは今の規則で拒まれる（`ClosureMoveCaptured`）ので、`reserve` のループの中で作るか、ルートの中で `http.default_limits()` から作る | `tests/http_types_6_3g.rs` |
+
+- 既定値と上限の上限は `src/stdlib/http_limits.sigil`（`std.http.limits`）にだけ置く。値は `defaults()` から作り、`with_<名前>(v)` で 1 つずつ変える（各値の `requires 1 <= v && v <= 上限の上限`）。表（`src/stdlib.rs`）の `requires` は同じ文字列で、単体テストで固定する。
+- `std.http`・`std.http.limits` は `trust none`、効果は全部 `none`（I/O・`fs.*` なし）、`unchecked`・`raw.*` なし。表の単体テストで固定する。
+
+### A-2. 上限の上限
+
+| 上限 | 既定値 | 上限の上限 |
+|---|---|---|
+| 要求の行 | 8 KiB | 64 KiB |
+| 見出しの部分 | 16 KiB | 256 KiB |
+| 見出しの数 | 100 | 1000 |
+| 本文 | 1 MiB | 64 MiB |
+| 分割した転送の大きさの行 | 1 KiB | 1 KiB |
+| 符号化した本文 | 2 MiB | 128 MiB |
+| 同時の接続 | 256 | 4096（`task.roots` の `limit` の上限） |
+| backlog | 128 | 1024（`net.listen` の `requires`） |
+| 時間（見出し・本文・ハンドラ・送信・待つ時間） | 10・30・30・30・60 秒 | どれも 600 秒 |
+| 1 つの接続の要求 | 1000 | 100000 |
+| 応答の本文 | 1 MiB | 64 MiB |
+
+### A-3. 数え方と解釈の細目
+
+- 要求の行は CRLF を除くバイト数。超えたバイトが対象の中（最初の SP の後で、そのバイトが SP でない）なら 414、ほかは 400。
+- 見出しの部分は、見出しの行とトレーラーの行の CRLF を含むバイト数。終わりの空行は数えない（数えると、上限ちょうどの見出しの分割した転送の要求が、トレーラーの終わりの空行で必ず超える）。見出しの数はトレーラーを含む行の数。
+- 大きさの行は CRLF を含むバイト数。符号化した本文は、`Content-Length` の本文、または大きさの行から終わりの空行までの全バイト。
+- 失敗は、失敗を起こしたバイトを消費しない（`consumed` はその前まで）。分け方によらない。
+- R4 の「前後の空白」: コロンの後が `chunked` か ` chunked`（SP 1 つ）だけを受ける。HTAB・2 つ以上の SP・後ろの空白は 400。1 つの token で、大文字小文字を除いて `chunked` に等しいもの（`Chunked` など）は 400、ほかの 1 つの token（`gzip`・`identity`）は 501、並び（`,`）・空は 400。
+- `Content-Length` の先頭の 0 は値として読む（`1*DIGIT` に合う）。値は 10^12 を超えたところで数えるのをやめて 413（桁あふれしない）。
+- `Host` の重複は版によらず 400（R11 は HTTP/1.1 の欠けも 400）。`Expect` は値（大文字小文字を区別しない）が `100-continue` のものだけを受け、ほかが 1 つでもあれば見出しの終わりで 417（R1・R11 の後）。`wants_continue` は HTTP/1.1 だけ。
+- 対象は R12 の文字（制御文字・空白・0x7F・0x80 以上）だけを拒み、`#` などはそのまま渡す（6-4 の経路の照合の範囲）。
+
+### A-4. 実装の制限と費用
+
+- `feed` が要求を完成させるとき、解釈した要求の行（メソッド・対象・問い合わせ）・見出しの並び（名前と値）・本文を、`HttpRequest` へ写す（`clone`。`&mut self` のフィールドから値を移動できないため）。写してから解釈器の側を空に戻すまでの間は、その 3 つが 2 組ある。写しは中断点を挟まないので、同時に写すのはワーカーの数（`W`）までである。したがって決定 4-4 の見積もりに、一時的に `W ×（要求の行の上限 + 見出しの部分の上限 + 本文の上限）` が加わる。既定値では 1 つのワーカーにつき 8 KiB + 16 KiB + 1 MiB ≈ 1.02 MiB（ワーカー 4 で ≈ 4.1 MiB）。上限の上限の組（64 KiB + 256 KiB + 64 MiB）では、1 つのワーカーにつき ≈ 64.3 MiB である。本文の上限を小さくしても、見出しの部分の写し（最大 256 KiB）は本文の分に吸収されないので、別の項として数える。起動のときに標準エラーへ出す最悪のメモリの見積もり（6-3g-c）にも、この項を含める。
+- `std.http`・`std.http.limits` は `std.os.net` と同じく、すべてのプログラムに暗黙に結ぶ。使わないプログラムの SIR には入らないが、検査の時間が 1 つのプログラムにつき約 60 ms 増える（debug のビルド、手元で測定）。使うプログラムにだけ結ぶ形は後続で検討する。
+- ADR 0020 の改訂が要る点（本 ADR の判断点 E・F の影響）は、人間の作業として 6-3g-b の PR で依頼した。

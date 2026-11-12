@@ -402,15 +402,35 @@ fn limit_http_send_time() {
         resp_body: 32 << 20,
         ..Lim::default()
     };
+    // サーバーのプロセスが終わったか（親が待つ前の終了済み = ゾンビ、または消えた）。
+    fn exited(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                .is_none_or(|c| c == 'Z'),
+            Err(_) => true,
+        }
+    }
     for mode in [Mode::Native(1), Mode::Native(4)] {
-        let (n, d) = prog().serve(mode, 1, 2, lim, |port, _| {
+        let (n, d) = prog().serve(mode, 1, 2, lim, |port, pid| {
             let mut s = connect(port);
             s.write_all(req("GET", "/huge", "", "").as_bytes()).unwrap();
-            // 応答の最初のバイトが届く（ハンドラが本文を作り終えて送り始める）のを待ってから、読まずに待つ。
+            // 応答の最初のバイトが届く（ハンドラが本文を作り終えて送り始める）のを待つ。
             let mut first = [0u8; 1];
             s.peek(&mut first).unwrap();
+            // 読まずに待つ。送信の時間（400 ミリ秒）を超えた書きの待ちで、サーバーがこの接続を閉じて終わる。
+            // 読み始める前に終わっていることを確かめる（読み始めると書きの待ちが起きず、上限が効かなくなるため、
+            // サーバーの処理の速さに依らないようにする）。
             let t = Instant::now();
-            std::thread::sleep(Duration::from_millis(1500));
+            while !exited(pid) {
+                assert!(
+                    t.elapsed() < Duration::from_secs(30),
+                    "{mode:?}: 送信の時間の上限が効かず、サーバーが終わらない"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // 閉じられた後に、届いていた分だけを読む。
             let mut n = 0usize;
             let mut buf = vec![0u8; 1 << 16];
             loop {
@@ -419,7 +439,6 @@ fn limit_http_send_time() {
                     Ok(k) => n += k,
                 }
             }
-            assert!(t.elapsed() >= Duration::from_millis(1500));
             n
         });
         clean(mode, &d, "1");

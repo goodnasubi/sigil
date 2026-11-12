@@ -393,31 +393,39 @@ fn limit_http_idle_time() {
 }
 
 /// 応答の送信の時間: 相手が読まないと、上限で閉じる（サーバーは止まらず、スロットを返す）。
+/// ネイティブだけで確かめる。時間の上限は中断点（書きの待ち）でだけ効く（ADR 0020 決定 4）。評価器は大きな本文の写しが
+/// 相手の読む速さより遅く、書きの待ちが起きないので、上限が効く前に全部を書き終える（評価器の処理の遅さで、差ではない）。
 #[test]
 fn limit_http_send_time() {
     let lim = Lim {
         send_ms: 400,
-        resp_body: 128 << 20,
+        resp_body: 32 << 20,
         ..Lim::default()
     };
-    let (got, took) = timed(lim, |port| {
-        let mut s = connect(port);
-        s.write_all(req("GET", "/huge", "", "").as_bytes()).unwrap();
-        // 読まずに待つ。サーバーが上限で閉じた後に読み始めて、途中で切れていることを確かめる。
-        std::thread::sleep(Duration::from_millis(1500));
-        let mut n = 0usize;
-        let mut buf = vec![0u8; 1 << 16];
-        loop {
-            match s.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(k) => n += k,
+    for mode in [Mode::Native(1), Mode::Native(4)] {
+        let (n, d) = prog().serve(mode, 1, 2, lim, |port, _| {
+            let mut s = connect(port);
+            s.write_all(req("GET", "/huge", "", "").as_bytes()).unwrap();
+            // 応答の最初のバイトが届く（ハンドラが本文を作り終えて送り始める）のを待ってから、読まずに待つ。
+            let mut first = [0u8; 1];
+            s.peek(&mut first).unwrap();
+            let t = Instant::now();
+            std::thread::sleep(Duration::from_millis(1500));
+            let mut n = 0usize;
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(k) => n += k,
+                }
             }
-        }
-        assert!(n < 64 << 20, "全部は届かない: {n}");
-        vec![]
-    });
-    assert!(got.is_empty());
-    assert!(took >= Duration::from_millis(1500), "{took:?}");
+            assert!(t.elapsed() >= Duration::from_millis(1500));
+            n
+        });
+        clean(mode, &d, "1");
+        // 有効な応答の先頭の一部は届くが、本文の全部（32 MiB + 見出し）は届かない。
+        assert!(n > 0 && n < (32 << 20), "{mode:?}: 一部だけ届く: {n}");
+    }
 }
 
 // ---- 回数・大きさの上限 ----
@@ -554,11 +562,11 @@ fn many_connections_do_not_leak_fds() {
 
 // ---- 起動の時のメモリの見積もり（ADR 0032 決定 4-4） ----
 
-/// 既定の上限での最悪のメモリ: 256 × (8 KiB + 16 KiB + 1 MiB + 1 MiB + 64 KiB + `S_http` 16 KiB)。
+/// 既定の上限での最悪のメモリ: 256 × (8 KiB + 16 KiB + 本文 1 MiB × 2（完成時の写し）+ 応答の本文 1 MiB + 64 KiB + `S_http` 16 KiB)。
 #[test]
 fn memory_bound_follows_the_adr_formula() {
     let src = "module app.main\n  targets server\n  trust none\n\npub fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let l = http.default_limits();\n  return l.memory_bound();\n}\n";
     let o = common::run(src, "main", &[]).unwrap_or_else(|e| panic!("{:?}", e.error));
-    let per = 8192 + 16384 + 1_048_576 + 1_048_576 + 65536 + 16384;
+    let per = 8192 + 16384 + 2 * 1_048_576 + 1_048_576 + 65536 + 16384;
     assert_eq!(o.value, (256 * per).to_string());
 }

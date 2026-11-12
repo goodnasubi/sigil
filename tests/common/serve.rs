@@ -147,7 +147,7 @@ fn handle(r: &HttpRequest) -> HttpResponse
     let mut b = Bytes.new();
     b.push(97);
     let mut i = 0;
-    while i < 26 {
+    while i < 25 {
       let c = b.clone();
       b.extend(&c);
       i = i + 1;

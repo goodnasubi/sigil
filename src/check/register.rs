@@ -44,6 +44,37 @@ impl Ck {
                     .collect(),
             },
         );
+        // `HttpError`・`HttpProgress` も腕を `match` できる列挙（ADR 0032 決定 2-2・2-3）。`NetError` と同じく、表の行（OS 層の
+        // 印）は残し、型の定義だけを列挙に置き換える。実体は `std.http` の同じ並びの宣言（lower が名前で結ぶ）。
+        self.types.insert(
+            "HttpError".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: crate::stdlib::HTTP_ERROR_ARMS
+                    .iter()
+                    .map(|a| ((*a).to_string(), vec![]))
+                    .collect(),
+            },
+        );
+        self.types.insert(
+            "HttpProgress".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: crate::stdlib::HTTP_PROGRESS_ARMS
+                    .iter()
+                    .map(|(a, ts)| {
+                        let tys = ts
+                            .iter()
+                            .map(|t| match *t {
+                                "Int" => Ty::Int,
+                                n => Ty::Named(n.into(), vec![]),
+                            })
+                            .collect();
+                        ((*a).to_string(), tys)
+                    })
+                    .collect(),
+            },
+        );
     }
 
     /// `impl` の型の名前（`impl<T> List<T>` なら `List`）。標準ライブラリの表の鍵に使う。
@@ -89,8 +120,8 @@ impl Ck {
                 )
             }
         };
-        let net_impl = self.net_home && super::NET_TYPES.contains(&tn.as_str());
-        if !std && !net_impl && PRELUDE_TYPES.contains(&tn.as_str()) {
+        let home_impl = self.home_types.contains(&tn.as_str());
+        if !std && !home_impl && PRELUDE_TYPES.contains(&tn.as_str()) {
             return self.err(
                 ErrorKind::TypeMismatch,
                 format!("`impl` は型を宣言したモジュールの中にだけ書ける（標準の型 `{tn}` には付けられない）"),

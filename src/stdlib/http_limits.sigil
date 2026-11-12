@@ -1,0 +1,360 @@
+module std.http.limits
+  targets server
+  trust none
+
+// HTTP/1.1 サーバーの上限の既定値と、上限の上限（ADR 0032 決定 4-3、判断点 E の案 E1、PR 6-3g-b）。
+//
+// - 既定値は ADR 0020 決定 4 の表（と ADR 0032 決定 4-1 が足した「符号化した本文 2 MiB」）の値で、このファイルにだけ置く。
+//   既定値を変えるときは ADR 0020 を改訂する。このファイルは `CODEOWNERS` で所有者のレビューの対象にする（ADR 0020 W3 の O2。
+//   `CODEOWNERS` の行は人間が足す）。
+// - `HttpLimits` の値は既定値（`defaults`）から作り、`with_*` で 1 つずつ変える。各値は `1 <= v && v <= 上限の上限` の
+//   `requires` で受け、「無制限」を表す値（0・負の値）を持たない（ADR 0020 決定 4）。上限の上限は ADR 0032 の補足 A（PR #411）に記録する。
+// - 利用者から見える名前は、標準ライブラリの表（`src/stdlib.rs`）の `HttpLimits` と `http.default_limits`。表の `requires` は
+//   このファイルの `requires` と同じ文字列で、単体テストで固定する。
+// - フィールドは `lim_<名前>`、取り出す関数は `<名前>()`（フィールドとメソッドに同じ名前は付けられない）。
+// - `HttpLimits` は `Int` だけを持つ。複製はできないが、タスクへ移せる（`Sendable`）。
+
+pub struct HttpLimits {
+  lim_request_line: Int,
+  lim_head: Int,
+  lim_headers: Int,
+  lim_body: Int,
+  lim_chunk_line: Int,
+  lim_encoded_body: Int,
+  lim_conns: Int,
+  lim_backlog: Int,
+  lim_head_ms: Int,
+  lim_body_ms: Int,
+  lim_handler_ms: Int,
+  lim_send_ms: Int,
+  lim_idle_ms: Int,
+  lim_requests: Int,
+  lim_response_body: Int,
+}
+
+pub fn defaults() -> HttpLimits
+  intent "上限の既定値（ADR 0020 決定 4、ADR 0032 決定 4-1）を持つ HttpLimits を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpLimits {
+    lim_request_line: 8192,
+    lim_head: 16384,
+    lim_headers: 100,
+    lim_body: 1048576,
+    lim_chunk_line: 1024,
+    lim_encoded_body: 2097152,
+    lim_conns: 256,
+    lim_backlog: 128,
+    lim_head_ms: 10000,
+    lim_body_ms: 30000,
+    lim_handler_ms: 30000,
+    lim_send_ms: 30000,
+    lim_idle_ms: 60000,
+    lim_requests: 1000,
+    lim_response_body: 1048576
+  };
+}
+
+impl HttpLimits {
+  pub fn request_line(self: &HttpLimits) -> Int
+    intent "要求の行（メソッド・対象・版。CRLF を除く）の長さ（バイト）。超えたら 414（対象が長い）か 400"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_request_line;
+  }
+
+  pub fn with_request_line(self: HttpLimits, v: Int) -> HttpLimits
+    intent "request_line だけを v に変えた値を返す"
+    requires 1 <= v && v <= 65536
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_request_line = v;
+    return l;
+  }
+
+  pub fn head(self: &HttpLimits) -> Int
+    intent "見出しの部分の大きさ（バイト。要求の行を除き、トレーラーを含む。各行の CRLF を数え、終わりの空行は数えない）。超えたら 431"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_head;
+  }
+
+  pub fn with_head(self: HttpLimits, v: Int) -> HttpLimits
+    intent "head だけを v に変えた値を返す"
+    requires 1 <= v && v <= 262144
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_head = v;
+    return l;
+  }
+
+  pub fn headers(self: &HttpLimits) -> Int
+    intent "見出しの数（トレーラーを含む）。超えたら 431"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_headers;
+  }
+
+  pub fn with_headers(self: HttpLimits, v: Int) -> HttpLimits
+    intent "headers だけを v に変えた値を返す"
+    requires 1 <= v && v <= 1000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_headers = v;
+    return l;
+  }
+
+  pub fn body(self: &HttpLimits) -> Int
+    intent "本文の大きさ（Content-Length、または分割した転送の復号した長さの合計。バイト）。超えたら 413"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_body;
+  }
+
+  pub fn with_body(self: HttpLimits, v: Int) -> HttpLimits
+    intent "body だけを v に変えた値を返す"
+    requires 1 <= v && v <= 67108864
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_body = v;
+    return l;
+  }
+
+  pub fn chunk_line(self: &HttpLimits) -> Int
+    intent "分割した転送の大きさの行の長さ（CRLF を含む。バイト）。超えたら 400"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_chunk_line;
+  }
+
+  pub fn with_chunk_line(self: HttpLimits, v: Int) -> HttpLimits
+    intent "chunk_line だけを v に変えた値を返す"
+    requires 1 <= v && v <= 1024
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_chunk_line = v;
+    return l;
+  }
+
+  pub fn encoded_body(self: &HttpLimits) -> Int
+    intent "符号化した本文の大きさ（本文の部分として受け取ったバイト数。大きさの行・塊の後の CRLF・最後の塊・トレーラーを含む）。超えたら 413"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_encoded_body;
+  }
+
+  pub fn with_encoded_body(self: HttpLimits, v: Int) -> HttpLimits
+    intent "encoded_body だけを v に変えた値を返す"
+    requires 1 <= v && v <= 134217728
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_encoded_body = v;
+    return l;
+  }
+
+  pub fn conns(self: &HttpLimits) -> Int
+    intent "同時の接続の数（task.roots の limit。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_conns;
+  }
+
+  pub fn with_conns(self: HttpLimits, v: Int) -> HttpLimits
+    intent "conns だけを v に変えた値を返す"
+    requires 1 <= v && v <= 4096
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_conns = v;
+    return l;
+  }
+
+  pub fn backlog(self: &HttpLimits) -> Int
+    intent "待ち行列（net.listen の backlog。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_backlog;
+  }
+
+  pub fn with_backlog(self: HttpLimits, v: Int) -> HttpLimits
+    intent "backlog だけを v に変えた値を返す"
+    requires 1 <= v && v <= 1024
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_backlog = v;
+    return l;
+  }
+
+  pub fn head_ms(self: &HttpLimits) -> Int
+    intent "見出しを読み終えるまでの時間（ミリ秒。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_head_ms;
+  }
+
+  pub fn with_head_ms(self: HttpLimits, v: Int) -> HttpLimits
+    intent "head_ms だけを v に変えた値を返す"
+    requires 1 <= v && v <= 600000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_head_ms = v;
+    return l;
+  }
+
+  pub fn body_ms(self: &HttpLimits) -> Int
+    intent "本文を読み終えるまでの時間（ミリ秒。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_body_ms;
+  }
+
+  pub fn with_body_ms(self: HttpLimits, v: Int) -> HttpLimits
+    intent "body_ms だけを v に変えた値を返す"
+    requires 1 <= v && v <= 600000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_body_ms = v;
+    return l;
+  }
+
+  pub fn handler_ms(self: &HttpLimits) -> Int
+    intent "ハンドラの時間（ミリ秒。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_handler_ms;
+  }
+
+  pub fn with_handler_ms(self: HttpLimits, v: Int) -> HttpLimits
+    intent "handler_ms だけを v に変えた値を返す"
+    requires 1 <= v && v <= 600000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_handler_ms = v;
+    return l;
+  }
+
+  pub fn send_ms(self: &HttpLimits) -> Int
+    intent "応答を送り終えるまでの時間（ミリ秒。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_send_ms;
+  }
+
+  pub fn with_send_ms(self: HttpLimits, v: Int) -> HttpLimits
+    intent "send_ms だけを v に変えた値を返す"
+    requires 1 <= v && v <= 600000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_send_ms = v;
+    return l;
+  }
+
+  pub fn idle_ms(self: &HttpLimits) -> Int
+    intent "接続を保ったまま次の要求の最初のバイトを待つ時間（ミリ秒。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_idle_ms;
+  }
+
+  pub fn with_idle_ms(self: HttpLimits, v: Int) -> HttpLimits
+    intent "idle_ms だけを v に変えた値を返す"
+    requires 1 <= v && v <= 600000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_idle_ms = v;
+    return l;
+  }
+
+  pub fn requests(self: &HttpLimits) -> Int
+    intent "1 つの接続の要求の数（6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_requests;
+  }
+
+  pub fn with_requests(self: HttpLimits, v: Int) -> HttpLimits
+    intent "requests だけを v に変えた値を返す"
+    requires 1 <= v && v <= 100000
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_requests = v;
+    return l;
+  }
+
+  pub fn response_body(self: &HttpLimits) -> Int
+    intent "応答の本文の大きさ（バイト。6-3g-c）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_response_body;
+  }
+
+  pub fn with_response_body(self: HttpLimits, v: Int) -> HttpLimits
+    intent "response_body だけを v に変えた値を返す"
+    requires 1 <= v && v <= 67108864
+    ensures none
+    effects none
+  {
+    let mut l = self;
+    l.lim_response_body = v;
+    return l;
+  }
+}

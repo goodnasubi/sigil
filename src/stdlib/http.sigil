@@ -1,0 +1,1053 @@
+module std.http
+  targets server
+  trust none
+
+// HTTP/1.1 の要求の増分の解釈器と型（ADR 0032 決定 1・2・4-1・5、PR 6-3g-b）。評価器とネイティブで同じこのコードを動かす
+// （判断点 B の案 B1）。`unchecked`・`raw.*` を使わない（信頼基盤の増分は 0）。I/O をしない（効果は none）。
+//
+// - 利用者から見える名前は、標準ライブラリの表（`src/stdlib.rs`）の `http.parser`・`http.default_limits` と
+//   `HttpParser`・`HttpProgress`・`HttpRequest`・`HttpHeader`・`HttpResponse`・`HttpError`（と `std.http.limits` の `HttpLimits`）。
+//   型の名前は平らな名前空間（ADR 0021）で利用者の型と衝突しないよう `Http` で始め、利用者が宣言できない前置きの名前にする。
+// - 型の細目（ADR 0032 決定 2-2 の見込みからの調整。ADR 0032 の補足 A（PR #411）に記録する）: フィールドは公開せず、取り出す関数で読む（フィールドと
+//   メソッドに同じ名前を付けられないので、フィールドは `req_*` などの名前にする）。取り出す関数は写しを返す。
+// - 増分（決定 2-3）: `feed` は受け取ったバイト列を 1 度だけ前から走査する。要求の行・見出しの行は行の終わりまで `line` に
+//   溜め、行が終わったら解釈して捨てる。分割した転送の大きさの行・塊の後の CRLF は状態だけで読み、溜めない。トレーラーは
+//   行ごとに形を確かめて捨てる。保持するのは、未完の行（`line`）、解釈した要求の行と見出し、復号した本文だけで、その和は
+//   要求の行・見出しの部分・本文の上限の和を超えない（`held`）。
+// - 読み越し: 要求が完成したら、`data` の中の次の位置を `HttpProgress.Done` で返す（読み越したバイト列は `data[next..]`）。
+//   残りを写さないのは、1 回の読みに多数の要求を並べた入力で、要求ごとに残りを写すと計算量が 2 乗になるため。
+// - 解釈の失敗は、そのバイトを消費せずに `Err` を返し、以後の `feed` も同じ `Err` を返す（続くバイト列を信じない）。
+//   失敗までに消費したバイト数は `consumed` で読める。
+// - 規則（決定 5 の R1〜R12）と上限（決定 4-1 の解釈の行）の番号は、下の各所に書く。数え方:
+//   - 要求の行: CRLF を除くバイト数。超えた位置が対象の中（最初の SP の後、2 つ目の SP の前）なら 414、ほかは 400。
+//   - 見出しの部分: 見出しの行（トレーラーを含む）の各行の CRLF を含むバイト数。終わりの空行は数えない。超えたら 431。
+//   - 見出しの数: トレーラーを含む行の数。超えたら 431。
+//   - 本文: `Content-Length` は値を読んだ時点で比べて 413（本文は読まない）。分割した転送は、大きさの行を読んだ時点で、
+//     復号した長さの合計が超えるなら 413（塊の中身は読まない）。
+//   - 分割した転送の大きさの行: CRLF を含むバイト数。超えたら 400（R6 で 8 桁＋CRLF までなので、既定値では先に R6 で 400）。
+//   - 符号化した本文: 本文の部分として受け取ったバイト数（`Content-Length` の本文、または大きさの行・塊・塊の後の CRLF・
+//     最後の塊・トレーラー・終わりの空行）。超えたら 413。
+
+use std.http.limits.defaults;
+
+pub struct HttpHeader {
+  h_name: String,
+  h_value: Bytes,
+}
+
+pub struct HttpRequest {
+  req_method: String,
+  req_path: Bytes,
+  req_query: Bytes,
+  req_version: Int,
+  req_headers: List<HttpHeader>,
+  req_body: Bytes,
+}
+
+pub struct HttpResponse {
+  res_status: Int,
+  res_headers: List<HttpHeader>,
+  res_body: Bytes,
+}
+
+pub enum HttpError {
+  BadRequest,
+  UriTooLong,
+  HeadersTooLarge,
+  BodyTooLarge,
+  NotImplemented,
+  VersionNotSupported,
+  ExpectationFailed,
+  Timeout,
+}
+
+pub enum HttpProgress {
+  NeedMore,
+  Done(HttpRequest, Int),
+}
+
+// 状態（`phase`）: 0 要求の行、1 要求の行の LF、2 見出しの行の頭、3 見出しの終わりの LF、4 見出しの行、5 見出しの行の LF、
+// 8 `Content-Length` の本文、10 大きさの行、11 大きさの行の LF、12 塊の中身、13 塊の後の CR、14 塊の後の LF。
+// トレーラーは 2〜5 を `trailer` を立てて使う。
+pub struct HttpParser {
+  lim_line: Int,
+  lim_head: Int,
+  lim_count: Int,
+  lim_body: Int,
+  lim_chunk: Int,
+  lim_encoded: Int,
+  phase: Int,
+  failed: Int,
+  used: Int,
+  line: Bytes,
+  line_len: Int,
+  spaces: Int,
+  head_bytes: Int,
+  count: Int,
+  stored: Int,
+  method: String,
+  path: Bytes,
+  query: Bytes,
+  version: Int,
+  headers: List<HttpHeader>,
+  body: Bytes,
+  cl: Int,
+  te: Bool,
+  hosts: Int,
+  expect: Int,
+  remaining: Int,
+  encoded: Int,
+  digits: Int,
+  size: Int,
+  lead_zero: Bool,
+  chunk_len: Int,
+  trailer: Bool,
+}
+
+pub fn default_limits() -> HttpLimits
+  intent "上限の既定値（std.http.limits の defaults）を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return defaults();
+}
+
+pub fn parser(limits: &HttpLimits) -> HttpParser
+  intent "limits の解釈の上限を持つ、空の増分の解釈器を作る"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpParser {
+    lim_line: limits.request_line(),
+    lim_head: limits.head(),
+    lim_count: limits.headers(),
+    lim_body: limits.body(),
+    lim_chunk: limits.chunk_line(),
+    lim_encoded: limits.encoded_body(),
+    phase: 0,
+    failed: 0,
+    used: 0,
+    line: Bytes.new(),
+    line_len: 0,
+    spaces: 0,
+    head_bytes: 0,
+    count: 0,
+    stored: 0,
+    method: "",
+    path: Bytes.new(),
+    query: Bytes.new(),
+    version: 0,
+    headers: List.new(),
+    body: Bytes.new(),
+    cl: -1,
+    te: false,
+    hosts: 0,
+    expect: 0,
+    remaining: 0,
+    encoded: 0,
+    digits: 0,
+    size: 0,
+    lead_zero: false,
+    chunk_len: 0,
+    trailer: false
+  };
+}
+
+fn error_of(code: Int) -> HttpError
+  intent "内部の状態コードを HttpError の腕にする（表で固定。ADR 0032 決定 2-2）"
+  requires none
+  ensures none
+  effects none
+{
+  if code == 414 {
+    return HttpError.UriTooLong;
+  }
+  if code == 431 {
+    return HttpError.HeadersTooLarge;
+  }
+  if code == 413 {
+    return HttpError.BodyTooLarge;
+  }
+  if code == 501 {
+    return HttpError.NotImplemented;
+  }
+  if code == 505 {
+    return HttpError.VersionNotSupported;
+  }
+  if code == 417 {
+    return HttpError.ExpectationFailed;
+  }
+  if code == 408 {
+    return HttpError.Timeout;
+  }
+  return HttpError.BadRequest;
+}
+
+fn is_tchar(c: Int) -> Bool
+  intent "token の文字（RFC 9110 5.6.2 の tchar）か"
+  requires none
+  ensures none
+  effects none
+{
+  if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+    return true;
+  }
+  return c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126;
+}
+
+fn is_ows(c: Int) -> Bool
+  intent "OWS の文字（SP か HTAB）か"
+  requires none
+  ensures none
+  effects none
+{
+  return c == 32 || c == 9;
+}
+
+fn ows_at(b: &Bytes, i: Int) -> Bool
+  intent "b の i 番目が OWS の文字か（範囲の外は偽）"
+  requires none
+  ensures none
+  effects none
+{
+  // `&&` の右に `unwrap_or` の値を渡す呼び出しを置くと、lowering の後始末の経路が移動済みの一時値を破棄しうる
+  // （SIR の検証器が拒む）ので、読みはこの関数の中で行う。
+  return is_ows(b.get(i).unwrap_or(0));
+}
+
+fn to_lower(c: Int) -> Int
+  intent "ASCII の大文字を小文字にする。ほかはそのまま"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 65 && c <= 90 {
+    return c + 32;
+  }
+  return c;
+}
+
+fn hex_value(c: Int) -> Int
+  intent "16 進の数字の値。数字でなければ -1"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 {
+    return c - 48;
+  }
+  if c >= 65 && c <= 70 {
+    return c - 55;
+  }
+  if c >= 97 && c <= 102 {
+    return c - 87;
+  }
+  return -1;
+}
+
+fn lower_of(b: &Bytes, start: Int, end: Int) -> Bytes
+  intent "b の start 以上 end 未満を、ASCII の大文字を小文字にして写す"
+  requires 0 <= start && start <= end && end <= b.len()
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  let mut i = start;
+  while i < end {
+    out.push(to_lower(b.get(i).unwrap_or(0)));
+    i = i + 1;
+  }
+  return out;
+}
+
+fn all_tchar(b: &Bytes, start: Int, end: Int) -> Bool
+  intent "b の start 以上 end 未満が空でなく、すべて token の文字か"
+  requires 0 <= start && start <= end && end <= b.len()
+  ensures none
+  effects none
+{
+  if start >= end {
+    return false;
+  }
+  let mut i = start;
+  while i < end {
+    if !is_tchar(b.get(i).unwrap_or(0)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+impl HttpParser {
+  pub fn feed(self: &mut HttpParser, data: &Bytes, start: Int) -> Result<HttpProgress, HttpError>
+    intent "data の start 以降を解釈の状態に足す。要求が完成したら、その要求と data の中の次の位置を返す（残りは写さない）。足りなければ NeedMore。解釈の失敗は Err で、以後も同じ Err"
+    requires 0 <= start && start <= data.len()
+    ensures none
+    effects none
+  {
+    if self.failed != 0 {
+      return Err(error_of(self.failed));
+    }
+    let n = data.len();
+    let mut i = start;
+    while i < n {
+      if self.phase == 8 || self.phase == 12 {
+        // 本文の中身はまとめて写す（1 バイトずつの状態の遷移を通さない）。
+        let mut k = n - i;
+        if k > self.remaining {
+          k = self.remaining;
+        }
+        let mut over = false;
+        if self.encoded + k > self.lim_encoded {
+          k = self.lim_encoded - self.encoded;
+          over = true;
+        }
+        if k > 0 {
+          let part = data.slice(i, i + k).unwrap_or(Bytes.new());
+          self.body.extend(&part);
+          self.remaining = self.remaining - k;
+          self.encoded = self.encoded + k;
+          self.used = self.used + k;
+          i = i + k;
+        }
+        if over {
+          self.failed = 413;
+          return Err(error_of(413));
+        }
+        if self.remaining == 0 {
+          if self.phase == 8 {
+            return Ok(self.finish(i));
+          }
+          self.phase = 13;
+        }
+      } else {
+        let c = data.get(i).unwrap_or(0);
+        let r = self.step(c);
+        if r >= 400 {
+          self.failed = r;
+          return Err(error_of(r));
+        }
+        i = i + 1;
+        self.used = self.used + 1;
+        if r == 1 {
+          return Ok(self.finish(i));
+        }
+      }
+    }
+    return Ok(HttpProgress.NeedMore);
+  }
+
+  pub fn consumed(self: &HttpParser) -> Int
+    intent "いまの要求のために消費したバイト数（feed をまたいだ合計。失敗のときは失敗の前まで）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.used;
+  }
+
+  pub fn held(self: &HttpParser) -> Int
+    intent "保持しているバイト数（未完の行・解釈した要求の行と見出し・復号した本文の和）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.line.len() + self.stored + self.body.len();
+  }
+
+  pub fn in_body(self: &HttpParser) -> Bool
+    intent "見出しを読み終え、本文を読んでいるか（時間の上限の段階を分けるため）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.failed == 0 && (self.phase == 8 || self.phase >= 10 || self.trailer);
+  }
+
+  pub fn wants_continue(self: &HttpParser) -> Bool
+    intent "HTTP/1.1 の Expect: 100-continue の要求の見出しを上限の検査まで通し、本文を読んでいるか（100 Continue を送ってよいか）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.expect == 1 && self.version == 11 && self.in_body();
+  }
+
+  fn finish(self: &mut HttpParser, next: Int) -> HttpProgress
+    intent "完成した要求を取り出して、状態を次の要求のために空に戻す"
+    requires none
+    ensures none
+    effects none
+  {
+    let req = HttpRequest {
+      req_method: self.method.clone(),
+      req_path: self.path.clone(),
+      req_query: self.query.clone(),
+      req_version: self.version,
+      req_headers: self.headers.clone(),
+      req_body: self.body.clone()
+    };
+    self.reset();
+    return HttpProgress.Done(req, next);
+  }
+
+  fn reset(self: &mut HttpParser)
+    intent "要求ごとの状態を初めに戻す（上限は残す）"
+    requires none
+    ensures none
+    effects none
+  {
+    self.phase = 0;
+    self.failed = 0;
+    self.used = 0;
+    self.line = Bytes.new();
+    self.line_len = 0;
+    self.spaces = 0;
+    self.head_bytes = 0;
+    self.count = 0;
+    self.stored = 0;
+    self.method = "";
+    self.path = Bytes.new();
+    self.query = Bytes.new();
+    self.version = 0;
+    self.headers = List.new();
+    self.body = Bytes.new();
+    self.cl = -1;
+    self.te = false;
+    self.hosts = 0;
+    self.expect = 0;
+    self.remaining = 0;
+    self.encoded = 0;
+    self.digits = 0;
+    self.size = 0;
+    self.lead_zero = false;
+    self.chunk_len = 0;
+    self.trailer = false;
+  }
+
+  fn step(self: &mut HttpParser, c: Int) -> Int
+    intent "1 バイトを状態に足す。0 は続き、1 は要求の完成（このバイトで終わる）、400 以上は失敗の状態コード（このバイトは消費しない）"
+    requires none
+    ensures none
+    effects none
+  {
+    let ph = self.phase;
+    // 符号化した本文の上限（決定 4-1）: 分割した転送の本文の部分（大きさの行からトレーラーの終わりまで）の全バイト。
+    if ph >= 10 || self.trailer {
+      self.encoded = self.encoded + 1;
+      if self.encoded > self.lim_encoded {
+        return 413;
+      }
+    }
+    if ph == 0 {
+      // 要求の行。CR の後は LF だけ（R8）。LF だけの行の終わりは 400（R8）。
+      if c == 13 {
+        self.phase = 1;
+        return 0;
+      }
+      if c == 10 {
+        return 400;
+      }
+      self.line_len = self.line_len + 1;
+      if self.line_len > self.lim_line {
+        if self.spaces == 1 && c != 32 {
+          return 414;
+        }
+        return 400;
+      }
+      if c == 32 {
+        self.spaces = self.spaces + 1;
+      }
+      self.line.push(c);
+      return 0;
+    }
+    if ph == 1 {
+      if c != 10 {
+        return 400;
+      }
+      let r = self.request_line();
+      self.line = Bytes.new();
+      if r != 0 {
+        return r;
+      }
+      self.phase = 2;
+      return 0;
+    }
+    if ph == 2 {
+      // 行の頭。CR は見出しの終わりの空行。LF だけは 400（R8）。SP・HTAB で始まる行は折り返し（R7）で 400。
+      if c == 13 {
+        self.phase = 3;
+        return 0;
+      }
+      if c == 10 || is_ows(c) {
+        return 400;
+      }
+      self.count = self.count + 1;
+      if self.count > self.lim_count {
+        return 431;
+      }
+      self.head_bytes = self.head_bytes + 1;
+      if self.head_bytes > self.lim_head {
+        return 431;
+      }
+      self.line.push(c);
+      self.phase = 4;
+      return 0;
+    }
+    if ph == 3 {
+      if c != 10 {
+        return 400;
+      }
+      if self.trailer {
+        return 1;
+      }
+      return self.end_head();
+    }
+    if ph == 4 {
+      if c == 10 {
+        return 400;
+      }
+      self.head_bytes = self.head_bytes + 1;
+      if self.head_bytes > self.lim_head {
+        return 431;
+      }
+      if c == 13 {
+        self.phase = 5;
+        return 0;
+      }
+      self.line.push(c);
+      return 0;
+    }
+    if ph == 5 {
+      if c != 10 {
+        return 400;
+      }
+      self.head_bytes = self.head_bytes + 1;
+      if self.head_bytes > self.lim_head {
+        return 431;
+      }
+      let r = self.field_line();
+      self.line = Bytes.new();
+      if r != 0 {
+        return r;
+      }
+      self.phase = 2;
+      return 0;
+    }
+    if ph == 10 {
+      // 大きさの行（R6）: 16 進の数字 1〜8 桁だけ。先頭の 0 は最後の塊の `0` だけ。拡張（`;`）・空白は拒む。
+      self.chunk_len = self.chunk_len + 1;
+      if self.chunk_len > self.lim_chunk {
+        return 400;
+      }
+      if c == 13 {
+        if self.digits == 0 {
+          return 400;
+        }
+        self.phase = 11;
+        return 0;
+      }
+      let v = hex_value(c);
+      if v < 0 || self.lead_zero {
+        return 400;
+      }
+      if self.digits == 0 && v == 0 {
+        self.lead_zero = true;
+      }
+      self.digits = self.digits + 1;
+      if self.digits > 8 {
+        return 400;
+      }
+      self.size = self.size * 16 + v;
+      return 0;
+    }
+    if ph == 11 {
+      self.chunk_len = self.chunk_len + 1;
+      if self.chunk_len > self.lim_chunk {
+        return 400;
+      }
+      if c != 10 {
+        return 400;
+      }
+      if self.size == 0 {
+        self.trailer = true;
+        self.phase = 2;
+        return 0;
+      }
+      // 本文の上限（決定 4-1）: 復号した長さの合計。塊の中身を読む前に比べる。
+      if self.body.len() + self.size > self.lim_body {
+        return 413;
+      }
+      self.remaining = self.size;
+      self.phase = 12;
+      return 0;
+    }
+    if ph == 13 {
+      // 塊の後は CRLF ちょうど（R6）。
+      if c != 13 {
+        return 400;
+      }
+      self.phase = 14;
+      return 0;
+    }
+    if ph == 14 {
+      if c != 10 {
+        return 400;
+      }
+      self.phase = 10;
+      self.digits = 0;
+      self.size = 0;
+      self.lead_zero = false;
+      self.chunk_len = 0;
+      return 0;
+    }
+    return 400;
+  }
+
+  fn request_line(self: &mut HttpParser) -> Int
+    intent "溜めた要求の行（CRLF を除く）を解釈する。0 は成功、ほかは状態コード（決定 1、R12）"
+    requires none
+    ensures none
+    effects none
+  {
+    let n = self.line.len();
+    let mut s1 = -1;
+    let mut s2 = -1;
+    let mut i = 0;
+    while i < n {
+      if self.line.get(i).unwrap_or(0) == 32 {
+        if s1 < 0 {
+          s1 = i;
+        } else if s2 < 0 {
+          s2 = i;
+        }
+      }
+      i = i + 1;
+    }
+    // R12: 空白はちょうど 2 つで、3 つの部分はどれも空でない。
+    if self.spaces != 2 || s1 <= 0 || s2 == s1 + 1 || s2 >= n - 1 {
+      return 400;
+    }
+    if !all_tchar(&self.line, 0, s1) {
+      return 400;
+    }
+    // R12: 対象の制御文字・空白・0x7F・0x80 以上。
+    i = s1 + 1;
+    while i < s2 {
+      let c = self.line.get(i).unwrap_or(0);
+      if c <= 32 || c >= 127 {
+        return 400;
+      }
+      i = i + 1;
+    }
+    // 版: `HTTP/` DIGIT `.` DIGIT。形の崩れは 400、1.0・1.1 以外は 505（決定 1）。
+    if n - s2 - 1 != 8 {
+      return 400;
+    }
+    let v = self.line.slice(s2 + 1, n).unwrap_or(Bytes.new());
+    let pre = v.slice(0, 5).unwrap_or(Bytes.new());
+    let major = v.get(5).unwrap_or(0);
+    let dot = v.get(6).unwrap_or(0);
+    let minor = v.get(7).unwrap_or(0);
+    if pre != "HTTP/".as_bytes() || dot != 46 || major < 48 || major > 57 || minor < 48 || minor > 57 {
+      return 400;
+    }
+    if major == 49 && minor == 49 {
+      self.version = 11;
+    } else if major == 49 && minor == 48 {
+      self.version = 10;
+    } else {
+      return 505;
+    }
+    let m = self.line.slice(0, s1).unwrap_or(Bytes.new());
+    if m == "CONNECT".as_bytes() || m == "TRACE".as_bytes() {
+      return 501;
+    }
+    // 対象の形: origin-form（`/` で始まる）か、`OPTIONS *` だけ。absolute-form・authority-form は 400（決定 1）。
+    let first = self.line.get(s1 + 1).unwrap_or(0);
+    if first == 42 {
+      if s2 != s1 + 2 || m != "OPTIONS".as_bytes() {
+        return 400;
+      }
+      self.path = "*".as_bytes();
+      self.query = Bytes.new();
+    } else if first == 47 {
+      let mut q = s2;
+      i = s1 + 1;
+      while i < s2 && q == s2 {
+        if self.line.get(i).unwrap_or(0) == 63 {
+          q = i;
+        }
+        i = i + 1;
+      }
+      self.path = self.line.slice(s1 + 1, q).unwrap_or(Bytes.new());
+      if q < s2 {
+        self.query = self.line.slice(q + 1, s2).unwrap_or(Bytes.new());
+      } else {
+        self.query = Bytes.new();
+      }
+    } else {
+      return 400;
+    }
+    match m.to_string_utf8() {
+      Ok(s) => {
+        self.method = s;
+      }
+      Err(e) => {
+        return 400;
+      }
+    }
+    self.stored = self.method.len() + self.path.len() + self.query.len();
+    return 0;
+  }
+
+  fn field_line(self: &mut HttpParser) -> Int
+    intent "溜めた見出しの行（CRLF を除く）を解釈する。0 は成功、ほかは状態コード（R1〜R5・R9〜R11）"
+    requires none
+    ensures none
+    effects none
+  {
+    let n = self.line.len();
+    let mut colon = -1;
+    let mut i = 0;
+    while i < n && colon < 0 {
+      if self.line.get(i).unwrap_or(0) == 58 {
+        colon = i;
+      }
+      i = i + 1;
+    }
+    // R9: 名前は空でない token だけ（名前の前後の空白・token の外の文字は 400）。
+    if colon <= 0 || !all_tchar(&self.line, 0, colon) {
+      return 400;
+    }
+    let mut vs = colon + 1;
+    while vs < n && ows_at(&self.line, vs) {
+      vs = vs + 1;
+    }
+    let mut ve = n;
+    while ve > vs && ows_at(&self.line, ve - 1) {
+      ve = ve - 1;
+    }
+    // R10: 値の制御文字（HTAB を除く。NUL・DEL を含む）は 400。0x80 以上は不透明なバイトとして受ける。
+    i = vs;
+    while i < ve {
+      let c = self.line.get(i).unwrap_or(0);
+      if (c < 32 && c != 9) || c == 127 {
+        return 400;
+      }
+      i = i + 1;
+    }
+    // トレーラーは形だけ確かめて捨てる（ADR 0020 決定 4）。
+    if self.trailer {
+      return 0;
+    }
+    let name = lower_of(&self.line, 0, colon);
+    let value = self.line.slice(vs, ve).unwrap_or(Bytes.new());
+    if name == "content-length".as_bytes() {
+      // R2: 2 つ目の Content-Length は値によらず 400。R3: 値は 1*DIGIT だけ（`5, 5` も 400）。上限を超えたら 413。
+      if self.cl >= 0 {
+        return 400;
+      }
+      let k = value.len();
+      if k == 0 {
+        return 400;
+      }
+      let mut acc = 0;
+      let mut big = false;
+      i = 0;
+      while i < k {
+        let c = value.get(i).unwrap_or(0);
+        if c < 48 || c > 57 {
+          return 400;
+        }
+        if !big {
+          acc = acc * 10 + (c - 48);
+          if acc > 1000000000000 {
+            big = true;
+          }
+        }
+        i = i + 1;
+      }
+      if big || acc > self.lim_body || acc > self.lim_encoded {
+        return 413;
+      }
+      self.cl = acc;
+    } else if name == "transfer-encoding".as_bytes() {
+      // R4: 小文字の `chunked` ちょうど 1 つ（コロンの後は空白なしか SP 1 つ）。重複は 400。R5: HTTP/1.0 は 400。
+      if self.te || self.version == 10 {
+        return 400;
+      }
+      let after = self.line.slice(colon + 1, n).unwrap_or(Bytes.new());
+      if after == "chunked".as_bytes() || after == " chunked".as_bytes() {
+        self.te = true;
+      } else if all_tchar(&self.line, vs, ve) && lower_of(&self.line, vs, ve) != "chunked".as_bytes() {
+        return 501;
+      } else {
+        return 400;
+      }
+    } else if name == "host".as_bytes() {
+      // R11: Host は 1 つだけ（HTTP/1.1 の欠けは見出しの終わりで見る）。
+      self.hosts = self.hosts + 1;
+      if self.hosts > 1 {
+        return 400;
+      }
+    } else if name == "expect".as_bytes() {
+      // `100-continue`（大文字小文字を区別しない）だけを受ける。ほかは見出しの終わりで 417（ADR 0020 決定 4）。
+      if lower_of(&value, 0, value.len()) == "100-continue".as_bytes() {
+        if self.expect == 0 {
+          self.expect = 1;
+        }
+      } else {
+        self.expect = 2;
+      }
+    }
+    match name.to_string_utf8() {
+      Ok(s) => {
+        self.stored = self.stored + s.len() + value.len();
+        self.headers.push(HttpHeader { h_name: s, h_value: value });
+      }
+      Err(e) => {
+        return 400;
+      }
+    }
+    return 0;
+  }
+
+  fn end_head(self: &mut HttpParser) -> Int
+    intent "見出しの終わりで、本文の区切りを決める。0 は本文へ、1 は本文なしで完成、ほかは状態コード（R1・R11、Expect）"
+    requires none
+    ensures none
+    effects none
+  {
+    // R1: Content-Length と Transfer-Encoding の両方は 400。
+    if self.cl >= 0 && self.te {
+      return 400;
+    }
+    // R11: HTTP/1.1 は Host がちょうど 1 つ。
+    if self.version == 11 && self.hosts != 1 {
+      return 400;
+    }
+    if self.expect == 2 {
+      return 417;
+    }
+    if self.te {
+      self.phase = 10;
+      self.digits = 0;
+      self.size = 0;
+      self.lead_zero = false;
+      self.chunk_len = 0;
+      return 0;
+    }
+    if self.cl > 0 {
+      self.remaining = self.cl;
+      self.phase = 8;
+      return 0;
+    }
+    return 1;
+  }
+}
+
+impl HttpError {
+  pub fn status(self: &HttpError) -> Int
+    intent "応答の状態コード（表で固定。ADR 0032 決定 2-2）"
+    requires none
+    ensures none
+    effects none
+  {
+    match self {
+      HttpError.BadRequest => {
+        return 400;
+      }
+      HttpError.UriTooLong => {
+        return 414;
+      }
+      HttpError.HeadersTooLarge => {
+        return 431;
+      }
+      HttpError.BodyTooLarge => {
+        return 413;
+      }
+      HttpError.NotImplemented => {
+        return 501;
+      }
+      HttpError.VersionNotSupported => {
+        return 505;
+      }
+      HttpError.ExpectationFailed => {
+        return 417;
+      }
+      HttpError.Timeout => {
+        return 408;
+      }
+    }
+  }
+}
+
+impl HttpRequest {
+  pub fn method(self: &HttpRequest) -> String
+    intent "メソッド（token。大文字小文字はそのまま）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_method.clone();
+  }
+
+  pub fn path(self: &HttpRequest) -> Bytes
+    intent "対象の `?` の前（百分率の符号は解かず、正規化もしない。`OPTIONS *` は `*`）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_path.clone();
+  }
+
+  pub fn query(self: &HttpRequest) -> Bytes
+    intent "対象の最初の `?` の後（無ければ空）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_query.clone();
+  }
+
+  pub fn version(self: &HttpRequest) -> Int
+    intent "版（HTTP/1.0 は 10、HTTP/1.1 は 11）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_version;
+  }
+
+  pub fn headers(self: &HttpRequest) -> List<HttpHeader>
+    intent "見出しの並び（届いた順。名前は小文字。トレーラーは含まない）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_headers.clone();
+  }
+
+  pub fn header(self: &HttpRequest, name: &String) -> Option<Bytes>
+    intent "名前（大文字小文字を区別しない）が一致する最初の見出しの値"
+    requires none
+    ensures none
+    effects none
+  {
+    let want = name.as_bytes();
+    let key = lower_of(&want, 0, want.len());
+    let mut i = 0;
+    while i < self.req_headers.len() {
+      match self.req_headers.get(i) {
+        Some(h) => {
+          if h.h_name.as_bytes() == key {
+            return Some(h.h_value.clone());
+          }
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    return None;
+  }
+
+  pub fn body(self: &HttpRequest) -> Bytes
+    intent "復号した本文"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_body.clone();
+  }
+
+  pub fn body_len(self: &HttpRequest) -> Int
+    intent "復号した本文の長さ"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_body.len();
+  }
+}
+
+impl HttpHeader {
+  pub fn name(self: &HttpHeader) -> String
+    intent "見出しの名前（小文字）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.h_name.clone();
+  }
+
+  pub fn value(self: &HttpHeader) -> Bytes
+    intent "見出しの値（前後の OWS を除いた生のバイト列）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.h_value.clone();
+  }
+}
+
+impl HttpResponse {
+  pub fn new(status: Int, body: Bytes) -> HttpResponse
+    intent "状態と本文から応答を作る（見出しの検査・Content-Length・Connection の付与は送る側。6-3g-c）"
+    requires 200 <= status && status <= 599
+    ensures none
+    effects none
+  {
+    return HttpResponse { res_status: status, res_headers: List.new(), res_body: body };
+  }
+
+  pub fn with_header(self: HttpResponse, name: &String, value: &Bytes) -> HttpResponse
+    intent "見出しを 1 つ足した応答を返す（名前・値の検査は送る側。ADR 0032 決定 6）"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut r = self;
+    let n = name.as_bytes();
+    let lower = lower_of(&n, 0, n.len());
+    match lower.to_string_utf8() {
+      Ok(s) => {
+        r.res_headers.push(HttpHeader { h_name: s, h_value: value.clone() });
+      }
+      Err(e) => {
+        r.res_headers.push(HttpHeader { h_name: name.clone(), h_value: value.clone() });
+      }
+    }
+    return r;
+  }
+
+  pub fn status(self: &HttpResponse) -> Int
+    intent "状態コード"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.res_status;
+  }
+
+  pub fn headers(self: &HttpResponse) -> List<HttpHeader>
+    intent "見出しの並び（足した順）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.res_headers.clone();
+  }
+
+  pub fn body(self: &HttpResponse) -> Bytes
+    intent "本文"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.res_body.clone();
+  }
+}

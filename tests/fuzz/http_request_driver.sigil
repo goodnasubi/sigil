@@ -1,0 +1,676 @@
+module app.main
+  targets server
+  trust none
+
+// `std.http` の増分の解釈器（ADR 0032 決定 2-3）を、試験から評価器とネイティブで同じ形で動かす入口（PR 6-3g-b）。
+//
+// - 結果は 1 つの文字列（ASCII）で返す。要求ごとに `R<消費>;<メソッド>;<対象>;<問い合わせ>;<版>;<見出しの数>;<名前>=<値>;...;<本文>`
+//   （版と数のほかは 16 進）、失敗は `E<状態>@<消費>`、未完は `P<消費>`。記録は `|` でつなぎ、最後に
+//   `|H<保持の最大>` を付ける。消費は、その要求のために `feed` が消費したバイト数（`feed` の分け方によらない）。
+// - 与え方: `step` が正なら `step` バイトずつ、0 なら `cuts` の位置で分けて（空なら全体を 1 回で）与える。
+// - 上限: `lim` は 6 つの値（要求の行・見出しの部分・見出しの数・本文・大きさの行・符号化した本文）で、0 は既定値のまま。
+
+fn push_text(out: &mut Bytes, s: &String)
+  intent "文字列のバイト列を足す"
+  requires none
+  ensures none
+  effects none
+{
+  out.extend(&s.as_bytes());
+}
+
+fn push_int(out: &mut Bytes, v: Int)
+  intent "整数を 10 進で足す（負は `-` を付ける）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut x = v;
+  if x < 0 {
+    out.push(45);
+    x = 0 - x;
+  }
+  let mut digits = Bytes.new();
+  if x == 0 {
+    digits.push(48);
+  }
+  while x > 0 {
+    digits.push(48 + x % 10);
+    x = x / 10;
+  }
+  let mut i = digits.len();
+  while i > 0 {
+    i = i - 1;
+    out.push(digits.get(i).unwrap_or(48));
+  }
+}
+
+fn hex_digit(v: Int) -> Int
+  intent "0〜15 を 16 進の小文字の数字にする"
+  requires none
+  ensures none
+  effects none
+{
+  if v < 10 {
+    return 48 + v;
+  }
+  return 87 + v;
+}
+
+fn push_hex(out: &mut Bytes, b: &Bytes)
+  intent "バイト列を 16 進（小文字、1 バイト 2 桁）で足す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = 0;
+  while i < b.len() {
+    let c = b.get(i).unwrap_or(0);
+    out.push(hex_digit(c / 16));
+    out.push(hex_digit(c % 16));
+    i = i + 1;
+  }
+}
+
+fn unhex(c: Int) -> Int
+  intent "16 進の数字の値（数字でなければ 0）"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 {
+    return c - 48;
+  }
+  if c >= 97 && c <= 102 {
+    return c - 87;
+  }
+  return 0;
+}
+
+fn from_hex(s: &String) -> Bytes
+  intent "16 進の文字列（偶数の長さ）をバイト列にする"
+  requires none
+  ensures none
+  effects none
+{
+  let b = s.as_bytes();
+  let mut out = Bytes.new();
+  let mut i = 0;
+  while i + 1 < b.len() {
+    out.push(unhex(b.get(i).unwrap_or(0)) * 16 + unhex(b.get(i + 1).unwrap_or(0)));
+    i = i + 2;
+  }
+  return out;
+}
+
+fn at(xs: &List<Int>, i: Int) -> Int
+  intent "一覧の i 番目（無ければ 0）"
+  requires none
+  ensures none
+  effects none
+{
+  match xs.get(i) {
+    Some(v) => {
+      return v + 0;
+    }
+    None => {
+      return 0;
+    }
+  }
+}
+
+fn limits_of(lim: &List<Int>) -> HttpLimits
+  intent "6 つの値（0 は既定値のまま）から HttpLimits を作る"
+  requires none
+  ensures none
+  effects none
+{
+  let mut l = http.default_limits();
+  if at(&lim, 0) > 0 {
+    l = l.with_request_line(at(&lim, 0));
+  }
+  if at(&lim, 1) > 0 {
+    l = l.with_head(at(&lim, 1));
+  }
+  if at(&lim, 2) > 0 {
+    l = l.with_headers(at(&lim, 2));
+  }
+  if at(&lim, 3) > 0 {
+    l = l.with_body(at(&lim, 3));
+  }
+  if at(&lim, 4) > 0 {
+    l = l.with_chunk_line(at(&lim, 4));
+  }
+  if at(&lim, 5) > 0 {
+    l = l.with_encoded_body(at(&lim, 5));
+  }
+  return l;
+}
+
+fn is_framing(name: &String) -> Bool
+  intent "本文の区切りの見出し（content-length・transfer-encoding）か"
+  requires none
+  ensures none
+  effects none
+{
+  let b = name.as_bytes();
+  return b == "content-length".as_bytes() || b == "transfer-encoding".as_bytes();
+}
+
+fn push_request(out: &mut Bytes, r: &HttpRequest, framing: Bool, full: Bool)
+  intent "要求を記録の形で足す（消費の欄を除く）。framing が偽なら本文の区切りの見出しを除く。full が偽なら本文は `L<長さ>` だけ"
+  requires none
+  ensures none
+  effects none
+{
+  push_hex(&mut out, &r.method().as_bytes());
+  out.push(59);
+  push_hex(&mut out, &r.path());
+  out.push(59);
+  push_hex(&mut out, &r.query());
+  out.push(59);
+  push_int(&mut out, r.version());
+  out.push(59);
+  let hs = r.headers();
+  let mut kept = 0;
+  let mut i = 0;
+  while i < hs.len() {
+    match hs.get(i) {
+      Some(h) => {
+        if framing || !is_framing(&h.name()) {
+          kept = kept + 1;
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  push_int(&mut out, kept);
+  i = 0;
+  while i < hs.len() {
+    match hs.get(i) {
+      Some(h) => {
+        if framing || !is_framing(&h.name()) {
+          out.push(59);
+          push_hex(&mut out, &h.name().as_bytes());
+          out.push(61);
+          push_hex(&mut out, &h.value());
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  out.push(59);
+  if full {
+    push_hex(&mut out, &r.body());
+  } else {
+    out.push(76);
+    push_int(&mut out, r.body_len());
+  }
+}
+
+fn piece_end(n: Int, pos: Int, step: Int, cuts: &List<Int>, ci: Int) -> Int
+  intent "次の区切りの位置（pos より後、n 以下）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut end = n;
+  if step > 0 {
+    end = pos + step;
+  } else if ci < cuts.len() {
+    end = at(&cuts, ci);
+  }
+  if end <= pos {
+    end = pos + 1;
+  }
+  if end > n {
+    end = n;
+  }
+  return end;
+}
+
+fn run_feeds(input: &Bytes, step: Int, cuts: &List<Int>, lim: &HttpLimits, full: Bool) -> Bytes
+  intent "input を分けて feed に与え、記録を返す（full が偽なら本文は長さだけ）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut p = http.parser(&lim);
+  let mut out = Bytes.new();
+  let mut held = 0;
+  let mut fed = 0;
+  let mut pos = 0;
+  let mut ci = 0;
+  let mut stop = false;
+  let n = input.len();
+  while pos < n && !stop {
+    let end = piece_end(n, pos, step, &cuts, ci);
+    ci = ci + 1;
+    let piece = input.slice(pos, end).unwrap_or(Bytes.new());
+    let mut start = 0;
+    let mut more = true;
+    while more {
+      match p.feed(&piece, start) {
+        Ok(pr) => {
+          match pr {
+            HttpProgress.Done(r, next) => {
+              out.push(82);
+              push_int(&mut out, fed + next - start);
+              out.push(59);
+              push_request(&mut out, &r, true, full);
+              out.push(124);
+              fed = 0;
+              start = next;
+              if start >= piece.len() {
+                more = false;
+              }
+            }
+            HttpProgress.NeedMore => {
+              fed = fed + piece.len() - start;
+              more = false;
+            }
+          }
+        }
+        Err(e) => {
+          out.push(69);
+          push_int(&mut out, e.status());
+          out.push(64);
+          push_int(&mut out, p.consumed());
+          out.push(124);
+          stop = true;
+          more = false;
+        }
+      }
+      if p.held() > held {
+        held = p.held();
+      }
+    }
+    pos = end;
+  }
+  if !stop && p.consumed() > 0 {
+    out.push(80);
+    push_int(&mut out, p.consumed());
+    out.push(124);
+  }
+  out.push(72);
+  push_int(&mut out, held);
+  return out;
+}
+
+fn serialize(r: &HttpRequest) -> Bytes
+  intent "要求を書き出す（本文の区切りは Content-Length にする）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  push_text(&mut out, &r.method());
+  out.push(32);
+  out.extend(&r.path());
+  let q = r.query();
+  if q.len() > 0 {
+    out.push(63);
+    out.extend(&q);
+  }
+  if r.version() == 11 {
+    push_text(&mut out, &" HTTP/1.1\r\n");
+  } else {
+    push_text(&mut out, &" HTTP/1.0\r\n");
+  }
+  let hs = r.headers();
+  let mut i = 0;
+  while i < hs.len() {
+    match hs.get(i) {
+      Some(h) => {
+        if !is_framing(&h.name()) {
+          push_text(&mut out, &h.name());
+          push_text(&mut out, &": ");
+          out.extend(&h.value());
+          push_text(&mut out, &"\r\n");
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  let body = r.body();
+  if body.len() > 0 {
+    push_text(&mut out, &"content-length: ");
+    push_int(&mut out, body.len());
+    push_text(&mut out, &"\r\n");
+  }
+  push_text(&mut out, &"\r\n");
+  out.extend(&body);
+  return out;
+}
+
+fn roundtrip(input: &Bytes, lim: &HttpLimits) -> Bytes
+  intent "全体を 1 回で与え、完成した要求を書き出して読み直す。どれも同じ要求なら ok"
+  requires none
+  ensures none
+  effects none
+{
+  let wide = http.default_limits().with_request_line(65536).with_head(262144).with_headers(1000).with_body(67108864).with_encoded_body(134217728);
+  let mut p = http.parser(&lim);
+  let mut start = 0;
+  let mut go = true;
+  let mut count = 0;
+  while go && start < input.len() {
+    match p.feed(&input, start) {
+      Ok(pr) => {
+        match pr {
+          HttpProgress.Done(r, next) => {
+            let text = serialize(&r);
+            let mut q = http.parser(&wide);
+            match q.feed(&text, 0) {
+              Ok(pr2) => {
+                match pr2 {
+                  HttpProgress.Done(r2, next2) => {
+                    let mut a = Bytes.new();
+                    push_request(&mut a, &r, false, true);
+                    let mut b = Bytes.new();
+                    push_request(&mut b, &r2, false, true);
+                    if a != b || next2 != text.len() {
+                      return "NG:differ".as_bytes();
+                    }
+                  }
+                  HttpProgress.NeedMore => {
+                    return "NG:more".as_bytes();
+                  }
+                }
+              }
+              Err(e) => {
+                let mut m = "NG:E".as_bytes();
+                push_int(&mut m, e.status());
+                return m;
+              }
+            }
+            count = count + 1;
+            start = next;
+          }
+          HttpProgress.NeedMore => {
+            go = false;
+          }
+        }
+      }
+      Err(e) => {
+        go = false;
+      }
+    }
+  }
+  let mut out = "ok".as_bytes();
+  push_int(&mut out, count);
+  return out;
+}
+
+fn text_of(b: &Bytes) -> String
+  intent "ASCII のバイト列を文字列にする"
+  requires none
+  ensures none
+  effects none
+{
+  match b.to_string_utf8() {
+    Ok(s) => {
+      return s;
+    }
+    Err(e) => {
+      return "?";
+    }
+  }
+}
+
+fn check_bytes(input: &Bytes, cuts: &List<Int>, lim: &HttpLimits) -> Bytes
+  intent "全体で 1 回・1 バイトずつ・cuts で分けた 3 通りの記録と往復の結果を `#` でつなぐ"
+  requires none
+  ensures none
+  effects none
+{
+  let nocut = List.new();
+  let mut out = run_feeds(&input, 0, &nocut, &lim, true);
+  out.push(35);
+  out.extend(&run_feeds(&input, 1, &nocut, &lim, true));
+  out.push(35);
+  out.extend(&run_feeds(&input, 0, &cuts, &lim, true));
+  out.push(35);
+  out.extend(&roundtrip(&input, &lim));
+  return out;
+}
+
+pub fn probe(input: List<Int>, cuts: List<Int>, lim: List<Int>) -> String
+  intent "試験の入口（評価器）。input をバイト列にして check_bytes の結果を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let b = Bytes.from_list(&input).unwrap_or(Bytes.new());
+  let l = limits_of(&lim);
+  return text_of(&check_bytes(&b, &cuts, &l));
+}
+
+pub fn once(input: List<Int>, lim: List<Int>) -> String
+  intent "試験の入口（評価器）。全体を 1 回で与えた記録だけを返す"
+  requires none
+  ensures none
+  effects none
+{
+  let b = Bytes.from_list(&input).unwrap_or(Bytes.new());
+  let l = limits_of(&lim);
+  let nocut = List.new();
+  return text_of(&run_feeds(&b, 0, &nocut, &l, true));
+}
+
+pub fn main(p: Path) -> String
+  intent "突き合わせの入口（評価器とネイティブ）。p の各行（16 進の入力）を、既定の上限と小さい上限で、全体・1 バイトずつ・7 バイトずつ与えた記録を `/` でつなぐ"
+  requires none
+  ensures none
+  effects fs.read
+{
+  let text = match fs.read(&p) {
+    Ok(t) => t,
+    Err(e) => "",
+  };
+  let ls = text.lines();
+  let mut small = List.new();
+  small.push(64);
+  small.push(96);
+  small.push(4);
+  small.push(48);
+  small.push(8);
+  small.push(80);
+  let nocut = List.new();
+  let dflt = List.new();
+  let ld = limits_of(&dflt);
+  let lsm = limits_of(&small);
+  let mut out = Bytes.new();
+  let mut i = 0;
+  while i < ls.len() {
+    match ls.get(i) {
+      Some(line) => {
+        let b = from_hex(&line);
+        out.extend(&check_bytes(&b, &nocut, &ld));
+        out.push(35);
+        out.extend(&run_feeds(&b, 7, &nocut, &ld, true));
+        out.push(35);
+        out.extend(&check_bytes(&b, &nocut, &lsm));
+        out.push(47);
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  return text_of(&out);
+}
+
+fn filled(n: Int) -> Bytes
+  intent "n バイトの `a`（倍にしながら作る）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = Bytes.new();
+  if n <= 0 {
+    return b;
+  }
+  b.push(97);
+  while b.len() * 2 <= n {
+    let c = b.clone();
+    b.extend(&c);
+  }
+  let rest = n - b.len();
+  let tail = b.slice(0, rest).unwrap_or(Bytes.new());
+  b.extend(&tail);
+  return b;
+}
+
+fn push_hex_int(out: &mut Bytes, v: Int)
+  intent "非負の整数を 16 進（小文字、先頭の 0 なし）で足す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut digits = Bytes.new();
+  let mut x = v;
+  if x == 0 {
+    digits.push(48);
+  }
+  while x > 0 {
+    digits.push(hex_digit(x % 16));
+    x = x / 16;
+  }
+  let mut i = digits.len();
+  while i > 0 {
+    i = i - 1;
+    out.push(digits.get(i).unwrap_or(48));
+  }
+}
+
+pub fn body_case(cl: Int, n: Int, step: Int) -> String
+  intent "Content-Length が cl で本文が n バイトの要求を、既定の上限で step バイトずつ（0 は全体を 1 回で）与えた記録"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: ".as_bytes();
+  push_int(&mut b, cl);
+  push_text(&mut b, &"\r\n\r\n");
+  b.extend(&filled(n));
+  let nocut = List.new();
+  let l = http.default_limits();
+  return text_of(&run_feeds(&b, step, &nocut, &l, false));
+}
+
+pub fn chunked_case(sizes: List<Int>, step: Int) -> String
+  intent "sizes の大きさの塊を並べた分割した転送の要求を、既定の上限で step バイトずつ（0 は全体を 1 回で）与えた記録"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n".as_bytes();
+  let mut i = 0;
+  while i < sizes.len() {
+    let k = at(&sizes, i);
+    push_hex_int(&mut b, k);
+    push_text(&mut b, &"\r\n");
+    b.extend(&filled(k));
+    push_text(&mut b, &"\r\n");
+    i = i + 1;
+  }
+  push_text(&mut b, &"0\r\n\r\n");
+  let nocut = List.new();
+  let l = http.default_limits();
+  return text_of(&run_feeds(&b, step, &nocut, &l, false));
+}
+
+pub fn limit_values() -> String
+  intent "既定の上限の 15 個の値を `,` でつなぐ（ADR 0020 決定 4 の表の並び）"
+  requires none
+  ensures none
+  effects none
+{
+  let l = http.default_limits();
+  let mut out = Bytes.new();
+  push_int(&mut out, l.request_line());
+  out.push(44);
+  push_int(&mut out, l.head());
+  out.push(44);
+  push_int(&mut out, l.headers());
+  out.push(44);
+  push_int(&mut out, l.body());
+  out.push(44);
+  push_int(&mut out, l.chunk_line());
+  out.push(44);
+  push_int(&mut out, l.encoded_body());
+  out.push(44);
+  push_int(&mut out, l.conns());
+  out.push(44);
+  push_int(&mut out, l.backlog());
+  out.push(44);
+  push_int(&mut out, l.head_ms());
+  out.push(44);
+  push_int(&mut out, l.body_ms());
+  out.push(44);
+  push_int(&mut out, l.handler_ms());
+  out.push(44);
+  push_int(&mut out, l.send_ms());
+  out.push(44);
+  push_int(&mut out, l.idle_ms());
+  out.push(44);
+  push_int(&mut out, l.requests());
+  out.push(44);
+  push_int(&mut out, l.response_body());
+  return text_of(&out);
+}
+
+pub fn set_limit(i: Int, v: Int) -> Int
+  intent "既定の上限の i 番目（limit_values の並び）を v に変え、読み直した値を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let l = http.default_limits();
+  if i == 0 {
+    return l.with_request_line(v).request_line();
+  }
+  if i == 1 {
+    return l.with_head(v).head();
+  }
+  if i == 2 {
+    return l.with_headers(v).headers();
+  }
+  if i == 3 {
+    return l.with_body(v).body();
+  }
+  if i == 4 {
+    return l.with_chunk_line(v).chunk_line();
+  }
+  if i == 5 {
+    return l.with_encoded_body(v).encoded_body();
+  }
+  if i == 6 {
+    return l.with_conns(v).conns();
+  }
+  if i == 7 {
+    return l.with_backlog(v).backlog();
+  }
+  if i == 8 {
+    return l.with_head_ms(v).head_ms();
+  }
+  if i == 9 {
+    return l.with_body_ms(v).body_ms();
+  }
+  if i == 10 {
+    return l.with_handler_ms(v).handler_ms();
+  }
+  if i == 11 {
+    return l.with_send_ms(v).send_ms();
+  }
+  if i == 12 {
+    return l.with_idle_ms(v).idle_ms();
+  }
+  if i == 13 {
+    return l.with_requests(v).requests();
+  }
+  return l.with_response_body(v).response_body();
+}

@@ -236,9 +236,33 @@ const PRELUDE_TYPES: &[&str] = &[
     "TcpListener",
     "TcpStream",
     "NetError",
+    // HTTP の型（ADR 0032 決定 2-2）。実体は埋め込みモジュール `std.http`・`std.http.limits` が持つ。`TcpStream` と同じ理由で
+    // 前置きの名前にする（`crate::stdlib::HTTP_TYPES` と同じ並び）。
+    "HttpLimits",
+    "HttpParser",
+    "HttpProgress",
+    "HttpRequest",
+    "HttpHeader",
+    "HttpResponse",
+    "HttpError",
 ];
 /// `std.os.net` が実体を宣言する前置きの型（上の 3 つ）。そのモジュール自身の検査でだけ、宣言と `impl` を許す。
 pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "NetError"];
+
+/// 埋め込みモジュール `mname` 自身の検査で、宣言と `impl` を許す前置きの型（実体を持つ型）。ほかのモジュールは空。
+/// `std.http` は `std.http.limits` の `HttpLimits` を `use` するので、両方に `HTTP_TYPES` を許す。
+pub(crate) fn home_types(embedded: bool, mname: &str) -> &'static [&'static str] {
+    use crate::stdlib::embedded::{HTTP_LIMITS_MODULE, HTTP_MODULE, NET_MODULE};
+    if !embedded {
+        &[]
+    } else if mname == NET_MODULE {
+        NET_TYPES
+    } else if mname == HTTP_MODULE || mname == HTTP_LIMITS_MODULE {
+        crate::stdlib::HTTP_TYPES
+    } else {
+        &[]
+    }
+}
 /// 型名を付けずに書く値（`Option`・`Result` の値）。
 const PRELUDE_VALUES: &[(&str, &str)] = &[
     ("Some", "Option"),
@@ -428,8 +452,9 @@ struct Ck {
     base_module: bool,
     /// 埋め込み標準モジュールの検査（予約名と許可一覧の確認を飛ばす。ADR 0025 補足 A-6）。
     embedded: bool,
-    /// 埋め込みモジュール `std.os.net` 自身の検査（前置きの型 `NET_TYPES` の宣言と `impl` を許す）。
-    net_home: bool,
+    /// 埋め込みモジュール自身の検査で、宣言と `impl` を許す前置きの型（`std.os.net` の `NET_TYPES`、`std.http` の
+    /// `HTTP_TYPES`。`home_types`）。ほかのモジュールでは空。
+    home_types: &'static [&'static str],
     /// 検査中の項目が埋め込みモジュール由来（結合後の名前が `std.` 始まり）。結合後のプログラムの再検査で、
     /// 入口が `trust base` でなくても、その項目の `unchecked`・大域・性質の手付けを許す（出所の印は名前）。
     item_embedded: bool,
@@ -580,8 +605,8 @@ pub(crate) fn check_module_embedded(
 pub fn std_heads() -> &'static [&'static str] {
     // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
     // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
-    // `net` は ADR 0031 決定 3-1（名前空間 `net`）で足した。
-    &["console", "fs", "net", "raw", "std"]
+    // `net` は ADR 0031 決定 3-1（名前空間 `net`）で、`http` は ADR 0032 決定 2-1（名前空間 `http`）で足した。
+    &["console", "fs", "http", "net", "raw", "std"]
 }
 
 /// 標準の前置きの名前（型・値）と名前空間の頭か。`use` で取り込む名前に使えない。
@@ -742,7 +767,7 @@ fn analyze(
         raw_delegated: false,
         base_module: file.module.trust == Trust::Base,
         embedded,
-        net_home: false,
+        home_types: &[],
         item_embedded: false,
         allowed_base: opts.trust_base.clone(),
         reports: HashMap::new(),

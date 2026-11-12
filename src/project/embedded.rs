@@ -72,6 +72,8 @@ impl Proj<'_> {
                 || r == embedded::THREAD_MODULE
                 || r == embedded::SCHED_MODULE
                 || r == embedded::NET_MODULE
+                || r == embedded::HTTP_LIMITS_MODULE
+                || r == embedded::HTTP_MODULE
             {
                 continue;
             }

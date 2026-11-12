@@ -705,6 +705,15 @@ impl<'a> L<'a> {
                     };
                     return self.user_call(decl, &r.targs, ops, ret);
                 }
+                // `http.*`（ADR 0032 決定 2-3）も組み込みでなく、埋め込みモジュール `std.http` の同じ名前の Sigil の関数が実体。
+                if let Some(f) = r.name.strip_prefix("http.") {
+                    self.core_only = false;
+                    let full = format!("{}.{f}", crate::stdlib::embedded::HTTP_MODULE);
+                    let Some(&decl) = self.fns.get(full.as_str()) else {
+                        return bail(format!("{} の実体（std.http）が結ばれていない", r.name));
+                    };
+                    return self.user_call(decl, &r.targs, ops, ret);
+                }
                 let b = match r.name.as_str() {
                     "console.log" => {
                         self.core_only = false;

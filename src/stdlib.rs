@@ -76,6 +76,17 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("TcpListener", 0, Layer::Os),
     ("TcpStream", 0, Layer::Os),
     ("NetError", 0, Layer::Os),
+    // HTTP/1.1 の解釈と型（ADR 0032 決定 2、PR 6-3g-b）。中身は `std.http`・`std.http.limits` の Sigil 実装が持つ（`TcpStream` と
+    // 同じ作法）。型の名前は平らな名前空間（ADR 0021）で利用者の型と衝突しないよう `Http` で始め、前置きの名前にする
+    // （利用者は宣言できない）。`HttpError`・`HttpProgress` は腕を `match` できる列挙で、検査器はこの行を列挙として登録し直す
+    // （`HTTP_ERROR_ARMS`・`HTTP_PROGRESS_ARMS`）。ほかは中身を見せない型で、`Sendable`・`Shareable` だけを持つ。
+    ("HttpLimits", 0, Layer::Os),
+    ("HttpParser", 0, Layer::Os),
+    ("HttpProgress", 0, Layer::Os),
+    ("HttpRequest", 0, Layer::Os),
+    ("HttpHeader", 0, Layer::Os),
+    ("HttpResponse", 0, Layer::Os),
+    ("HttpError", 0, Layer::Os),
 ];
 
 /// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ（単体テストで固定する）。
@@ -83,6 +94,31 @@ pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed",
 /// `std.os.net` が実体を持つ、fd を所有する型（結合後の名前）。値の破棄で `close(2)` を 1 回呼ぶ
 /// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
 pub const NET_FD_TYPES: &[&str] = &["std.os.net.TcpListener", "std.os.net.TcpStream"];
+/// `HttpError` の腕（ADR 0032 決定 2-2）。並びは `std.http` の宣言と同じ（単体テストで固定する）。
+pub const HTTP_ERROR_ARMS: &[&str] = &[
+    "BadRequest",
+    "UriTooLong",
+    "HeadersTooLarge",
+    "BodyTooLarge",
+    "NotImplemented",
+    "VersionNotSupported",
+    "ExpectationFailed",
+    "Timeout",
+];
+/// `HttpProgress` の腕と中身の型（ADR 0032 決定 2-3）。`Done` は完成した要求と、`feed` に渡したバイト列の中の次の位置。
+/// 並びは `std.http` の宣言と同じ（単体テストで固定する）。
+pub const HTTP_PROGRESS_ARMS: &[(&str, &[&str])] =
+    &[("NeedMore", &[]), ("Done", &["HttpRequest", "Int"])];
+/// `std.http`・`std.http.limits` が実体を宣言する前置きの型（表の `Http` で始まる行）。
+pub const HTTP_TYPES: &[&str] = &[
+    "HttpLimits",
+    "HttpParser",
+    "HttpProgress",
+    "HttpRequest",
+    "HttpHeader",
+    "HttpResponse",
+    "HttpError",
+];
 
 pub mod core_sigil;
 pub mod embedded;
@@ -326,6 +362,15 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>",
         "net.server",
     ),
+    // HTTP の上限の既定値と増分の解釈器（ADR 0032 決定 2-3・4-3、PR 6-3g-b）。実体は `std.http`（lower が名前で結ぶ）。
+    // I/O をしない（効果なし）。
+    (Layer::Os, "http", "default_limits() -> HttpLimits", "none"),
+    (
+        Layer::Os,
+        "http",
+        "parser(limits: &HttpLimits) -> HttpParser",
+        "none",
+    ),
 ];
 
 /// シグネチャ（`Entry` の最初の要素）に対応する `requires` 節。ない関数は `none`。
@@ -338,6 +383,75 @@ pub const REQUIRES: &[(&str, &str)] = &[
     (
         "read(self: &TcpStream, max: Int) -> Result<Bytes, NetError>",
         "1 <= max && max <= 65536",
+    ),
+    // HTTP（ADR 0032 決定 2-3・4-3）。上限の上限は `std.http.limits` の `requires` と同じ（単体テストで固定する）。
+    (
+        "feed(self: &mut HttpParser, data: &Bytes, start: Int) -> Result<HttpProgress, HttpError>",
+        "0 <= start && start <= data.len()",
+    ),
+    (
+        "new(status: Int, body: Bytes) -> HttpResponse",
+        "200 <= status && status <= 599",
+    ),
+    (
+        "with_request_line(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 65536",
+    ),
+    (
+        "with_head(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 262144",
+    ),
+    (
+        "with_headers(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 1000",
+    ),
+    (
+        "with_body(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 67108864",
+    ),
+    (
+        "with_chunk_line(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 1024",
+    ),
+    (
+        "with_encoded_body(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 134217728",
+    ),
+    (
+        "with_conns(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 4096",
+    ),
+    (
+        "with_backlog(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 1024",
+    ),
+    (
+        "with_head_ms(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 600000",
+    ),
+    (
+        "with_body_ms(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 600000",
+    ),
+    (
+        "with_handler_ms(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 600000",
+    ),
+    (
+        "with_send_ms(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 600000",
+    ),
+    (
+        "with_idle_ms(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 600000",
+    ),
+    (
+        "with_requests(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 100000",
+    ),
+    (
+        "with_response_body(self: HttpLimits, v: Int) -> HttpLimits",
+        "1 <= v && v <= 67108864",
     ),
     ("min(self: &List<T>) -> &T", "self.len() > 0"),
     ("max(self: &List<T>) -> &T", "self.len() > 0"),
@@ -567,6 +681,146 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ),
         ],
     ),
+    // HTTP の型（ADR 0032 決定 2-2・2-3、PR 6-3g-b）。実体は `std.http`・`std.http.limits` の `impl`。取り出す関数は写しを返す。
+    (
+        Layer::Os,
+        "HttpLimits",
+        &[
+            ("request_line(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_request_line(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("head(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_head(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("headers(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_headers(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("body(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_body(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("chunk_line(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_chunk_line(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("encoded_body(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_encoded_body(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("conns(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_conns(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("backlog(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_backlog(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("head_ms(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_head_ms(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("body_ms(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_body_ms(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("handler_ms(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_handler_ms(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("send_ms(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_send_ms(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("idle_ms(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_idle_ms(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("requests(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_requests(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+            ("response_body(self: &HttpLimits) -> Int", "none"),
+            (
+                "with_response_body(self: HttpLimits, v: Int) -> HttpLimits",
+                "none",
+            ),
+        ],
+    ),
+    (
+        Layer::Os,
+        "HttpParser",
+        &[
+            (
+                "feed(self: &mut HttpParser, data: &Bytes, start: Int) -> Result<HttpProgress, HttpError>",
+                "none",
+            ),
+            ("consumed(self: &HttpParser) -> Int", "none"),
+            ("held(self: &HttpParser) -> Int", "none"),
+            ("in_body(self: &HttpParser) -> Bool", "none"),
+            ("wants_continue(self: &HttpParser) -> Bool", "none"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "HttpRequest",
+        &[
+            ("method(self: &HttpRequest) -> String", "none"),
+            ("path(self: &HttpRequest) -> Bytes", "none"),
+            ("query(self: &HttpRequest) -> Bytes", "none"),
+            ("version(self: &HttpRequest) -> Int", "none"),
+            ("headers(self: &HttpRequest) -> List<HttpHeader>", "none"),
+            (
+                "header(self: &HttpRequest, name: &String) -> Option<Bytes>",
+                "none",
+            ),
+            ("body(self: &HttpRequest) -> Bytes", "none"),
+            ("body_len(self: &HttpRequest) -> Int", "none"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "HttpHeader",
+        &[
+            ("name(self: &HttpHeader) -> String", "none"),
+            ("value(self: &HttpHeader) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "HttpResponse",
+        &[
+            ("new(status: Int, body: Bytes) -> HttpResponse", "none"),
+            (
+                "with_header(self: HttpResponse, name: &String, value: &Bytes) -> HttpResponse",
+                "none",
+            ),
+            ("status(self: &HttpResponse) -> Int", "none"),
+            ("headers(self: &HttpResponse) -> List<HttpHeader>", "none"),
+            ("body(self: &HttpResponse) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "HttpError",
+        &[("status(self: &HttpError) -> Int", "none")],
+    ),
     (
         Layer::Core,
         "<T> Cell<T>",
@@ -732,6 +986,67 @@ mod tests {
             "TcpStream.write_all",
             "TcpStream.shutdown",
             "NetError",
+            // ADR 0032 決定 2（PR 6-3g-b）。
+            "http.default_limits",
+            "http.parser",
+            "HttpLimits",
+            "HttpLimits.request_line",
+            "HttpLimits.with_request_line",
+            "HttpLimits.head",
+            "HttpLimits.with_head",
+            "HttpLimits.headers",
+            "HttpLimits.with_headers",
+            "HttpLimits.body",
+            "HttpLimits.with_body",
+            "HttpLimits.chunk_line",
+            "HttpLimits.with_chunk_line",
+            "HttpLimits.encoded_body",
+            "HttpLimits.with_encoded_body",
+            "HttpLimits.conns",
+            "HttpLimits.with_conns",
+            "HttpLimits.backlog",
+            "HttpLimits.with_backlog",
+            "HttpLimits.head_ms",
+            "HttpLimits.with_head_ms",
+            "HttpLimits.body_ms",
+            "HttpLimits.with_body_ms",
+            "HttpLimits.handler_ms",
+            "HttpLimits.with_handler_ms",
+            "HttpLimits.send_ms",
+            "HttpLimits.with_send_ms",
+            "HttpLimits.idle_ms",
+            "HttpLimits.with_idle_ms",
+            "HttpLimits.requests",
+            "HttpLimits.with_requests",
+            "HttpLimits.response_body",
+            "HttpLimits.with_response_body",
+            "HttpParser",
+            "HttpParser.feed",
+            "HttpParser.consumed",
+            "HttpParser.held",
+            "HttpParser.in_body",
+            "HttpParser.wants_continue",
+            "HttpProgress",
+            "HttpRequest",
+            "HttpRequest.method",
+            "HttpRequest.path",
+            "HttpRequest.query",
+            "HttpRequest.version",
+            "HttpRequest.headers",
+            "HttpRequest.header",
+            "HttpRequest.body",
+            "HttpRequest.body_len",
+            "HttpHeader",
+            "HttpHeader.name",
+            "HttpHeader.value",
+            "HttpResponse",
+            "HttpResponse.new",
+            "HttpResponse.with_header",
+            "HttpResponse.status",
+            "HttpResponse.headers",
+            "HttpResponse.body",
+            "HttpError",
+            "HttpError.status",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -739,12 +1054,135 @@ mod tests {
         assert_eq!(names(Layer::Os), want);
     }
 
+    /// `std.http`・`std.http.limits` のソース（ADR 0032 決定 2-1・6）。
+    fn http_sources() -> Vec<(&'static str, &'static str)> {
+        use super::embedded::{lookup, HTTP_LIMITS_MODULE, HTTP_MODULE};
+        [HTTP_MODULE, HTTP_LIMITS_MODULE]
+            .iter()
+            .map(|m| (*m, lookup(m, &[]).expect("登録されている")))
+            .collect()
+    }
+
+    #[test]
+    fn http_is_trust_none_without_io_or_raw_ops() {
+        // 信頼基盤の増分は 0（`trust none`、`unchecked`・`raw.*` なし）。I/O をせず、`fs.read`・`fs.write` を持たない
+        // （ディレクトリの横断を持ち込まない。ADR 0032 決定 6）。
+        for (m, src) in http_sources() {
+            let f = crate::parser::parse(src).unwrap();
+            assert_eq!(f.module.name.join("."), m);
+            assert_eq!(f.module.trust, crate::ast::Trust::None, "{m}");
+            for line in src.lines().map(str::trim).filter(|l| !l.starts_with("//")) {
+                assert!(!line.starts_with("unchecked"), "{m}: {line}");
+                assert!(!line.contains("raw."), "{m}: {line}");
+                if line.starts_with("effects ") {
+                    assert_eq!(line, "effects none", "{m}");
+                }
+            }
+        }
+        // 表の行（名前空間 `http` と `Http` で始まる型のメソッド）の効果も none（`fs.*` を持たない）。
+        for (_, ns, sig, eff) in NAMESPACED_FNS {
+            if *ns == "http" {
+                assert_eq!(*eff, "none", "{sig}");
+            }
+        }
+        for (_, head, fns) in IMPLS {
+            if HTTP_TYPES.contains(head) {
+                for (sig, eff) in *fns {
+                    assert_eq!(*eff, "none", "{head}.{sig}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn http_limits_requires_match_the_embedded_source() {
+        // 上限の上限は `std.http.limits` の `requires` にあり、表の `requires` は同じ文字列（ADR 0032 決定 4-3）。
+        let (_, src) = http_sources()[1];
+        let mut n = 0;
+        for (head, fns) in IMPLS
+            .iter()
+            .filter(|(_, h, _)| *h == "HttpLimits")
+            .map(|(_, h, f)| (h, f))
+        {
+            for (sig, _) in fns.iter() {
+                let name = sig.split('(').next().unwrap();
+                let at = src
+                    .find(&format!("pub fn {name}("))
+                    .unwrap_or_else(|| panic!("{head}.{name} の実体が無い"));
+                let req = src[at..]
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("requires "))
+                    .unwrap();
+                let want = REQUIRES
+                    .iter()
+                    .find(|(s, _)| s == sig)
+                    .map_or("none", |(_, r)| r);
+                assert_eq!(req, want, "{name}");
+                if name.starts_with("with_") {
+                    assert!(req.starts_with("1 <= v && v <= "), "{name}: {req}");
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 15);
+    }
+
+    #[test]
+    fn http_enum_arms_match_the_embedded_declaration() {
+        // 検査器が登録する腕の並び（`HTTP_ERROR_ARMS`・`HTTP_PROGRESS_ARMS`）は、`std.http` の宣言と同じ。
+        let (_, src) = http_sources()[0];
+        let arms = |name: &str| -> Vec<String> {
+            src.split(&format!("pub enum {name} {{"))
+                .nth(1)
+                .unwrap()
+                .split('}')
+                .next()
+                .unwrap()
+                .split(",\n")
+                .map(|s| s.trim().trim_end_matches(',').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        assert_eq!(arms("HttpError"), HTTP_ERROR_ARMS);
+        let progress: Vec<String> = HTTP_PROGRESS_ARMS
+            .iter()
+            .map(|(a, ts)| {
+                if ts.is_empty() {
+                    a.to_string()
+                } else {
+                    format!("{a}({})", ts.join(", "))
+                }
+            })
+            .collect();
+        assert_eq!(arms("HttpProgress"), progress);
+        // 前置きの型の一覧（検査器）と表の行が同じ。
+        for t in HTTP_TYPES {
+            assert!(
+                OPAQUE_TYPES
+                    .iter()
+                    .any(|(n, _, l)| n == t && *l == Layer::Os),
+                "{t}"
+            );
+        }
+    }
+
     fn mentions_os_type(sig: &str) -> bool {
         sig.split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| {
                 matches!(
                     w,
-                    "Path" | "IoError" | "TcpListener" | "TcpStream" | "NetError"
+                    "Path"
+                        | "IoError"
+                        | "TcpListener"
+                        | "TcpStream"
+                        | "NetError"
+                        | "HttpLimits"
+                        | "HttpParser"
+                        | "HttpProgress"
+                        | "HttpRequest"
+                        | "HttpHeader"
+                        | "HttpResponse"
+                        | "HttpError"
                 )
             })
     }

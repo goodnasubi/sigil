@@ -147,7 +147,8 @@ impl Proj<'_> {
                     format!("`use {}`: `{}` は標準ライブラリの名前で、利用者のモジュールの名前にならない（標準ライブラリは `use` なしで見える）", u.path.join("."), mpath[0]),
                 ));
             }
-            if crate::check::is_std_name(item) {
+            // 埋め込みモジュールどうしでは、前置きの型の実体の取り込み（`std.http` が `std.http.limits.HttpLimits` を取り込む）を許す。
+            if crate::check::is_std_name(item) && !embedded_use {
                 return Err(diag(
                     u.span,
                     ErrorKind::UseConflict,

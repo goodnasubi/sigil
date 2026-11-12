@@ -25,6 +25,7 @@
 | [07-bytes](07-bytes/) | 種別＋長さ＋本体のバイナリメッセージの組み立てと読み戻し、XOR と回転のチェックサム | `Bytes` の生成・`push`・`push_u32_be`・`extend`・`get`・`read_u32_be`、ビット演算（`&` `\|` `^` `~` `>>`）と `rotr32`（[ADR 0023](../docs/decisions/0023-bytes-and-bitwise.md)） |
 | [08-traits](08-traits/) | 図形の面積を題材にしたトレイトの宣言と型ごとの実装、総称の制約越しの呼び出し | `trait` の宣言、`impl トレイト for 型`、総称の制約 `<T: Shape>`（[ADR 0022](../docs/decisions/0022-type-identity-traits-and-function-types.md)） |
 | [09-enums](09-enums/) | 注文の状態遷移（受付・支払済・発送済・取消）を題材にした列挙型の構築と分解、状態遷移 | `enum` のバリアント（値の形がバリアントごとに違う）、全バリアントを書き切る `match` の網羅性、値で受け取った列挙型の消費と再構築（[ADR 0008](../docs/decisions/0008-m0-notation.md)） |
+| [10-http-server](10-http-server/) | `task.roots` で接続ごとのルートを起動し、`http.serve_conn` で要求を読み応答を送る HTTP/1.1 サーバー（経路 `/`・`/echo`・404） | `http.conn`・`http.serve_conn`・`http.abort_conn`、接続の隔離と上限、名前のハンドラ（[ADR 0032](../docs/decisions/0032-p1-http-server.md)） |
 
 ## 実行のしかた
 

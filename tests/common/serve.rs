@@ -346,9 +346,19 @@ pub fn send_in_steps(s: &mut TcpStream, payload: &[u8], step: usize) {
     }
 }
 
+/// 相手が閉じるまで読む。読みの時間切れ（`TimedOut`・`WouldBlock`）は、サーバーが閉じなかったということなので失敗にする。
+/// 接続のリセットなどは、相手が閉じたものとして終わりにする。
 pub fn read_all(s: &mut TcpStream) -> Vec<u8> {
     let mut got = vec![];
-    let _ = s.read_to_end(&mut got);
+    if let Err(e) = s.read_to_end(&mut got) {
+        assert!(
+            !matches!(
+                e.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ),
+            "サーバーが閉じなかった（クライアントの読みが時間切れ）: {e}"
+        );
+    }
     got
 }
 

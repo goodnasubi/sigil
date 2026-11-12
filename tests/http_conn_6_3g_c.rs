@@ -562,11 +562,11 @@ fn many_connections_do_not_leak_fds() {
 
 // ---- 起動の時のメモリの見積もり（ADR 0032 決定 4-4） ----
 
-/// 既定の上限での最悪のメモリ: 256 × (2 × (8 KiB + 16 KiB + 1 MiB)（完成時の写しを含む）+ 応答の本文 1 MiB + 64 KiB + `S_http` 16 KiB)。
+/// 既定の上限での最悪のメモリ: 256 × (2 × (8 KiB + 16 KiB + 1 MiB + 応答の本文 1 MiB)（要求の完成時と応答の組み立ての写しを含む）+ 64 KiB + `S_http` 16 KiB)。
 #[test]
 fn memory_bound_follows_the_adr_formula() {
     let src = "module app.main\n  targets server\n  trust none\n\npub fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let l = http.default_limits();\n  return l.memory_bound();\n}\n";
     let o = common::run(src, "main", &[]).unwrap_or_else(|e| panic!("{:?}", e.error));
-    let per = 2 * (8192 + 16384 + 1_048_576) + 1_048_576 + 65536 + 16384;
+    let per = 2 * (8192 + 16384 + 1_048_576 + 1_048_576) + 65536 + 16384;
     assert_eq!(o.value, (256 * per).to_string());
 }

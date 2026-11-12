@@ -28,7 +28,7 @@ module std.http
 //   - 符号化した本文: 本文の部分として受け取ったバイト数（`Content-Length` の本文、または大きさの行・塊・塊の後の CRLF・
 //     最後の塊・トレーラー・終わりの空行）。超えたら 413。
 
-use std.http.limits.HttpLimits;
+use std.http.limits.defaults;
 
 pub struct HttpHeader {
   h_name: String,
@@ -105,12 +105,12 @@ pub struct HttpParser {
 }
 
 pub fn default_limits() -> HttpLimits
-  intent "上限の既定値（std.http.limits の HttpLimits.defaults）を返す"
+  intent "上限の既定値（std.http.limits の defaults）を返す"
   requires none
   ensures none
   effects none
 {
-  return HttpLimits.defaults();
+  return defaults();
 }
 
 pub fn parser(limits: &HttpLimits) -> HttpParser

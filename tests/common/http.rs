@@ -1,6 +1,6 @@
 //! `std.http` の増分の解釈器（ADR 0032 決定 2-3、PR 6-3g-b）を評価器で動かす試験の補助。
 //!
-//! 入口は `tests/data/http_driver.sigil`（評価器とネイティブで同じ）。1 回の lowering で多数の入力を処理するため、
+//! 入口は `tests/fuzz/http_request_driver.sigil`（評価器とネイティブで同じ）。1 回の lowering で多数の入力を処理するため、
 //! 入力ごとに 1 つのルートタスクとして `run_roots_with` で動かす（ADR 0020 決定 2 の「Sigil の対象」）。
 //!
 //! `probe` の記録（`whole#bytes#cuts#rt`）について、次を確かめる（決定 7 の性質）。
@@ -19,7 +19,7 @@ pub const DEFAULTS: [i64; 6] = [8192, 16384, 100, 1_048_576, 1024, 2_097_152];
 pub fn driver() -> String {
     std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/http_driver.sigil"
+        "/tests/fuzz/http_request_driver.sigil"
     ))
     .unwrap()
 }

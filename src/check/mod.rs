@@ -250,7 +250,7 @@ const PRELUDE_TYPES: &[&str] = &[
 pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "NetError"];
 
 /// 埋め込みモジュール `mname` 自身の検査で、宣言と `impl` を許す前置きの型（実体を持つ型）。ほかのモジュールは空。
-/// `std.http` は `std.http.limits` の `HttpLimits` を `use` するので、両方に `HTTP_TYPES` を許す。
+/// `std.http` は `std.http.limits` の関数を `use` し、その型 `HttpLimits` が見えるので、両方に `HTTP_TYPES` を許す。
 pub(crate) fn home_types(embedded: bool, mname: &str) -> &'static [&'static str] {
     use crate::stdlib::embedded::{HTTP_LIMITS_MODULE, HTTP_MODULE, NET_MODULE};
     if !embedded {

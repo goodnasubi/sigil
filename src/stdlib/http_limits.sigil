@@ -7,7 +7,7 @@ module std.http.limits
 // - 既定値は ADR 0020 決定 4 の表（と ADR 0032 決定 4-1 が足した「符号化した本文 2 MiB」）の値で、このファイルにだけ置く。
 //   既定値を変えるときは ADR 0020 を改訂する。このファイルは `CODEOWNERS` で所有者のレビューの対象にする（ADR 0020 W3 の O2。
 //   `CODEOWNERS` の行は人間が足す）。
-// - `HttpLimits` の値は既定値（`HttpLimits.defaults`）から作り、`with_*` で 1 つずつ変える。各値は `1 <= v && v <= 上限の上限` の
+// - `HttpLimits` の値は既定値（`defaults`）から作り、`with_*` で 1 つずつ変える。各値は `1 <= v && v <= 上限の上限` の
 //   `requires` で受け、「無制限」を表す値（0・負の値）を持たない（ADR 0020 決定 4）。上限の上限は ADR 0032 の補足に記録する。
 // - 利用者から見える名前は、標準ライブラリの表（`src/stdlib.rs`）の `HttpLimits` と `http.default_limits`。表の `requires` は
 //   このファイルの `requires` と同じ文字列で、単体テストで固定する。
@@ -32,32 +32,32 @@ pub struct HttpLimits {
   lim_response_body: Int,
 }
 
-impl HttpLimits {
-  pub fn defaults() -> HttpLimits
-    intent "上限の既定値（ADR 0020 決定 4、ADR 0032 決定 4-1）を持つ HttpLimits を返す"
-    requires none
-    ensures none
-    effects none
-  {
-    return HttpLimits {
-      lim_request_line: 8192,
-      lim_head: 16384,
-      lim_headers: 100,
-      lim_body: 1048576,
-      lim_chunk_line: 1024,
-      lim_encoded_body: 2097152,
-      lim_conns: 256,
-      lim_backlog: 128,
-      lim_head_ms: 10000,
-      lim_body_ms: 30000,
-      lim_handler_ms: 30000,
-      lim_send_ms: 30000,
-      lim_idle_ms: 60000,
-      lim_requests: 1000,
-      lim_response_body: 1048576
-    };
-  }
+pub fn defaults() -> HttpLimits
+  intent "上限の既定値（ADR 0020 決定 4、ADR 0032 決定 4-1）を持つ HttpLimits を返す"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpLimits {
+    lim_request_line: 8192,
+    lim_head: 16384,
+    lim_headers: 100,
+    lim_body: 1048576,
+    lim_chunk_line: 1024,
+    lim_encoded_body: 2097152,
+    lim_conns: 256,
+    lim_backlog: 128,
+    lim_head_ms: 10000,
+    lim_body_ms: 30000,
+    lim_handler_ms: 30000,
+    lim_send_ms: 30000,
+    lim_idle_ms: 60000,
+    lim_requests: 1000,
+    lim_response_body: 1048576
+  };
+}
 
+impl HttpLimits {
   pub fn request_line(self: &HttpLimits) -> Int
     intent "要求の行（メソッド・対象・版。CRLF を除く）の長さ（バイト）。超えたら 414（対象が長い）か 400"
     requires none

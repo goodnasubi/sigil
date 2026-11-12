@@ -191,6 +191,9 @@ fn shape(rng: &mut Rng, n: usize) -> (Vec<i64>, Vec<i64>) {
     (cuts, lim)
 }
 
+/// (由来, 番号, 入力, 分ける位置, 上限)
+type Case = (&'static str, usize, Vec<u8>, Vec<i64>, Vec<i64>);
+
 #[test]
 fn fuzz_http_request() {
     let n = fuzz::iters(DEFAULT_ITERS);
@@ -199,8 +202,7 @@ fn fuzz_http_request() {
     let corpus = read_hex_dir("tests/fuzz/corpus/http_request");
     assert!(corpus.len() >= 30, "種が足りない（R1〜R12 と密輸の形）");
     let mut rng = Rng::new(seed);
-    // (由来, 番号, 入力, 分ける位置, 上限)
-    let mut cases: Vec<(&str, usize, Vec<u8>, Vec<i64>, Vec<i64>)> = vec![];
+    let mut cases: Vec<Case> = vec![];
     for (i, b) in regress.iter().enumerate() {
         let len = b.len() as i64;
         cases.push(("回帰", i, b.clone(), vec![1, len / 2], vec![]));

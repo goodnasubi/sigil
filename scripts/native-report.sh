@@ -3,8 +3,8 @@
 # 飛ばし件数（仕様上ビルドで止める参照・Lock の入口引数を除く）が上限を超えたら（突き合わせ件数が下限を割ったら）失敗させる。
 # 使い方: cargo test && scripts/native-report.sh
 # 環境変数: SIGIL_NATIVE_MAX_SKIP（飛ばしの上限。既定 10）、SIGIL_NATIVE_MIN_CHECKED（突き合わせの下限。既定 400）
-# CI は .github/workflows/ci.yml で上限 20・下限 400 を渡す（上限 20 は 2026-11-10 の所有者の決定、Issue #379 で削減を追跡）。
-# 既定の 10 は引き上げ前の値（Issue #379 は上限を再び下げることを目指す）。今の実測（飛ばし 20）では、既定のままだと失敗する。
+# CI は .github/workflows/ci.yml で上限 17・下限 800 を渡す（Issue #429 で引数の突き合わせを回復）。
+# 既定の 10 は引き上げ前の値（Issue #379 は上限を再び下げることを目指す）。
 # 実測の記録は ADR 0030 補足 D-5。
 dir="${CARGO_TARGET_DIR:-target}/tmp"
 max_skip="${SIGIL_NATIVE_MAX_SKIP:-10}"

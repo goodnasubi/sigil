@@ -9,7 +9,7 @@
 //!   引数と期待値の `p` を実際のパスに置き換えて比べる。表の最後の内容は比べない。
 //! - `capture_console=false` の事例は、出力以外（値・停止の報告・破棄の順序・終了コード）を比べる。
 //!   成功のときの標準出力は、末尾が値であることだけを確かめる。
-//! - 飛ばすのは、停止でない失敗（検査・入口の指定のエラー）と、コマンドラインの書き方で表せない引数だけ。
+//! - コマンドラインで表せない値は、引数を組み立てて元の関数を呼ぶ試験用の入口で突き合わせる。
 #![allow(dead_code)]
 
 use sigil::codegen::Opts;
@@ -47,10 +47,146 @@ pub fn arg_text(a: &Arg) -> String {
 
 fn ambiguous(a: &Arg) -> bool {
     match a {
-        Arg::Str(s) => !matches!(sigil::shared_args::parse_arg(s), Ok(Arg::Str(t)) if &t == s),
+        Arg::Str(s) => {
+            s.contains('\0')
+                || !matches!(sigil::shared_args::parse_arg(s), Ok(Arg::Str(t)) if &t == s)
+        }
         Arg::List(xs) => xs.iter().any(ambiguous),
         _ => false,
     }
+}
+
+/// CLI で値の種類が変わる場合と、空の List<構造体> を渡す場合だけ、
+/// ソースの末尾に引数なしの入口を足す。元の関数・契約・行番号は変えない。
+/// 通常の参照・Lock の入口は従来どおりビルドで除外する。
+fn bound_entry(srcs: &[&str], func: &str, args: &[Arg], opts: &Opts) -> Option<String> {
+    use sigil::ast::{Item, Type};
+    use sigil::ir::Ty;
+    if !args.iter().any(ambiguous)
+        && !args
+            .iter()
+            .any(|arg| matches!(arg, Arg::List(xs) if xs.is_empty()))
+    {
+        return None;
+    }
+    let program = sigil::ir_eval::lower_sources_with(srcs, func, &opts.trust_base).unwrap();
+    let entry = &program.funcs[program.entry];
+    let empty_adt_list = args.iter().zip(&entry.params).any(|(arg, &param)| {
+        let mut ty = &entry.locals[param].ty;
+        if let Ty::Ref(inner) = ty {
+            ty = inner;
+        }
+        matches!((arg, ty), (Arg::List(xs), Ty::List(inner))
+            if xs.is_empty() && matches!(inner.as_ref(), Ty::Adt(_)))
+    });
+    if !args.iter().any(ambiguous) && !empty_adt_list {
+        return None;
+    }
+    let file = sigil::parse(srcs[0]).unwrap();
+    assert!(!file
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Fn(f) if f.name == "native_comparison_entry")));
+    let decl = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Fn(f) if f.name == func => Some(f),
+            _ => None,
+        })
+        .expect("突き合わせの入口は先頭モジュールの関数");
+    let mut body = String::new();
+    let mut call_args = Vec::new();
+    let mut sequence = 0;
+    for (arg, param) in args.iter().zip(&decl.params) {
+        let (ty, borrow) = match &param.ty {
+            Type::Ref { mutable, inner } => (inner.as_ref(), if *mutable { "&mut " } else { "&" }),
+            ty => (ty, ""),
+        };
+        let name = bind_arg(arg, ty, &mut body, &mut sequence);
+        call_args.push(format!("{borrow}{name}"));
+    }
+    let ret = decl
+        .ret
+        .as_ref()
+        .map(type_text)
+        .unwrap_or_else(|| "Unit".into());
+    let effects = sigil::fmt::normalize_effects(&decl.effects, &decl.params);
+    let effects = if effects.is_empty() {
+        "none".into()
+    } else {
+        effects.join(", ")
+    };
+    Some(format!("{}\n\nfn native_comparison_entry() -> {ret}\n  intent \"突き合わせの引数を渡す\"\n  requires none\n  ensures none\n  effects {effects}\n{{\n{body}  return {func}({});\n}}\n", srcs[0], call_args.join(", ")))
+}
+
+fn type_text(ty: &sigil::ast::Type) -> String {
+    use sigil::ast::Type;
+    match ty {
+        Type::Path { path, args } => {
+            let name = path.join(".");
+            if args.is_empty() {
+                name
+            } else {
+                format!(
+                    "{name}<{}>",
+                    args.iter().map(type_text).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        Type::Ref { mutable, inner } => format!(
+            "&{}{}",
+            if *mutable { "mut " } else { "" },
+            type_text(inner)
+        ),
+        Type::Tuple(items) => format!(
+            "({})",
+            items.iter().map(type_text).collect::<Vec<_>>().join(", ")
+        ),
+        Type::Fn { .. } => panic!("関数の値は Arg では渡せない"),
+    }
+}
+
+/// 値は Sigil のリテラルと List.new/push で組み立てる。文字列の NUL・区切り文字も CLI を通らない。
+fn bind_arg(arg: &Arg, ty: &sigil::ast::Type, body: &mut String, sequence: &mut usize) -> String {
+    use sigil::ast::Type;
+    let name = format!("native_arg_{}", *sequence);
+    *sequence += 1;
+    let value = match arg {
+        Arg::Int(n) => n.to_string(),
+        Arg::Float(n) if n.is_nan() => "(0.0 / 0.0)".into(),
+        Arg::Float(n) if n.is_infinite() => {
+            format!("({}.0 / 0.0)", if n.is_sign_negative() { -1 } else { 1 })
+        }
+        Arg::Float(n) => format!("{n:?}"),
+        Arg::Bool(b) => b.to_string(),
+        Arg::Str(s) => {
+            let quoted = format!(
+                "\"{}\"",
+                s.chars()
+                    .map(|c| format!("\\u{{{:x}}}", c as u32))
+                    .collect::<String>()
+            );
+            if matches!(ty, Type::Path { path, .. } if path == &["Path"]) {
+                format!("Path.new(&{quoted})")
+            } else {
+                quoted
+            }
+        }
+        Arg::List(xs) => {
+            let Type::Path { args, .. } = ty else {
+                panic!("一覧の型がない")
+            };
+            body.push_str(&format!("  let mut {name} = List.new();\n"));
+            for arg in xs {
+                let item = bind_arg(arg, &args[0], body, sequence);
+                body.push_str(&format!("  {name}.push({item});\n"));
+            }
+            return name;
+        }
+    };
+    body.push_str(&format!("  let mut {name} = {value};\n"));
+    name
 }
 
 /// 実行ファイルを作る。作れないのは（`cc` がないことを含め）失敗として返す。
@@ -192,10 +328,6 @@ pub fn check(
         record("skip", why, func);
         note(&format!("飛ばす: {why} {func}"));
     };
-    // コマンドラインの書き方では文字列として渡せない引数（"21" など）は、型の違う引数になってしまう。
-    if args.iter().any(ambiguous) {
-        return skip("コマンドラインで書けない引数");
-    }
     // 入口の指定や検査のエラーは、実行ファイルを作る前の話。
     if let Err(f) = want {
         if !matches!(f.error, RunError::Stop(_)) {
@@ -251,30 +383,33 @@ pub fn check(
         keys.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
     }
     let args: Vec<Arg> = args.iter().map(|a| map_arg(a, &keys)).collect();
-    match native::build(
-        srcs,
-        func,
-        &Opts {
-            trace_drops: opts.trace_drops,
-            trust_base: opts.trust_base.clone(),
-        },
-        &exe,
-    ) {
+    let build_opts = Opts {
+        trace_drops: opts.trace_drops,
+        trust_base: opts.trust_base.clone(),
+    };
+    let bound = bound_entry(srcs, func, &args, &build_opts);
+    let (build_srcs, entry, exec_args) = if let Some(ref source) = bound {
+        let mut sources = srcs.to_vec();
+        sources[0] = source;
+        (sources, "native_comparison_entry", &[][..])
+    } else {
+        (srcs.to_vec(), func, args.as_slice())
+    };
+    match native::build(&build_srcs, entry, &build_opts, &exe) {
         Ok(()) => {}
-        // コマンドラインで受け取れない型の引数（空の List<構造体> など）は、SIR の評価器には渡せても実行ファイルにはならない。
         Err(native::BuildError::Run(RunError::Entry(m)))
             if m.contains("コマンドラインから受け取れない") =>
         {
             let _ = std::fs::remove_dir_all(&dir);
-            // 参照型・Lock の入口引数は、ビルドで止めるのが仕様（#366）。上限の対象外として別の理由で数える。
+            // 参照型・Lock の入口引数は、ビルドで止めるのが仕様（#366）。
             if m.contains("入口の参照型") {
                 return skip("仕様上ビルドで止める入口引数（参照・Lock）");
             }
-            return skip("コマンドラインで書けない引数の型");
+            panic!("{func}: 試験用の入口でも引数を渡せない: {m}");
         }
         Err(e) => panic!("{func}: ネイティブのビルドに失敗: {e}"),
     }
-    let got = exec(&exe, &args);
+    let got = exec(&exe, exec_args);
     let _ = std::fs::remove_dir_all(&dir);
     // スタックの枯渇は、SIR の評価器の枠の大きさで決まる。実行ファイルの枠は小さく、同じ深さでは枯渇しないことがある
     // （その場合は止まらず値を返す）。止まったときだけ、止まり方を比べる。

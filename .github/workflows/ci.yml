@@ -61,11 +61,13 @@ jobs:
 
       - name: test（検証器・SIR 評価器・ネイティブを突き合わせる）
         run: |
+          rm -f "${CARGO_TARGET_DIR:-target}"/tmp/native-report-*.tsv
           cargo nextest run --no-fail-fast
           cargo test --doc
 
       - name: ネイティブの突き合わせ件数（飛ばしの上限を検査）
         run: scripts/native-report.sh
         env:
-          SIGIL_NATIVE_MAX_SKIP: "20"
-          SIGIL_NATIVE_MIN_CHECKED: "1500"
+          SIGIL_NATIVE_MAX_SKIP: "17"
+          # キャッシュの古い記録を除いた run 43412110137 の実測は 803 件。
+          SIGIL_NATIVE_MIN_CHECKED: "800"

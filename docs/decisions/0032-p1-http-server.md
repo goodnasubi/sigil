@@ -1,6 +1,6 @@
 # 0032: HTTP/1.1 サーバー（PR 6-3g、段階 6）
 
-- **状態**: 提案（Issue #407。判断点 A〜I は決定済み。6-3g-a〜d の実装は完了。補足 C）。判断点 A〜I は、2026-11-12 にクマが理念に照らして typesafe-ai の正式判定（jev-1.13.0）で決定した。いずれも起草者の推奨どおり（記録は末尾の「決定の記録」）。
+- **状態**: 提案（Issue #407。判断点 A〜I は決定済み）。判断点 A〜I は、2026-11-12 にクマが理念に照らして typesafe-ai の正式判定（jev-1.13.0）で決定した。いずれも起草者の推奨どおり（記録は末尾の「決定の記録」）。
 - **日付**: 2026-11-12
 - **対象**: ADR 0018 の PR 6-3 の本体（ADR 0031 の分割計画の 6-3g）。6-3e で入った `std.os.net`（`TcpListener`・`TcpStream`・`NetError`）と `task.roots` の上に置く HTTP/1.1 のサーバーの範囲・API・並行の形・上限・解釈の規則・ファジング・検証・PR の分割。
 - **要承認**: セキュリティ関連（ADR 0020 決定 3 の G1・G2、ADR 0031 決定 6）。本 ADR の PR と、本 ADR に従う実装の PR は、CI が緑で別系統のエージェントが承認しても、**人間（所有者）の承認なしにマージしない**。
@@ -507,41 +507,3 @@ ADR 0030 補足 D の方針（差は表に固定する）に従う。`std.http` 
 ### B-4. 範囲外で見つかった問題
 
 - ネイティブで `String == "書き出し"`（文字列の書き出しを `==` の片側に直接書く）が、書き出し 1 つにつき塊 2 つを漏らす（変数に入れた書き出し、`as_bytes()` の比較は漏れない）。`std.http` は `Bytes` で比べて避けた。コンパイラの不具合として Issue で報告する。
-
-## 補足 C: 6-3g-d の完了の記録（Issue #415、2026-11-13 JST）
-
-6-3g（6-3g-a〜d）の完了の記録。本文の決定（判断点 A〜I）を変えない。
-
-### C-1. 公開した名前と型の細目（最終）
-
-- 型: `HttpLimits`・`HttpParser`・`HttpProgress`・`HttpRequest`・`HttpHeader`・`HttpResponse`・`HttpError`・`HttpConn`。どれも中身を見せない型で、取り出す関数が写しを返す（補足 A-1）。`HttpConn` は `Sendable` だけ（`TcpStream` を持つ）。
-- 関数: `http.default_limits`・`http.parser`・`http.conn`・`http.serve_conn`・`http.abort_conn`、`HttpParser`（`feed`・`consumed`・`held`・`in_body`・`wants_continue`）、`HttpRequest`（`method`・`path`・`query`・`version`・`headers`・`header`・`body`・`body_len`）、`HttpHeader`（`name`・`value`）、`HttpResponse`（`new`・`with_header`・`status`・`headers`・`body`）、`HttpError.status`、`HttpLimits`（各上限の取り出しと `with_*`、`memory_bound`）。
-- 利用者が書く形は `examples/10-http-server/` にある（受け付けのループは利用者が `task.roots` で書く。決定 2-3）。
-
-### C-2. 計測の値
-
-補足 B-3 のとおり（`S_http` ≈ 9.6 KiB/接続で式には 16 KiB、停止の印の分岐の有無で処理量の差は誤差の範囲）。最悪のメモリの式は、補足 B-1 の `HttpLimits.memory_bound()` が持つ。ADR 0020 決定 4 の式の改訂（判断点 E の影響）は、人間の作業として未了のまま残る。
-
-### C-3. 評価器との差の表（ADR 0030 補足 D-3）
-
-行は足さない（決定 8）。評価器とネイティブ（ワーカー 1・4）で、持続接続・パイプライン（送る位置を変えて）・`100-continue`・応答の検査・時間の上限・上限の回数・異常停止の隔離が同じ応答になることを `tests/http_conn_6_3g_c.rs`・`tests/http_response_rules.rs`・`tests/examples_http_6_3g_d.rs` で確かめた。送信の時間の試験だけネイティブに限るのは、評価器が大きな本文の写しで遅く書きの待ちが起きないという処理の速さの違いで、動作の差ではない（決定 8 のとおり表に入れない）。
-
-### C-4. G2 の確かめ（ADR 0020 決定 3、本 ADR 決定 9）
-
-| 項目 | 確かめた内容 |
-|---|---|
-| 決定 1（定数時間） | 対象外。HTTP の層に秘密の比較は無い（認証は 6-6） |
-| 決定 2 の対象の追加 | `tests/fuzz_http_request.rs`（`fuzz_http_request`）。種 39 件（R1〜R12 と密輸の既知の形）、短い実行は既定 600 回、回帰の置き場 `tests/fuzz/regress/http_request/`（誤りが見つからなかったので空）。長い実行の CI の段（`.github/workflows/fuzz.yml`）は人間の作業として未了のまま残る（決定 7 の案 H1）。足されるまでは手で 30 分以上走らせて PR に記録する |
-| 決定 4 の上限のテスト | `limit_http_` で始まる 17 件（解釈の行 `request_line`・`head`・`headers`・`body`・`chunk_line`・`encoded_body`、接続の行 `head_time`・`body_time`・`handler_time`・`idle_time`・`send_time`・`requests_per_connection`・`response_body`・`concurrent_connections` ほか）。上限ちょうどは通り、1 つ超えると決めた動きになる |
-| 規則 | R1〜R12（`tests/http_parse_rules.rs`）・S1〜S7（`tests/http_response_rules.rs`）の規則ごとのテスト |
-| 信頼基盤の増分 0 | `scripts/trust-base-diff.sh` の差分なし。`std.http` は `trust none`、`unchecked`・`raw.*`・`fs.*` なし（`src/stdlib.rs` の単体テストで固定） |
-
-### C-5. 未決として残す点（この段では決めない）
-
-- **人間の判断点 1: 起動時の標準エラーの行の有無**。ADR 0032 決定 4-4 は、起動時に最悪のメモリを標準エラーへ出すとしたが、`std.http` は `trust none` で標準エラーへ書く操作が無く、出すには標準エラーへ書く `unchecked` の操作（信頼基盤の増分）が要る。認めるかは所有者の判断待ちで、決まるまで `HttpLimits.memory_bound()` が値だけを提供する（補足 B-1）。
-- ADR 0020 の改訂（判断点 E・F の影響）と `CODEOWNERS`・`fuzz.yml` の変更は人間の作業。
-- `abort_conn` の「読み取り中」「送信中」の段階は、利用者のコードから段階を作る手段が無く、ソケットでは確かめていない（補足 B-2）。
-
-### C-6. HTTP サーバーのサンプル
-
-`examples/10-http-server/`（`http_server.sigil`・`http_server.spec`）。`task.roots` で接続ごとのルートを起動し、`http.serve_conn` に名前のハンドラを渡す。`tests/examples_http_6_3g_d.rs` が、構文・正規形・検査・仕様の出力を固定し、評価器・ネイティブ（ワーカー 1・4）で同じ応答を返すことを確かめる。

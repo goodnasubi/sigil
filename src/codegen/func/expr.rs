@@ -214,7 +214,18 @@ impl<'a, 'p> Fx<'a, 'p> {
             Rvalue::Binary(op, a, b) => {
                 let (x, tx) = self.val(a);
                 let (y, _) = self.val(b);
-                self.binary(*op, &tx, x, y)
+                let r = self.binary(*op, &tx, x, y);
+                // 文字列の書き出し（`Const::Str`）は、使うたびに新しい文字列の塊を作る（`raw_const`）。二項演算は読むだけで
+                // 所有しないので、結果を得た後に、この式で作った塊を放す（Issue #416。比較の演算子と、文字列のパターンの照合。`str_concat` も
+                // 両辺を写すだけで放さないので、同じ扱いでよい）。
+                // 局所や一時の `Copy`・`Move` の演算子は、持ち主が別にいるので放さない。
+                if matches!(a, Operand::Const(Const::Str(_))) {
+                    self.rt("str_free", &[x]);
+                }
+                if matches!(b, Operand::Const(Const::Str(_))) {
+                    self.rt("str_free", &[y]);
+                }
+                r
             }
             Rvalue::Aggregate(kind, ops) => {
                 let p = self.cg.p;

@@ -253,7 +253,18 @@ fn send_once(fd: Int, data: &Bytes, off: Int) -> Int
     k = 65536;
   }
   let buf = raw.alloc(k, 1);
+  // 4 バイトずつ read_u32_be（ビッグエンディアン）で読んで、上位から順に 4 バイトを書く。1 バイトずつの get（Option を
+  // 毎回作る）は、書きの速さの支配的な費用だった（Issue #427）。端数は 1 バイトずつ。
   let mut i = 0;
+  while i + 4 <= k {
+    let v = data.read_u32_be(off + i).unwrap_or(0);
+    let q = raw.offset(buf, i);
+    raw.store_u8(q, (v >> 24) & 255);
+    raw.store_u8(raw.offset(q, 1), (v >> 16) & 255);
+    raw.store_u8(raw.offset(q, 2), (v >> 8) & 255);
+    raw.store_u8(raw.offset(q, 3), v & 255);
+    i = i + 4;
+  }
   while i < k {
     raw.store_u8(raw.offset(buf, i), data.get(off + i).unwrap_or(0));
     i = i + 1;

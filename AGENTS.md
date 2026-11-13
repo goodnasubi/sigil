@@ -138,6 +138,15 @@ cargo test --test <変更範囲のテスト>
 - 番号は `docs/decisions/README.md` に「予約」の行を足して確保する。他の PR と重ねない。
 - 実装中に ADR との食い違いを見つけたら、実装を止めて ADR の修正 PR を出す。
 
+## 仕様判断と typesafe-ai
+
+- 仕様の決定・変更・削除の手順は「レビューとマージ」の表のとおり（理念に照らして考える → typesafe-ai で正式判定する → スコアが近接した場合だけ人間へ提示する）。この節は typesafe-ai の呼び出し方法を定める。
+- 呼び出し先: `POST https://api.typesafe.ai/v1/systemone`。ヘッダーは `Authorization: Bearer $TYPESAFE_API_KEY` と `Content-Type: application/json`。本体は `{"model": "jev-1.13.0", "state": "...", "questions": {...}}`。
+- `questions` は辞書形式で渡す（リスト形式だと HTTP 422 になる）。問いの形は `{"type": "choice", "criteria": {"<選択肢id>": "<説明>"}}`。`type` は `choice` のほか `noul`（yes/no の確率）も使える。応答の `answers` に確率と `confidence` が返る。
+- `state` の冒頭に評価軸を固定して書く（プロジェクトの理念と所有者の明示方針を含める）。判定の途中で評価軸を変えてやり直さない。
+- 入力と応答の JSON は記録として残し、決定と根拠を ADR／Issue に書く。
+- 環境ごとの設定: Codex Cloud の sigil 環境では、許可ドメイン `api.typesafe.ai` と環境変数 `TYPESAFE_API_KEY` が設定済み（値は所有者が登録したもので、エージェントは値を読み出したり記録したりしない）。設定はタスク開始時点の環境の版で固定される。キーが無い環境で判定が必要になったら、その時点で所有者へ報告する。
+
 ## トークンの節約
 
 - GitHub の Issue・PR・コメントの本文を会話や報告に再掲しない。報告は URL と要点だけ、短く。

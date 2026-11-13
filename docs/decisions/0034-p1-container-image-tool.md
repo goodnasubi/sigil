@@ -1,4 +1,4 @@
-# 0033: P1 のコンテナイメージの道具
+# 0034: P1 のコンテナイメージの道具
 
 - **状態**: 提案（Issue #447）。新規判断 A〜C は 2026-11-14 JST に Codex Cloud（OpenAI 系統）が typesafe-ai `jev-1.13.0` の正式判定で決定。A はバイナリ I/O の不足を明示して再判定した。所有者が後から確認し、覆せる記録を末尾に残す。実装の着手・マージの承認を意味しない。
 - **範囲**: 段階 6-2 の設計と後続の分割。コード・依存・CI・信頼基盤の設定は変更しない。
@@ -91,7 +91,7 @@ CI 設定の人間担当 PR が入るまでは、手動で Docker が動いて�
 
 ## 影響と参照
 
-- この PR は新規 ADR だけ。README の番号予約はユーザー指定の変更範囲外なので行わず、0033 が次の空き番号であることを確認して PR に例外を記録する。
+- この PR は新規 ADR だけ。README の番号予約はユーザー指定の変更範囲外なので行わず、PR #449 が 0033 を使用しているため、次の空き番号 0034 を選び、PR に例外を記録する。
 - バイナリ I/O と CI の不足を明示した段階計画であり、生成器が既に動くという主張ではない。Docker 互換性の実測、上限値と I/O API は後続の完了条件に残る。
 - 形式の参照: [OCI Image Layout](https://github.com/opencontainers/image-spec/blob/v1.0.0/image-layout.md)、[Manifest](https://github.com/opencontainers/image-spec/blob/v1.0.0/manifest.md)、[Configuration](https://github.com/opencontainers/image-spec/blob/v1.0.0/config.md)、[Layer](https://github.com/opencontainers/image-spec/blob/v1.0.0/layer.md)。
 

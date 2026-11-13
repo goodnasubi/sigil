@@ -224,7 +224,15 @@ fn recv_once(fd: Int, max: Int, out: &mut Bytes) -> Int
   while r == -4 {
     r = raw.syscall(45, fd, raw.addr_to_int(buf), max, 0, 0, 0);
   }
+  // 8 バイトずつ、load_i64（x86-64 のリトルエンディアン）で読んで下位・上位の 4 バイトを push_u32_le で足す。
+  // 1 バイトずつの push（reserve の確認つき）は、本文の取り込みの支配的な費用だった（Issue #417）。
   let mut i = 0;
+  while i + 8 <= r {
+    let w = raw.load_i64(raw.offset(buf, i));
+    out.push_u32_le(w & 4294967295);
+    out.push_u32_le(w >> 32);
+    i = i + 8;
+  }
   while i < r {
     out.push(raw.load_u8(raw.offset(buf, i)));
     i = i + 1;

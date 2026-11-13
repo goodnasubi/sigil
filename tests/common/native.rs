@@ -315,6 +315,57 @@ fn map_arg(a: &Arg, keys: &[(String, String)]) -> Arg {
     }
 }
 
+/// 実行前の失敗はビルドの診断、引数の型・個数の失敗は実行ファイルの入口診断と比べる。
+/// 実行できないソースを成功扱いせず、同じ拒否が確認できたときだけ checked にする。
+fn check_rejection(srcs: &[&str], func: &str, args: &[Arg], opts: &Options, want: &Failure) {
+    let dir = scratch("rejection");
+    let exe = dir.join("prog");
+    let build_opts = Opts {
+        trace_drops: opts.trace_drops,
+        trust_base: opts.trust_base.clone(),
+    };
+    let built = native::build(srcs, func, &build_opts, &exe);
+    // 拒否されたプログラムの入口には到達しない。曖昧な CLI 値を別の種類に変えない。
+    let got = if built.is_ok() && matches!(want.error, RunError::Entry(_)) {
+        assert!(
+            !args.iter().any(ambiguous),
+            "{func}: 入口エラーの引数を CLI で同じ種類として渡せない"
+        );
+        Some(exec(&exe, args))
+    } else {
+        None
+    };
+    let exists = exe.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(want.output.is_empty(), "{func}: 拒否前の評価器の出力");
+    assert!(want.drops.is_empty(), "{func}: 拒否前の評価器の破棄");
+    match (built, got) {
+        (Err(native::BuildError::Run(got)), None) => {
+            let same = match (&want.error, &got) {
+                (RunError::Check(a), RunError::Check(b)) => a == b,
+                (
+                    RunError::Module { file: a, error: ae },
+                    RunError::Module { file: b, error: be },
+                ) => a == b && ae == be,
+                (RunError::Entry(a), RunError::Entry(b)) => a == b,
+                _ => false,
+            };
+            assert!(same, "{func}: 拒否の診断が違う: {:?} / {got:?}", want.error);
+            assert!(!exists, "{func}: ビルドで拒否したのに実行ファイルがある");
+        }
+        (Ok(()), Some(got)) => {
+            assert_eq!(got.code, Some(1), "{func}: 入口エラーの終了コード");
+            assert_eq!(got.stdout, "", "{func}: 入口エラーの標準出力");
+            assert_eq!(
+                got.stderr,
+                format!("{}\n", want.error).trim_start(),
+                "{func}: 入口エラーの標準エラー"
+            );
+        }
+        (built, _) => panic!("{func}: 同じ拒否にならない: {:?} / {built:?}", want.error),
+    }
+}
+
 /// SIR の評価器の結果 `want` と、ネイティブの実行結果を突き合わせる。
 pub fn check(
     srcs: &[&str],
@@ -328,10 +379,17 @@ pub fn check(
         record("skip", why, func);
         note(&format!("飛ばす: {why} {func}"));
     };
-    // 入口の指定や検査のエラーは、実行ファイルを作る前の話。
+    // 検査・入口の拒否も突き合わせる。ビルド前の拒否と、実行時の引数の拒否を区別する。
     if let Err(f) = want {
-        if !matches!(f.error, RunError::Stop(_)) {
+        if matches!(f.error, RunError::Unsupported(_)) {
             return skip("停止でない失敗");
+        }
+        if !matches!(f.error, RunError::Stop(_)) {
+            check_rejection(srcs, func, args, opts, f);
+            CHECKED.fetch_add(1, Ordering::SeqCst);
+            record("checked", "検査・入口の拒否", func);
+            note(&format!("検査・入口の拒否を突き合わせた: {func}"));
+            return;
         }
     }
     let dir = scratch("both");

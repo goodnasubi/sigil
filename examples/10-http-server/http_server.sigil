@@ -1,0 +1,80 @@
+// 例 10: HTTP/1.1 サーバー（ADR 0032）
+// 受け付けのループは利用者が task.roots で書く。1 つの接続が 1 つのルート（隔離の単位）で、同時の接続の数は reserve が守る。
+// http.conn が接続を包み、http.serve_conn が要求を読んでハンドラを呼び応答を送る（持続接続・パイプライン・時間と大きさの上限）。
+// ハンドラが異常停止しても、その接続だけが 500 で閉じ、他の接続と受け付けは続く（http.abort_conn）。
+// std.http は信頼基盤を足さない（trust none）。応答の見出しの検査と Content-Length の付与はライブラリが行う。
+
+module examples.http_server
+  targets server
+  trust none
+
+fn text(status: Int, body: &String) -> HttpResponse
+  intent "状態と本文から応答を作る"
+  requires 200 <= status && status <= 599
+  ensures none
+  effects none
+{
+  return HttpResponse.new(status, body.as_bytes());
+}
+
+// ハンドラは名前の関数で宣言する（関数の型の値は Sendable でないので、起動したルートがとらえられるのは名前の呼び出しだけ）。
+fn handle(r: &HttpRequest) -> HttpResponse
+  intent "経路ごとの応答: / は挨拶、/echo は要求の本文をそのまま返す、それ以外は 404"
+  requires none
+  ensures none
+  effects none
+{
+  let path = r.path();
+  if path == "/".as_bytes() {
+    return text(200, &"hello");
+  }
+  if path == "/echo".as_bytes() {
+    return HttpResponse.new(200, r.body()).with_header(&"content-type", &"application/octet-stream".as_bytes());
+  }
+  return text(404, &"not found");
+}
+
+fn limits() -> HttpLimits
+  intent "既定の上限（ADR 0020 決定 4）。変えるときは with_* で 1 つずつ"
+  requires none
+  ensures none
+  effects none
+{
+  return http.default_limits();
+}
+
+// n 個の接続を受け付けて返す。最初の標準出力の行は待ち受けの番号（port 0 の local_port）。
+pub fn serve(n: Int, limit: Int) -> Int
+  intent "127.0.0.1 の空いているポートで待ち受け、n 個の接続を受け付けて、それぞれ別のルートで処理する"
+  requires 1 <= limit && limit <= 4096
+  ensures none
+  effects clock, console, net.server, task
+{
+  let host = "127.0.0.1";
+  match net.listen(&host, 0, limits().backlog()) {
+    Ok(l) => {
+      console.log(&l.local_port());
+      return task.roots(limit, |g| {
+        let mut i = 0;
+        while i < n {
+          let slot = g.reserve();
+          match l.accept() {
+            Ok(st) => {
+              slot.start(http.conn(st), move |c| {
+                http.serve_conn(&c, &limits(), handle);
+              }, move |c| {
+                http.abort_conn(c, &limits());
+              });
+            }
+            Err(e) => {}
+          }
+          i = i + 1;
+        }
+        return n;
+      });
+    }
+    Err(e) => {
+      return 0 - 1;
+    }
+  }
+}

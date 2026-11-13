@@ -567,6 +567,45 @@ spec:
   事後条件: result == true
   効果: なし
 
+=== examples/10-http-server/http_server.sigil
+check: ok
+spec:
+モジュール examples.http_server
+  出力先: サーバー
+  信頼基盤: いいえ
+
+関数 text（非公開）
+  意図: 状態と本文から応答を作る
+  引数: status を受け取る（Int）、body を読む（String）
+  戻り値: HttpResponse
+  事前条件: 200 <= status && status <= 599
+  事後条件: なし
+  効果: なし
+
+関数 handle（非公開）
+  意図: 経路ごとの応答: / は挨拶、/echo は要求の本文をそのまま返す、それ以外は 404
+  引数: r を読む（HttpRequest）
+  戻り値: HttpResponse
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+
+関数 limits（非公開）
+  意図: 既定の上限（ADR 0020 決定 4）。変えるときは with_* で 1 つずつ
+  引数: なし
+  戻り値: HttpLimits
+  事前条件: なし
+  事後条件: なし
+  効果: なし
+
+関数 serve（公開）
+  意図: 127.0.0.1 の空いているポートで待ち受け、n 個の接続を受け付けて、それぞれ別のルートで処理する
+  引数: n を受け取る（Int）、limit を受け取る（Int）
+  戻り値: Int
+  事前条件: 1 <= limit && limit <= 4096
+  事後条件: なし
+  効果: 現在時刻を読む・待つ、コンソールに出力する、接続を待ち受ける、タスクを起動する・中断しうる・値を共有する
+
 === tests/data/effects_main.sigil
 check: 5:1: 型エラー: `use` の先のモジュールを探す根がない（`sigil check --root <根>` で検査する）
 spec:

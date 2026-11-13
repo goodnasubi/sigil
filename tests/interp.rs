@@ -622,9 +622,9 @@ fn comparing_very_deep_values_stops_instead_of_overflowing_the_host_stack() {
     );
     let opts = Options {
         stack_bytes: 1024 * 1024,
-        ..Options::default()
+        ..Options::captured()
     };
-    let e = run_with(&program(&items), "build", &[], &opts).unwrap_err();
+    let e = common::run_with_stack_recovery(&program(&items), "build", &[], &opts).unwrap_err();
     match e.error {
         RunError::Stop(s) => assert_eq!(s.kind, StopKind::StackExhausted),
         other => panic!("{other}"),
@@ -637,9 +637,9 @@ fn stack_exhaustion_while_showing_the_result_keeps_the_position() {
     let items = items.replace("build() -> Int", "build() -> L");
     let opts = Options {
         stack_bytes: 1024 * 1024,
-        ..Options::default()
+        ..Options::captured()
     };
-    let e = run_with(&program(&items), "build", &[], &opts).unwrap_err();
+    let e = common::run_with_stack_recovery(&program(&items), "build", &[], &opts).unwrap_err();
     match e.error {
         RunError::Stop(s) => {
             assert_eq!(s.kind, StopKind::StackExhausted);

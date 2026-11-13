@@ -53,6 +53,16 @@ pub fn run_with(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
     run_sources_with(&[src], func, args, opts)
 }
 
+/// #431 の純粋な深い値の2試験専用。小スタックの停止結果は呼び出し側の検査に残し、
+/// ネイティブが成功したら、既定スタックの評価器の成功結果と突き合わせる。
+/// 外部I/Oを伴うソースには使わない（比較のために評価器を再実行する）。
+pub fn run_with_stack_recovery(src: &str, func: &str, args: &[Arg], opts: &Options) -> Res {
+    verify(&[src], func);
+    let result = ir_eval::run_with(src, func, args, opts);
+    native::check_stack_recovery(&[src], func, args, opts, &result);
+    result
+}
+
 pub fn run_sources(srcs: &[&str], func: &str, args: &[Arg]) -> Res {
     run_sources_with(srcs, func, args, &Options::captured())
 }

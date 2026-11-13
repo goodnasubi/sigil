@@ -374,6 +374,45 @@ pub fn check(
     opts: &Options,
     want: &Result<Outcome, Failure>,
 ) {
+    check_impl(srcs, func, args, opts, want, false);
+}
+
+/// #431 の純粋な深い値の2試験からだけ明示的に使う。一般の比較では再実行しない。
+pub fn check_stack_recovery(
+    srcs: &[&str],
+    func: &str,
+    args: &[Arg],
+    opts: &Options,
+    want: &Result<Outcome, Failure>,
+) {
+    assert!(
+        matches!(want, Err(f) if matches!(&f.error, RunError::Stop(s) if s.kind == StopKind::StackExhausted)),
+        "{func}: 回復比較の元の結果はスタックの枯渇であること"
+    );
+    assert!(opts.stack_bytes < Options::default().stack_bytes);
+    assert!(opts.capture_console, "{func}: 回復比較は出力全文を比べる");
+    assert!(
+        args.is_empty() && srcs.len() == 1,
+        "{func}: 深い値の単一ソース専用"
+    );
+    assert!(
+        opts.fs_files.is_none()
+            && opts.trust_base.is_empty()
+            && opts.embedded_extra.is_empty()
+            && opts.embedded_roots.is_empty(),
+        "{func}: 回復比較は外部I/Oのない2試験専用"
+    );
+    check_impl(srcs, func, args, opts, want, true);
+}
+
+fn check_impl(
+    srcs: &[&str],
+    func: &str,
+    args: &[Arg],
+    opts: &Options,
+    want: &Result<Outcome, Failure>,
+    recover_stack: bool,
+) {
     let skip = |why: &str| {
         SKIPPED.fetch_add(1, Ordering::SeqCst);
         record("skip", why, func);
@@ -469,8 +508,41 @@ pub fn check(
     }
     let got = exec(&exe, exec_args);
     let _ = std::fs::remove_dir_all(&dir);
+    let recovered;
+    let want = if recover_stack {
+        assert_eq!(
+            got.code,
+            Some(0),
+            "{func}: 回復比較の終了コード\n{}",
+            got.stderr
+        );
+        // 全設定を保ち、試験用に小さくしたスタックだけ既定へ戻す。
+        let replay_opts = Options {
+            stack_bytes: Options::default().stack_bytes,
+            trace_drops: opts.trace_drops,
+            fs_files: opts.fs_files.clone(),
+            capture_console: opts.capture_console,
+            trust_base: opts.trust_base.clone(),
+            schedule_seed: opts.schedule_seed,
+            embedded_extra: opts.embedded_extra.clone(),
+            embedded_roots: opts.embedded_roots.clone(),
+        };
+        // common のラッパーには戻らない。元の小スタックでの停止結果も書き換えない。
+        recovered = match sigil::ir_eval::run_sources_with(srcs, func, &args, &replay_opts) {
+            Ok(outcome) => Ok(outcome),
+            Err(failure) if matches!(&failure.error, RunError::Stop(s) if s.kind == StopKind::StackExhausted) =>
+            {
+                return skip("スタックの枯渇（既定スタックでも評価器が枯渇し比較未成立）");
+            }
+            Err(failure) => panic!("{func}: 既定スタックでの再評価に失敗: {failure}"),
+        };
+        &recovered
+    } else {
+        want
+    };
     // スタックの枯渇は、SIR の評価器の枠の大きさで決まる。実行ファイルの枠は小さく、同じ深さでは枯渇しないことがある
-    // （その場合は止まらず値を返す）。止まったときだけ、止まり方を比べる。
+    // （その場合は止まらず値を返す）。通常は止まったときだけ、止まり方を比べる。
+    // #431 の2試験だけは上の専用経路で既定スタックの結果と比べる。
     if let Err(f) = want {
         if matches!(&f.error, RunError::Stop(s) if s.kind == StopKind::StackExhausted)
             && got.code != Some(70)
@@ -478,8 +550,10 @@ pub fn check(
             return skip("スタックの枯渇（実行ファイルでは枯渇しない）");
         }
     }
-    CHECKED.fetch_add(1, Ordering::SeqCst);
-    record("checked", "", func);
+    if !recover_stack {
+        CHECKED.fetch_add(1, Ordering::SeqCst);
+        record("checked", "", func);
+    }
     // `--trace-drops` の行は標準エラーから外して、破棄の順序として比べる。
     let (drops, rest): (Vec<&str>, Vec<&str>) = got
         .stderr
@@ -497,6 +571,13 @@ pub fn check(
     match want {
         Ok(o) => {
             assert_eq!(got.code, Some(0), "{func}: 終了コード\n{}", got.stderr);
+            if recover_stack {
+                assert!(
+                    rest.is_empty(),
+                    "{func}: 回復比較の標準エラー\n{}",
+                    got.stderr
+                );
+            }
             let value = replace_keys(&o.value, &keys);
             if opts.capture_console {
                 let output = replace_keys(&o.output, &keys);
@@ -544,5 +625,10 @@ pub fn check(
                 assert_eq!(drops, want_drops, "{func}: 破棄の順序");
             }
         }
+    }
+    if recover_stack {
+        CHECKED.fetch_add(1, Ordering::SeqCst);
+        record("checked", "既定スタックで深い値を突き合わせた", func);
+        note(&format!("既定スタックで深い値を突き合わせた: {func}"));
     }
 }

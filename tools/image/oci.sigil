@@ -1,0 +1,275 @@
+module tools.image.oci
+  targets server
+  trust none
+
+use tools.image.binary.decimal;
+use tools.image.binary.hex;
+
+// OCI 1.0固定JSON部品。入口・I/O・イメージ全体の結線は6-2d。
+pub struct Descriptor {
+  media_type_value: String,
+  digest_value: String,
+  size_value: Int,
+}
+
+pub fn read_json(data: &Bytes) -> Result<JsonValue, Int>
+  intent "既存の検査済みJSON readerを使う"
+  requires none
+  ensures none
+  effects none
+{
+  return json.parse(&data);
+}
+
+fn quote(value: &String) -> Result<String, Int>
+  intent "文字列は必ず既存のJSON escapeを通す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut nodes = List.new();
+  nodes.push(JsonNode.Str(value.clone()));
+  let b = json.stringify(&JsonValue.new(nodes, 0))?;
+  return b.to_string_utf8().map_err(|e| 400);
+}
+
+pub fn digest(data: &Bytes) -> String
+  intent "既存cryptoのSHA-256を使いOCI digestにする"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = "sha256:".as_bytes();
+  b.extend(&hex(&sha256(&data)).as_bytes());
+  return b.to_string_utf8().unwrap_or("");
+}
+
+pub fn descriptor(media: &String, data: &Bytes) -> Result<Descriptor, Int>
+  intent "実際のバイト列からsizeとdigestを得る"
+  requires none
+  ensures none
+  effects none
+{
+  let d = Descriptor { media_type_value: media.clone(), digest_value: digest(&data), size_value: data.len() };
+  descriptor_json(&d)?;
+  return Ok(d);
+}
+
+fn valid_descriptor(d: &Descriptor) -> Bool
+  intent "OCIの固定mediaTypeとSHA-256の綴りとsizeを検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if d.media_type_value != "application/vnd.oci.image.manifest.v1+json" && d.media_type_value != "application/vnd.oci.image.config.v1+json" && d.media_type_value != "application/vnd.oci.image.layer.v1.tar" {
+    return false;
+  }
+  let b = d.digest_value.as_bytes();
+  if d.size_value < 0 || d.size_value > 134217728 || b.len() != 71 || b.slice(0, 7).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("") != "sha256:" {
+    return false;
+  }
+  let mut i = 7;
+  while i < 71 {
+    let c = b.get(i).unwrap_or(0);
+    if !((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+pub fn descriptor_json(d: &Descriptor) -> Result<Bytes, Int>
+  intent "固定キー順と空白なしのdescriptorを作る"
+  requires none
+  ensures none
+  effects none
+{
+  if !valid_descriptor(&d) {
+    return Err(400);
+  }
+  let mut out = Bytes.new();
+  out.extend(&"{\"mediaType\":".as_bytes());
+  out.extend(&quote(&d.media_type_value)?.as_bytes());
+  out.extend(&",\"digest\":".as_bytes());
+  out.extend(&quote(&d.digest_value)?.as_bytes());
+  out.extend(&",\"size\":".as_bytes());
+  out.extend(&decimal(d.size_value)?.as_bytes());
+  out.extend(&"}".as_bytes());
+  return Ok(out);
+}
+
+pub fn read_descriptor(data: &Bytes) -> Result<Descriptor, Int>
+  intent "重複・未知欄・型・digestとsizeを検査してdescriptorを読む"
+  requires none
+  ensures none
+  effects none
+{
+  let value = read_json(&data)?;
+  let nodes = value.nodes();
+  let mut fields = List.new();
+  match nodes.get(value.root()) {
+    Some(JsonNode.Object(f)) => {
+      fields = f.clone();
+    }
+    _ => {
+      return Err(400);
+    }
+  }
+  if fields.len() != 3 {
+    return Err(400);
+  }
+  let media = json_string(&nodes, field_index(&fields, &"mediaType")?)?;
+  let hash = json_string(&nodes, field_index(&fields, &"digest")?)?;
+  let mut size = 0 - 1;
+  match nodes.get(field_index(&fields, &"size")?) {
+    Some(JsonNode.Int(n)) => {
+      size = n;
+    }
+    _ => {
+      return Err(400);
+    }
+  }
+  let d = Descriptor { media_type_value: media, digest_value: hash, size_value: size };
+  if !valid_descriptor(&d) {
+    return Err(400);
+  }
+  return Ok(d);
+}
+
+pub fn verify_descriptor(d: &Descriptor, data: &Bytes) -> Result<Bool, Int>
+  intent "実長と期待digestの両方を照合する"
+  requires none
+  ensures none
+  effects none
+{
+  if !valid_descriptor(&d) || d.size_value != data.len() || d.digest_value != digest(&data) {
+    return Err(400);
+  }
+  return Ok(true);
+}
+
+pub fn layout_json() -> Bytes
+  intent "OCI Image Layout 1.0.0の固定JSONを作る"
+  requires none
+  ensures none
+  effects none
+{
+  return "{\"imageLayoutVersion\":\"1.0.0\"}".as_bytes();
+}
+
+pub fn config_json(layer: &Descriptor) -> Result<Bytes, Int>
+  intent "単一appと非rootを固定した設定を作る"
+  requires none
+  ensures none
+  effects none
+{
+  if !valid_descriptor(&layer) || layer.media_type_value != "application/vnd.oci.image.layer.v1.tar" {
+    return Err(400);
+  }
+  let mut out = Bytes.new();
+  out.extend(&"{\"architecture\":\"amd64\",\"os\":\"linux\",\"config\":{\"User\":\"65532:65532\",\"Entrypoint\":[\"/app\"],\"WorkingDir\":\"/\"},\"rootfs\":{\"type\":\"layers\",\"diff_ids\":[".as_bytes());
+  out.extend(&quote(&layer.digest_value)?.as_bytes());
+  out.extend(&"]}}".as_bytes());
+  return Ok(out);
+}
+
+pub fn manifest_json(config: &Descriptor, layer: &Descriptor) -> Result<Bytes, Int>
+  intent "configと非圧縮単層のmanifestを作る"
+  requires none
+  ensures none
+  effects none
+{
+  if config.media_type_value != "application/vnd.oci.image.config.v1+json" || layer.media_type_value != "application/vnd.oci.image.layer.v1.tar" {
+    return Err(400);
+  }
+  let c = descriptor_json(&config)?.to_string_utf8().map_err(|e| 400)?;
+  let l = descriptor_json(&layer)?.to_string_utf8().map_err(|e| 400)?;
+  let mut out = Bytes.new();
+  out.extend(&"{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"config\":".as_bytes());
+  out.extend(&c.as_bytes());
+  out.extend(&",\"layers\":[".as_bytes());
+  out.extend(&l.as_bytes());
+  out.extend(&"]}".as_bytes());
+  return Ok(out);
+}
+
+pub fn index_json(manifest: &Descriptor) -> Result<Bytes, Int>
+  intent "linux amd64と固定参照名の単一manifest indexを作る"
+  requires none
+  ensures none
+  effects none
+{
+  if !valid_descriptor(&manifest) || manifest.media_type_value != "application/vnd.oci.image.manifest.v1+json" {
+    return Err(400);
+  }
+  let d = descriptor_json(&manifest)?;
+  let text = d.slice(0, d.len() - 1).map_err(|e| 400)?.to_string_utf8().map_err(|e| 400)?;
+  let mut out = Bytes.new();
+  out.extend(&"{\"schemaVersion\":2,\"manifests\":[".as_bytes());
+  out.extend(&text.as_bytes());
+  out.extend(&",\"platform\":{\"architecture\":\"amd64\",\"os\":\"linux\"},\"annotations\":{\"org.opencontainers.image.ref.name\":\"sigil-app:latest\"}}]}".as_bytes());
+  return Ok(out);
+}
+
+pub fn descriptor_media_type(item: &Descriptor) -> String
+  intent "media_typeを読む"
+  requires none
+  ensures none
+  effects none
+{
+  return item.media_type_value.clone();
+}
+
+pub fn descriptor_digest(item: &Descriptor) -> String
+  intent "digestを読む"
+  requires none
+  ensures none
+  effects none
+{
+  return item.digest_value.clone();
+}
+
+pub fn descriptor_size(item: &Descriptor) -> Int
+  intent "sizeを読む"
+  requires none
+  ensures none
+  effects none
+{
+  return item.size_value;
+}
+
+fn field_index(fields: &List<JsonField>, name: &String) -> Result<Int, Int>
+  intent "固定欄のインデックスを借用で探す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = 0;
+  while i < fields.len() {
+    match fields.get(i) {
+      Some(f) => {
+        if f.name() == name {
+          return Ok(f.index());
+        }
+      }
+      None => {
+        return Err(400);
+      }
+    }
+    i = i + 1;
+  }
+  return Err(400);
+}
+
+fn json_string(nodes: &List<JsonNode>, index: Int) -> Result<String, Int>
+  intent "文字列ノードを確認して複製する"
+  requires none
+  ensures none
+  effects none
+{
+  return match nodes.get(index) {
+    Some(JsonNode.Str(s)) => Ok(s.clone()),
+    _ => Err(400),
+  };
+}

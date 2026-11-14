@@ -1,0 +1,59 @@
+module tools.image.elf
+  targets server
+  trust none
+
+use tools.image.binary.le;
+use tools.image.binary.span;
+
+// 静的ELF64 little endian x86-64の形だけを確認する。入力元・命令の安全性は証明しない。
+
+pub fn validate_elf(data: &Bytes) -> Result<Bool, Int>
+  intent "ヘッダと全program headerを確保や桁あふれなしに確認する"
+  requires none
+  ensures none
+  effects none
+{
+  if data.len() < 64 || data.len() > 67108864 {
+    return Err(400);
+  }
+  if le(&data, 0, 4)? != 1179403647 || le(&data, 4, 1)? != 2 || le(&data, 5, 1)? != 1 || le(&data, 6, 1)? != 1 {
+    return Err(400);
+  }
+  if le(&data, 16, 2)? != 2 || le(&data, 18, 2)? != 62 || le(&data, 20, 4)? != 1 || le(&data, 52, 2)? != 64 || le(&data, 54, 2)? != 56 {
+    return Err(400);
+  }
+  let offset = le(&data, 32, 8)?;
+  let count = le(&data, 56, 2)?;
+  // 拡張program header数(PN_XNUM)はこの固定形式では扱わない。
+  if count == 0 || count == 65535 || offset < 64 || !span(data.len(), offset, count * 56) {
+    return Err(400);
+  }
+  let mut i = 0;
+  while i < count {
+    let p = offset + i * 56;
+    let kind = le(&data, p, 4)?;
+    if kind == 2 || kind == 3 {
+      return Err(400);
+    }
+    let start = le(&data, p + 8, 8)?;
+    let size = le(&data, p + 32, 8)?;
+    if !span(data.len(), start, size) {
+      return Err(400);
+    }
+    if kind == 1 {
+      let address = le(&data, p + 16, 8)?;
+      let memory = le(&data, p + 40, 8)?;
+      if memory < size || address > 9223372036854775807 - memory {
+        return Err(400);
+      }
+      let align = le(&data, p + 48, 8)?;
+      if align > 1 {
+        if (align & align - 1) != 0 || address % align != start % align {
+          return Err(400);
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return Ok(true);
+}

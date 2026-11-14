@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const HEAD: &str = "module app.main\n  targets server\n  trust none\n\n";
 const MODES: [u32; 3] = [0, 1, 4];
 
 struct Guard(Child);
@@ -196,6 +195,7 @@ fn exchange(s: &mut TcpStream, case: &str) {
             return;
         }
         "eof" => {
+            s.shutdown(std::net::Shutdown::Both).unwrap();
             return;
         }
         "timeout" => {
@@ -291,18 +291,19 @@ pub fn main(port: Int, timeout: Int) -> Int
   ensures none
   effects net.client, random, task.suspend, task.spawn, clock
 {
-  let cfg = match pg.config("127.0.0.1", port, "user", "database", Secret.from_bytes("pencil".as_bytes())) {
-    Ok(c) => c, Err(e) => { return 99; }
-  };
-  let limits = match pg.default_connect_limits().with_timeout(timeout) { Ok(l) => l, Err(e) => { return 98; } };
+  let cfg = pg.config("127.0.0.1", port, "user", "database", Secret.from_bytes("pencil".as_bytes())).unwrap();
+  let limits = pg.default_connect_limits().with_timeout(timeout).unwrap();
   match pg.connect(cfg, &limits) {
     Ok(c) => { return 0; }
     Err(PgError.Protocol) => { return 1; }
     Err(PgError.LimitExceeded) => { return 2; }
     Err(PgError.Timeout) => { return 3; }
+    Err(PgError.Authentication) => { return 5; }
+    Err(PgError.Connection) => { return 6; }
     Err(e) => { return 4; }
   }
 }
+
 "#;
     let p = Prog::new(source, &[]);
     for mode in MODES {
@@ -333,9 +334,48 @@ pub fn main(port: Int, timeout: Int) -> Int
                 "ok" => "0",
                 "timeout" => "3",
                 "iterations" => "2",
+                "trust" | "md5" | "plus" | "nonce" | "duplicate" | "signature" | "order" => "5",
+                "eof" => "6",
                 _ => "1",
             };
             finish(c, expected, mode);
         }
+    }
+}
+
+#[test]
+fn unsupported_credentials_are_rejected_before_connect() {
+    let source = r#"module app.main
+  targets server
+  trust none
+pub fn main(port: Int) -> Int
+  intent "非対応資格情報を接続せず拒否する"
+  requires none
+  ensures none
+  effects none
+{
+  let a = pg.config("127.0.0.1", port, "user", "db", Secret.from_bytes("日本語".as_bytes()));
+  match a { Err(PgError.UnsupportedCredential) => {} _ => { return 1; } }
+  let b = pg.config("127.0.0.1", port, "user", "db", Secret.from_bytes(Bytes.new()));
+  match b { Err(PgError.UnsupportedCredential) => {} _ => { return 2; } }
+  let c = pg.config("127.0.0.1", port, "u\u{0}ser", "db", Secret.from_bytes("pencil".as_bytes()));
+  match c { Err(PgError.UnsupportedCredential) => {} _ => { return 3; } }
+  let d = pg.config("127.0.0.1", port, "user", "db", Secret.from_bytes("a\u{a}b".as_bytes()));
+  match d { Err(PgError.UnsupportedCredential) => {} _ => { return 4; } }
+  return 0;
+}
+"#;
+    let p = Prog::new(source, &[]);
+    for mode in MODES {
+        let l = listener();
+        finish(
+            p.spawn(mode, &[i64::from(l.local_addr().unwrap().port())]),
+            "0",
+            mode,
+        );
+        assert_eq!(
+            l.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }

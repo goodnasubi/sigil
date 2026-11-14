@@ -78,6 +78,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // `Shareable` でない（性質は検査器が型名ごとに持つ）。`NetError` は腕を `match` できる列挙で、検査器は
     // この行を列挙として登録し直す（`NET_ERROR_ARMS`）。
     ("TcpListener", 0, Layer::Os),
+    ("ShutdownSignal", 0, Layer::Os),
     ("TcpStream", 0, Layer::Os),
     // ADR 0034 決定 4: 接続側専用の所有型。
     ("TcpClient", 0, Layer::Os),
@@ -152,6 +153,7 @@ pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed",
 /// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
 pub const NET_FD_TYPES: &[&str] = &[
     "std.os.net.TcpListener",
+    "std.os.net.ShutdownSignal",
     "std.os.net.TcpStream",
     "std.os.net.TcpClient",
 ];
@@ -448,6 +450,7 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>",
         "net.server",
     ),
+    (Layer::Os, "net", "shutdown_signal() -> Result<ShutdownSignal, NetError>", "net.server"),
     // ADR 0034 決定 4: 実効果を接続側と乱数で分ける。既存サーバー側 API の意味は変えない。
     (Layer::Os, "net", "connect(host: &String, port: Int) -> Result<TcpClient, NetError>", "net.client, task.suspend"),
     (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
@@ -823,6 +826,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         ],
     ),
     // TCP のソケットの操作（ADR 0031 決定 3-2、PR 6-3e）。実体は `std.os.net` の `impl`。
+    (Layer::Os, "ShutdownSignal", &[("wait(self: &ShutdownSignal) -> Result<Unit, NetError>", "net.server, task.suspend")]),
     (
         Layer::Os,
         "TcpListener",
@@ -1158,6 +1162,9 @@ mod tests {
             "BinaryIoError",
             // ADR 0031 決定 3（PR 6-3e）。
             "net.listen",
+            "net.shutdown_signal",
+            "ShutdownSignal",
+            "ShutdownSignal.wait",
             "TcpListener",
             "TcpListener.local_port",
             "TcpListener.accept",
@@ -1443,6 +1450,7 @@ mod tests {
                         | "Path"
                         | "IoError"
                         | "BinaryIoError"
+                        | "ShutdownSignal"
                         | "TcpListener"
                         | "TcpStream"
                         | "TcpClient"

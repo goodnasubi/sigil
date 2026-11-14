@@ -20,6 +20,52 @@ module std.os.net
 //   recvfrom 45、sendto 44、shutdown 48、close 3。
 // 利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
 
+use std.os.io.shutdown_block;
+use std.os.io.shutdown_open;
+use std.os.io.shutdown_read;
+use std.os.io.shutdown_restore;
+
+// ルートやスレッドを起動する前に main で一度だけ作る。作成時に SIGTERM/INT を
+// ブロックし、以後の全スレッドへ継承する。fd の破棄時もマスクは戻さない（破棄する
+// スレッドは作成したスレッドと異なり得るため）。プロセスの終了まで保持する機構。
+pub struct ShutdownSignal {
+  fd: Int,
+}
+
+pub fn shutdown_signal() -> Result<ShutdownSignal, NetError>
+  intent "スレッド起動前に終了の合図 SIGTERM/INT を受ける所有 fd を作る"
+  requires none
+  ensures none
+  effects net.server
+{
+  let previous = shutdown_block();
+  if previous < 0 { return Err(classify(previous)); }
+  let fd = shutdown_open();
+  if fd < 0 {
+    shutdown_restore(previous);
+    return Err(classify(fd));
+  }
+  return Ok(ShutdownSignal { fd: fd });
+}
+
+impl ShutdownSignal {
+  pub fn wait(self: &ShutdownSignal) -> Result<Unit, NetError>
+    intent "SIGTERM/INT の到着まで通常の fd として待つ"
+    requires none
+    ensures none
+    effects net.server, task.suspend
+    unchecked "所有 fd は借用中生きている。生のメモリを持つのは中断しない shutdown_read の中だけ"
+  {
+    while true {
+      let r = shutdown_read(self.fd);
+      if r == 15 || r == 2 { return Ok(unit()); }
+      if r != -11 { return Err(classify(r)); }
+      if raw.io_wait_fd(self.fd, 1) < 0 { return Err(NetError.Other); }
+    }
+    return Err(NetError.Other);
+  }
+}
+
 pub struct TcpListener {
   fd: Int,
 }

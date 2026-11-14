@@ -1,0 +1,326 @@
+module app.web_router
+  targets server
+  trust none
+
+fn public_handler(req: &AppRequest) -> HttpResponse
+  intent "公開応答"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpResponse.new(200, "public".as_bytes());
+}
+
+type UserId = Int where self > 0 && self <= 99;
+
+fn user_value(req: &AppRequest) -> Result<HttpResponse, HttpResponse>
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  let id = web.validate(UserId.check(req.param_int(&"id")?))?;
+  return Ok(HttpResponse.new(200, req.param(&"id")?.as_bytes()));
+}
+
+fn user_handler(req: &AppRequest) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  return user_value(&req).unwrap_or(web.error_response(400));
+}
+
+fn query_value(req: &AppRequest) -> Result<HttpResponse, HttpResponse>
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  return Ok(HttpResponse.new(200, req.query(&"q")?.as_bytes()));
+}
+
+fn query_handler(req: &AppRequest) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  return query_value(&req).unwrap_or(web.error_response(400));
+}
+
+fn json_value(req: &AppRequest) -> Result<HttpResponse, HttpResponse>
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  let id = web.validate(UserId.check(req.json_int(&"id")?))?;
+  return Ok(HttpResponse.new(200, req.json_string(&"name")?.as_bytes()));
+}
+
+fn json_handler(req: &AppRequest) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  return json_value(&req).unwrap_or(web.error_response(400));
+}
+
+fn private_handler(req: &AppRequest) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  match req.identity() {
+    Some(identity) => {
+      return HttpResponse.new(200, identity.subject().as_bytes());
+    }
+    None => {}
+  }
+  return web.error_response(500);
+}
+
+fn echo_handler(req: &AppRequest) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpResponse.new(200, req.path().as_bytes().concat(&"|".as_bytes()).concat(&req.method().as_bytes()));
+}
+
+fn verify(req: &AppRequest) -> Result<AuthIdentity, HttpResponse>
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  let token = req.header(&"authorization").unwrap_or(Bytes.new());
+  if token.to_string_utf8().unwrap_or("") == "Bearer valid" {
+    return Ok(AuthIdentity.new("subject"));
+  }
+  return Err(HttpResponse.new(500, "sensitive verifier failure".as_bytes()));
+}
+
+fn before_one(req: &AppRequest) -> Option<HttpResponse>
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&"before-1");
+  if req.header(&"x-stop").is_some() {
+    return Some(HttpResponse.new(201, "stopped".as_bytes()));
+  }
+  return None;
+}
+
+fn before_two(req: &AppRequest) -> Option<HttpResponse>
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&"before-2");
+  return None;
+}
+
+fn after_one(req: &AppRequest, response: HttpResponse) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&"after-1");
+  return response.with_header(&"x-after-one", &"yes".as_bytes());
+}
+
+fn after_two(req: &AppRequest, response: HttpResponse) -> HttpResponse
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&"after-2");
+  return response.with_header(&"x-after-two", &"yes".as_bytes());
+}
+
+fn registration() -> Int
+  intent "ルーターの境界と順序を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  let a = Router.new().public_route("GET", "/users/:id", RouteHandler { handle: public_handler }).unwrap_or(Router.new());
+  if !a.route("GET", "/users/admin", RouteHandler { handle: private_handler }).is_err() {
+    return 1;
+  }
+  let b = Router.new().route("GET", "/users/admin", RouteHandler { handle: private_handler }).unwrap_or(Router.new());
+  if !b.public_route("GET", "/users/:name", RouteHandler { handle: public_handler }).is_err() {
+    return 2;
+  }
+  if !Router.new().route("GET", "/:id/:id", RouteHandler { handle: public_handler }).is_err() {
+    return 3;
+  }
+  if !Router.new().route("GET", "/:id/", RouteHandler { handle: public_handler }).is_err() {
+    return 4;
+  }
+  if !Router.new().route("GET", "/:", RouteHandler { handle: public_handler }).is_err() {
+    return 5;
+  }
+  if !Router.new().route("GET POST", "/", RouteHandler { handle: public_handler }).is_err() {
+    return 6;
+  }
+  return 0;
+}
+
+fn json_depth_handler(req: &AppRequest) -> HttpResponse
+  intent "JSON 深さの境界をフレームワークから検証する"
+  requires none
+  ensures none
+  effects none
+{
+  return match req.json() {
+    Ok(_) => HttpResponse.new(200, "parsed".as_bytes()),
+    Err(e) => e,
+  };
+  return web.error_response(500);
+}
+
+fn query_int_value(req: &AppRequest) -> Result<HttpResponse, HttpResponse>
+  intent "整数クエリと篩型の検証を組み合わせる"
+  requires none
+  ensures none
+  effects none
+{
+  let value = web.validate(UserId.check(req.query_int(&"q")?))?;
+  return Ok(HttpResponse.new(200, req.query(&"q")?.as_bytes()));
+}
+
+fn query_int_handler(req: &AppRequest) -> HttpResponse
+  intent "整数クエリの検証失敗を400に写す"
+  requires none
+  ensures none
+  effects none
+{
+  return query_int_value(&req).unwrap_or(web.error_response(400));
+}
+
+fn summarize(response: &HttpResponse) -> String
+  intent "応答を比較可能な文字列にする"
+  requires none
+  ensures none
+  effects none
+{
+  let mut code = "500";
+  match response.status() {
+    200 => {
+      code = "200";
+    }
+    201 => {
+      code = "201";
+    }
+    400 => {
+      code = "400";
+    }
+    401 => {
+      code = "401";
+    }
+    404 => {
+      code = "404";
+    }
+    405 => {
+      code = "405";
+    }
+    _ => {}
+  }
+  let mut text = code.as_bytes().concat(&"|".as_bytes()).concat(&response.body());
+  let headers = response.headers();
+  let mut i = 0;
+  while i < headers.len() {
+    match headers.get(i) {
+      Some(header) => {
+        let header_name = header.name();
+        if header_name == "x-after-one" || header_name == "x-after-two" {
+          text.extend(&"|".as_bytes());
+          text.extend(&header_name.as_bytes());
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  return text.to_string_utf8().unwrap_or("");
+}
+
+fn probe(request_text: String, mode: Int) -> String
+  intent "ネットワークの権限なしでディスパッチを呼ぶ"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let mut router = Router.new().public_route("GET", "/public", RouteHandler { handle: public_handler }).unwrap_or(Router.new());
+  router = router.public_route("GET", "/users/:id", RouteHandler { handle: user_handler }).unwrap_or(Router.new());
+  router = router.route("GET", "/private", RouteHandler { handle: private_handler }).unwrap_or(Router.new());
+  router = router.public_route("GET", "/query", RouteHandler { handle: query_handler }).unwrap_or(Router.new());
+  router = router.public_route("POST", "/json", RouteHandler { handle: json_handler }).unwrap_or(Router.new());
+  router = router.public_route("GET", "/echo", RouteHandler { handle: echo_handler }).unwrap_or(Router.new());
+  if mode == 1 || mode == 3 {
+    router = router.with_auth(AuthVerifier { verify: verify });
+  }
+  if mode == 2 || mode == 3 {
+    router = router.before(BeforeHook { run: before_one }).before(BeforeHook { run: before_two });
+    router = router.after(AfterHook { run: after_one }).after(AfterHook { run: after_two });
+  }
+  if mode == 4 {
+    match web.load_config() {
+      Ok(config) => {
+        router = router.with_limits(&config.app_limits());
+      }
+      Err(_) => {
+        return "config error";
+      }
+    }
+  }
+  router = router.public_route("GET", "/echo/:name", RouteHandler { handle: echo_handler }).unwrap_or(Router.new());
+  router = router.public_route("POST", "/json-depth", RouteHandler { handle: json_depth_handler }).unwrap_or(Router.new());
+  router = router.public_route("GET", "/query-int", RouteHandler { handle: query_int_handler }).unwrap_or(Router.new());
+  if mode == 5 {
+    let routes = router.public_routes();
+    let mut text = Bytes.new();
+    let mut i = 0;
+    while i < routes.len() {
+      match routes.get(i) {
+        Some(route) => {
+          text.extend(&route.as_bytes());
+          text.extend(&";".as_bytes());
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    return text.to_string_utf8().unwrap_or("");
+  }
+  let shared = SyncShared.new(router);
+  let router_ref = shared.borrow();
+  let limits = http.default_limits();
+  let mut parser = http.parser(&limits);
+  match parser.feed(&request_text.as_bytes(), 0) {
+    Ok(progress) => {
+      match progress {
+        HttpProgress.Done(req, _) => {
+          return summarize(&router_ref.dispatch(&req));
+        }
+        HttpProgress.NeedMore => {}
+      }
+    }
+    Err(_) => {
+      return "parse error";
+    }
+  }
+  return "incomplete";
+}

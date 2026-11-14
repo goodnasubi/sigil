@@ -32,6 +32,13 @@ impl Ck {
                 self.os_items.types.insert((*n).into());
             }
         }
+        self.types.insert(
+            "AuthPolicy".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: vec![("Required".into(), vec![]), ("Public".into(), vec![])],
+            },
+        );
         // JSON の腕も利用者が構築・match できる。子は再帰型でなく整数インデックス。
         let list = |t| Ty::Named("List".into(), vec![t]);
         self.types.insert(
@@ -305,6 +312,28 @@ impl Ck {
         let saved = self.span;
         // 表のシグネチャは OS 層の型を名指しする。核の検査（`OsItemInCore`）は利用者のコードにだけかける。
         let core = std::mem::replace(&mut self.core, false);
+        // ADR 0033 C1: 利用者側で効果上限付き関数の箱を構築する。
+        // 引数位置の関数型を格納する言語拡張は行わない。
+        let callbacks = self.std_parse(&format!(
+            "module std.web\n targets server\n trust none\n{}",
+            crate::stdlib::WEB_CALLBACKS
+        ))?;
+        for item in callbacks.items {
+            if let Item::Struct(s) = item {
+                let fields = s
+                    .fields
+                    .iter()
+                    .map(|f| Ok((f.name.clone(), self.resolve(&f.ty, Pos::Placed)?)))
+                    .collect::<R<Vec<_>>>()?;
+                self.types.insert(
+                    s.name,
+                    TypeDef::Struct {
+                        params: vec![],
+                        fields,
+                    },
+                );
+            }
+        }
         for (layer, sig, effects) in crate::stdlib::FREE_FNS {
             let (name, s) = self.std_sig(&crate::stdlib::free_source(*layer, sig, effects))?;
             self.fns.insert(name, s);

@@ -1,0 +1,39 @@
+module std.os.random
+  targets server
+  trust base
+
+// Linux x86-64 の OS 暗号乱数の最小境界（ADR 0034 決定 4）。
+// 固定 nonce・疑似乱数へのフォールバックは公開しない。
+pub fn bytes(len: Int) -> Option<Bytes>
+  intent "getrandom で len バイトを全部取得する。部分読みと EINTR を処理し、失敗なら None。SCRAM nonce の 24 バイトもこの入口で取得する"
+  requires 1 <= len && len <= 65536
+  ensures none
+  effects random
+  unchecked "len バイトの領域だけに getrandom（318、flags 0）が書く。部分読みの残りを取得し、EINTR は同じ位置から再試行。0 と他の失敗は None。中断せず、戻る前に確保領域を解放する。出力は全量成功時だけ Bytes へ写す"
+{
+  let buf = raw.alloc(len, 1);
+  let mut off = 0;
+  let mut failed = false;
+  while off < len && !failed {
+    let r = raw.syscall(318, raw.addr_to_int(raw.offset(buf, off)), len - off, 0, 0, 0, 0);
+    if r > 0 {
+      off = off + r;
+    } else if r != -4 {
+      failed = true;
+    }
+  }
+  let mut out = Bytes.new();
+  if !failed {
+    let mut i = 0;
+    while i < len {
+      out.push(raw.load_u8(raw.offset(buf, i)));
+      i = i + 1;
+    }
+  }
+  raw.set(buf, 0, len);
+  raw.free(buf, len, 1);
+  if failed {
+    return None;
+  }
+  return Some(out);
+}

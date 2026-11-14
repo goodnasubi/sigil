@@ -505,7 +505,7 @@ impl Ck {
         match self.shallow(t) {
             Ty::Named(n, args) => {
                 if matches!(self.types.get(&n), Some(TypeDef::Opaque(_)))
-                    && matches!(n.as_str(), "TcpListener" | "TcpStream")
+                    && matches!(n.as_str(), "TcpListener" | "TcpStream" | "TcpClient")
                 {
                     return true;
                 }

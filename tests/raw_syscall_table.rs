@@ -240,11 +240,8 @@ fn socket_shape_is_restricted() {
     ] {
         stops(&format!("  return {call};"), "socket");
     }
-    // 接続する側（connect 42）と、フラグのない accept（43）は表にない。
-    stops(
-        "  return raw.syscall(42, 3, 0, 0, 0, 0, 0);",
-        "許可表にない",
-    );
+    // connect（42）は ADR 0034 決定 4 で追加。引数が不正なら拒否する。フラグのない accept（43）は表にない。
+    stops("  return raw.syscall(42, 3, 0, 0, 0, 0, 0);", "addrlen");
     stops(
         "  return raw.syscall(43, 3, 0, 0, 0, 0, 0);",
         "許可表にない",

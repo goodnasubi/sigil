@@ -103,13 +103,13 @@ thread_local! {
     pub(super) static DEEP: StdCell<bool> = const { StdCell::new(false) };
     pub(super) static DROP_LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     pub(super) static TYPES: RefCell<Rc<Vec<TypeDef>>> = RefCell::new(Rc::new(vec![]));
-    /// fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`）の型番号。無いプログラムでは `usize::MAX`。
-    pub(super) static FD_TYPES: StdCell<[usize; 2]> = const { StdCell::new([usize::MAX; 2]) };
+    /// fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`・`TcpClient`）の型番号。無いプログラムでは `usize::MAX`。
+    pub(super) static FD_TYPES: StdCell<[usize; 3]> = const { StdCell::new([usize::MAX; 3]) };
 }
 
 /// 実行するプログラムの、fd を所有する型の番号を記録する（値の破棄で `close` するため）。
 pub(super) fn set_fd_types(types: &[TypeDef]) {
-    let mut ids = [usize::MAX; 2];
+    let mut ids = [usize::MAX; 3];
     for (slot, name) in ids.iter_mut().zip(crate::stdlib::NET_FD_TYPES) {
         if let Some(i) = types.iter().position(|t| t.name == *name) {
             *slot = i;
@@ -118,7 +118,7 @@ pub(super) fn set_fd_types(types: &[TypeDef]) {
     FD_TYPES.with(|c| c.set(ids));
 }
 
-/// fd を所有する値（`TcpListener`・`TcpStream`）の破棄で、fd を 1 回閉じる（ADR 0031 決定 3-1。失敗は捨てる）。
+/// fd を所有する値（`TcpListener`・`TcpStream`・`TcpClient`）の破棄で、fd を 1 回閉じる（ADR 0031 決定 3-1。失敗は捨てる）。
 /// ネイティブの破棄の関数が `std.os.net.close_fd` を呼ぶのと同じ意味。写し（`silent`）と、中身を移動済みの値では閉じない。
 /// 呼び出し側は、この後で `silent` を立てる（`log_drop` と同じ。1 つの値につき 1 回だけ通る）。
 fn close_owned_fd(a: &Agg) {
@@ -128,7 +128,7 @@ fn close_owned_fd(a: &Agg) {
     let Tag::Struct(t) = a.tag else {
         return;
     };
-    let ids = FD_TYPES.try_with(|c| c.get()).unwrap_or([usize::MAX; 2]);
+    let ids = FD_TYPES.try_with(|c| c.get()).unwrap_or([usize::MAX; 3]);
     if !ids.contains(&t) {
         return;
     }

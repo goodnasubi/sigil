@@ -63,9 +63,11 @@ pub const SCHED_MODULE: &str = "std.os.sched";
 /// プラットフォーム層で、入口の `targets` との照合は免除する。ネイティブと評価器の両方が、このモジュールの関数を
 /// そのまま動かす（判断点 D の案 B）。使わないプログラムの SIR には入らない（lower は呼ばれた関数だけを入れる）。
 pub const NET_MODULE: &str = "std.os.net";
+/// OS 暗号乱数の最小境界（ADR 0034 決定 4）。
+pub const RANDOM_MODULE: &str = "std.os.random";
 /// `net.listen` の実体（結合後の名前）。lower が名前で結ぶ。
 pub const NET_LISTEN_FN: &str = "std.os.net.listen";
-/// fd を所有する値（`TcpListener`・`TcpStream`）の破棄で呼ぶ関数（結合後の名前）。ネイティブは `sigil_rt_net_close` の
+/// fd を所有する値（`TcpListener`・`TcpStream`・`TcpClient`）の破棄で呼ぶ関数（結合後の名前）。ネイティブは `sigil_rt_net_close` の
 /// シムから呼ぶ。lower は、プログラムがこれらの型を持つときだけ SIR に入れる。
 pub const NET_CLOSE_FN: &str = "std.os.net.close_fd";
 
@@ -243,6 +245,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (SCHED_MODULE, include_str!("os_sched.sigil")),
     (IO_MODULE, include_str!("os_io.sigil")),
     (NET_MODULE, include_str!("os_net.sigil")),
+    (RANDOM_MODULE, include_str!("os_random.sigil")),
     (HTTP_LIMITS_MODULE, include_str!("http_limits.sigil")),
     (HTTP_MODULE, include_str!("http.sigil")),
     (JSON_MODULE, include_str!("json.sigil")),
@@ -280,6 +283,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             THREAD_MODULE,
             SCHED_MODULE,
             NET_MODULE,
+            RANDOM_MODULE,
             HTTP_LIMITS_MODULE,
             HTTP_MODULE,
             JSON_MODULE,

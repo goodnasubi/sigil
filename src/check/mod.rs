@@ -236,6 +236,7 @@ const PRELUDE_TYPES: &[&str] = &[
     // 宣言できると、表のシグネチャの型（fd を所有する型）と取り違えるので、前置きの名前にする。
     "TcpListener",
     "TcpStream",
+    "TcpClient",
     "NetError",
     // HTTP の型（ADR 0032 決定 2-2）。実体は埋め込みモジュール `std.http`・`std.http.limits` が持つ。`TcpStream` と同じ理由で
     // 前置きの名前にする（`crate::stdlib::HTTP_TYPES` と同じ並び）。
@@ -251,8 +252,8 @@ const PRELUDE_TYPES: &[&str] = &[
     "JsonNode",
     "JsonField",
 ];
-/// `std.os.net` が実体を宣言する前置きの型（上の 3 つ）。そのモジュール自身の検査でだけ、宣言と `impl` を許す。
-pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "NetError"];
+/// `std.os.net` が実体を宣言する前置きの型（所有型 3 つと NetError）。そのモジュール自身の検査でだけ、宣言と `impl` を許す。
+pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "TcpClient", "NetError"];
 
 /// 埋め込みモジュール `mname` 自身の検査で、宣言と `impl` を許す前置きの型（実体を持つ型）。ほかのモジュールは空。
 /// `std.http` は `std.http.limits` の関数を `use` し、その型 `HttpLimits` が見えるので、両方に `HTTP_TYPES` を許す。
@@ -613,7 +614,10 @@ pub fn std_heads() -> &'static [&'static str] {
     // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
     // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
     // `net` は ADR 0031、`http` は ADR 0032、`json` は ADR 0033 判断点 G（Issue #455）で足した。
-    &["console", "env", "fs", "http", "json", "net", "raw", "std"]
+    // `random` は ADR 0034 決定 4（Issue #462）で足した。
+    &[
+        "console", "env", "fs", "http", "json", "net", "random", "raw", "std",
+    ]
 }
 
 /// 標準の前置きの名前（型・値）と名前空間の頭か。`use` で取り込む名前に使えない。

@@ -1,0 +1,255 @@
+module tools.image.ustar
+  targets server
+  trust none
+
+use tools.image.binary.span;
+use tools.image.binary.zeros;
+
+// USTAR通常ファイルのみ。mtime/uid/gid=0、空のuname/gname、二つの終端ブロック、全体128MiB以下。
+pub struct TarFile {
+  name_value: String,
+  mode_value: Int,
+  data_value: Bytes,
+}
+
+pub fn archive_size(current: Int, size: Int) -> Result<Int, Int>
+  intent "数値欄と総量を加算前に検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if current < 0 || size < 0 || size > 8589934591 || current > 134217728 {
+    return Err(400);
+  }
+  let padding = (512 - size % 512) % 512;
+  if size > 134217728 - 512 - padding || current > 134217728 - 1024 - 512 - padding - size {
+    return Err(400);
+  }
+  return Ok(current + 512 + size + padding);
+}
+
+fn path_ok(name: &String) -> Bool
+  intent "固定archive用の相対ASCIIパスだけを認める"
+  requires none
+  ensures none
+  effects none
+{
+  let b = name.as_bytes();
+  if b.len() == 0 || b.len() > 100 {
+    return false;
+  }
+  if b.get(0).unwrap_or(0) == 47 || b.get(b.len() - 1).unwrap_or(0) == 47 {
+    return false;
+  }
+  let mut i = 0;
+  let mut component = 0;
+  while i < b.len() {
+    let c = b.get(i).unwrap_or(0);
+    if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45 || c == 46 || c == 47 || c == 95) {
+      return false;
+    }
+    if c == 47 {
+      if component == 0 {
+        return false;
+      }
+      let part = b.slice(i - component, i).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
+      if part == "." || part == ".." {
+        return false;
+      }
+      component = 0;
+    } else {
+      component = component + 1;
+    }
+    i = i + 1;
+  }
+  let part = b.slice(i - component, i).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
+  return part != "." && part != "..";
+}
+
+fn octal(out: &mut Bytes, offset: Int, width: Int, value: Int) -> Result<Bool, Int>
+  intent "固定幅のゼロ詰め八進欄を作る"
+  requires none
+  ensures none
+  effects none
+{
+  let mut n = value;
+  let mut i = width - 1;
+  out.set(offset + i, 0).map_err(|e| 400)?;
+  while i > 0 {
+    i = i - 1;
+    out.set(offset + i, 48 + n % 8).map_err(|e| 400)?;
+    n = n / 8;
+  }
+  if n != 0 || value < 0 {
+    return Err(400);
+  }
+  return Ok(true);
+}
+
+pub fn append_file(out: &mut Bytes, name: &String, mode: Int, data: &Bytes) -> Result<Bool, Int>
+  intent "検査後に決定的な通常ファイルを加える"
+  requires none
+  ensures none
+  effects none
+{
+  archive_size(out.len(), data.len())?;
+  if out.len() % 512 != 0 || !path_ok(&name) || (mode != 365 && mode != 420) {
+    return Err(400);
+  }
+  let mut h = zeros(512);
+  let n = name.as_bytes();
+  let mut i = 0;
+  while i < n.len() {
+    h.set(i, n.get(i).unwrap_or(0)).map_err(|e| 400)?;
+    i = i + 1;
+  }
+  octal(&mut h, 100, 8, mode)?;
+  octal(&mut h, 108, 8, 0)?;
+  octal(&mut h, 116, 8, 0)?;
+  octal(&mut h, 124, 12, data.len())?;
+  octal(&mut h, 136, 12, 0)?;
+  i = 148;
+  while i < 156 {
+    h.set(i, 32).map_err(|e| 400)?;
+    i = i + 1;
+  }
+  h.set(156, 48).map_err(|e| 400)?;
+  let magic = "ustar\u{0}00".as_bytes();
+  i = 0;
+  while i < magic.len() {
+    h.set(257 + i, magic.get(i).unwrap_or(0)).map_err(|e| 400)?;
+    i = i + 1;
+  }
+  let mut sum = 0;
+  i = 0;
+  while i < 512 {
+    sum = sum + h.get(i).unwrap_or(0);
+    i = i + 1;
+  }
+  octal(&mut h, 148, 7, sum)?;
+  h.set(155, 32).map_err(|e| 400)?;
+  out.extend(&h);
+  out.extend(&data);
+  out.extend(&zeros((512 - data.len() % 512) % 512));
+  return Ok(true);
+}
+
+pub fn finish_tar(out: &mut Bytes) -> Result<Bool, Int>
+  intent "二つのゼロブロックで終える"
+  requires none
+  ensures none
+  effects none
+{
+  if out.len() % 512 != 0 || out.len() > 134217728 - 1024 {
+    return Err(400);
+  }
+  out.extend(&zeros(1024));
+  return Ok(true);
+}
+
+fn read_octal(data: &Bytes, offset: Int, width: Int) -> Result<Int, Int>
+  intent "生成形式と同じゼロ詰め八進欄だけを読む"
+  requires none
+  ensures none
+  effects none
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < width - 1 {
+    let c = data.get(offset + i).unwrap_or(0);
+    if c < 48 || c > 55 || n > (9223372036854775807 - (c - 48)) / 8 {
+      return Err(400);
+    }
+    n = n * 8 + c - 48;
+    i = i + 1;
+  }
+  if data.get(offset + i).unwrap_or(1) != 0 {
+    return Err(400);
+  }
+  return Ok(n);
+}
+
+pub fn read_tar(data: &Bytes) -> Result<List<TarFile>, Int>
+  intent "固定USTARを読み全ヘッダとpaddingと終端を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if data.len() < 1024 || data.len() > 134217728 || data.len() % 512 != 0 {
+    return Err(400);
+  }
+  let mut files = List.new();
+  let mut p = 0;
+  while p < data.len() - 1024 {
+    if !span(data.len(), p, 512) {
+      return Err(400);
+    }
+    let h = data.slice(p, p + 512).map_err(|e| 400)?;
+    let size = read_octal(&h, 124, 12)?;
+    let mode = read_octal(&h, 100, 8)?;
+    let mut end = 0;
+    let mut scanning = true;
+    while end < 100 && scanning {
+      if h.get(end).unwrap_or(0) == 0 {
+        scanning = false;
+      } else {
+        end = end + 1;
+      }
+    }
+    let name = h.slice(0, end).map_err(|e| 400)?.to_string_utf8().map_err(|e| 400)?;
+    let next = archive_size(p, size)?;
+    if !span(data.len() - 1024, p + 512, next - p - 512) {
+      return Err(400);
+    }
+    let body = data.slice(p + 512, p + 512 + size).map_err(|e| 400)?;
+    // 再符号化したヘッダとの全バイト比較で型・checksum・予約欄も確認する。
+    let mut canonical = Bytes.new();
+    append_file(&mut canonical, &name, mode, &body)?;
+    let mut i = 0;
+    while i < next - p {
+      if canonical.get(i) != data.get(p + i) {
+        return Err(400);
+      }
+      i = i + 1;
+    }
+    files.push(TarFile { name_value: name.clone(), mode_value: mode, data_value: body.clone() });
+    p = next;
+  }
+  if p != data.len() - 1024 {
+    return Err(400);
+  }
+  while p < data.len() {
+    if data.get(p).unwrap_or(1) != 0 {
+      return Err(400);
+    }
+    p = p + 1;
+  }
+  return Ok(files);
+}
+
+pub fn tar_name(item: &TarFile) -> String
+  intent "nameを読む"
+  requires none
+  ensures none
+  effects none
+{
+  return item.name_value.clone();
+}
+
+pub fn tar_mode(item: &TarFile) -> Int
+  intent "modeを読む"
+  requires none
+  ensures none
+  effects none
+{
+  return item.mode_value;
+}
+
+pub fn tar_data(item: &TarFile) -> Bytes
+  intent "dataを読む"
+  requires none
+  ensures none
+  effects none
+{
+  return item.data_value.clone();
+}

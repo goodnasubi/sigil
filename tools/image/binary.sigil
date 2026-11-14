@@ -1,0 +1,95 @@
+module tools.image.binary
+  targets server
+  trust none
+
+// ADR 0035: 形式処理の共通部品。エラー400は不正形式・範囲超過。
+
+pub fn span(total: Int, offset: Int, count: Int) -> Bool
+  intent "加算前に範囲を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  return total >= 0 && offset >= 0 && count >= 0 && offset <= total && count <= total - offset;
+}
+
+pub fn le(data: &Bytes, offset: Int, width: Int) -> Result<Int, Int>
+  intent "符号付きIntに収まるlittle endianを読む"
+  requires none
+  ensures none
+  effects none
+{
+  if width < 1 || width > 8 || !span(data.len(), offset, width) {
+    return Err(400);
+  }
+  let mut n = 0;
+  let mut i = width;
+  while i > 0 {
+    i = i - 1;
+    let b = data.get(offset + i).unwrap_or(0);
+    if n > (9223372036854775807 - b) / 256 {
+      return Err(400);
+    }
+    n = n * 256 + b;
+  }
+  return Ok(n);
+}
+
+pub fn zeros(count: Int) -> Bytes
+  intent "検査済みの長さのゼロ列を作る"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = Bytes.new();
+  let mut i = 0;
+  while i < count {
+    b.push(0);
+    i = i + 1;
+  }
+  return b;
+}
+
+pub fn hex(data: &Bytes) -> String
+  intent "小文字16進数へ変換する"
+  requires none
+  ensures none
+  effects none
+{
+  let digits = "0123456789abcdef".as_bytes();
+  let mut b = Bytes.new();
+  let mut i = 0;
+  while i < data.len() {
+    let n = data.get(i).unwrap_or(0);
+    b.push(digits.get(n / 16).unwrap_or(48));
+    b.push(digits.get(n % 16).unwrap_or(48));
+    i = i + 1;
+  }
+  return b.to_string_utf8().unwrap_or("");
+}
+
+pub fn decimal(n: Int) -> Result<String, Int>
+  intent "非負整数を十進数にする"
+  requires none
+  ensures none
+  effects none
+{
+  if n < 0 {
+    return Err(400);
+  }
+  let mut rest = n;
+  let mut rev = Bytes.new();
+  rev.push(48 + rest % 10);
+  rest = rest / 10;
+  while rest > 0 {
+    rev.push(48 + rest % 10);
+    rest = rest / 10;
+  }
+  let mut b = Bytes.new();
+  let mut i = rev.len();
+  while i > 0 {
+    i = i - 1;
+    b.push(rev.get(i).unwrap_or(48));
+  }
+  return Ok(b.to_string_utf8().unwrap_or(""));
+}

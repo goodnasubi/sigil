@@ -75,6 +75,7 @@ pub const NET_CLOSE_FN: &str = "std.os.net.close_fd";
 pub const PG_MODULE: &str = "std.pg";
 /// `trust none` の設定・上限検証・定型応答（ADR 0033 E・I・J、Issue #460）。
 pub const WEB_MODULE: &str = "std.web";
+pub const PG_SCRAM_MODULE: &str = "std.pg_scram";
 
 /// `trust none` の平坦表・反復 JSON モジュール（ADR 0033、Issue #455 決定コメント 6869456186）。
 pub const JSON_MODULE: &str = "std.json";
@@ -253,6 +254,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (JSON_MODULE, include_str!("json.sigil")),
     (PG_MODULE, include_str!("pg.sigil")),
     (WEB_MODULE, include_str!("web.sigil")),
+    (PG_SCRAM_MODULE, include_str!("pg_scram.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
@@ -289,6 +291,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             RANDOM_MODULE,
             HTTP_LIMITS_MODULE,
             HTTP_MODULE,
+            PG_MODULE,
             JSON_MODULE,
             WEB_MODULE,
             PATH_MODULE,

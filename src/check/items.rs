@@ -139,6 +139,7 @@ impl Ck {
                         if is_embedded_name(&s.name)
                             || crate::stdlib::HTTP_TYPES.contains(&s.name.as_str())
                             || crate::stdlib::WEB_TYPES.contains(&s.name.as_str())
+                            || crate::stdlib::PG_TYPES.contains(&s.name.as_str())
                         {
                             self.core = false;
                         }

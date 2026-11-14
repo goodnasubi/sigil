@@ -221,7 +221,7 @@ CI 設定の人間担当 PR が入るまでは、手動で Docker が動いて�
 
 ## 6-2f: 実装・実測の記録（2026-11-14 JST、Issue #479）
 
-本節は設計時の記録に対する追記である。前段はマージ済みだが、**OCI archive の load/run を毎回実行する CI が未設定のため、6-2 全体の完了とはしない**。冒頭と ADR 0036 の「提案・未承認」は起草時点の記述として残す。7-1 のサービス結合、CI 設定の変更、形式変更は本記録の範囲外。
+本節は設計時の記録に対する追記である。当初（2026-11-14 JST）は OCI archive の load/run を毎回実行する CI が未設定のため、6-2 全体を未完了と記録した。**2026-11-15 JST に #494/#495 で CI 実行が追加され、成功 run が得られたため、この点の 6-2 の完了条件は達成済みとする**。冒頭と ADR 0036 の「提案・未承認」は起草時点の記述として残す。7-1 のサービス結合、CI 設定の変更、形式変更は本記録の範囲外。
 
 ### 対象と承認の履歴
 
@@ -234,6 +234,8 @@ CI 設定の人間担当 PR が入るまでは、手動で Docker が動いて�
 | 6-2e | [PR #477](https://github.com/goodnasubi/sigil/pull/477)、`tests/image_docker_474.rs`（`d2e64bee`）。[PR #476](https://github.com/goodnasubi/sigil/pull/476)（`c485b9f5`）は既存 scratch テストの CI 化のみ |
 
 所有者承認は [#457 の記録](https://github.com/goodnasubi/sigil/pull/457#issuecomment-6869774712)（2026-11-14 10:56 JST、head `bd3cfdb6`）と [#465 の記録](https://github.com/goodnasubi/sigil/pull/465#issuecomment-6873849779)（同日 16:30 JST、head `2d17d19e45d2df9e2f0e6a868d29f8a78a0b698c`）にある。いずれもメイン会話の明示承認を転記した記録であり、起草時の判定サービスの応答を承認の代わりには扱わない。
+
+本記録を実態に合わせる所有者承認は [PR #480 のコメント 6885700691](https://github.com/goodnasubi/sigil/pull/480#issuecomment-6885700691)（2026-11-15 JST）にある。修正後の head は別系統の再レビューと CI 確認の対象とする。
 
 ### 信頼基盤の実際の差分
 
@@ -252,13 +254,15 @@ CI 設定の人間担当 PR が入るまでは、手動で Docker が動いて�
 
 `tests/image_formats_467.rs` は5件、入口のテストは2件。Python 標準 `tarfile` / `json` / `hashlib` で非圧縮 USTAR、単一 app、mode/uid/gid/mtime、固定 config と descriptor の size/digest、layer diff_id、archive の SHA-256 を独立照合する。これは外部 archive の取込み機能でも発行者の認証でもない。
 
-### CI の実行記録と未達条件
+### CI の実行記録と当初の未達条件の解消（2026-11-15 JST 更新）
 
 [CI run 43594622077](https://github.com/goodnasubi/sigil/actions/runs/43594622077)（PR #477 head `4c6e11d0512e6c33ef97eab0bff325ebc088b762`、2026-11-14 21:23〜21:50 JST、job [132446379348](https://github.com/goodnasubi/sigil/actions/runs/43594622077/job/132446379348)）は緑。ログで fmt/clippy、nextest 1516 passed・7 skipped、doc test 0件、ネイティブ突き合わせ859件・飛ばし0件を確認した。形式部品5件と入口2件も PASS。Rust は `1.100.0 (0ef1bc386 2026-11-09)`。
 
-同 run の Docker ステップは `Docker version 29.4.2, build 055a478` と `cargo test --test m5_native -- --ignored runs_in_scratch_container` の1件成功を記録する。**Docker server の版・image store は出力されず、OCI の load/run テストの成功証拠にはならない**。現行 `.github/workflows/ci.yml` は `image_docker_474` を明示実行せず、当該テストは `#[ignore]` のため通常 nextest では実行されない。`ubuntu-latest` と Docker の版・store も固定されていない。
+同 run の Docker ステップは `Docker version 29.4.2, build 055a478` と `cargo test --test m5_native -- --ignored runs_in_scratch_container` の1件成功を記録する。**Docker server の版・image store は出力されず、OCI の load/run テストの成功証拠にはならない**。当時の `.github/workflows/ci.yml` は `image_docker_474` を明示実行せず、当該テストは `#[ignore]` のため通常 nextest では実行されなかった。
 
-6-2 を完了扱いにするには、人間担当の CI 設定で OCI テストを毎回実行し、使用する Docker の版・store を固定・記録して load/run・inspect・非 root の成功 run を残す必要がある。これは既存テストの緑で代替できない。本追記では workflow や形式を変更しない。
+その後、[Issue #494](https://github.com/goodnasubi/sigil/issues/494) に対応する [PR #495](https://github.com/goodnasubi/sigil/pull/495) が 2026-11-15 07:32 JST にマージされた（merge commit `7109bf92`）。Docker 互換性ステップに `cargo test --test image_docker_474 -- --ignored` が追加され、CI で毎回明示実行されるようになった。[CI run 43645316425](https://github.com/goodnasubi/sigil/actions/runs/43645316425) は緑で、[job 132601645295](https://github.com/goodnasubi/sigil/actions/runs/43645316425/job/132601645295) の同ステップも成功。2026-11-15 07:25 JST のログに `Docker version 29.4.2, build 055a478` と `oci_archive_loads_inspects_and_runs_non_root_in_docker ... ok`（1 passed・0 failed）があり、OCI の load/run・inspect・非 root の成功証拠を確認できる。既存 scratch テストだけの成功とは区別し、**OCI テストの CI 未実行・成功証拠不足は解消済み**として扱う。
+
+Docker server の版・image store はこの run でも出力されず、`ubuntu-latest` と Docker の版・store の固定も workflow にはない。この環境固定・記録の不足は、CI 実行・合格という達成済みの点とは分けて報告する。本追記では workflow や形式を変更しない。
 
 ### Cloud の追試（2026-11-14 22:00〜22:04 JST）
 
@@ -281,4 +285,4 @@ manifest sha256:74ea736e85bbc96660e1f5e6cf7153ae03fa239646cbe13c617bfa5d432d0d63
 archive  sha256:27fdd67af3f870e90427eb579148cc41194f073fff853f3a33fd2a320b13060d
 ```
 
-`sha256sum` の archive 値も表示と一致した。GNU tar は外側の5ファイル（index、layout、layer/config/manifest の3 blob）を読み取れた。Docker の失敗を避けるための `manifest.json` 追加、変換、store 設定変更は行っていない。成功する固定 CI 環境の整備が必要という未達をそのまま残す。
+`sha256sum` の archive 値も表示と一致した。GNU tar は外側の5ファイル（index、layout、layer/config/manifest の3 blob）を読み取れた。Docker の失敗を避けるための `manifest.json` 追加、変換、store 設定変更は行っていない。この Cloud 環境での失敗は当時の実測として残す。後日の #494/#495 と CI run 43645316425 による成功は前節のとおりであり、この追試の失敗を理由に OCI テストの CI 実行・合格を未達とは扱わない。

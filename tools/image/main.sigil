@@ -1,0 +1,89 @@
+module tools.image.main
+  targets server
+  trust none
+
+use tools.image.elf.validate_elf;
+use tools.image.oci.config_json;
+use tools.image.oci.descriptor;
+use tools.image.oci.descriptor_digest;
+use tools.image.oci.digest;
+use tools.image.oci.index_json;
+use tools.image.oci.layout_json;
+use tools.image.oci.manifest_json;
+use tools.image.ustar.append_file;
+use tools.image.ustar.finish_tar;
+
+struct Image {
+  archive: Bytes,
+  layer_digest: String,
+  config_digest: String,
+  manifest_digest: String,
+}
+
+fn blob_path(hash: &String) -> Result<String, Int>
+  intent "内容digestから固定のblob名を作る"
+  requires none
+  ensures none
+  effects none
+{
+  let mut path = "blobs/sha256/".as_bytes();
+  path.extend(&hash.as_bytes().slice(7, 71).map_err(|e| 400)?);
+  return path.to_string_utf8().map_err(|e| 400);
+}
+
+fn assemble(elf: &Bytes) -> Result<Image, Int>
+  intent "検証済みの単一ELFから固定順のOCI archiveを純粋に組み立てる"
+  requires none
+  ensures none
+  effects none
+{
+  validate_elf(&elf)?;
+  let mut layer = Bytes.new();
+  append_file(&mut layer, &"app", 365, &elf)?;
+  finish_tar(&mut layer)?;
+  let l = descriptor(&"application/vnd.oci.image.layer.v1.tar", &layer)?;
+  let config = config_json(&l)?;
+  let c = descriptor(&"application/vnd.oci.image.config.v1+json", &config)?;
+  let manifest = manifest_json(&c, &l)?;
+  let m = descriptor(&"application/vnd.oci.image.manifest.v1+json", &manifest)?;
+  let mut archive = Bytes.new();
+  // この順序は形式版の一部。入力パス・名前・時刻を取り込まない。
+  append_file(&mut archive, &"index.json", 420, &index_json(&m)?)?;
+  append_file(&mut archive, &"oci-layout", 420, &layout_json())?;
+  append_file(&mut archive, &blob_path(&descriptor_digest(&l))?, 420, &layer)?;
+  append_file(&mut archive, &blob_path(&descriptor_digest(&c))?, 420, &config)?;
+  append_file(&mut archive, &blob_path(&descriptor_digest(&m))?, 420, &manifest)?;
+  finish_tar(&mut archive)?;
+  return Ok(Image { archive: archive, layer_digest: descriptor_digest(&l), config_digest: descriptor_digest(&c), manifest_digest: descriptor_digest(&m) });
+}
+
+fn report(target: &String, hash: &String)
+  intent "digestの対象名を対にして診断へ表示する"
+  requires none
+  ensures none
+  effects console
+{
+  let mut line = target.as_bytes();
+  line.extend(&" ".as_bytes());
+  line.extend(&hash.as_bytes());
+  console.log(&line.to_string_utf8().unwrap_or(""));
+}
+
+pub fn main(input: String, output: String) -> Result<Int, Int>
+  intent "単一ELFを上限付きで読みOCI archiveを書き完了後だけdigestを報告する"
+  requires none
+  ensures none
+  effects console, fs
+{
+  let elf = fs.read_bytes(&Path.new(&input), 67108864).map_err(|e| 1)?;
+  let image = assemble(&elf)?;
+  let archive_digest = digest(&image.archive);
+  // Errでは完了もdigestも表示しない。残存物の扱いはADR 0036決定2。
+  fs.write_bytes(&Path.new(&output), &image.archive, 134217728).map_err(|e| 2)?;
+  console.log(&"image complete");
+  report(&"layer", &image.layer_digest);
+  report(&"config", &image.config_digest);
+  report(&"manifest", &image.manifest_digest);
+  report(&"archive", &archive_digest);
+  return Ok(0);
+}

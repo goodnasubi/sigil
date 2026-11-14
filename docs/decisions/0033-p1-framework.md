@@ -1,9 +1,9 @@
 # 0033: サーバーアプリケーションのフレームワーク（段階 6-4）
 
-- **状態**: 提案（初稿。Issue #445。判断点 A〜K は未決定・推奨案まで）
-- **日付**: 2026-11-13
+- **状態**: 提案（判断点 A〜K は `typesafe-ai` により決定済み。6-4a〜6-4g 実装完了。Issue #445・#490）
+- **日付**: 2026-11-13（補足 A 追記: 2026-11-15）
 - **対象**: [ADR 0018](0018-p1-scope.md) の段階 6-4「フレームワーク」。`std.http`（[ADR 0032](0032-p1-http-server.md)）と `task.roots`（[ADR 0031](0031-p1-first-wait-ops-and-socket-api.md)）の上に置くサーバーアプリケーションのフレームワークの目的・範囲、既存 ADR からの持ち越し事項の扱い、判断点と推奨案、実装の段分け案。
-- **要承認**: セキュリティ関連（[ADR 0020](0020-p1-security-addendum.md) 決定 3 の G1・G2）。本段では判断点の決定自体は行わず、推奨案の提示までとする。次段で Sigil の理念に照らして `typesafe-ai` による正式判定で決定し、実装 PR は G1・G2 および承認方針に従って進める。
+- **要承認**: セキュリティ関連（[ADR 0020](0020-p1-security-addendum.md) 決定 3 の G1・G2）。判断点 A〜K は `typesafe-ai` による正式判定で決定し（補足 A-1）、6-4b〜6-4g の実装と G2 の確認記録を補足 A に収める。
 
 ---
 
@@ -387,3 +387,86 @@ ADR 0018 観点 5（「1 つの PR が小さく、独立して確かめられる
   2. **判断点 G（`JsonValue` の再帰的構造）**: 再帰的な列挙型を持つ `JsonValue` を `trust none` の Sigil コードとして書いたとき、現行の単相化・所有権・破棄・評価器／ネイティブ突き合わせで問題が出ないか（6-4d の冒頭で検証し、制約があれば平坦な配列＋添字表現へ切り替える）。
   3. **判断点 K（`signalfd4` と `TcpListener` 中断）**: `accept` が `io_wait_fd` で待っているタスクを `signalfd` 発火時に取り消す／起こす方法が、現行 `std.os.sched` の取り消しと競合なく書けるか（6-4f で検証）。
 - 起草（agy / Gemini 系統）と正式判定・レビュー（`typesafe-ai`・Codex Cloud 等）を分離することで、単一エージェントによる案出しと採点の偏りを抑える。
+
+---
+
+## 補足 A: 判断点 A〜K の正式判定と 6-4b〜6-4g の完了記録（Issue #445・#490、2026-11-15 JST）
+
+### A-1. 判断点 A〜K の正式判定結果と実装時検証の反映
+
+Issue #445 における `typesafe-ai`（`jev-1.13.0`、2026-11-14 JST）の正式判定により、判断点 A〜K はすべて推奨案（A1・B1・C1・D1・E1・F1・G1・H1・I1・J1・K1、確信度 1.0）に決定された。また「根拠の限界と再検証」に挙げた 3 点の実装時検証結果は次のとおりである。
+
+| 判断点 | 正式判定 | 実装段・PR と検証結果 |
+|---|---|---|
+| **A（モジュール配置）** | **A1**: `std.web`（`trust none`）＋ `std.json`（`trust none`）＋ `env.get` | 6-4b（PR #456・#458）・6-4c（PR #471）・6-4d（PR #459）・6-4e（PR #482）。`std_heads()` に `env`・`json`・`web` を追加 |
+| **B（`SyncShared<T>`）** | **B1（B1-b）**: `borrow(self: &SyncShared<T>) -> &T`（`effects task.share`） | 6-4b（Issue #454、PR #456・#458）。`&T` 返しが評価器・ネイティブ双方の所有権・破棄規則と整合し、`Copyable` な `T` に対する既存の `get` も維持（`tests/syncshared_env_454.rs`） |
+| **C（ルーティング表現）** | **C1**: `Router` への明示的登録と静的セグメント＋ `:param` の 1 回走査照合 | 6-4e（Issue #478、PR #482）。正規表現・ワイルドカードなし、1 回のみの `%XX` 復号、`.` / `..` / `%2f` / `%5c` / `%00` / 末尾スラッシュは 400 で拒否（`tests/web_router_478.rs`） |
+| **D（ハンドラ・ミドルウェア表現）** | **D1**: 関数型の構造体包み（`RouteHandler`・`BeforeHook`・`AfterHook`・`AuthVerifier`） | 6-4e（Issue #478、PR #482）。効果上限 `D` は `clock, console, db, env, random, task`（`src/stdlib.rs` の `WEB_CALLBACKS`）に固定し、`fs.*`・`net.*`・`process`・`foreign`・`unchecked` を含めない |
+| **E（設定読み込み・上限検証）** | **E1**: `env.get`（`effects env`）と `web.load_config() -> Result<AppConfig, ConfigError>` | 6-4b（PR #456・#458）・6-4c（Issue #460、PR #471）。`SIGIL_HTTP_*` 15 項目＋`SIGIL_APP_*` 4 項目＋`SIGIL_APP_HOST` を検証し、`<= 0` や上限の上限超を拒否。`exec::Options::env_vars` によるテスト差し替えに対応 |
+| **F（起動時メモリ見積もり行）** | **F1**: `AppConfig.log_memory_bound()` で `console.log`（標準出力）へ `sigil.web memory_bound_bytes=<N>` を出力 | 6-4c（Issue #460、PR #471）。ADR 0032 判断点 1 の決定（標準エラー用 `unchecked` 操作を足さない）に従い、信頼基盤の増分 0 で実装 |
+| **G（JSON 解釈器・書き出し器）** | **G1（平坦ノード表）**: `std.json`（`trust none`）の明示的スタック方式＋平坦な `List<JsonNode>` 表現 | 6-4d（Issue #455、PR #459）。Issue #455 の `typesafe-ai` 正式判定（Option A = 0.95）により、`JsonValue` を平坦なノード配列＋根添字で表現し、深さ 10,000 の複製・破棄でも評価器スタックを再帰消費しない構造とした。解釈器の深さ上限は 64（65 で `Err`）、重複キーは拒否 |
+| **H（URL クエリと `T.check` 連携）** | **H1**: クエリ上限既定 100・重複キー 400・`web.validate(T.check(...))` による 400 変換 | 6-4e（Issue #478、PR #482）。`+` を空白（`0x20`）として 1 回復号し、`param` / `param_int` / `query` / `query_int` / `json` / `json_string` / `json_int` と `web.validate` を提供 |
+| **I（500 等の安全なエラー応答）** | **I1**: `web.error_response(status)` による固定文の `text/plain; charset=utf-8` 応答 | 6-4c（Issue #460、PR #471）。`500` は `"internal server error"` 等の固定文のみを返し、契約違反の文・位置・環境変数の値を一切含めない |
+| **J（既定拒否の認証差し込み口と `X-Forwarded-For` 不信用）** | **J1**: `Router.route` 既定 `AuthPolicy.Required`（fail-closed 401）、`public_route`・`public_routes()`、`X-Forwarded-*` 不信用 | 6-4c（PR #471）・6-4e（PR #482）。認証検証器未設定または `Err` 時は固定 401 を返し、同一経路への `route` と `public_route` の重複登録は起動時エラーで拒否 |
+| **K（終了の合図での優雅な停止）** | **K1**: `net.shutdown_signal()`（`SIGTERM`/`SIGINT` 専用 `signalfd4`）＋ `task.roots_grace(limit, grace_ms, body)` | 6-4f（Issue #483、PR #489）。Issue #483 の `typesafe-ai` 正式判定（`docs/decisions/records/483-typesafe-final-20261114T155517Z.json`）により、公開 API は `net.shutdown_signal()` と `task.roots_grace` の最小 2 点とし、`task.race` との合成で新規受付停止と処理中接続の期限付きドレインを行う |
+
+### A-2. G2 の確認結果（完了条件 1〜7）
+
+ADR 0020 決定 3 の G2（実装の PR ごとの確認）および本 ADR「完了条件」の 1〜7 を次のとおり確認した。
+
+1. **上限の設定と無制限値の拒否**（完了条件 1）:
+   - `web.load_config()` が 15 個の `SIGIL_HTTP_*`、3 個の `SIGIL_APP_*`（`SIGIL_APP_QUERY_PARAMS_MAX` 既定 100 / 上限 1000、`SIGIL_APP_JSON_MAX_DEPTH` 既定 64 / 上限 64、`SIGIL_APP_SHUTDOWN_GRACE_MS` 既定 30000 / 上限 300000）、`SIGIL_APP_PORT`（`1..=65535`）を検証し、`0`・負数・上限の上限超・非整数をすべて `Err(ConfigError)` で拒否する。
+   - 検証テスト: `tests/app_config_460.rs`（`limit_app_*` 18 件を含む全 25 件）。
+2. **JSON の深さ上限とファジング**（完了条件 2）:
+   - `std.json`（`src/stdlib/json.sigil`）は `trust none` の明示的スタック実装であり、深さ 64 は成功し、深さ 65 は `Err`（フレームワークでは 400）になる。平坦ノード表により深さ 10,000 の `JsonValue` の複製・破棄でもスタック枯渇が起きない。
+   - 検証テスト: `tests/fuzz_app_json.rs`（深さ 64/65 境界、深さ 10,000 複製・破棄、重複キー・不正入力拒否、往復一致・評価器とネイティブ 1/4 ワーカー一致・リーク検査 `live: frames=0 chunks=0` / `sigil_blocks=0` の全 4 件）。`.github/workflows/fuzz.yml` への長時間実行の追加は CODEOWNERS 対象のため人間の作業として引き継ぐ。
+3. **既定で拒否する認証の差し込み口**（完了条件 3）:
+   - `Router.route` は常に `AuthPolicy.Required` として登録され、`with_auth` 未設定時または検証器が `Err` を返した時はハンドラおよび `before` フックを呼ばずに固定の 401（`"unauthorized"`）を返す（fail-closed）。
+   - 認証不要の経路は `Router.public_route` で明示的に登録し、`Router.public_routes()` で `"METHOD PATH"` の `List<String>` として列挙できる。同一のメソッド・正規化パスの組を複数回登録した場合（公開・非公開の混在を含む）は `Err(RouteError)` で拒否する。
+   - 検証テスト: `tests/web_router_478.rs`、`tests/web_integrated_490.rs`。
+4. **安全な 500 の本文と秘密・権限の隔離**（完了条件 4）:
+   - `web.error_response(status)` は固定の短い平文（`500` は `"internal server error"` 等）のみを返し、契約違反の診断文・ソース位置・環境変数の値を含めない。`ConfigError.name()` は環境変数名のみを保持し、設定値を含めない。ハンドラ契約違反や応答本文上限超過時は `http.abort_conn` が本文空の 500 を返して接続を閉じ、診断は標準エラーにのみ出る。
+   - `std.web`（`src/stdlib/web.sigil`）と `std.json`（`src/stdlib/json.sigil`）はいずれも `trust none` であり、`fs.*`・`net.*`・`raw.*`・`unchecked`・`process`・`foreign` を一切持たない。
+   - 検証テスト: `tests/app_config_460.rs`、`tests/web_router_478.rs`（`web_is_trust_none_and_keeps_capability_boundary`）。
+5. **`X-Forwarded-For` 等の不信用**（完了条件 5）:
+   - `std.web` / `std.http` に `client_ip()`・`forwarded_host()`・`forwarded_proto()` や `trust_proxy` フラグは存在せず、`req.header("x-forwarded-for")` 等は未検証の生の `Bytes` としてのみ参照される。ルーティング・認証・上限検査のいずれも転送ヘッダを参照しない。
+   - 検証テスト: `tests/app_config_460.rs`、`tests/web_router_478.rs`。
+6. **テスト差し替えと優雅な停止**（完了条件 6）:
+   - ソケットを開かない `router.dispatch(&req)` と評価器の `exec::Options::env_vars` 差し替えにより、環境変数・ルーティング・認証・入力検証を決定的に単体テストできる（`tests/syncshared_env_454.rs`、`tests/web_router_478.rs`、`tests/web_integrated_490.rs`）。
+   - ネイティブ実行での `SIGTERM` / `SIGINT` に対し、`net.shutdown_signal()` と `task.roots_grace` + `task.race` により新規 `accept` を中断し、処理中接続の完了を待ってから終了する（猶予期限超過時は中断して終了する）ことを確認した（`tests/shutdown_signal_483.rs`、`tests/root_drain_483.rs`、`tests/web_shutdown_483.rs`、`tests/web_integrated_490.rs`）。
+7. **G1・G2 の記録**（完了条件 7）:
+   - 本 ADR の「脅威と対策」（G1）および本補足 A-2（G2）に記録した。また 6-4b〜6-4f を組み合わせた実接続＋ソケット無しディスパッチの統合サンプルを `examples/11-web-router/main.sigil` に整備し、`tests/web_integrated_490.rs` で検証した。
+
+### A-3. ADR 0022 持ち越し 3 点の検証結果
+
+[ADR 0022](0022-type-identity-traits-and-function-types.md)「根拠の限界と再検証」から段階 6-4 へ送られていた 3 点は、実コード（`src/stdlib/web.sigil`・`examples/11-web-router/main.sigil`）で次のとおり検証された。
+
+1. **`SyncShared` を共有する形でハンドラ表が書けるか**: `SyncShared<Router>` を 1 つ作り、各接続タスクで `shared_router.borrow()`（`&Router`）を借りて `dispatch` することで、接続ごとにハンドラ表を複製せず、ロックも使わずに共有できることを確認した。
+2. **ミドルウェアを構造体に包む形で書けるか**: 引数の位置の関数型に関数型・効果を書けない制限（`FnTypePosition`）の下でも、`RouteHandler`・`BeforeHook`・`AfterHook`・`AuthVerifier` の 4 つの構造体で包むことで、前処理（短絡応答を含む）・認証・ハンドラ・後処理の合成が言語拡張なしで書けることを確認した。
+3. **`dyn`・関連型・既定実装なしで足りるか**: 6-4 の範囲（設定・JSON・ルーター・フック・入力検証・優雅な停止）ではいずれも不要で足りた。
+
+### A-4. 6-5（PostgreSQL）・6-6（認証）への引き継ぎ事項
+
+#### 確認済みの前提（そのまま使える仕組み）
+
+1. **ハンドラ・フック・認証検証器の効果上限 `D`**:
+   - `RouteHandler`・`BeforeHook`・`AfterHook`・`AuthVerifier` の関数フィールドの効果上限は `clock, console, db, env, random, task`（`src/stdlib.rs` の `WEB_CALLBACKS`）に設定済みである。
+   - 6-5（PostgreSQL、[ADR 0034](0034-p1-postgresql-client.md)）の `db`・`clock`・`random`・`task.*`（`net.client` を包んだ `std.db.pg` の公開操作）、および 6-6（認証）の `env`・`clock`・`random` を使う関数を、型や効果上限を変更せずにそのままルーターへ登録できる。
+2. **認証差し込み口（6-6 向け）**:
+   - 6-6 で実装する Bearer トークン検証器は、`AuthVerifier { verify: fn(req: &HttpRequest) -> Result<AuthIdentity, HttpResponse> }` として `router.with_auth(verifier)` に渡すだけで全 `route(...)` 経路に既定必須（fail-closed 401）で適用される。
+   - 検証済みの主体識別子は `req.identity()`（`Option<AuthIdentity>`、`AuthIdentity.subject()`）からハンドラ内で取得でき、公開経路の一覧は `router.public_routes()` で G3 監査用に取得できる。
+3. **環境変数と秘密情報の読み込み（6-5・6-6 向け）**:
+   - データベース接続設定や Bearer 署名鍵の読み込みには `env.get(name: &String) -> Option<String>`（`effects env`）を使い、テスト時は評価器の `exec::Options::env_vars` でプロセス環境変数を汚さずに差し替えられる。
+4. **優雅な停止と資源の後始末（6-5 向け）**:
+   - `net.shutdown_signal()` と `task.roots_grace(config.http_limits().max_connections(), config.app_limits().shutdown_grace_ms(), ...)` により、`SIGTERM` / `SIGINT` 受信時に新規接続の受け付けを止め、処理中の接続タスクを猶予時間内にドレインしてから後続の終了処理（6-5 の接続プールのクローズ等）へ進める。
+
+#### 未解決の残課題・留意事項
+
+1. **CODEOWNERS 対象ファイルの人間作業**:
+   - `.github/workflows/fuzz.yml` への `fuzz_app_json` 長時間実行ジョブの追加、および `src/limits.rs` / `.github/CODEOWNERS` の変更はエージェントの変更禁止範囲（CODEOWNERS 対象）であるため、人間の作業として残る。
+2. **起動時メモリ見積もり行の出力先と ADR 0020 の文言整合**:
+   - `AppConfig.log_memory_bound()` は ADR 0032 判断点 1 の決定に従い `console.log`（標準出力）へ `sigil.web memory_bound_bytes=<N>` を出力する。ADR 0020 決定 4 の「標準エラーに出す」という文言との整合改訂は人間の判断・改訂対象として残る。
+3. **`SIGIL_APP_JSON_MAX_DEPTH` と `AppRequest.json()` の使い分け**:
+   - `AppRequest.json()` / `json_string()` / `json_int()` は既定の深さ上限 64（`json.parse`）で解釈する。環境変数 `SIGIL_APP_JSON_MAX_DEPTH` で 64 未満に絞った上限値（`config.app_limits().json_max_depth()`）を適用する場合は、`json.parse_with_max_depth(&req.body(), config.app_limits().json_max_depth())` を呼ぶ。
+4. **6-5 側の関連既知課題**:
+   - 6-5（ADR 0034）の SCRAM-SHA-256 に関連し、SIR 評価器での PBKDF2 4096 反復の実行時間に関する課題（Issue #484）が別途起票されている。

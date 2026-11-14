@@ -632,6 +632,49 @@ impl<'a, 'p> Fx<'a, 'p> {
                 );
                 (r, u)
             }
+            FsReadBytes => {
+                let (path, _) = self.val(&args[0]);
+                let (max, _) = self.val(&args[1]);
+                let pp = self.rt("str_data", &[path]);
+                let pl = self.rt("str_bytes", &[path]);
+                let kind = self.zero_tmp(16);
+                let bytes = self.rt("fs_read_bytes", &[pp, pl, max, kind]);
+                let c = self.b.ins().icmp_imm_s(IntCC::NotEqual, bytes, 0);
+                let r = self.branch(
+                    c,
+                    |s| s.mk_enum_c(0, &[bytes]),
+                    |s| {
+                        let err = s.binary_io_error(kind, path, max);
+                        s.mk_enum_c(1, &[err])
+                    },
+                );
+                (r, u)
+            }
+            FsWriteBytes => {
+                let (path, _) = self.val(&args[0]);
+                let (bytes, _) = self.val(&args[1]);
+                let (max, _) = self.val(&args[2]);
+                let pp = self.rt("str_data", &[path]);
+                let pl = self.rt("str_bytes", &[path]);
+                // Bytes の頭の配置は複製せず、既存 core.bytes の窓口だけを使う。
+                let dp = self.rt("bytes_data", &[bytes]);
+                let dl = self.rt("bytes_len", &[bytes]);
+                let kind = self.zero_tmp(16);
+                let rc = self.rt("fs_write_bytes", &[pp, pl, dp, dl, max, kind]);
+                let c = self.b.ins().icmp_imm_s(IntCC::Equal, rc, 0);
+                let r = self.branch(
+                    c,
+                    |s| {
+                        let z = s.ic(0);
+                        s.mk_enum_c(0, &[z])
+                    },
+                    |s| {
+                        let err = s.binary_io_error(kind, path, max);
+                        s.mk_enum_c(1, &[err])
+                    },
+                );
+                (r, u)
+            }
             Compare(op) => {
                 let (x, tx) = self.val(&args[0]);
                 let (y, _) = self.val(&args[1]);
@@ -1039,6 +1082,29 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.task_builtin(b, args, stop).expect("並行処理の操作")
             }
         }
+    }
+
+    /// バイナリ I/O の内部出力を通常の列挙型へ結ぶ。パスは Io のときだけ複製する。
+    fn binary_io_error(&mut self, kind_slot: Value, path: Value, max: Value) -> Value {
+        let k = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), kind_slot, 0);
+        let io = self.b.ins().icmp_imm_s(IntCC::Equal, k, 4);
+        self.branch(
+            io,
+            |s| {
+                let slot = s.b.ins().iadd_imm_s(kind_slot, 8);
+                let err = s.io_error(slot, path);
+                s.mk_enum_c(4, &[err])
+            },
+            |s| {
+                let a = s.b.ins().icmp_imm_s(IntCC::Equal, k, 0);
+                let b = s.b.ins().icmp_imm_s(IntCC::Equal, k, 2);
+                let payload = s.b.ins().bor(a, b);
+                s.branch(payload, |s| s.mk_enum(k, &[max]), |s| s.mk_enum(k, &[]))
+            },
+        )
     }
 
     /// `IoError(kind, path)` の塊（`kind_slot` に 32 ビットの種別が入っている）。

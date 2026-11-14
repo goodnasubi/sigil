@@ -43,6 +43,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("List", 1, Layer::Core),
     ("Path", 0, Layer::Os),
     ("IoError", 0, Layer::Os),
+    ("BinaryIoError", 0, Layer::Os),
     ("ParseError", 0, Layer::Core),
     ("Shared", 1, Layer::Core),
     ("Cell", 1, Layer::Core),
@@ -370,6 +371,18 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         Layer::Os,
         "fs",
         "write(p: &Path, s: &String) -> Result<Unit, IoError>",
+        "fs.write",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "read_bytes(p: &Path, max: Int) -> Result<Bytes, BinaryIoError>",
+        "fs.read",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "write_bytes(p: &Path, data: &Bytes, max: Int) -> Result<Unit, BinaryIoError>",
         "fs.write",
     ),
     // TCP の待ち受け（ADR 0031 決定 3-2、PR 6-3e）。実体は `std.os.net.listen`（lower が名前で結ぶ）。
@@ -1012,6 +1025,8 @@ mod tests {
             "env.get",
             "fs.read",
             "fs.write",
+            "fs.read_bytes",
+            "fs.write_bytes",
             "Path",
             "Path.new",
             "Path.is_empty",
@@ -1019,6 +1034,7 @@ mod tests {
             "Path.file_name",
             "Path.parent",
             "IoError",
+            "BinaryIoError",
             // ADR 0031 決定 3（PR 6-3e）。
             "net.listen",
             "TcpListener",
@@ -1241,6 +1257,7 @@ mod tests {
                     w,
                     "Path"
                         | "IoError"
+                        | "BinaryIoError"
                         | "TcpListener"
                         | "TcpStream"
                         | "NetError"

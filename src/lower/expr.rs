@@ -739,6 +739,14 @@ impl<'a> L<'a> {
                         self.core_only = false;
                         Builtin::FsWrite
                     }
+                    "fs.read_bytes" => {
+                        self.core_only = false;
+                        Builtin::FsReadBytes
+                    }
+                    "fs.write_bytes" => {
+                        self.core_only = false;
+                        Builtin::FsWriteBytes
+                    }
                     "raw.addr_null" => Builtin::RawAddrNull,
                     "raw.addr_to_int" => Builtin::RawAddrToInt,
                     "raw.int_to_addr" => Builtin::RawIntToAddr,

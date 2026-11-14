@@ -368,6 +368,8 @@ pub enum Builtin {
     EnvGet,
     FsRead,
     FsWrite,
+    FsReadBytes,
+    FsWriteBytes,
     RawAddrNull,
     RawAddrToInt,
     RawIntToAddr,

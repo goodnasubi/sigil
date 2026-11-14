@@ -535,6 +535,7 @@ fn check_impl(
             stack_bytes: Options::default().stack_bytes,
             trace_drops: opts.trace_drops,
             fs_files: opts.fs_files.clone(),
+            fs_bytes: opts.fs_bytes.clone(),
             env_vars: opts.env_vars.clone(),
             capture_console: opts.capture_console,
             trust_base: opts.trust_base.clone(),

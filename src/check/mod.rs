@@ -214,6 +214,7 @@ const PRELUDE_TYPES: &[&str] = &[
     "Set",
     "Path",
     "IoError",
+    "BinaryIoError",
     "ParseError",
     "Shared",
     "Cell",

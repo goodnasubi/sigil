@@ -86,6 +86,10 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // 同じ作法）。型の名前は平らな名前空間（ADR 0021）で利用者の型と衝突しないよう `Http` で始め、前置きの名前にする
     // （利用者は宣言できない）。`HttpError`・`HttpProgress` は腕を `match` できる列挙で、検査器はこの行を列挙として登録し直す
     // （`HTTP_ERROR_ARMS`・`HTTP_PROGRESS_ARMS`）。ほかは中身を見せない型で、`Sendable`・`Shareable` だけを持つ。
+    ("PgConfig", 0, Layer::Os),
+    ("PgConnectLimits", 0, Layer::Os),
+    ("PgConn", 0, Layer::Os),
+    ("PgError", 0, Layer::Os),
     ("HttpLimits", 0, Layer::Os),
     ("HttpParser", 0, Layer::Os),
     // 接続（ADR 0032 決定 3-2、PR 6-3g-c）。`TcpStream` を持つので `Sendable` だけで、`Shareable` でない。
@@ -103,6 +107,18 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
 
 /// `std.web` の設定と安全な設定エラー（ADR 0033 E、Issue #460）。
 pub const WEB_TYPES: &[&str] = &["AppConfig", "AppLimits", "ConfigError"];
+/// PostgreSQL 接続の内部定義と結ぶ公開型（ADR 0034）。
+pub const PG_TYPES: &[&str] = &["PgConfig", "PgConnectLimits", "PgConn", "PgError"];
+pub const PG_ERROR_ARMS: &[&str] = &[
+    "UnsupportedCredential",
+    "Authentication",
+    "Connection",
+    "Timeout",
+    "Protocol",
+    "LimitExceeded",
+    "TypeMismatch",
+    "UnsupportedType",
+];
 
 /// `std.json` が実体を宣言する、平坦な JSON 表の型（ADR 0033、Issue #455）。
 pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
@@ -410,6 +426,9 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     // ADR 0034 決定 4: 実効果を接続側と乱数で分ける。既存サーバー側 API の意味は変えない。
     (Layer::Os, "net", "connect(host: &String, port: Int) -> Result<TcpClient, NetError>", "net.client, task.suspend"),
     (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
+    (Layer::Os, "pg", "config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>", "none"),
+    (Layer::Os, "pg", "default_connect_limits() -> PgConnectLimits", "none"),
+    (Layer::Os, "pg", "connect(config: PgConfig, limits: &PgConnectLimits) -> Result<PgConn, PgError>", "net.client, random, clock, task.spawn, task.suspend"),
     // HTTP の上限の既定値と増分の解釈器（ADR 0032 決定 2-3・4-3、PR 6-3g-b）。実体は `std.http`（lower が名前で結ぶ）。
     // I/O をしない（効果なし）。
     (Layer::Os, "http", "default_limits() -> HttpLimits", "none"),
@@ -781,6 +800,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ),
         ],
     ),
+    (Layer::Os, "PgConnectLimits", &[("with_timeout(self: PgConnectLimits, ms: Int) -> Result<PgConnectLimits, PgError>", "none")]),
     (Layer::Os, "TcpClient", &[
         ("read(self: &mut TcpClient, max: Int) -> Result<Bytes, NetError>", "net.client, task.suspend"),
         ("write_all(self: &mut TcpClient, data: &Bytes) -> Result<Unit, NetError>", "net.client, task.suspend"),
@@ -1116,6 +1136,14 @@ mod tests {
             "AppLimits.shutdown_grace_ms",
             "ConfigError",
             "ConfigError.name",
+            "pg.config",
+            "pg.default_connect_limits",
+            "pg.connect",
+            "PgConfig",
+            "PgConnectLimits",
+            "PgConnectLimits.with_timeout",
+            "PgConn",
+            "PgError",
             // ADR 0032 決定 2（PR 6-3g-b）。
             "http.default_limits",
             "http.parser",
@@ -1336,6 +1364,10 @@ mod tests {
                         | "TcpStream"
                         | "TcpClient"
                         | "NetError"
+                        | "PgConfig"
+                        | "PgConnectLimits"
+                        | "PgConn"
+                        | "PgError"
                         | "HttpLimits"
                         | "HttpParser"
                         | "HttpProgress"

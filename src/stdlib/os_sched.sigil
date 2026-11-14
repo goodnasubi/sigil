@@ -90,6 +90,7 @@ global T_SPIN_VER: Int = 18
 global T_SPIN_FLAG: Int = 19
 global T_ACTIVE: Int = 20
 global T_CANCEL: Int = 21
+// 0 は期限なし、正は task.timeout の子番号 + 1、負はドレインする集まりの -(番号 + 1)。
 global T_TMO: Int = 22
 global T_FIRED: Int = 23
 global T_WOBJ: Int = 24
@@ -173,6 +174,7 @@ global G_TI: Int = 8
 // 取り消しの間、外側の取り消し（task.timeout・範囲）の S_SAVED・S_SCAN を退避する所。
 global G_SAVED: Int = 9
 global G_SCAN: Int = 10
+// 0 は既存 task.roots の無期限待ち。正は本体が戻った時点からのドレイン猶予。
 global G_GRACE: Int = 11
 global G_WORDS: Int = 12
 // 起動の記録の語: 0 集まり, 1 いまのルートタスク, 2 接続の語, 3 接続の破棄, 4 on_abort の関数の値, 5 その破棄, 6 段階,

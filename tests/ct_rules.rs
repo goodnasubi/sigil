@@ -91,6 +91,19 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
         "std.crypto.pbkdf2_sha256",
         &["salt", "iterations", "dk_len"],
     ),
+    // ADR 0034: ClientProof の XOR と ServerSignature 比較、および
+    // 証明の base64 は秘密依存の表引き・分岐を行わない。
+    ("std.pg_scram.ct_base64_char", &[]),
+    ("std.pg_scram.ct_base64", &[]),
+    ("std.pg_scram.ct_proof", &[]),
+    ("std.pg_scram.ct_signature", &[]),
+    ("std.pg_scram.respond", &["nonce", "server_first"]),
+    ("std.pg_scram.respond_text", &["nonce", "server_first"]),
+    (
+        "std.pg_scram.respond_bare",
+        &["nonce", "server_first", "bare"],
+    ),
+    ("std.pg_scram.verify", &["server_final"]),
 ];
 
 /// 対象表のうち、まだ実装が存在しない行（先行登録）。
@@ -562,16 +575,40 @@ fn apply_builtin(
 /// 標準ライブラリを含むプログラム（コーパス）を 1 つ組み立てる。
 /// 入口から届かない関数も含めて、標準ライブラリの関数がすべて SIR に現れる。
 fn corpus() -> Program {
-    let src = "module ctprobe\n  targets server\n  trust none\n\n\
-               fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects task.suspend\n{\n  \
-               let a = Bytes.new();\n  let b = Bytes.new();\n  \
-               let s = Secret.from_bytes(a);\n  let inner = s.expose();\n  \
-               let d = sha256(&b);\n  \
-               let h = hmac_sha256(&s, &b);\n  \
-               let ok = verify_hmac_sha256(&s, &b, &d);\n  \
-               let p = pbkdf2_sha256(&s, &b, 4096, 32);\n  \
-               if ct_eq(&inner, &b) && ok {\n    return s.len() + d.len() + h.len() + p.len();\n  }\n  return 0;\n}\n";
-    sigil::ir_eval::lower_sources(&[src], "main").expect("コーパスの組み立てに失敗")
+    // 埋込みモジュールの試験専用入口から本物の本体を呼び、DCE 後にも
+    // SCRAM と既存暗号の対象を残す。製品の公開 API には入口を追加しない。
+    let probe = r#"
+fn probe() -> Int
+  intent "定数時間対象を探査する"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let b = Bytes.new();
+  let s = Secret.from_bytes(Bytes.new());
+  let inner = s.expose();
+  let d = sha256(&b);
+  let h = hmac_sha256(&s, &b);
+  let ok = verify_hmac_sha256(&s, &b, &d);
+  let p = pbkdf2_sha256(&s, &b, 4096, 32);
+  let reply = respond(&s, &b, &b);
+  let checked = verify(&s, &b);
+  let initial = first(&b);
+  if ct_eq(&inner, &b) && ok { return s.len() + d.len() + h.len() + p.len(); }
+  return 0;
+}
+"#;
+    let src = "module ctprobe\n  targets server\n  trust none\npub fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects none\n{ return 0; }\n";
+    let opts = sigil::effects::Options {
+        embedded_extra: vec![(
+            "std.pg_scram".into(),
+            format!("{}\n{probe}", include_str!("../src/stdlib/pg_scram.sigil")),
+        )],
+        embedded_roots: vec!["std.pg_scram".into()],
+        ..Default::default()
+    };
+    sigil::ir_eval::lower_sources_opts(&[src], "std.pg_scram.probe", &opts)
+        .expect("コーパスの組み立てに失敗")
 }
 
 /// ADR 0024 決定 3 の包括基準に当たる関数かどうか。
@@ -985,4 +1022,24 @@ fn clif_real_ct_equal_is_clean() {
         "ct_equal の CLIF 分岐 {0} が SIR の予算 {budget} を超えた: {delta:?}",
         delta.branch
     );
+}
+
+#[test]
+fn clif_scram_proof_and_signature_have_no_division() {
+    // 本番と同じ本体を抽出する。IR 最適化が none の現行生成系では、
+    // この CLIF が最終形。分岐の秘密依存は上の SIR テイント検査が担う。
+    let source = include_str!("../src/stdlib/pg_scram.sigil");
+    let start = source.find("pub fn ct_proof(").unwrap();
+    let end = source[start..].find("pub fn respond(").unwrap() + start;
+    let defs = &source[start..end];
+    for (tag, call) in [
+        ("scramproof", "ct_proof(&Bytes.new(), &Bytes.new()).len()"),
+        (
+            "scramsignature",
+            "match ct_signature(&Bytes.new(), &Bytes.new()) { true => 1, false => 0 }",
+        ),
+    ] {
+        let delta = clif_delta(tag, defs, call);
+        assert_eq!(delta.div, 0, "SCRAM の CLIF に除算命令がある: {delta:?}");
+    }
 }

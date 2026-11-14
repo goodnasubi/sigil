@@ -6,10 +6,21 @@ use sigil::exec::Options;
 const PG: &str = include_str!("../src/stdlib/pg.sigil");
 const TAIL: &str = "\n  intent \"試験\"\n  requires none\n  ensures none\n  effects none\n";
 fn source(sig: &str, body: &str) -> String {
+    // 純粋なフレーム部を試験する。接続部と埋込み専用 import は外部認証試験が担う。
+    let pure = PG
+        .split("// 接続は fd を一つだけ所有する。")
+        .next()
+        .unwrap();
+    let pure = pure
+        .lines()
+        .filter(|line| !line.starts_with("use std.pg_scram."))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         "{}\npub fn {sig}{TAIL}{{\n{body}\n}}\n",
-        PG.replacen("module std.pg", "module app.pg", 1)
+        pure.replacen("module std.pg", "module app.pg", 1)
     )
+    .replace("PgError", "ProtocolTestError")
 }
 fn convert(body: &str) -> String {
     let mut b = body.replace(".unwrap()", "?").replace(r"\0", r"\u{0}");

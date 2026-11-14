@@ -8,6 +8,25 @@ use super::util::collect_calls_block;
 use super::{std_heads, Ck, Pos, PRELUDE_TYPES, PRELUDE_VALUES, R};
 use crate::stdlib::embedded::is_embedded_name;
 
+fn item_is_embedded(i: &Item) -> bool {
+    match i {
+        Item::Type(t) => is_embedded_name(&t.name),
+        Item::Struct(s) => is_embedded_name(&s.name),
+        Item::Enum(e) => is_embedded_name(&e.name),
+        Item::Fn(f) => is_embedded_name(&f.name),
+        Item::Trait(t) => is_embedded_name(&t.name),
+        Item::Global(g) => is_embedded_name(&g.name),
+        Item::Properties(p) => is_embedded_name(&p.type_name),
+        Item::Impl(im) => {
+            matches!(&im.ty, Type::Path { path, .. } if is_embedded_name(&path.join(".")))
+        }
+        Item::ImplFor(im) => {
+            is_embedded_name(&im.trait_name)
+                || matches!(&im.ty, Type::Path { path, .. } if is_embedded_name(&path.join(".")))
+        }
+    }
+}
+
 impl Ck {
     pub(super) fn run(&mut self, file: &File) -> R<()> {
         // 0. モジュールの宣言（ADR 0016 の決定 3・6 の補足。名前の予約が許可より先）
@@ -25,8 +44,20 @@ impl Ck {
                 format!("モジュール名 `{mname}` は標準ライブラリの名前（`std`・`raw`・`fs`・`console` で始まる名前は利用者は使えない）"),
             );
         }
-        // 公開のシグネチャが非公開の型を名指ししない（ADR 0021 の決定 4）
-        if let Some((span, msg)) = crate::project::private_in_public(file) {
+        // 公開のシグネチャが非公開の型を名指ししない（ADR 0021 の決定 4）。
+        // 結合後の再検査（`typed_with`）では、既にモジュール単位で検査済みの埋め込み項目（`std.*`）を除外し、
+        // 埋め込み側が使う標準の型名（`Secret` など）と入口モジュールの非公開の同名型が混同されないようにする。
+        let non_embedded = File {
+            module: file.module.clone(),
+            uses: file.uses.clone(),
+            items: file
+                .items
+                .iter()
+                .filter(|i| !item_is_embedded(i))
+                .cloned()
+                .collect(),
+        };
+        if let Some((span, msg)) = crate::project::private_in_public(&non_embedded) {
             self.span = span;
             return self.err(ErrorKind::PrivateInPublic, msg);
         }
@@ -139,6 +170,7 @@ impl Ck {
                         if is_embedded_name(&s.name)
                             || crate::stdlib::HTTP_TYPES.contains(&s.name.as_str())
                             || crate::stdlib::WEB_TYPES.contains(&s.name.as_str())
+                            || crate::stdlib::PG_TYPES.contains(&s.name.as_str())
                         {
                             self.core = false;
                         }

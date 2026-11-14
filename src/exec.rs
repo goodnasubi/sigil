@@ -130,6 +130,8 @@ pub struct Options {
     /// この表（パス -> 内容）を引き、ない `p` は `Err(IoError.NotFound(p))` を返す。`fs.write` は表を書き換える。
     /// `None`（既定）のときは実際のファイルを読み書きする。
     pub fs_files: Option<std::collections::BTreeMap<String, String>>,
+    /// `env.get` の差し替え。`Some` ならこの表だけを読み、`None` なら実行環境を読む。
+    pub env_vars: Option<std::collections::BTreeMap<String, String>>,
     /// `console.log` の出力を `Outcome::output` に溜める（テスト用）。偽（既定）なら本物の標準出力へ書き、`output` は空。
     pub capture_console: bool,
     /// `trust base` の宣言を許すモジュール名（`--trust-base`。ADR 0016）。
@@ -159,6 +161,7 @@ impl Default for Options {
             stack_bytes: 256 * 1024 * 1024,
             trace_drops: false,
             fs_files: None,
+            env_vars: None,
             capture_console: false,
             trust_base: Vec::new(),
             schedule_seed: None,

@@ -364,6 +364,8 @@ pub enum Builtin {
     BytesPushU32Le,
     BytesReadU32Be,
     ConsoleLog,
+    /// 環境変数を読む（`&String -> Option<String>`、効果 `env`）。
+    EnvGet,
     FsRead,
     FsWrite,
     RawAddrNull,
@@ -406,6 +408,8 @@ pub enum Builtin {
     ChanRecv,
     SyncSharedNew,
     SyncSharedGet,
+    /// `SyncShared<T>` の内容を共有参照で読む（効果 `task.share`）。
+    SyncSharedBorrow,
     LockNew,
     LockAcquire,
     /// `LockGuard` の中身への参照（`get` / `get_mut`。ADR 0026 決定 3、Issue #188）。

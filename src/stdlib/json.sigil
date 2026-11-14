@@ -1,0 +1,976 @@
+module std.json
+  targets bare, browser, server
+  trust none
+
+// Issue #455 決定コメント 6869456186（案A）。再帰型は使わず子を整数で参照する。
+// 深さはコンテナの数（空も1）。構文・範囲・深さの失敗はすべて Err(400)。
+// キーの重複は復号後の文字列で拒否。整数は Int、. / e を含む数は有限 Float。
+// 小数は十進桁を反復で二進へ変換し、binary64 に最近接偶数丸めする。非有限結果は拒否。
+// serializer は同じノードへの複数参照（共有・循環）を400で拒否。未参照ノードは出力しない。
+
+pub enum JsonNode {
+  Null,
+  Bool(Bool),
+  Int(Int),
+  Float(Float),
+  Str(String),
+  Array(List<Int>),
+  Object(List<JsonField>),
+}
+
+pub struct JsonField {
+  field_name: String,
+  field_index: Int,
+}
+
+pub struct JsonValue {
+  value_nodes: List<JsonNode>,
+  value_root: Int,
+}
+
+struct JsonRead {
+  data: Bytes,
+  pos: Int,
+}
+
+struct JsonFrame {
+  parent: Int,
+  kind: Int,
+  state: Int,
+  items: List<Int>,
+  fields: List<JsonField>,
+  key: String,
+}
+
+struct JsonTask {
+  text_only: Bool,
+  node: Int,
+  depth: Int,
+  text: Bytes,
+  next: Int,
+}
+
+impl JsonField {
+  pub fn new(name: String, index: Int) -> JsonField
+    intent "キーと子のインデックスを組にする"
+    requires none
+    ensures none
+    effects none
+  {
+    return JsonField { field_name: name, field_index: index };
+  }
+
+  pub fn name(self: &JsonField) -> String
+    intent "キーを写す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.field_name.clone();
+  }
+
+  pub fn index(self: &JsonField) -> Int
+    intent "子のインデックスを読む"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.field_index;
+  }
+}
+
+impl JsonValue {
+  pub fn new(nodes: List<JsonNode>, root: Int) -> JsonValue
+    intent "平坦表を所有する。検証は stringify で行う"
+    requires none
+    ensures none
+    effects none
+  {
+    return JsonValue { value_nodes: nodes, value_root: root };
+  }
+
+  pub fn nodes(self: &JsonValue) -> List<JsonNode>
+    intent "再帰しないノード表を写す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.value_nodes.clone();
+  }
+
+  pub fn root(self: &JsonValue) -> Int
+    intent "根のインデックスを読む"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.value_root;
+  }
+}
+
+fn byte(r: &JsonRead) -> Int
+  intent "終端では -1、ほかは現在のバイト"
+  requires none
+  ensures none
+  effects none
+{
+  return r.data.get(r.pos).unwrap_or(-1);
+}
+
+fn space(r: &mut JsonRead)
+  intent "JSON が認める4種類の空白だけを読み飛ばす"
+  requires none
+  ensures none
+  effects none
+{
+  let mut c = byte(&r);
+  while c == 32 || c == 9 || c == 10 || c == 13 {
+    r.pos = r.pos + 1;
+    c = byte(&r);
+  }
+}
+
+fn digit(c: Int) -> Bool
+  intent "十進数字か"
+  requires none
+  ensures none
+  effects none
+{
+  return c >= 48 && c <= 57;
+}
+
+fn hex(c: Int) -> Int
+  intent "16進数字の値。無効なら -1"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 {
+    return c - 48;
+  }
+  if c >= 65 && c <= 70 {
+    return c - 55;
+  }
+  if c >= 97 && c <= 102 {
+    return c - 87;
+  }
+  return -1;
+}
+
+fn unit(r: &mut JsonRead) -> Result<Int, Int>
+  intent "4桁の Unicode エスケープを読む"
+  requires none
+  ensures none
+  effects none
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < 4 {
+    let d = hex(byte(&r));
+    if d < 0 {
+      return Err(400);
+    }
+    n = n * 16 + d;
+    r.pos = r.pos + 1;
+    i = i + 1;
+  }
+  return Ok(n);
+}
+
+fn unicode(out: &mut Bytes, n: Int)
+  intent "検証済みスカラーを UTF-8 で書く"
+  requires none
+  ensures none
+  effects none
+{
+  if n < 128 {
+    out.push(n);
+  } else if n < 2048 {
+    out.push(192 + n / 64);
+    out.push(128 + n % 64);
+  } else if n < 65536 {
+    out.push(224 + n / 4096);
+    out.push(128 + n / 64 % 64);
+    out.push(128 + n % 64);
+  } else {
+    out.push(240 + n / 262144);
+    out.push(128 + n / 4096 % 64);
+    out.push(128 + n / 64 % 64);
+    out.push(128 + n % 64);
+  }
+}
+
+fn string(r: &mut JsonRead) -> Result<String, Int>
+  intent "引用符と制御文字と UTF-8 とサロゲート対を検証する"
+  requires none
+  ensures none
+  effects none
+{
+  if byte(&r) != 34 {
+    return Err(400);
+  }
+  r.pos = r.pos + 1;
+  let mut out = Bytes.new();
+  while r.pos < r.data.len() {
+    let c = byte(&r);
+    r.pos = r.pos + 1;
+    if c == 34 {
+      return match out.to_string_utf8() {
+        Ok(s) => Ok(s),
+        Err(_) => Err(400),
+      };
+    }
+    if c < 32 {
+      return Err(400);
+    }
+    if c != 92 {
+      out.push(c);
+    } else {
+      let e = byte(&r);
+      r.pos = r.pos + 1;
+      if e == 34 || e == 92 || e == 47 {
+        out.push(e);
+      } else if e == 98 {
+        out.push(8);
+      } else if e == 102 {
+        out.push(12);
+      } else if e == 110 {
+        out.push(10);
+      } else if e == 114 {
+        out.push(13);
+      } else if e == 116 {
+        out.push(9);
+      } else if e == 117 {
+        let mut n = unit(&mut r)?;
+        if n >= 55296 && n <= 56319 {
+          if byte(&r) != 92 {
+            return Err(400);
+          }
+          r.pos = r.pos + 1;
+          if byte(&r) != 117 {
+            return Err(400);
+          }
+          r.pos = r.pos + 1;
+          let low = unit(&mut r)?;
+          if low < 56320 || low > 57343 {
+            return Err(400);
+          }
+          n = 65536 + (n - 55296) * 1024 + low - 56320;
+        } else if n >= 56320 && n <= 57343 {
+          return Err(400);
+        }
+        unicode(&mut out, n);
+      } else {
+        return Err(400);
+      }
+    }
+  }
+  return Err(400);
+}
+
+fn literal(r: &mut JsonRead, word: &String) -> Result<Bool, Int>
+  intent "固定の語を一致させる"
+  requires none
+  ensures none
+  effects none
+{
+  let b = word.as_bytes();
+  let mut i = 0;
+  while i < b.len() {
+    if byte(&r) != b.get(i).unwrap_or(-1) {
+      return Err(400);
+    }
+    r.pos = r.pos + 1;
+    i = i + 1;
+  }
+  return Ok(true);
+}
+
+fn finite(x: Float) -> Bool
+  intent "NaN と無限大を拒否する"
+  requires none
+  ensures none
+  effects none
+{
+  return (Float.to_bits(x) & 9218868437227405312) != 9218868437227405312;
+}
+
+fn nonzero(digits: &Bytes) -> Bool
+  intent "十進の桁のどれかが非ゼロか"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = 0;
+  while i < digits.len() {
+    if digits.get(i).unwrap_or(0) != 0 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn twice(digits: &mut Bytes) -> Int
+  intent "小数の十進桁を2倍して整数の1ビットを返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut carry = 0;
+  let mut i = digits.len();
+  while i > 0 {
+    i = i - 1;
+    let n = digits.get(i).unwrap_or(0) * 2 + carry;
+    digits.set(i, n % 10);
+    carry = n / 10;
+  }
+  return carry;
+}
+
+fn decimal_float(digits: &Bytes, point: Int, negative: Bool, sticky: Bool) -> Result<Float, Int>
+  intent "十進桁から正確に二進の仮数・丸めビットを取り、最近接偶数丸めする"
+  requires none
+  ensures none
+  effects none
+{
+  let mut sign = 0;
+  if negative {
+    sign = Int.min_value();
+  }
+  if digits.is_empty() {
+    return Ok(Float.from_bits(sign));
+  }
+  if point > 309 {
+    return Err(400);
+  }
+  if point < -324 {
+    return Ok(Float.from_bits(sign));
+  }
+  let mut whole = Bytes.new();
+  let mut fraction = Bytes.new();
+  let mut i = 0;
+  while i < point {
+    whole.push(digits.get(i).unwrap_or(0));
+    i = i + 1;
+  }
+  i = point;
+  while i < 0 {
+    fraction.push(0);
+    i = i + 1;
+  }
+  while i < digits.len() {
+    fraction.push(digits.get(i).unwrap_or(0));
+    i = i + 1;
+  }
+  let mut binary = Bytes.new();
+  while nonzero(&whole) {
+    let mut rem = 0;
+    i = 0;
+    while i < whole.len() {
+      let n = rem * 10 + whole.get(i).unwrap_or(0);
+      whole.set(i, n / 2);
+      rem = n % 2;
+      i = i + 1;
+    }
+    binary.push(rem);
+  }
+  let mut exponent = binary.len() - 1;
+  let mut first = 0;
+  if binary.is_empty() {
+    exponent = -1;
+    first = twice(&mut fraction);
+    while first == 0 && exponent > -1075 {
+      exponent = exponent - 1;
+      first = twice(&mut fraction);
+    }
+    if first == 0 {
+      return Ok(Float.from_bits(sign));
+    }
+  }
+  let mut precision = 53;
+  if exponent < -1022 {
+    precision = exponent + 1075;
+  }
+  let mut mantissa = 0;
+  let mut guard = 0;
+  let mut taken = 0;
+  i = binary.len();
+  while taken <= precision {
+    let mut bit = 0;
+    if i > 0 {
+      i = i - 1;
+      bit = binary.get(i).unwrap_or(0);
+    } else if taken == 0 && binary.is_empty() {
+      bit = first;
+    } else {
+      bit = twice(&mut fraction);
+    }
+    if taken < precision {
+      mantissa = mantissa * 2 + bit;
+    } else {
+      guard = bit;
+    }
+    taken = taken + 1;
+  }
+  let mut rest = sticky || nonzero(&fraction);
+  while i > 0 {
+    i = i - 1;
+    if binary.get(i).unwrap_or(0) != 0 {
+      rest = true;
+    }
+  }
+  if guard == 1 && (rest || mantissa % 2 == 1) {
+    mantissa = mantissa + 1;
+  }
+  if precision == 53 {
+    if mantissa == 9007199254740992 {
+      mantissa = mantissa / 2;
+      exponent = exponent + 1;
+    }
+    if exponent > 1023 {
+      return Err(400);
+    }
+    return Ok(Float.from_bits(sign | exponent + 1023 << 52 | mantissa - 4503599627370496));
+  }
+  return Ok(Float.from_bits(sign | mantissa));
+}
+
+fn number(r: &mut JsonRead) -> Result<JsonNode, Int>
+  intent "JSON の数の文法を検証し整数は64ビット、小数は binary64 に最近接偶数丸めする"
+  requires none
+  ensures none
+  effects none
+{
+  let start = r.pos;
+  let negative = byte(&r) == 45;
+  if negative {
+    r.pos = r.pos + 1;
+  }
+  let first = byte(&r);
+  if !digit(first) {
+    return Err(400);
+  }
+  let mut digits = Bytes.new();
+  let mut leading = 0;
+  let mut count = 0;
+  let mut sticky = false;
+  while digit(byte(&r)) {
+    let d = byte(&r) - 48;
+    if digits.is_empty() && d == 0 {
+      leading = leading + 1;
+    } else if digits.len() < 1100 {
+      digits.push(d);
+    } else if d != 0 {
+      sticky = true;
+    }
+    count = count + 1;
+    r.pos = r.pos + 1;
+  }
+  if first == 48 && count != 1 {
+    return Err(400);
+  }
+  let mut point = count - leading;
+  let mut fractional = false;
+  if byte(&r) == 46 {
+    fractional = true;
+    r.pos = r.pos + 1;
+    if !digit(byte(&r)) {
+      return Err(400);
+    }
+    while digit(byte(&r)) {
+      let d = byte(&r) - 48;
+      if digits.is_empty() && d == 0 {
+        point = point - 1;
+      } else if digits.len() < 1100 {
+        digits.push(d);
+      } else if d != 0 {
+        sticky = true;
+      }
+      r.pos = r.pos + 1;
+    }
+  }
+  if byte(&r) == 101 || byte(&r) == 69 {
+    fractional = true;
+    r.pos = r.pos + 1;
+    let negexp = byte(&r) == 45;
+    if negexp || byte(&r) == 43 {
+      r.pos = r.pos + 1;
+    }
+    if !digit(byte(&r)) {
+      return Err(400);
+    }
+    // 入力長より大きな指数は、ゼロ以外を確実に範囲外/ゼロへ運ぶ。
+    let limit = r.data.len() + 400;
+    let mut exp = 0;
+    while digit(byte(&r)) {
+      if exp < limit / 10 {
+        exp = exp * 10 + byte(&r) - 48;
+      } else {
+        exp = limit;
+      }
+      r.pos = r.pos + 1;
+    }
+    if negexp {
+      point = point - exp;
+    } else {
+      point = point + exp;
+    }
+  }
+  if !fractional {
+    return match r.data.slice(start, r.pos).unwrap_or(Bytes.new()).to_string_utf8() {
+      Ok(s) => match s.parse_int() {
+        Ok(n) => Ok(JsonNode.Int(n)),
+        Err(_) => Err(400),
+      },
+      Err(_) => Err(400),
+    };
+  }
+  return Ok(JsonNode.Float(decimal_float(&digits, point, negative, sticky)?));
+}
+
+fn frame(parent: Int, kind: Int) -> JsonFrame
+  intent "空のコンテナのフレーム"
+  requires none
+  ensures none
+  effects none
+{
+  return JsonFrame { parent: parent, kind: kind, state: 0, items: List.new(), fields: List.new(), key: "" };
+}
+
+pub fn parse(data: &Bytes) -> Result<JsonValue, Int>
+  intent "深さ64までの JSON を明示フレームで読む"
+  requires none
+  ensures none
+  effects none
+{
+  let mut r = JsonRead { data: data.clone(), pos: 0 };
+  let mut nodes = List.new();
+  let mut frames: List<JsonFrame> = List.new();
+  let mut active = -1;
+  let mut depth = 0;
+  let mut root = -1;
+  while true {
+    space(&mut r);
+    let c = byte(&r);
+    let mut close = false;
+    let mut skip = false;
+    if active >= 0 {
+      match frames.get_mut(active) {
+        Some(f) => {
+          if f.state == 1 {
+            if c == 44 {
+              r.pos = r.pos + 1;
+              f.state = 2;
+              skip = true;
+            } else if (f.kind == 0 && c == 93) || (f.kind == 1 && c == 125) {
+              close = true;
+            } else {
+              return Err(400);
+            }
+          } else if f.state == 0 && ((f.kind == 0 && c == 93) || (f.kind == 1 && c == 125)) {
+            close = true;
+          } else if f.kind == 1 {
+            f.key = string(&mut r)?;
+            let mut i = 0;
+            while i < f.fields.len() {
+              match f.fields.get(i) {
+                Some(field) => {
+                  if field.field_name == f.key {
+                    return Err(400);
+                  }
+                }
+                None => {
+                  return Err(400);
+                }
+              }
+              i = i + 1;
+            }
+            space(&mut r);
+            if byte(&r) != 58 {
+              return Err(400);
+            }
+            r.pos = r.pos + 1;
+            space(&mut r);
+          }
+        }
+        None => {
+          return Err(400);
+        }
+      }
+    } else if root >= 0 {
+      if r.pos != r.data.len() {
+        return Err(400);
+      }
+      return Ok(JsonValue.new(nodes, root));
+    }
+    if !skip {
+      let mut made = -1;
+      if close {
+        match frames.get(active) {
+          Some(f) => {
+            made = nodes.len();
+            if f.kind == 0 {
+              nodes.push(JsonNode.Array(f.items.clone()));
+            } else {
+              nodes.push(JsonNode.Object(f.fields.clone()));
+            }
+            active = f.parent;
+          }
+          None => {
+            return Err(400);
+          }
+        }
+        depth = depth - 1;
+        r.pos = r.pos + 1;
+      } else {
+        let next = byte(&r);
+        if next == 91 || next == 123 {
+          if depth >= 64 {
+            return Err(400);
+          }
+          let mut kind = 0;
+          if next == 123 {
+            kind = 1;
+          }
+          frames.push(frame(active, kind));
+          active = frames.len() - 1;
+          depth = depth + 1;
+          r.pos = r.pos + 1;
+        } else {
+          made = nodes.len();
+          if next == 34 {
+            nodes.push(JsonNode.Str(string(&mut r)?));
+          } else if next == 110 {
+            literal(&mut r, &"null")?;
+            nodes.push(JsonNode.Null);
+          } else if next == 116 {
+            literal(&mut r, &"true")?;
+            nodes.push(JsonNode.Bool(true));
+          } else if next == 102 {
+            literal(&mut r, &"false")?;
+            nodes.push(JsonNode.Bool(false));
+          } else {
+            nodes.push(number(&mut r)?);
+          }
+        }
+      }
+      if made >= 0 {
+        if active < 0 {
+          root = made;
+        } else {
+          match frames.get_mut(active) {
+            Some(f) => {
+              if f.kind == 0 {
+                f.items.push(made);
+              } else {
+                f.fields.push(JsonField.new(f.key.clone(), made));
+              }
+              f.state = 1;
+            }
+            None => {
+              return Err(400);
+            }
+          }
+        }
+      }
+    }
+  }
+  return Err(400);
+}
+
+fn int_bytes(n: Int) -> Bytes
+  intent "最小整数も符号の反転であふれずに10進で書く"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  let mut x = n;
+  if x < 0 {
+    out.push(45);
+  } else {
+    x = 0 - x;
+  }
+  let mut digits = Bytes.new();
+  if x == 0 {
+    digits.push(48);
+  }
+  while x < 0 {
+    digits.push(48 - x % 10);
+    x = x / 10;
+  }
+  let mut i = digits.len();
+  while i > 0 {
+    i = i - 1;
+    out.push(digits.get(i).unwrap_or(48));
+  }
+  return out;
+}
+
+fn multiply(digits: &mut Bytes, factor: Int)
+  intent "下位からの十進桁を小さい整数で掛ける"
+  requires none
+  ensures none
+  effects none
+{
+  let mut carry = 0;
+  let mut i = 0;
+  while i < digits.len() {
+    let n = digits.get(i).unwrap_or(0) * factor + carry;
+    digits.set(i, n % 10);
+    carry = n / 10;
+    i = i + 1;
+  }
+  while carry > 0 {
+    digits.push(carry % 10);
+    carry = carry / 10;
+  }
+}
+
+fn float_bytes(x: Float) -> Bytes
+  intent "有限 binary64 の正確な十進表現を書く。指数でなく小数点を必ず付ける"
+  requires none
+  ensures none
+  effects none
+{
+  let bits = Float.to_bits(x);
+  let abs = bits & 9223372036854775807;
+  let mut mantissa = abs & 4503599627370495;
+  let mut exponent = (abs >> 52) - 1075;
+  if (abs >> 52) == 0 {
+    exponent = -1074;
+  } else {
+    mantissa = mantissa + 4503599627370496;
+  }
+  let mut out = Bytes.new();
+  if bits < 0 {
+    out.push(45);
+  }
+  if mantissa == 0 {
+    out.extend(&"0.0".as_bytes());
+    return out;
+  }
+  while exponent < 0 && mantissa % 2 == 0 {
+    mantissa = mantissa / 2;
+    exponent = exponent + 1;
+  }
+  let mut digits = Bytes.new();
+  while mantissa > 0 {
+    digits.push(mantissa % 10);
+    mantissa = mantissa / 10;
+  }
+  let mut fraction = 0;
+  if exponent < 0 {
+    fraction = 0 - exponent;
+    while exponent < 0 {
+      multiply(&mut digits, 5);
+      exponent = exponent + 1;
+    }
+  } else {
+    while exponent > 0 {
+      multiply(&mut digits, 2);
+      exponent = exponent - 1;
+    }
+  }
+  let point = digits.len() - fraction;
+  if point <= 0 {
+    out.extend(&"0.".as_bytes());
+    let mut zeros = 0 - point;
+    while zeros > 0 {
+      out.push(48);
+      zeros = zeros - 1;
+    }
+  }
+  let mut i = digits.len();
+  while i > 0 {
+    i = i - 1;
+    out.push(48 + digits.get(i).unwrap_or(0));
+    if i == fraction && fraction > 0 && point > 0 {
+      out.push(46);
+    }
+  }
+  if fraction == 0 {
+    out.extend(&".0".as_bytes());
+  }
+  return out;
+}
+
+fn quote(s: &String) -> Bytes
+  intent "文字列を JSON エスケープで書く"
+  requires none
+  ensures none
+  effects none
+{
+  let b = s.as_bytes();
+  let digits = "0123456789abcdef".as_bytes();
+  let mut out = Bytes.new();
+  out.push(34);
+  let mut i = 0;
+  while i < b.len() {
+    let c = b.get(i).unwrap_or(0);
+    if c == 34 || c == 92 {
+      out.push(92);
+      out.push(c);
+    } else if c < 32 {
+      out.extend(&"\\u00".as_bytes());
+      out.push(digits.get(c / 16).unwrap_or(48));
+      out.push(digits.get(c % 16).unwrap_or(48));
+    } else {
+      out.push(c);
+    }
+    i = i + 1;
+  }
+  out.push(34);
+  return out;
+}
+
+fn text_task(tasks: &mut List<JsonTask>, top: Int, b: Bytes) -> Int
+  intent "文字列の出力タスクを積む"
+  requires none
+  ensures none
+  effects none
+{
+  tasks.push(JsonTask { text_only: true, node: -1, depth: 0, text: b, next: top });
+  return tasks.len() - 1;
+}
+
+fn node_task(tasks: &mut List<JsonTask>, top: Int, node: Int, depth: Int) -> Int
+  intent "ノードの出力タスクを積む"
+  requires none
+  ensures none
+  effects none
+{
+  tasks.push(JsonTask { text_only: false, node: node, depth: depth, text: Bytes.new(), next: top });
+  return tasks.len() - 1;
+}
+
+pub fn stringify(value: &JsonValue) -> Result<Bytes, Int>
+  intent "不正な参照・循環・深さ65・非有限数・重複キーを拒否し反復で書く"
+  requires none
+  ensures none
+  effects none
+{
+  let mut tasks = List.new();
+  let mut top = node_task(&mut tasks, -1, value.value_root, 0);
+  let mut out = Bytes.new();
+  // 同じノードを二度訪れる表（循環や共有）を拒否し、入力表に対する出力の指数的増大を防ぐ。
+  let mut seen = Bytes.new();
+  let mut j = 0;
+  while j < value.value_nodes.len() {
+    seen.push(0);
+    j = j + 1;
+  }
+  while top >= 0 {
+    let mut job = JsonTask { text_only: false, node: -2, depth: 0, text: Bytes.new(), next: -1 };
+    match tasks.get(top) {
+      Some(t) => {
+        job = t.clone();
+      }
+      None => {
+        return Err(400);
+      }
+    }
+    top = job.next;
+    if job.text_only {
+      out.extend(&job.text);
+    } else {
+      if job.node < 0 || job.node >= value.value_nodes.len() {
+        return Err(400);
+      }
+      if seen.get(job.node).unwrap_or(1) != 0 {
+        return Err(400);
+      }
+      seen.set(job.node, 1);
+      match value.value_nodes.get(job.node) {
+        Some(node) => {
+          match node {
+            JsonNode.Null => {
+              out.extend(&"null".as_bytes());
+            }
+            JsonNode.Bool(b) => {
+              if b {
+                out.extend(&"true".as_bytes());
+              } else {
+                out.extend(&"false".as_bytes());
+              }
+            }
+            JsonNode.Int(n) => {
+              out.extend(&int_bytes(n));
+            }
+            JsonNode.Float(x) => {
+              if !finite(x) {
+                return Err(400);
+              }
+              out.extend(&float_bytes(x));
+            }
+            JsonNode.Str(s) => {
+              out.extend(&quote(&s));
+            }
+            JsonNode.Array(items) => {
+              if job.depth >= 64 {
+                return Err(400);
+              }
+              out.push(91);
+              top = text_task(&mut tasks, top, "]".as_bytes());
+              let mut i = items.len();
+              while i > 0 {
+                i = i - 1;
+                let child = match items.get(i) {
+                  Some(n) => n + 0,
+                  None => -2,
+                };
+                top = node_task(&mut tasks, top, child, job.depth + 1);
+                if i > 0 {
+                  top = text_task(&mut tasks, top, ",".as_bytes());
+                }
+              }
+            }
+            JsonNode.Object(fields) => {
+              if job.depth >= 64 {
+                return Err(400);
+              }
+              out.push(123);
+              top = text_task(&mut tasks, top, "}".as_bytes());
+              let mut i = fields.len();
+              while i > 0 {
+                i = i - 1;
+                match fields.get(i) {
+                  Some(f) => {
+                    let mut k = 0;
+                    while k < i {
+                      match fields.get(k) {
+                        Some(other) => {
+                          if other.field_name == f.field_name {
+                            return Err(400);
+                          }
+                        }
+                        None => {
+                          return Err(400);
+                        }
+                      }
+                      k = k + 1;
+                    }
+                    top = node_task(&mut tasks, top, f.field_index, job.depth + 1);
+                    top = text_task(&mut tasks, top, ":".as_bytes());
+                    top = text_task(&mut tasks, top, quote(&f.field_name));
+                    if i > 0 {
+                      top = text_task(&mut tasks, top, ",".as_bytes());
+                    }
+                  }
+                  None => {
+                    return Err(400);
+                  }
+                }
+              }
+            }
+          }
+        }
+        None => {
+          return Err(400);
+        }
+      }
+    }
+  }
+  return Ok(out);
+}

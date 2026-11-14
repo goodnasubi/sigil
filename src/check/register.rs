@@ -32,6 +32,26 @@ impl Ck {
                 self.os_items.types.insert((*n).into());
             }
         }
+        // JSON の腕も利用者が構築・match できる。子は再帰型でなく整数インデックス。
+        let list = |t| Ty::Named("List".into(), vec![t]);
+        self.types.insert(
+            "JsonNode".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: vec![
+                    ("Null".into(), vec![]),
+                    ("Bool".into(), vec![Ty::Bool]),
+                    ("Int".into(), vec![Ty::Int]),
+                    ("Float".into(), vec![Ty::Float]),
+                    ("Str".into(), vec![Ty::Str]),
+                    ("Array".into(), vec![list(Ty::Int)]),
+                    (
+                        "Object".into(),
+                        vec![list(Ty::Named("JsonField".into(), vec![]))],
+                    ),
+                ],
+            },
+        );
         // `NetError` は腕を `match` できる列挙（ADR 0031 決定 3-3、判断点 B）。表の行（OS 層の印）は残し、
         // 型の定義だけを列挙に置き換える。実体は `std.os.net` の同じ並びの宣言（lower が名前で結ぶ）。
         self.types.insert(

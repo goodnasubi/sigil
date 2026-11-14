@@ -1,0 +1,223 @@
+module app.main
+  targets server
+  trust none
+
+pub fn probe_bytes(b: &Bytes) -> String
+  intent "JSON を clone と往復で検証し正規の出力を返す"
+  requires none
+  ensures none
+  effects none
+{
+  match json.parse(&b) {
+    Err(code) => {
+      return "E400";
+    }
+    Ok(value) => {
+      let copied = value.clone();
+      let nodes = copied.nodes();
+      let again = JsonValue.new(nodes.clone(), copied.root());
+      match json.stringify(&again) {
+        Err(code) => {
+          return "NGwrite";
+        }
+        Ok(encoded) => {
+          match json.parse(&encoded) {
+            Err(code) => {
+              return "NGread";
+            }
+            Ok(back) => {
+              match json.stringify(&back) {
+                Err(code) => {
+                  return "NGrewrite";
+                }
+                Ok(twice) => {
+                  if encoded != twice {
+                    return "NGroundtrip";
+                  }
+                  return encoded.to_string_utf8().unwrap_or("NGutf8");
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return "NG";
+}
+
+pub fn probe(input: List<Int>) -> String
+  intent "テストの整数列からバイト列を作る"
+  requires none
+  ensures none
+  effects none
+{
+  return match Bytes.from_list(&input) {
+    Ok(b) => probe_bytes(&b),
+    Err(_) => "E400",
+  };
+  return "NG";
+}
+
+pub fn numeric(input: List<Int>) -> Int
+  intent "Float のビット列を Rust の oracle と比較する"
+  requires none
+  ensures none
+  effects none
+{
+  let b = Bytes.from_list(&input).unwrap_or(Bytes.new());
+  match json.parse(&b) {
+    Ok(v) => {
+      let nodes = v.nodes();
+      return match nodes.get(v.root()) {
+        Some(n) => match n {
+          JsonNode.Float(x) => Float.to_bits(x),
+          _ => 42,
+        },
+        None => 43,
+      };
+    }
+    Err(_) => {
+      return 44;
+    }
+  }
+  return 45;
+}
+
+pub fn unhex(c: Int) -> Int
+  intent "16進の数字を読む"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 {
+    return c - 48;
+  }
+  return c - 87;
+}
+
+pub fn main(p: Path) -> String
+  intent "各行の16進入力を評価器とネイティブで比較する"
+  requires none
+  ensures none
+  effects fs.read
+{
+  let text = fs.read(&p).unwrap_or("");
+  let lines = text.lines();
+  let mut out = Bytes.new();
+  let mut i = 0;
+  while i < lines.len() {
+    match lines.get(i) {
+      Some(line) => {
+        let bytes = line.as_bytes();
+        let mut b = Bytes.new();
+        let mut j = 0;
+        while j + 1 < bytes.len() {
+          b.push(unhex(bytes.get(j).unwrap_or(48)) * 16 + unhex(bytes.get(j + 1).unwrap_or(48)));
+          j = j + 2;
+        }
+        let rec = probe_bytes(&b);
+        out.extend(&rec.as_bytes());
+        out.push(10);
+      }
+      None => {
+        return "NGline";
+      }
+    }
+    i = i + 1;
+  }
+  return out.to_string_utf8().unwrap_or("NGutf8");
+}
+
+pub fn table(depth: Int, bad: Int) -> Int
+  intent "公開の表から深さと不正参照を検証し深い clone の生存性も確認する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut nodes = List.new();
+  nodes.push(JsonNode.Null);
+  let mut root = 0;
+  let mut i = 0;
+  while i < depth {
+    let mut items = List.new();
+    items.push(root);
+    if i % 2 == 0 {
+      nodes.push(JsonNode.Array(items));
+    } else {
+      let mut fields = List.new();
+      fields.push(JsonField.new("k", root));
+      nodes.push(JsonNode.Object(fields));
+    }
+    root = nodes.len() - 1;
+    i = i + 1;
+  }
+  if bad == 1 {
+    root = -1;
+  }
+  if bad == 2 {
+    root = nodes.len();
+  }
+  if bad == 3 {
+    let mut children = List.new();
+    children.push(nodes.len());
+    nodes.push(JsonNode.Array(children));
+    root = nodes.len() - 1;
+  }
+  if bad == 4 {
+    let mut children = List.new();
+    children.push(-2);
+    nodes.push(JsonNode.Array(children));
+    root = nodes.len() - 1;
+  }
+  if bad == 5 {
+    let mut children = List.new();
+    children.push(0);
+    children.push(0);
+    nodes.push(JsonNode.Array(children));
+    root = nodes.len() - 1;
+  }
+  if bad == 6 {
+    let mut fields = List.new();
+    fields.push(JsonField.new("a", 0));
+    fields.push(JsonField.new("a", 0));
+    nodes.push(JsonNode.Object(fields));
+    root = nodes.len() - 1;
+  }
+  if bad == 7 {
+    nodes.push(JsonNode.Float(Float.from_bits(9218868437227405312)));
+    root = nodes.len() - 1;
+  }
+  if bad == 8 {
+    nodes.push(JsonNode.Float(Float.from_bits(9221120237041090560)));
+    root = nodes.len() - 1;
+  }
+  if bad == 9 {
+    let mut children = List.new();
+    children.push(1);
+    let mut forward = List.new();
+    forward.push(JsonNode.Array(children));
+    forward.push(JsonNode.Null);
+    return result_code(&JsonValue.new(forward, 0));
+  }
+  if bad == 10 {
+    root = 0;
+  }
+  let value = JsonValue.new(nodes, root);
+  let copied = value.clone();
+  let copy_nodes = copied.nodes();
+  return result_code(&JsonValue.new(copy_nodes, copied.root()));
+}
+
+pub fn result_code(value: &JsonValue) -> Int
+  intent "書ければ200、失敗は400"
+  requires none
+  ensures none
+  effects none
+{
+  return match json.stringify(&value) {
+    Ok(_) => 200,
+    Err(code) => code,
+  };
+  return 500;
+}

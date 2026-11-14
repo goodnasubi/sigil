@@ -36,6 +36,9 @@ pub type Entry = (&'static str, &'static str);
 
 /// 標準の型で、中身を見せないもの（名前, 型引数の数）。
 pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
+    ("JsonValue", 0, Layer::Core),
+    ("JsonNode", 0, Layer::Core),
+    ("JsonField", 0, Layer::Core),
     ("Bytes", 0, Layer::Core),
     ("List", 1, Layer::Core),
     ("Path", 0, Layer::Os),
@@ -91,7 +94,10 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("HttpError", 0, Layer::Os),
 ];
 
-/// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ（単体テストで固定する）。
+/// `std.json` が実体を宣言する、平坦な JSON 表の型（ADR 0033、Issue #455）。
+pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
+
+/// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ。
 pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
 /// `std.os.net` が実体を持つ、fd を所有する型（結合後の名前）。値の破棄で `close(2)` を 1 回呼ぶ
 /// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
@@ -340,6 +346,8 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
 pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
+    (Layer::Core, "json", "parse(data: &Bytes) -> Result<JsonValue, Int>", "none"),
+    (Layer::Core, "json", "stringify(value: &JsonValue) -> Result<Bytes, Int>", "none"),
     (
         Layer::Os,
         "console",
@@ -496,6 +504,16 @@ pub const REQUIRES: &[(&str, &str)] = &[
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
 pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
+    (Layer::Core, "JsonValue", &[
+        ("new(nodes: List<JsonNode>, root: Int) -> JsonValue", "none"),
+        ("nodes(self: &JsonValue) -> List<JsonNode>", "none"),
+        ("root(self: &JsonValue) -> Int", "none"),
+    ]),
+    (Layer::Core, "JsonField", &[
+        ("new(name: String, index: Int) -> JsonField", "none"),
+        ("name(self: &JsonField) -> String", "none"),
+        ("index(self: &JsonField) -> Int", "none"),
+    ]),
     (
         Layer::Core,
         "Secret",

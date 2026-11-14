@@ -66,6 +66,9 @@ pub const NET_LISTEN_FN: &str = "std.os.net.listen";
 /// シムから呼ぶ。lower は、プログラムがこれらの型を持つときだけ SIR に入れる。
 pub const NET_CLOSE_FN: &str = "std.os.net.close_fd";
 
+/// `trust none` の平坦表・反復 JSON モジュール（ADR 0033、Issue #455 決定コメント 6869456186）。
+pub const JSON_MODULE: &str = "std.json";
+
 /// HTTP/1.1 の要求の解釈と型の Sigil 実装のモジュール名（ADR 0032 決定 2-1、判断点 B の案 B1、PR 6-3g-b）。`trust none` で、
 /// 評価器とネイティブがこのモジュールの関数をそのまま動かす。`std.os.net` と同じく暗黙に結ぶ層で、入口の `targets` との
 /// 照合は免除する（表の行は OS 層なので、`bare` の利用者からは使えない）。使わないプログラムの SIR には入らない。
@@ -236,6 +239,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (NET_MODULE, include_str!("os_net.sigil")),
     (HTTP_LIMITS_MODULE, include_str!("http_limits.sigil")),
     (HTTP_MODULE, include_str!("http.sigil")),
+    (JSON_MODULE, include_str!("json.sigil")),
     (PATH_MODULE, include_str!("core_path.sigil")),
     (STRING_MODULE, include_str!("core_string.sigil")),
     (LIST_MODULE, include_str!("core_list.sigil")),
@@ -271,6 +275,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             NET_MODULE,
             HTTP_LIMITS_MODULE,
             HTTP_MODULE,
+            JSON_MODULE,
             PATH_MODULE,
             STRING_MODULE,
             LIST_MODULE,

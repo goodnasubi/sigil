@@ -423,7 +423,7 @@ ADR 0020 決定 3 の G2（実装の PR ごとの確認）および本 ADR「完
 3. **既定で拒否する認証の差し込み口**（完了条件 3）:
    - `Router.route` は常に `AuthPolicy.Required` として登録され、`with_auth` 未設定時または検証器が `Err` を返した時はハンドラおよび `before` フックを呼ばずに固定の 401（`"unauthorized"`）を返す（fail-closed）。
    - 認証不要の経路は `Router.public_route` で明示的に登録し、`Router.public_routes()` で `"METHOD PATH"` の `List<String>` として列挙できる。同一のメソッド・正規化パスの組を複数回登録した場合（公開・非公開の混在を含む）は `Err(RouteError)` で拒否する。
-   - 検証テスト: `tests/web_router_478.rs`、`tests/web_integrated_490.rs`。
+   - 検証テスト: `tests/web_router_478.rs`。
 4. **安全な 500 の本文と秘密・権限の隔離**（完了条件 4）:
    - `web.error_response(status)` は固定の短い平文（`500` は `"internal server error"` 等）のみを返し、契約違反の診断文・ソース位置・環境変数の値を含めない。`ConfigError.name()` は環境変数名のみを保持し、設定値を含めない。ハンドラ契約違反や応答本文上限超過時は `http.abort_conn` が本文空の 500 を返して接続を閉じ、診断は標準エラーにのみ出る。
    - `std.web`（`src/stdlib/web.sigil`）と `std.json`（`src/stdlib/json.sigil`）はいずれも `trust none` であり、`fs.*`・`net.*`・`raw.*`・`unchecked`・`process`・`foreign` を一切持たない。
@@ -432,10 +432,12 @@ ADR 0020 決定 3 の G2（実装の PR ごとの確認）および本 ADR「完
    - `std.web` / `std.http` に `client_ip()`・`forwarded_host()`・`forwarded_proto()` や `trust_proxy` フラグは存在せず、`req.header("x-forwarded-for")` 等は未検証の生の `Bytes` としてのみ参照される。ルーティング・認証・上限検査のいずれも転送ヘッダを参照しない。
    - 検証テスト: `tests/app_config_460.rs`、`tests/web_router_478.rs`。
 6. **テスト差し替えと優雅な停止**（完了条件 6）:
-   - ソケットを開かない `router.dispatch(&req)` と評価器の `exec::Options::env_vars` 差し替えにより、環境変数・ルーティング・認証・入力検証を決定的に単体テストできる（`tests/syncshared_env_454.rs`、`tests/web_router_478.rs`、`tests/web_integrated_490.rs`）。
-   - ネイティブ実行での `SIGTERM` / `SIGINT` に対し、`net.shutdown_signal()` と `task.roots_grace` + `task.race` により新規 `accept` を中断し、処理中接続の完了を待ってから終了する（猶予期限超過時は中断して終了する）ことを確認した（`tests/shutdown_signal_483.rs`、`tests/root_drain_483.rs`、`tests/web_shutdown_483.rs`、`tests/web_integrated_490.rs`）。
+   - ソケットを開かない `router.dispatch(&req)` と評価器の `exec::Options::env_vars` 差し替えにより、環境変数・ルーティング・認証・入力検証を決定的に単体テストできる（`tests/syncshared_env_454.rs`、`tests/app_config_460.rs`、`tests/web_router_478.rs`）。
+   - ネイティブ実行での `SIGTERM` / `SIGINT` に対し、`net.shutdown_signal()` と `task.roots_grace` + `task.race` により新規 `accept` を中断し、処理中接続の完了を待ってから終了する（猶予期限超過時は中断して終了する）ことを各機能単体で確認した（`tests/shutdown_signal_483.rs`、`tests/root_drain_483.rs`、`tests/web_shutdown_483.rs`）。
 7. **G1・G2 の記録**（完了条件 7）:
-   - 本 ADR の「脅威と対策」（G1）および本補足 A-2（G2）に記録した。また 6-4b〜6-4f を組み合わせた実接続＋ソケット無しディスパッチの統合サンプルを `examples/11-web-router/main.sigil` に整備し、`tests/web_integrated_490.rs` で検証した。
+   - 本 ADR の「脅威と対策」（G1）および本補足 A-2（G2）に、段階 6-4 の各実装 PR（6-4b〜6-4f）で確認できた範囲を記録した。
+   - ソケット無しのディスパッチサンプルは `examples/11-web-router/main.sigil` に整備され、単体テスト（`tests/web_router_478.rs`）で検証済みである。
+   - 実ソケット（`TcpListener`）による実接続・設定読み込み・終了シグナルを組み合わせたエンドツーエンドの統合検証は、段階 6-4 の個別機能の範囲外（6-5 の DB 接続および 6-6 の認証・本番構成を結合する段階）とし、A-4 の引き継ぎ事項に明記した。
 
 ### A-3. ADR 0022 持ち越し 3 点の検証結果
 
@@ -470,3 +472,6 @@ ADR 0020 決定 3 の G2（実装の PR ごとの確認）および本 ADR「完
    - `AppRequest.json()` / `json_string()` / `json_int()` は既定の深さ上限 64（`json.parse`）で解釈する。環境変数 `SIGIL_APP_JSON_MAX_DEPTH` で 64 未満に絞った上限値（`config.app_limits().json_max_depth()`）を適用する場合は、`json.parse_with_max_depth(&req.body(), config.app_limits().json_max_depth())` を呼ぶ。
 4. **6-5 側の関連既知課題**:
    - 6-5（ADR 0034）の SCRAM-SHA-256 に関連し、SIR 評価器での PBKDF2 4096 反復の実行時間に関する課題（Issue #484）が別途起票されている。
+5. **実接続とルーター・設定・終了シグナルの統合検証（6-5・6-6 向け）**:
+   - 段階 6-4 では、設定読み込み（`tests/app_config_460.rs`）、ソケット無しルーターディスパッチ（`tests/web_router_478.rs`、`examples/11-web-router/main.sigil`）、および終了合図と受付中断・ルートドレイン（`tests/web_shutdown_483.rs` 等）をそれぞれ個別機能として単体検証した。
+   - 実ソケット（`TcpListener`）の待ち受けループにルーター（`SyncShared<Router>`）、設定読み込み、および `net.shutdown_signal()` / `task.roots_grace` を結合したエンドツーエンドの実接続・実トラフィック統合検証は 6-4 では未実施であり、実 DB 接続・認証を結合する段階 6-5・6-6 の統合試験で実施する。

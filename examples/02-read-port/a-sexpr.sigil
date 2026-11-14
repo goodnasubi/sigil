@@ -4,7 +4,7 @@
 
 (type Port (Int (where (<= 1 self 65535))))
 
-(enum ConfigError
+(enum ReadPortError
   (Io IoError)
   (NotANumber String)
   (OutOfRange Int))
@@ -12,12 +12,12 @@
 (fn read-port
   (intent "設定ファイルの内容を整数として読み、ポート番号として返す")
   (params (path Path))
-  (returns (Result Port ConfigError))
+  (returns (Result Port ReadPortError))
   (requires (not (empty? path)))
   (ensures)
   (effects (fs.read path))
   (body
-    (let ((text (try (map-err (fs.read path) ConfigError.Io))))
+    (let ((text (try (map-err (fs.read path) ReadPortError.Io))))
       (match (parse-int (trim text))
-        ((Ok n)  (Port.check n (ConfigError.OutOfRange n)))
-        ((Err _) (Err (ConfigError.NotANumber text)))))))
+        ((Ok n)  (Port.check n (ReadPortError.OutOfRange n)))
+        ((Err _) (Err (ReadPortError.NotANumber text)))))))

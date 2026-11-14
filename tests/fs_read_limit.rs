@@ -41,7 +41,7 @@ fn small_regular_file_still_reads() {
 fn file_over_the_limit_is_rejected() {
     let p = sparse("over", LIMIT + 1);
     let v = read_port(p.to_str().unwrap());
-    assert!(v.starts_with("Err(ConfigError.Io(IoError.Other("), "{v}");
+    assert!(v.starts_with("Err(ReadPortError.Io(IoError.Other("), "{v}");
 }
 
 #[test]
@@ -49,14 +49,14 @@ fn file_at_the_limit_is_not_rejected_for_size() {
     // 上限ちょうど（NUL だけ）は大きさでは拒否されない。数値でないので NotANumber になる。
     let p = sparse("exact", LIMIT);
     let v = read_port(p.to_str().unwrap());
-    assert!(v.starts_with("Err(ConfigError.NotANumber("), "{v}");
+    assert!(v.starts_with("Err(ReadPortError.NotANumber("), "{v}");
 }
 
 #[cfg(unix)]
 #[test]
 fn device_is_rejected() {
     let v = read_port("/dev/zero");
-    assert!(v.starts_with("Err(ConfigError.Io(IoError.Other("), "{v}");
+    assert!(v.starts_with("Err(ReadPortError.Io(IoError.Other("), "{v}");
 }
 
 #[cfg(unix)]
@@ -71,5 +71,5 @@ fn fifo_is_rejected_without_blocking() {
         .unwrap_or(false);
     assert!(ok, "mkfifo が使えない");
     let v = read_port(p.to_str().unwrap());
-    assert!(v.starts_with("Err(ConfigError.Io(IoError.Other("), "{v}");
+    assert!(v.starts_with("Err(ReadPortError.Io(IoError.Other("), "{v}");
 }

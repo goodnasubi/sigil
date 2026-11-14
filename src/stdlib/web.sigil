@@ -2,7 +2,7 @@ module std.web
   targets server
   trust none
 
-// ADR 0033 E・I・J / Issue #460。設定・定型応答・ルーター。停止処理は後続段。
+// ADR 0033 E・I・J / Issue #460。設定・定型応答・ルーター・猶予つき停止。
 // 前段ヘッダーを解釈する API や信頼フラグは持たない。HttpRequest.header の値は未検証の生値。
 // 不正な設定は Result の Err で起動側に返し、失敗時には待ち受けを開始しない。
 // ConfigError は変数名だけを保持し、設定値（秘密を含む）を保持・表示しない。
@@ -1018,4 +1018,22 @@ impl Router {
     }
     return Some(error_response(404));
   }
+}
+
+// 停止待機は呼び出し側で注入する。実運用では task を始める前に net.shutdown_signal()
+// を作り、stop からその wait() を呼ぶ。評価器では sleep や channel で同じ経路を検証できる。
+// accept は reserve と accept の両方を含む受付ループ。停止時に取り消すのはこのループだけで、
+// 起動済みルートは roots_grace が本体終了の時点から grace_ms だけ待つ。
+pub fn run_until(limit: Int, grace_ms: Int, accept: fn(&RootGroup) -> Unit, stop: fn() -> Unit)
+  intent "停止の合図と受付ループを競合待機し、受付中断後に起動済みルートを猶予つきでドレインする"
+  requires limit >= 1 && limit <= 4096 && grace_ms >= 1 && grace_ms <= 300000
+  ensures none
+  effects task.spawn, task.suspend, clock, of(accept), of(stop)
+{
+  task.roots_grace(limit, grace_ms, |g| {
+    let mut waits = List.new();
+    waits.push(|| { accept(g); return 0; });
+    waits.push(|| { stop(); return 0; });
+    task.race(waits);
+  });
 }

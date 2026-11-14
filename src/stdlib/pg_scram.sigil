@@ -271,4 +271,3 @@ pub fn verify(signature: &Secret, server_final: &Bytes) -> Result<Bool, ScramErr
   let wipe = Secret.from_bytes(got);
   return Ok(ok);
 }
-

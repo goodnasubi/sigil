@@ -2,15 +2,7 @@
 mod common;
 const SCRAM: &str = include_str!("../src/stdlib/pg_scram.sigil");
 fn source(body: &str, effects: &str) -> String {
-    let scram = SCRAM
-        .lines()
-        .filter(|line| !line.starts_with("use std.crypto."))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "{}\npub fn main() -> Result<Int, ScramError>\n intent \"試験\"\n requires none\n ensures none\n effects {effects}\n{{\n{body}\n}}",
-        scram.replacen("module std.pg_scram", "module app.scram", 1)
-    )
+    format!("{}\npub fn main() -> Result<Int, ScramError>\n intent \"試験\"\n requires none\n ensures none\n effects {effects}\n{{\n{body}\n}}", SCRAM.replacen("module std.pg_scram", "module app.scram", 1))
 }
 #[test]
 fn rfc7677() {

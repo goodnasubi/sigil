@@ -801,7 +801,7 @@ impl<'a> L<'a> {
                     "task.sleep" => Builtin::TaskSleep,
                     "task.channel" => Builtin::TaskChannel,
                     // 複数ルートの入口（ADR 0031 決定 4-1）。検査器の登録と実体は PR 6-3d。
-                    "task.roots" => Builtin::RootsScope,
+                    "task.roots" | "task.roots_grace" => Builtin::RootsScope,
                     n => return bail(format!("名前空間の関数 {n}")),
                 };
                 Ok(self.emit_call(Callee::Builtin(b), ops, ret))

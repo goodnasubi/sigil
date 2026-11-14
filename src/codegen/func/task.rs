@@ -890,8 +890,26 @@ impl<'a, 'p> Fx<'a, 'p> {
         );
         self.fail_if(bad, code);
         let frame = self.frame();
-        let (fv, _) = self.own(&args[1]);
-        let gid = self.rt("sched_roots_begin", &[limit]);
+        let grace = if args.len() == 3 {
+            let (ms, _) = self.val(&args[1]);
+            let lo = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, ms, 1);
+            let hi = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::SignedGreaterThan, ms, 300000);
+            let bad = self.b.ins().bor(lo, hi);
+            let code = self.cg.code_for(
+                stop,
+                Some(StopKind::StdRequiresViolated),
+                Some("task.roots_grace: grace_ms は 1 以上 300000 以下"),
+            );
+            self.fail_if(bad, code);
+            ms
+        } else {
+            self.ic(0)
+        };
+        let (fv, _) = self.own(&args[args.len() - 1]);
+        let gid = self.rt("sched_roots_begin", &[limit, grace]);
         let aux1 = self.site_off(k, 1);
         let aux2 = self.site_off(k, 2);
         self.st(gid, frame, aux1);
@@ -946,6 +964,15 @@ impl<'a, 'p> Fx<'a, 'p> {
         let c = self.ic(CANCEL_CODE);
         self.jump_cleanup(c);
         self.b.switch_to_block(rb);
+        let fired = self.rt("sched_tmo_fired", &[]);
+        let (expired, drained) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(fired, expired, NOARGS, drained, NOARGS);
+        self.b.switch_to_block(expired);
+        let g = self.ld(self.frame(), aux1);
+        self.cancel_loop_by(Some(g), "sched_group_cancel_next");
+        self.b.ins().jump(drained, NOARGS);
+        self.b.switch_to_block(drained);
+        let frame = self.frame();
         let v = self.ld(frame, aux2);
         self.finish_call(v, dty, dty, dest, next);
     }

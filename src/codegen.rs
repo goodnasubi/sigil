@@ -153,7 +153,6 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_join"
         | "sched_chan_recv"
         | "sched_lock_acquire"
-        | "sched_roots_begin"
         | "sched_roots_end"
         | "sched_group_closed"
         | "sched_reserve"
@@ -161,6 +160,7 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_root_cancel_next"
         | "sched_root_abort_end"
         | "sched_group_cancel_next" => ("p", 'p'),
+        "sched_roots_begin" => ("pp", 'p'),
         "sched_root_new" => ("ppppp", 'p'),
         "sched_root_launch" => ("ppp", 'v'),
         "sched_spawn" => ("ppp", 'p'),

@@ -383,6 +383,10 @@ impl Ck {
                 "roots<T>(limit: Int, f: fn(&RootGroup) -> T) -> T",
                 "task.suspend, of(f)",
             ),
+            (
+                "roots_grace<T>(limit: Int, grace_ms: Int, f: fn(&RootGroup) -> T) -> T",
+                "clock, task.suspend, of(f)",
+            ),
         ];
         for (sig, effects) in task_fns {
             let (name, s) = self.std_sig(&crate::stdlib::free_source(

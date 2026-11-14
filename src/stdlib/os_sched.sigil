@@ -173,7 +173,8 @@ global G_TI: Int = 8
 // 取り消しの間、外側の取り消し（task.timeout・範囲）の S_SAVED・S_SCAN を退避する所。
 global G_SAVED: Int = 9
 global G_SCAN: Int = 10
-global G_WORDS: Int = 11
+global G_GRACE: Int = 11
+global G_WORDS: Int = 12
 // 起動の記録の語: 0 集まり, 1 いまのルートタスク, 2 接続の語, 3 接続の破棄, 4 on_abort の関数の値, 5 その破棄, 6 段階,
 // 7 取り消しの走査位置（タスクの添字 + 1）, 8 取り消しを始めたタスク。
 global R_GROUP: Int = 0
@@ -685,7 +686,16 @@ fn wake_sleeper(s: Int, t: Int)
   effects none
 {
   let c = ld(t, T_TMO);
-  if c != 0 {
+  if c < 0 {
+    st(t, T_TMO, 0);
+    st(t, T_FIRED, 1);
+    let g = tab_get(s, S_GROUPS, 0 - c - 1);
+    let sc = tab_get(s, S_SCOPES, ld(g, G_SID));
+    st(sc, 1, 0);
+    st(t, T_WAITSCOPE, 0 - 1);
+    mark_group(s, 0 - c - 1, t);
+    wake(s, t, 0, false);
+  } else if c != 0 {
     st(t, T_TMO, 0);
     st(t, T_FIRED, 1);
     let child = tab_get(s, S_TASKS, c - 1);
@@ -1636,7 +1646,7 @@ fn cur_root(s: Int) -> Int
   return ld(cur, T_ROOT);
 }
 
-fn roots_begin_locked(limit: Int) -> Int
+fn roots_begin_locked(limit: Int, grace: Int) -> Int
   intent "ルートの集まりを作って番号を返す。本体の終わりを待つ範囲を 1 つ作る"
   requires none
   ensures none
@@ -1647,6 +1657,7 @@ fn roots_begin_locked(limit: Int) -> Int
   let g = rec(G_WORDS);
   st(g, G_SID, sid);
   st(g, G_LIMIT, limit);
+  st(g, G_GRACE, grace);
   return tab_push(s, S_GROUPS, g);
 }
 
@@ -1659,7 +1670,14 @@ fn roots_end_locked(gid: Int) -> Int
   let s = sched();
   let g = tab_get(s, S_GROUPS, gid);
   st(g, G_CLOSED, 1);
-  return scope_end_locked(ld(g, G_SID));
+  let waiting = scope_end_locked(ld(g, G_SID));
+  if waiting != 0 && ld(g, G_GRACE) > 0 {
+    let cur = ld(s, S_CUR);
+    sleep_enqueue(s, cur, ld(g, G_GRACE));
+    st(cur, T_TMO, 0 - gid - 1);
+    st(cur, T_FIRED, 0);
+  }
+  return waiting;
 }
 
 fn group_closed_locked(gid: Int) -> Int
@@ -1869,6 +1887,7 @@ fn root_finished(s: Int, r: Int, reclaim: Bool)
     if w != 0 {
       st(sc, 1, 0);
       st(w, T_WAITSCOPE, 0 - 1);
+      timeout_unwait(s, w);
       finish_scope(s, sc);
       wake(s, w, 0, false);
     }
@@ -2848,14 +2867,14 @@ pub fn collect_garbage()
   mutex_unlock();
 }
 
-pub fn roots_begin(limit: Int) -> Int
+pub fn roots_begin(limit: Int, grace: Int) -> Int
   intent "排他の下で roots_begin を行う"
   requires none
   ensures none
   effects none
 {
   mutex_lock();
-  let outcome = roots_begin_locked(limit);
+  let outcome = roots_begin_locked(limit, grace);
   mutex_unlock();
   return outcome;
 }

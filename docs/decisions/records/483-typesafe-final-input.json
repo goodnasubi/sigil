@@ -1,0 +1,14 @@
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸: SigilはAIが実装し人間が仕様をレビューする。trust none、最小権限、信頼基盤最小化、ADR0033 K/ADR0018 SIGTERM/SIGINT優雅終了、所有者のIssue483実装承認を固定。先行判断はweb.run_untilを含め採用したが、現行効果推論ではof(callback)がraceのクロージャList越しに伝播せず、追加web helperには広い静的効果上限か推論変更が必要と判明。最終案は追加web helperを持たず、現行webにserve入口がない設計に合わせ利用側で task.roots_grace + 既存task.raceを直接合成する。SIGTERM/INT専用opaque ShutdownSignal、通常programを変えず利用programのみnative worker生成前にmaskを準備しconstructorは所有fdを開く、既存IR再利用roots_graceで受付本体終了から有限猶予、評価器はsleep等の停止注入、nativeは子processへ実signal送付する。公開追加はShutdownSignal/net.shutdown_signal/ShutdownSignal.wait/task.roots_graceのみ。任意signalと6-4gは導入しない。",
+  "questions": {
+    "implementation": {
+      "type": "choice",
+      "criteria": {
+        "minimal": "最終案を採用し、既存raceとroots_grace直接合成で受付中断とdrainを検証、余分な権限要求と推論変更を避ける",
+        "broad": "web helperを追加するためcallbackに広い静的効果上限を要求する",
+        "change_inference": "Issue範囲を拡大してeffect推論自体を変更する"
+      }
+    }
+  }
+}

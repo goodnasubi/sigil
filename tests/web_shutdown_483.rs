@@ -38,7 +38,12 @@ fn run() -> Int
   ensures none
   effects task.spawn, task.suspend, clock, console
 {{
-  web.run_until(1, {grace}, accept, stop);
+  task.roots_grace(1, {grace}, |g| {{
+    let mut waits = List.new();
+    waits.push(|| {{ accept(&g); return 0; }});
+    waits.push(|| {{ stop(); return 0; }});
+    task.race(waits);
+  }});
   console.log(&99);
   return 0;
 }}
@@ -129,7 +134,9 @@ fn run() -> Int
         Err(_) => { return 11; }
         Ok(listener) => {
           console.log(&listener.local_port());
-          web.run_until(1, 50, |g| {
+          task.roots_grace(1, 50, |g| {
+            let mut waits = List.new();
+            waits.push(|| {
             while true {
               let slot = g.reserve();
               match listener.accept() {
@@ -139,7 +146,11 @@ fn run() -> Int
                 }
               }
             }
-          }, || { signal.wait(); });
+              return 0;
+            });
+            waits.push(|| { signal.wait(); return 0; });
+            task.race(waits);
+          });
         }
       }
     }

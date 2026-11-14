@@ -404,7 +404,6 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "web", "load_config() -> Result<AppConfig, ConfigError>", "env"),
     (Layer::Os, "web", "error_response(status: Int) -> HttpResponse", "none"),
     (Layer::Os, "web", "validate<T>(value: Option<T>) -> Result<T, HttpResponse>", "none"),
-    (Layer::Os, "web", "run_until(limit: Int, grace_ms: Int, accept: fn(&RootGroup) -> Unit, stop: fn() -> Unit)", "task.spawn, task.suspend, clock, of(accept), of(stop)"),
     (Layer::Core, "json", "parse(data: &Bytes) -> Result<JsonValue, Int>", "none"),
     (Layer::Core, "json", "stringify(value: &JsonValue) -> Result<Bytes, Int>", "none"),
     (

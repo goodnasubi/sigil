@@ -2069,7 +2069,7 @@ fn root_slot(gid: usize) -> Val {
 }
 
 /// `Atomic` / `SyncShared` の中身の入れ物。`Val::Shared` を外して見る（`SharedGet` と同じ形）。
-fn shared_cell(v: &Val) -> Option<&Rc<RefCell<Val>>> {
+pub(super) fn shared_cell(v: &Val) -> Option<&Rc<RefCell<Val>>> {
     match v {
         Val::Shared(rc) => match &**rc {
             Val::Cell(c) => Some(c),

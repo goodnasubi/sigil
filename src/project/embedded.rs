@@ -75,6 +75,7 @@ impl Proj<'_> {
                 || r == embedded::RANDOM_MODULE
                 || r == embedded::HTTP_LIMITS_MODULE
                 || r == embedded::HTTP_MODULE
+                || r == embedded::WEB_MODULE
             {
                 continue;
             }

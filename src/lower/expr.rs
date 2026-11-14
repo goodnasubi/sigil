@@ -714,6 +714,15 @@ impl<'a> L<'a> {
                     };
                     return self.user_call(decl, &r.targs, ops, ret);
                 }
+                // 設定と定型応答も trust none の Sigil 実装をそのまま呼ぶ。
+                if let Some(f) = r.name.strip_prefix("web.") {
+                    self.core_only = false;
+                    let full = format!("{}.{f}", crate::stdlib::embedded::WEB_MODULE);
+                    let Some(&decl) = self.fns.get(full.as_str()) else {
+                        return bail(format!("{} の実体（std.web）が結ばれていない", r.name));
+                    };
+                    return self.user_call(decl, &r.targs, ops, ret);
+                }
                 // JSON も trust none の Sigil 実装を評価器・ネイティブで共用する。
                 if let Some(f) = r.name.strip_prefix("json.") {
                     let full = format!("{}.{f}", crate::stdlib::embedded::JSON_MODULE);

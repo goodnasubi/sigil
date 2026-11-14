@@ -1,0 +1,272 @@
+module std.web
+  targets server
+  trust none
+
+// ADR 0033 E・I・J / Issue #460。設定と定型応答の基盤。ルーター・停止処理は後続段。
+// 前段ヘッダーを解釈する API や信頼フラグは持たない。HttpRequest.header の値は未検証の生値。
+// 不正な設定は Result の Err で起動側に返し、失敗時には待ち受けを開始しない。
+// ConfigError は変数名だけを保持し、設定値（秘密を含む）を保持・表示しない。
+// HOST は net.listen と同じ IPv4 ドット表記。形式の最終検証は待ち受け側で行う。
+
+pub struct AppConfig {
+  config_host: String,
+  config_port: Int,
+  config_http: HttpLimits,
+  config_app: AppLimits,
+}
+
+pub struct AppLimits {
+  lim_query: Int,
+  lim_json: Int,
+  lim_shutdown: Int,
+}
+
+pub struct ConfigError {
+  config_name: String,
+}
+
+fn read_limit(name: &String, fallback: Int, cap: Int) -> Result<Int, ConfigError>
+  intent "未設定なら既定値、整数変換と範囲検証に失敗すれば変数名だけを返す"
+  requires none
+  ensures none
+  effects env
+{
+  match env.get(&name) {
+    None => { return Ok(fallback); }
+    Some(text) => {
+      match text.parse_int() {
+        Ok(v) => {
+          if 1 <= v && v <= cap {
+            return Ok(v);
+          }
+        }
+        Err(_) => {}
+      }
+    }
+  }
+  return Err(ConfigError { config_name: name.clone() });
+}
+
+pub fn load_config() -> Result<AppConfig, ConfigError>
+  intent "環境変数を読み、無制限値を含む不正な設定を起動前に拒否する"
+  requires none
+  ensures none
+  effects env
+{
+  let mut limits = http.default_limits();
+  let request_line = read_limit(&"SIGIL_HTTP_REQUEST_LINE_BYTES", limits.request_line(), 65536)?;
+  limits = limits.with_request_line(request_line);
+  let head = read_limit(&"SIGIL_HTTP_HEAD_BYTES", limits.head(), 262144)?;
+  limits = limits.with_head(head);
+  let headers = read_limit(&"SIGIL_HTTP_HEADERS_MAX", limits.headers(), 1000)?;
+  limits = limits.with_headers(headers);
+  let body = read_limit(&"SIGIL_HTTP_BODY_BYTES", limits.body(), 67108864)?;
+  limits = limits.with_body(body);
+  let chunk_line = read_limit(&"SIGIL_HTTP_CHUNK_LINE_BYTES", limits.chunk_line(), 1024)?;
+  limits = limits.with_chunk_line(chunk_line);
+  let encoded_body = read_limit(&"SIGIL_HTTP_ENCODED_BODY_BYTES", limits.encoded_body(), 134217728)?;
+  limits = limits.with_encoded_body(encoded_body);
+  let conns = read_limit(&"SIGIL_HTTP_CONNS_MAX", limits.conns(), 4096)?;
+  limits = limits.with_conns(conns);
+  let backlog = read_limit(&"SIGIL_HTTP_BACKLOG", limits.backlog(), 1024)?;
+  limits = limits.with_backlog(backlog);
+  let head_ms = read_limit(&"SIGIL_HTTP_HEAD_MS", limits.head_ms(), 600000)?;
+  limits = limits.with_head_ms(head_ms);
+  let body_ms = read_limit(&"SIGIL_HTTP_BODY_MS", limits.body_ms(), 600000)?;
+  limits = limits.with_body_ms(body_ms);
+  let handler_ms = read_limit(&"SIGIL_HTTP_HANDLER_MS", limits.handler_ms(), 600000)?;
+  limits = limits.with_handler_ms(handler_ms);
+  let send_ms = read_limit(&"SIGIL_HTTP_SEND_MS", limits.send_ms(), 600000)?;
+  limits = limits.with_send_ms(send_ms);
+  let idle_ms = read_limit(&"SIGIL_HTTP_IDLE_MS", limits.idle_ms(), 600000)?;
+  limits = limits.with_idle_ms(idle_ms);
+  let requests = read_limit(&"SIGIL_HTTP_REQUESTS_PER_CONN", limits.requests(), 100000)?;
+  limits = limits.with_requests(requests);
+  let response_body = read_limit(&"SIGIL_HTTP_RESPONSE_BODY_BYTES", limits.response_body(), 67108864)?;
+  limits = limits.with_response_body(response_body);
+  let query = read_limit(&"SIGIL_APP_QUERY_PARAMS_MAX", 100, 1000)?;
+  let depth = read_limit(&"SIGIL_APP_JSON_MAX_DEPTH", 64, 128)?;
+  let grace = read_limit(&"SIGIL_APP_SHUTDOWN_GRACE_MS", 10000, 300000)?;
+  let port = read_limit(&"SIGIL_APP_PORT", 8080, 65535)?;
+  let host = env.get(&"SIGIL_APP_HOST").unwrap_or("127.0.0.1");
+  return Ok(AppConfig {
+    config_host: host,
+    config_port: port,
+    config_http: limits,
+    config_app: AppLimits { lim_query: query, lim_json: depth, lim_shutdown: grace }
+  });
+}
+
+fn decimal(value: Int) -> String
+  intent "非負整数を十進の文字列にする"
+  requires value >= 0
+  ensures none
+  effects none
+{
+  let mut reverse = Bytes.new();
+  let mut n = value;
+  reverse.push(48 + n % 10);
+  n = n / 10;
+  while n > 0 {
+    reverse.push(48 + n % 10);
+    n = n / 10;
+  }
+  let mut digits = Bytes.new();
+  let mut i = reverse.len();
+  while i > 0 {
+    i = i - 1;
+    digits.push(reverse.get(i).unwrap_or(48));
+  }
+  return digits.to_string_utf8().unwrap_or("");
+}
+
+impl AppConfig {
+
+  pub fn host(self: &AppConfig) -> String
+    intent "待ち受け先 IPv4 の文字列を写す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.config_host.clone();
+  }
+
+  pub fn port(self: &AppConfig) -> Int
+    intent "環境変数のポートは 1 から 65535、未設定は 8080"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.config_port;
+  }
+
+  pub fn http_limits(self: &AppConfig) -> HttpLimits
+    intent "検証済みの HTTP 上限を写す"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut limits = http.default_limits();
+    limits = limits.with_request_line(self.config_http.request_line());
+    limits = limits.with_head(self.config_http.head());
+    limits = limits.with_headers(self.config_http.headers());
+    limits = limits.with_body(self.config_http.body());
+    limits = limits.with_chunk_line(self.config_http.chunk_line());
+    limits = limits.with_encoded_body(self.config_http.encoded_body());
+    limits = limits.with_conns(self.config_http.conns());
+    limits = limits.with_backlog(self.config_http.backlog());
+    limits = limits.with_head_ms(self.config_http.head_ms());
+    limits = limits.with_body_ms(self.config_http.body_ms());
+    limits = limits.with_handler_ms(self.config_http.handler_ms());
+    limits = limits.with_send_ms(self.config_http.send_ms());
+    limits = limits.with_idle_ms(self.config_http.idle_ms());
+    limits = limits.with_requests(self.config_http.requests());
+    limits = limits.with_response_body(self.config_http.response_body());
+    return limits;
+  }
+
+  pub fn app_limits(self: &AppConfig) -> AppLimits
+    intent "検証済みのアプリ上限を写す"
+    requires none
+    ensures none
+    effects none
+  {
+    return AppLimits { lim_query: self.config_app.lim_query, lim_json: self.config_app.lim_json, lim_shutdown: self.config_app.lim_shutdown };
+  }
+
+  pub fn log_memory_bound(self: &AppConfig)
+    intent "起動時に最悪の HTTP メモリ見積もりを定型の一行で出す"
+    requires none
+    ensures none
+    effects console
+  {
+    let value = decimal(self.config_http.memory_bound());
+    let line = "sigil.web memory_bound_bytes=".as_bytes().concat(&value.as_bytes());
+    console.log(&line.to_string_utf8().unwrap_or(""));
+  }
+}
+
+impl AppLimits {
+
+  pub fn query_params_max(self: &AppLimits) -> Int
+    intent "検証済みのアプリ上限を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_query;
+  }
+
+  pub fn json_max_depth(self: &AppLimits) -> Int
+    intent "検証済みのアプリ上限を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_json;
+  }
+
+  pub fn shutdown_grace_ms(self: &AppLimits) -> Int
+    intent "検証済みのアプリ上限を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.lim_shutdown;
+  }
+}
+
+impl ConfigError {
+  pub fn name(self: &ConfigError) -> String
+    intent "不正な設定の変数名だけを返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.config_name.clone();
+  }
+}
+
+pub fn error_response(status: Int) -> HttpResponse
+  intent "フレームワークのエラー本文は固定文のみ。未対応コードは安全な 500 にする"
+  requires none
+  ensures none
+  effects none
+{
+  let code = match status {
+    400 => 400,
+    401 => 401,
+    403 => 403,
+    404 => 404,
+    405 => 405,
+    408 => 408,
+    413 => 413,
+    414 => 414,
+    417 => 417,
+    431 => 431,
+    500 => 500,
+    501 => 501,
+    503 => 503,
+    505 => 505,
+    _ => 500,
+  };
+  let text = match code {
+    400 => "bad request",
+    401 => "unauthorized",
+    403 => "forbidden",
+    404 => "not found",
+    405 => "method not allowed",
+    408 => "request timeout",
+    413 => "content too large",
+    414 => "uri too long",
+    417 => "expectation failed",
+    431 => "request header fields too large",
+    500 => "internal server error",
+    501 => "not implemented",
+    503 => "service unavailable",
+    505 => "http version not supported",
+    _ => "internal server error",
+  };
+  return HttpResponse.new(code, text.as_bytes()).with_header(&"content-type", &"text/plain; charset=utf-8".as_bytes());
+}
+

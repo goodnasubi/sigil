@@ -218,3 +218,67 @@ CI 設定の人間担当 PR が入るまでは、手動で Docker が動いて�
 ```
 
 **最終決定**: `implementation_revised.A` を採用する（確率 1.0、confidence 1.0、他案 0.0）。検査外の形式処理を増やす代わりに、バイナリ I/O を別 ADR の前提として可視化する。初回の「新 unchecked 追加なし」という前提をそのまま実装許可に使わず、差分の列挙と所有者レビューを残す。B・C は初回の A を採用し、いずれも確率 1.0・confidence 1.0。
+
+## 6-2f: 実装・実測の記録（2026-11-14 JST、Issue #479）
+
+本節は設計時の記録に対する追記である。前段はマージ済みだが、**OCI archive の load/run を毎回実行する CI が未設定のため、6-2 全体の完了とはしない**。冒頭と ADR 0036 の「提案・未承認」は起草時点の記述として残す。7-1 のサービス結合、CI 設定の変更、形式変更は本記録の範囲外。
+
+### 対象と承認の履歴
+
+| 段 | マージ済みの成果物 |
+|---|---|
+| 6-2a | [PR #457](https://github.com/goodnasubi/sigil/pull/457)、ADR 0036（`f0f554d9`） |
+| 6-2b | [PR #465](https://github.com/goodnasubi/sigil/pull/465)、上限付きバイナリ I/O・故障注入・登録境界（`6a3bea86`） |
+| 6-2c | [PR #468](https://github.com/goodnasubi/sigil/pull/468)、`tools/image/{binary,elf,ustar,oci}.sigil`（`54f646f5`） |
+| 6-2d | [PR #472](https://github.com/goodnasubi/sigil/pull/472)、`tools/image/main.sigil` と入口の突き合わせ（`2de8ee3f`） |
+| 6-2e | [PR #477](https://github.com/goodnasubi/sigil/pull/477)、`tests/image_docker_474.rs`（`d2e64bee`）。[PR #476](https://github.com/goodnasubi/sigil/pull/476)（`c485b9f5`）は既存 scratch テストの CI 化のみ |
+
+所有者承認は [#457 の記録](https://github.com/goodnasubi/sigil/pull/457#issuecomment-6869774712)（2026-11-14 10:56 JST、head `bd3cfdb6`）と [#465 の記録](https://github.com/goodnasubi/sigil/pull/465#issuecomment-6873849779)（同日 16:30 JST、head `2d17d19e45d2df9e2f0e6a868d29f8a78a0b698c`）にある。いずれもメイン会話の明示承認を転記した記録であり、起草時の判定サービスの応答を承認の代わりには扱わない。
+
+### 信頼基盤の実際の差分
+
+6-2b の変更（`4718d8d^..2d17d19`）を `scripts/trust-base-diff.sh 4718d8d^ 2d17d19` とソース差分で照合した。
+
+- `src/stdlib/os_fs.sigil` に `unchecked` の関数を6個追加: `binary_path`、`binary_io`、`binary_stat`、`binary_close`、`read_bytes`、`write_bytes`。前提は借用と可読・書込み範囲、max と path の検査順、領域の解放、fd の単独所有と一度の close。Linux x86-64 の openat=257/read=0/write=1/fstat=5/close=3、stat 144 byte・8 byte 境界・mode +24・size +48 を明記している。
+- `src/codegen/func/call.rs` と `src/codegen.rs` のシム、`src/ir_eval/binary_io.rs` と呼出しの結線、`src/exec.rs` の `fs_bytes`、型・標準 API 登録、lower/SIR の builtin が信頼基盤の増分。評価器は独立した Rust 実装であり、検査済み Sigil の形式処理と同一視しない。
+- `RAW_OPS` の行・効果・requires・前提の変更は0。`trust-base.list` は両端に存在せず、許可の追加も0。`Cargo.toml` / `Cargo.lock` の変更0、新効果カテゴリ0。公開効果は `fs.read` / `fs.write`、既存の raw 操作と埋込み OS/Bytes の許可を利用する。
+- 6-2c/d の形式処理・入口は `trust none`。純粋な組立ては `effects none`、入口は `console, fs`（推論上 `console` / `fs.read` / `fs.write`）。`tests/image_generator_470.rs` が効果の欠落・余分の拒否も確認する。コンパイラ、評価器、既存核/OS操作、カーネル、Docker は信頼基盤・外部実行基盤として残る。
+
+入力64MiB・出力128MiB、読込み前の上限検査、write の全量・close 成功後だけの完了表示を実装済み。失敗ファイルは空・prefix・全量が残り得るため load せず、同じ入力から先頭より全量を書き直す。原子的置換・永続性は保証しない。入口の成功は表示 `Ok(0)` で判定する（CLI は `Err` でもシェル終了値0になり得る）。呼出し方は [tools/image/README.md](../../tools/image/README.md) を参照。
+
+### 再現性と外部照合
+
+`tests/image_generator_470.rs::entry_reproducibility_references_digests_and_failures` は同一の121 byte ELF fixture を別ディレクトリ・別入力名・mtime（2000/2030年）・1.1秒以上離れた実時刻で生成し、評価器/ネイティブの計4出力について外側 tar 全体と4対象の digest 表示の一致を確認する。入力 byte 120 の0→1変更では layer/config/manifest/archive すべての digest と archive が変わり、変更後も評価器/ネイティブが一致する。コンパイラが異なる ELF を出す場合の一致は保証しない。
+
+`tests/image_formats_467.rs` は5件、入口のテストは2件。Python 標準 `tarfile` / `json` / `hashlib` で非圧縮 USTAR、単一 app、mode/uid/gid/mtime、固定 config と descriptor の size/digest、layer diff_id、archive の SHA-256 を独立照合する。これは外部 archive の取込み機能でも発行者の認証でもない。
+
+### CI の実行記録と未達条件
+
+[CI run 43594622077](https://github.com/goodnasubi/sigil/actions/runs/43594622077)（PR #477 head `4c6e11d0512e6c33ef97eab0bff325ebc088b762`、2026-11-14 21:23〜21:50 JST、job [132446379348](https://github.com/goodnasubi/sigil/actions/runs/43594622077/job/132446379348)）は緑。ログで fmt/clippy、nextest 1516 passed・7 skipped、doc test 0件、ネイティブ突き合わせ859件・飛ばし0件を確認した。形式部品5件と入口2件も PASS。Rust は `1.100.0 (0ef1bc386 2026-11-09)`。
+
+同 run の Docker ステップは `Docker version 29.4.2, build 055a478` と `cargo test --test m5_native -- --ignored runs_in_scratch_container` の1件成功を記録する。**Docker server の版・image store は出力されず、OCI の load/run テストの成功証拠にはならない**。現行 `.github/workflows/ci.yml` は `image_docker_474` を明示実行せず、当該テストは `#[ignore]` のため通常 nextest では実行されない。`ubuntu-latest` と Docker の版・store も固定されていない。
+
+6-2 を完了扱いにするには、人間担当の CI 設定で OCI テストを毎回実行し、使用する Docker の版・store を固定・記録して load/run・inspect・非 root の成功 run を残す必要がある。これは既存テストの緑で代替できない。本追記では workflow や形式を変更しない。
+
+### Cloud の追試（2026-11-14 22:00〜22:04 JST）
+
+対象は `d2e64bee47d8d41054fe3542a43a36db9bf5dfa3`。既存 `/workspace/.sigil-tools/activate.sh` の Rust `1.99.1 (58cf8f9c3 2026-10-13)`、Cargo `1.99.1 (5f94df478 2026-08-27)`、GCC `14.2.0`、Python `3.12.14`（標準 tarfile/json/hashlib）、GNU tar `1.35` を使用した。Docker client/server はともに `29.9.2`（client build `a82e528`）、`docker info` は `ServerVersion=29.9.2 Driver=vfs DriverStatus=null`。これは OCI 対応 store の成功環境ではない。
+
+| コマンド | 実測結果 |
+|---|---|
+| `cargo fmt --check` | 成功 |
+| `cargo clippy --locked --all-targets -- -D warnings` | 成功 |
+| `cargo test --locked --test image_formats_467 --test image_generator_470` | 形式5件・入口2件成功（上記の再現性・外部照合を含む） |
+| `cargo test --locked --test image_docker_474 -- --ignored --nocapture` | **失敗**。生成器は `Ok(0)` まで進んだが `docker load -i` は終了値1、`invalid archive: does not contain a manifest.json`。inspect/run には未到達で、stdout/終了値/非 root の Docker 実測成功は未記録 |
+| `cargo test --locked --test m5_native -- --ignored runs_in_scratch_container --nocapture` | 既存 scratch テスト1件成功 |
+
+Docker テストが生成した ownership ELF（`examples/03-ownership/ownership.sigil`）を同じネイティブ生成器で再度出力し、`cmp` と `sha256sum` で2つの archive の一致も確認した。入力 ELF の SHA-256 は `5f568bf02dbde01079c598fe753471447b5754660cd766de0c29cfae7c248252`。生成器の表示を対象ごとに記録する。
+
+```text
+layer    sha256:8c2684bbf9816908561de02b2e9e457a8f633c87ff0870147ff2dbb1e5d12730
+config   sha256:24a93b5fb73c0a281d69d8baa2472c0512e9a40a13cc68557ec12637a4b232f5
+manifest sha256:74ea736e85bbc96660e1f5e6cf7153ae03fa239646cbe13c617bfa5d432d0d63
+archive  sha256:27fdd67af3f870e90427eb579148cc41194f073fff853f3a33fd2a320b13060d
+```
+
+`sha256sum` の archive 値も表示と一致した。GNU tar は外側の5ファイル（index、layout、layer/config/manifest の3 blob）を読み取れた。Docker の失敗を避けるための `manifest.json` 追加、変換、store 設定変更は行っていない。成功する固定 CI 環境の整備が必要という未達をそのまま残す。

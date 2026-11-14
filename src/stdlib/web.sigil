@@ -2,7 +2,7 @@ module std.web
   targets server
   trust none
 
-// ADR 0033 E・I・J / Issue #460。設定と定型応答の基盤。ルーター・停止処理は後続段。
+// ADR 0033 E・I・J / Issue #460。設定・定型応答・ルーター。停止処理は後続段。
 // 前段ヘッダーを解釈する API や信頼フラグは持たない。HttpRequest.header の値は未検証の生値。
 // 不正な設定は Result の Err で起動側に返し、失敗時には待ち受けを開始しない。
 // ConfigError は変数名だけを保持し、設定値（秘密を含む）を保持・表示しない。
@@ -32,7 +32,9 @@ fn read_limit(name: &String, fallback: Int, cap: Int) -> Result<Int, ConfigError
   effects env
 {
   match env.get(&name) {
-    None => { return Ok(fallback); }
+    None => {
+      return Ok(fallback);
+    }
     Some(text) => {
       match text.parse_int() {
         Ok(v) => {
@@ -89,12 +91,7 @@ pub fn load_config() -> Result<AppConfig, ConfigError>
   let grace = read_limit(&"SIGIL_APP_SHUTDOWN_GRACE_MS", 10000, 300000)?;
   let port = read_limit(&"SIGIL_APP_PORT", 8080, 65535)?;
   let host = env.get(&"SIGIL_APP_HOST").unwrap_or("127.0.0.1");
-  return Ok(AppConfig {
-    config_host: host,
-    config_port: port,
-    config_http: limits,
-    config_app: AppLimits { lim_query: query, lim_json: depth, lim_shutdown: grace }
-  });
+  return Ok(AppConfig { config_host: host, config_port: port, config_http: limits, config_app: AppLimits { lim_query: query, lim_json: depth, lim_shutdown: grace } });
 }
 
 fn decimal(value: Int) -> String
@@ -121,7 +118,6 @@ fn decimal(value: Int) -> String
 }
 
 impl AppConfig {
-
   pub fn host(self: &AppConfig) -> String
     intent "待ち受け先 IPv4 の文字列を写す"
     requires none
@@ -187,7 +183,6 @@ impl AppConfig {
 }
 
 impl AppLimits {
-
   pub fn query_params_max(self: &AppLimits) -> Int
     intent "検証済みのアプリ上限を返す"
     requires none
@@ -270,3 +265,757 @@ pub fn error_response(status: Int) -> HttpResponse
   return HttpResponse.new(code, text.as_bytes()).with_header(&"content-type", &"text/plain; charset=utf-8".as_bytes());
 }
 
+// ADR 0033 C1。関数引数の格納や高階ミドルウェアを導入せず、利用者が型付きの箱を構築する。
+// 許される効果の上限はサーバー処理だけ。ファイル・ネットワーク・プロセスの権限を渡さない。
+
+pub struct RouteHandler {
+  handle: fn(&AppRequest) -> HttpResponse effects clock, console, db, env, random, task,
+}
+
+pub struct BeforeHook {
+  run: fn(&AppRequest) -> Option<HttpResponse> effects clock, console, db, env, random, task,
+}
+
+pub struct AfterHook {
+  run: fn(&AppRequest, HttpResponse) -> HttpResponse effects clock, console, db, env, random, task,
+}
+
+pub struct AuthVerifier {
+  verify: fn(&AppRequest) -> Result<AuthIdentity, HttpResponse> effects clock, console, db, env, random, task,
+}
+
+pub enum AuthPolicy {
+  Required,
+  Public,
+}
+
+pub struct AuthIdentity {
+  identity_subject: String,
+}
+
+pub struct WebParam {
+  param_name: String,
+  param_value: String,
+}
+
+pub struct WebRoute {
+  route_method: String,
+  route_path: String,
+  route_handler: RouteHandler,
+  route_auth: AuthPolicy,
+}
+
+pub struct AppRequest {
+  app_method: String,
+  app_path: String,
+  app_query: List<WebParam>,
+  app_params: List<WebParam>,
+  app_headers: List<HttpHeader>,
+  app_body: Bytes,
+  app_identity: Option<AuthIdentity>,
+}
+
+pub struct Router {
+  router_routes: List<WebRoute>,
+  router_before: List<BeforeHook>,
+  router_after: List<AfterHook>,
+  router_verifier: Option<AuthVerifier>,
+  router_query_max: Int,
+}
+
+pub fn validate<T>(value: Option<T>) -> Result<T, HttpResponse>
+  intent "篩型 T.check の Option を固定の 400 応答へ写す"
+  requires none
+  ensures none
+  effects none
+{
+  return value.ok_or(error_response(400));
+}
+
+fn hex_digit(b: Int) -> Int
+  intent "入力を検査して安全な結果を返す"
+  requires none
+  ensures none
+  effects none
+{
+  if b >= 48 && b <= 57 {
+    return b - 48;
+  }
+  if b >= 65 && b <= 70 {
+    return b - 55;
+  }
+  if b >= 97 && b <= 102 {
+    return b - 87;
+  }
+  return -1;
+}
+
+fn decode(data: &Bytes, plus_space: Bool) -> Result<String, HttpResponse>
+  intent "百分率符号化を一度だけ解き、不正な符号化・UTF-8・NULを拒否する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  let mut i = 0;
+  while i < data.len() {
+    let mut b = data.get(i).unwrap_or(0);
+    if b == 37 {
+      if i + 2 >= data.len() {
+        return Err(error_response(400));
+      }
+      let hi = hex_digit(data.get(i + 1).unwrap_or(0));
+      let lo = hex_digit(data.get(i + 2).unwrap_or(0));
+      if hi < 0 || lo < 0 {
+        return Err(error_response(400));
+      }
+      b = hi * 16 + lo;
+      i = i + 2;
+    } else {
+      if plus_space && b == 43 {
+        b = 32;
+      }
+    }
+    if b == 0 {
+      return Err(error_response(400));
+    }
+    out.push(b);
+    i = i + 1;
+  }
+  return out.to_string_utf8().map_err(|e| error_response(400));
+}
+
+fn path_segments(path: &String) -> Result<List<String>, HttpResponse>
+  intent "ルート以外の空セグメント・末尾スラッシュ・ドット・逆スラッシュを拒否する"
+  requires none
+  ensures none
+  effects none
+{
+  let data = path.as_bytes();
+  if data.len() == 0 || data.get(0).unwrap_or(0) != 47 {
+    return Err(error_response(400));
+  }
+  let mut items = List.new();
+  if data.len() == 1 {
+    return Ok(items);
+  }
+  let mut start = 1;
+  let mut i = 1;
+  while i <= data.len() {
+    let b = data.get(i).unwrap_or(47);
+    if b == 47 {
+      let segment = data.slice(start, i).unwrap_or(Bytes.new()).to_string_utf8().map_err(|e| error_response(400))?;
+      if segment == "" || segment == "." || segment == ".." {
+        return Err(error_response(400));
+      }
+      items.push(segment);
+      start = i + 1;
+    } else {
+      if b <= 32 || b == 92 || b == 127 || b == 63 || b == 35 {
+        return Err(error_response(400));
+      }
+    }
+    i = i + 1;
+  }
+  return Ok(items);
+}
+
+fn decode_path(data: &Bytes) -> Result<String, HttpResponse>
+  intent "入力を検査して安全な結果を返す"
+  requires none
+  ensures none
+  effects none
+{
+  // 符号化された区切りは経路の別名を生まないよう拒否する。
+  let mut i = 0;
+  while i + 2 < data.len() {
+    if data.get(i).unwrap_or(0) == 37 {
+      let b = hex_digit(data.get(i + 1).unwrap_or(0)) * 16 + hex_digit(data.get(i + 2).unwrap_or(0));
+      if b == 47 || b == 92 {
+        return Err(error_response(400));
+      }
+      i = i + 2;
+    }
+    i = i + 1;
+  }
+  let path = decode(&data, false)?;
+  let segments = path_segments(&path)?;
+  return Ok(path);
+}
+
+fn parse_query(data: &Bytes, cap: Int) -> Result<List<WebParam>, HttpResponse>
+  intent "空欄・重複を含め全ての問い合わせ欄を数え上限を適用する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut items = List.new();
+  if data.len() == 0 {
+    return Ok(items);
+  }
+  let mut start = 0;
+  let mut i = 0;
+  let mut count = 0;
+  while i <= data.len() {
+    let current = data.get(i).unwrap_or(0);
+    if i == data.len() || current == 38 {
+      count = count + 1;
+      if count > cap {
+        return Err(error_response(400));
+      }
+      let mut split = start;
+      let mut delimiter = data.get(split).unwrap_or(0);
+      while split < i && delimiter != 61 {
+        split = split + 1;
+        delimiter = data.get(split).unwrap_or(0);
+      }
+      let name_bytes = data.slice(start, split).unwrap_or(Bytes.new());
+      let name = decode(&name_bytes, true)?;
+      let mut value_start = split;
+      if split < i {
+        value_start = split + 1;
+      }
+      let value_bytes = data.slice(value_start, i).unwrap_or(Bytes.new());
+      let value = decode(&value_bytes, true)?;
+      items.push(WebParam { param_name: name, param_value: value });
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return Ok(items);
+}
+
+fn find_param(params: &List<WebParam>, name: &String) -> Result<String, HttpResponse>
+  intent "欠落と重複を400にしてパラメータ汚染による解釈の不一致を防ぐ"
+  requires none
+  ensures none
+  effects none
+{
+  let mut found = None;
+  let mut i = 0;
+  while i < params.len() {
+    match params.get(i) {
+      Some(p) => {
+        if p.param_name == name {
+          match found {
+            Some(_) => {
+              return Err(error_response(400));
+            }
+            None => {}
+          }
+          found = Some(p.param_value.clone());
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  return found.ok_or(error_response(400));
+}
+
+fn match_route(pattern: &String, path: &List<String>) -> Option<List<WebParam>>
+  intent "同じセグメント数の完全一致または :name の一セグメント変数で照合する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut expected = List.new();
+  match path_segments(&pattern) {
+    Ok(v) => {
+      expected = v;
+    }
+    Err(_) => {
+      return None;
+    }
+  }
+  if expected.len() != path.len() {
+    return None;
+  }
+  let mut params = List.new();
+  let mut i = 0;
+  while i < expected.len() {
+    let a = expected.get(i)?;
+    let b = path.get(i)?;
+    let bytes = a.as_bytes();
+    if bytes.get(0).unwrap_or(0) == 58 {
+      let name = bytes.slice(1, bytes.len()).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
+      params.push(WebParam { param_name: name, param_value: b.clone() });
+    } else {
+      if a != b {
+        return None;
+      }
+    }
+    i = i + 1;
+  }
+  return Some(params);
+}
+
+impl AuthIdentity {
+  pub fn new(subject: String) -> AuthIdentity
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return AuthIdentity { identity_subject: subject };
+  }
+
+  pub fn subject(self: &AuthIdentity) -> String
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.identity_subject.clone();
+  }
+}
+
+fn json_field(value: &JsonValue, name: &String) -> Option<JsonNode>
+  intent "JSON のトップレベルのオブジェクトから名前付きの値を読む"
+  requires none
+  ensures none
+  effects none
+{
+  let nodes = value.nodes();
+  let node = nodes.get(value.root())?;
+  match node {
+    JsonNode.Object(fields) => {
+      let mut i = 0;
+      while i < fields.len() {
+        let field = fields.get(i)?;
+        if field.name() == name {
+          let child = nodes.get(field.index())?;
+          return Some(child.clone());
+        }
+        i = i + 1;
+      }
+    }
+    _ => {}
+  }
+  return None;
+}
+
+impl AppRequest {
+  pub fn method(self: &AppRequest) -> String
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.app_method.clone();
+  }
+
+  pub fn path(self: &AppRequest) -> String
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.app_path.clone();
+  }
+
+  pub fn body(self: &AppRequest) -> Bytes
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.app_body.clone();
+  }
+
+  pub fn identity(self: &AppRequest) -> Option<AuthIdentity>
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return match self.app_identity {
+      Some(v) => Some(AuthIdentity.new(v.subject())),
+      None => None,
+    };
+    return None;
+  }
+
+  pub fn header(self: &AppRequest, name: &String) -> Option<Bytes>
+    intent "前段ヘッダーも未検証の生値としてのみ返す。名前はHTTPと同じ小文字"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut i = 0;
+    while i < self.app_headers.len() {
+      match self.app_headers.get(i) {
+        Some(h) => {
+          if h.name() == name {
+            return Some(h.value());
+          }
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    return None;
+  }
+
+  pub fn param(self: &AppRequest, name: &String) -> Result<String, HttpResponse>
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return find_param(&self.app_params, &name);
+  }
+
+  pub fn query(self: &AppRequest, name: &String) -> Result<String, HttpResponse>
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return find_param(&self.app_query, &name);
+  }
+
+  pub fn param_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.param(&name)?.parse_int().map_err(|e| error_response(400));
+  }
+
+  pub fn query_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.query(&name)?.parse_int().map_err(|e| error_response(400));
+  }
+
+  pub fn json(self: &AppRequest) -> Result<JsonValue, HttpResponse>
+    intent "JSONモジュールの深さ64・構文検査を適用し失敗を固定の400へ写す"
+    requires none
+    ensures none
+    effects none
+  {
+    return json.parse(&self.app_body).map_err(|e| error_response(400));
+  }
+
+  pub fn json_string(self: &AppRequest, name: &String) -> Result<String, HttpResponse>
+    intent "JSON の値を型付きで読み、欠落・型違いは400にする"
+    requires none
+    ensures none
+    effects none
+  {
+    let value = self.json()?;
+    match json_field(&value, &name).ok_or(error_response(400))? {
+      JsonNode.Str(v) => {
+        return Ok(v.clone());
+      }
+      _ => {}
+    }
+    return Err(error_response(400));
+  }
+
+  pub fn json_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>
+    intent "JSON の値を型付きで読み、欠落・型違いは400にする"
+    requires none
+    ensures none
+    effects none
+  {
+    let value = self.json()?;
+    match json_field(&value, &name).ok_or(error_response(400))? {
+      JsonNode.Int(v) => {
+        return Ok(v);
+      }
+      _ => {}
+    }
+    return Err(error_response(400));
+  }
+}
+
+impl Router {
+  pub fn new() -> Router
+    intent "認証検証器なし・問い合わせ上限100で既定拒否のルーターを作る"
+    requires none
+    ensures none
+    effects none
+  {
+    return Router { router_routes: List.new(), router_before: List.new(), router_after: List.new(), router_verifier: None, router_query_max: 100 };
+  }
+
+  pub fn with_limits(self: Router, limits: &AppLimits) -> Router
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut router = self;
+    router.router_query_max = limits.query_params_max();
+    return router;
+  }
+
+  pub fn route(self: Router, method: String, path: String, handler: RouteHandler) -> Result<Router, HttpResponse>
+    intent "通常の経路は必ず認証必須として登録する"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.add_route(method, path, handler, AuthPolicy.Required).ok_or(error_response(400));
+  }
+
+  pub fn public_route(self: Router, method: String, path: String, handler: RouteHandler) -> Result<Router, HttpResponse>
+    intent "明示した公開経路だけを認証から外す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.add_route(method, path, handler, AuthPolicy.Public).ok_or(error_response(400));
+  }
+
+  fn add_route(self: Router, method: String, path: String, handler: RouteHandler, policy: AuthPolicy) -> Option<Router>
+    intent "経路パターンを検査し、同一メソッドで重なる経路を拒否する"
+    requires none
+    ensures none
+    effects none
+  {
+    let segments = path_segments(&path).ok()?;
+    if method == "" {
+      return None;
+    }
+    let method_bytes = method.as_bytes();
+    let mut method_index = 0;
+    while method_index < method_bytes.len() {
+      let b = method_bytes.get(method_index).unwrap_or(0);
+      let alpha = (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
+      let digit = b >= 48 && b <= 57;
+      let punctuation = b == 33 || b == 35 || b == 36 || b == 37 || b == 38 || b == 39 || b == 42 || b == 43 || b == 45 || b == 46 || b == 94 || b == 95 || b == 96 || b == 124 || b == 126;
+      if !alpha && !digit && !punctuation {
+        return None;
+      }
+      method_index = method_index + 1;
+    }
+    let mut names = List.new();
+    let mut i = 0;
+    while i < segments.len() {
+      let segment = segments.get(i)?;
+      let bytes = segment.as_bytes();
+      if bytes.get(0).unwrap_or(0) == 58 {
+        if bytes.len() == 1 {
+          return None;
+        }
+        let name = bytes.slice(1, bytes.len()).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
+        let mut j = 0;
+        while j < names.len() {
+          if names.get(j)? == name {
+            return None;
+          }
+          j = j + 1;
+        }
+        names.push(name);
+      }
+      i = i + 1;
+    }
+    let mut router = self;
+    // 同一メソッドで重なるパターンは公開/必須の曖昧な優先順位を作らず拒否する。
+    i = 0;
+    while i < router.router_routes.len() {
+      let previous = router.router_routes.get(i)?;
+      if previous.route_method == method {
+        let old_segments = path_segments(&previous.route_path).ok()?;
+        if old_segments.len() == segments.len() {
+          let mut overlaps = true;
+          let mut j = 0;
+          while j < segments.len() {
+            let a = segments.get(j)?;
+            let b = old_segments.get(j)?;
+            let a_bytes = a.as_bytes();
+            let b_bytes = b.as_bytes();
+            let a_variable = a_bytes.get(0).unwrap_or(0) == 58;
+            let b_variable = b_bytes.get(0).unwrap_or(0) == 58;
+            if a != b && !a_variable && !b_variable {
+              overlaps = false;
+            }
+            j = j + 1;
+          }
+          if overlaps {
+            return None;
+          }
+        }
+      }
+      i = i + 1;
+    }
+    router.router_routes.push(WebRoute { route_method: method, route_path: path, route_handler: handler, route_auth: policy });
+    return Some(router);
+  }
+
+  pub fn before(self: Router, hook: BeforeHook) -> Router
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut router = self;
+    router.router_before.push(hook);
+    return router;
+  }
+
+  pub fn after(self: Router, hook: AfterHook) -> Router
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut router = self;
+    router.router_after.push(hook);
+    return router;
+  }
+
+  pub fn with_auth(self: Router, verifier: AuthVerifier) -> Router
+    intent "入力を検査して安全な結果を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut router = self;
+    router.router_verifier = Some(verifier);
+    return router;
+  }
+
+  pub fn public_routes(self: &Router) -> List<String>
+    intent "認証を外した経路を登録順で METHOD PATH の一覧として監査可能にする"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut items = List.new();
+    let mut i = 0;
+    while i < self.router_routes.len() {
+      match self.router_routes.get(i) {
+        Some(route) => {
+          match route.route_auth {
+            AuthPolicy.Public => {
+              let text = route.route_method.as_bytes().concat(&" ".as_bytes()).concat(&route.route_path.as_bytes());
+              items.push(text.to_string_utf8().unwrap_or(""));
+            }
+            AuthPolicy.Required => {}
+          }
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    return items;
+  }
+
+  pub fn dispatch(self: &Router, req: &HttpRequest) -> HttpResponse
+    intent "ソケットなしで境界検査・認証・フックを適用する。内部の一覧不整合は安全な500にする"
+    requires none
+    ensures none
+    effects clock, console, db, env, random, task
+  {
+    return self.try_dispatch(&req).unwrap_or(error_response(500));
+  }
+
+  fn try_dispatch(self: &Router, req: &HttpRequest) -> Option<HttpResponse>
+    intent "ソケットなしで境界検証・照合・認証・前処理・ハンドラ・後処理を順に適用する"
+    requires none
+    ensures none
+    effects clock, console, db, env, random, task
+  {
+    let mut path = "";
+    match decode_path(&req.path()) {
+      Ok(v) => {
+        path = v;
+      }
+      Err(e) => {
+        return Some(e);
+      }
+    }
+    let mut segments = List.new();
+    match path_segments(&path) {
+      Ok(v) => {
+        segments = v;
+      }
+      Err(e) => {
+        return Some(e);
+      }
+    }
+    let mut query = List.new();
+    match parse_query(&req.query(), self.router_query_max) {
+      Ok(v) => {
+        query = v;
+      }
+      Err(e) => {
+        return Some(e);
+      }
+    }
+    let method = req.method();
+    let mut i = 0;
+    let mut path_found = false;
+    while i < self.router_routes.len() {
+      let route = self.router_routes.get(i)?;
+      match match_route(&route.route_path, &segments) {
+        Some(params) => {
+          path_found = true;
+          if route.route_method == method {
+            let mut request = AppRequest { app_method: method, app_path: path, app_query: query, app_params: params, app_headers: req.headers(), app_body: req.body(), app_identity: None };
+            match route.route_auth {
+              AuthPolicy.Required => {
+                match self.router_verifier {
+                  Some(verifier) => {
+                    match verifier.verify(&request) {
+                      Ok(identity) => {
+                        request.app_identity = Some(identity);
+                      }
+                      Err(_) => {
+                        return Some(error_response(401));
+                      }
+                    }
+                  }
+                  None => {
+                    return Some(error_response(401));
+                  }
+                }
+              }
+              AuthPolicy.Public => {}
+            }
+            let mut early = None;
+            let mut j = 0;
+            let mut stopped = false;
+            while j < self.router_before.len() && !stopped {
+              let hook = self.router_before.get(j)?;
+              match hook.run(&request) {
+                Some(response) => {
+                  early = Some(response);
+                  stopped = true;
+                }
+                None => {}
+              }
+              j = j + 1;
+            }
+            let mut response = match early {
+              Some(r) => r,
+              None => route.route_handler.handle(&request),
+            };
+            // 後処理は登録の逆順。境界検査・認証失敗時にはフックを呼ばない。
+            j = self.router_after.len();
+            while j > 0 {
+              j = j - 1;
+              let hook = self.router_after.get(j)?;
+              response = hook.run(&request, response);
+            }
+            return Some(response);
+          }
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    if path_found {
+      return Some(error_response(405));
+    }
+    return Some(error_response(404));
+  }
+}

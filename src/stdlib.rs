@@ -99,10 +99,49 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("AppConfig", 0, Layer::Os),
     ("AppLimits", 0, Layer::Os),
     ("ConfigError", 0, Layer::Os),
+    ("Router", 0, Layer::Os),
+    ("AppRequest", 0, Layer::Os),
+    ("AuthIdentity", 0, Layer::Os),
+    ("AuthPolicy", 0, Layer::Os),
+    ("RouteHandler", 0, Layer::Os),
+    ("BeforeHook", 0, Layer::Os),
+    ("AfterHook", 0, Layer::Os),
+    ("AuthVerifier", 0, Layer::Os),
 ];
 
 /// `std.web` の設定と安全な設定エラー（ADR 0033 E、Issue #460）。
-pub const WEB_TYPES: &[&str] = &["AppConfig", "AppLimits", "ConfigError"];
+pub const WEB_TYPES: &[&str] = &[
+    "AppConfig",
+    "AppLimits",
+    "ConfigError",
+    "Router",
+    "AppRequest",
+    "AuthIdentity",
+    "AuthPolicy",
+    "RouteHandler",
+    "BeforeHook",
+    "AfterHook",
+    "AuthVerifier",
+];
+
+/// 効果付きの関数欄を利用者が構築できる箱（ADR 0033 C1）。実装との一致は単体テストで固定する。
+pub const WEB_CALLBACKS: &str = r#"pub struct RouteHandler {
+  handle: fn(&AppRequest) -> HttpResponse effects clock, console, db, env, random, task,
+}
+
+pub struct BeforeHook {
+  run: fn(&AppRequest) -> Option<HttpResponse> effects clock, console, db, env, random, task,
+}
+
+pub struct AfterHook {
+  run: fn(&AppRequest, HttpResponse) -> HttpResponse effects clock, console, db, env, random, task,
+}
+
+pub struct AuthVerifier {
+  verify: fn(&AppRequest) -> Result<AuthIdentity, HttpResponse> effects clock, console, db, env, random, task,
+}
+
+"#;
 
 /// `std.json` が実体を宣言する、平坦な JSON 表の型（ADR 0033、Issue #455）。
 pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
@@ -362,6 +401,7 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
 pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "web", "load_config() -> Result<AppConfig, ConfigError>", "env"),
     (Layer::Os, "web", "error_response(status: Int) -> HttpResponse", "none"),
+    (Layer::Os, "web", "validate<T>(value: Option<T>) -> Result<T, HttpResponse>", "none"),
     (Layer::Core, "json", "parse(data: &Bytes) -> Result<JsonValue, Int>", "none"),
     (Layer::Core, "json", "stringify(value: &JsonValue) -> Result<Bytes, Int>", "none"),
     (
@@ -547,6 +587,36 @@ pub const REQUIRES: &[(&str, &str)] = &[
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
 pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
+    (Layer::Os, "AuthIdentity", &[
+        ("new(subject: String) -> AuthIdentity", "none"),
+        ("subject(self: &AuthIdentity) -> String", "none"),
+    ]),
+    (Layer::Os, "AppRequest", &[
+        ("method(self: &AppRequest) -> String", "none"),
+        ("path(self: &AppRequest) -> String", "none"),
+        ("body(self: &AppRequest) -> Bytes", "none"),
+        ("identity(self: &AppRequest) -> Option<AuthIdentity>", "none"),
+        ("header(self: &AppRequest, name: &String) -> Option<Bytes>", "none"),
+        ("param(self: &AppRequest, name: &String) -> Result<String, HttpResponse>", "none"),
+        ("query(self: &AppRequest, name: &String) -> Result<String, HttpResponse>", "none"),
+        ("param_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>", "none"),
+        ("query_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>", "none"),
+        ("json(self: &AppRequest) -> Result<JsonValue, HttpResponse>", "none"),
+        ("json_string(self: &AppRequest, name: &String) -> Result<String, HttpResponse>", "none"),
+        ("json_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>", "none"),
+    ]),
+    (Layer::Os, "Router", &[
+        ("new() -> Router", "none"),
+        ("with_limits(self: Router, limits: &AppLimits) -> Router", "none"),
+        ("route(self: Router, method: String, path: String, handler: RouteHandler) -> Result<Router, HttpResponse>", "none"),
+        ("public_route(self: Router, method: String, path: String, handler: RouteHandler) -> Result<Router, HttpResponse>", "none"),
+        ("before(self: Router, hook: BeforeHook) -> Router", "none"),
+        ("after(self: Router, hook: AfterHook) -> Router", "none"),
+        ("with_auth(self: Router, verifier: AuthVerifier) -> Router", "none"),
+        ("public_routes(self: &Router) -> List<String>", "none"),
+        ("dispatch(self: &Router, req: &HttpRequest) -> HttpResponse", "db, console, clock, random, env, task.spawn, task.suspend, task.share"),
+    ]),
+
     (Layer::Os, "AppConfig", &[
         ("host(self: &AppConfig) -> String", "none"),
         ("port(self: &AppConfig) -> Int", "none"),
@@ -1116,6 +1186,38 @@ mod tests {
             "AppLimits.shutdown_grace_ms",
             "ConfigError",
             "ConfigError.name",
+            "web.validate",
+            "Router",
+            "AppRequest",
+            "AuthIdentity",
+            "AuthPolicy",
+            "RouteHandler",
+            "BeforeHook",
+            "AfterHook",
+            "AuthVerifier",
+            "AuthIdentity.new",
+            "AuthIdentity.subject",
+            "AppRequest.method",
+            "AppRequest.path",
+            "AppRequest.body",
+            "AppRequest.identity",
+            "AppRequest.header",
+            "AppRequest.param",
+            "AppRequest.query",
+            "AppRequest.param_int",
+            "AppRequest.query_int",
+            "AppRequest.json",
+            "AppRequest.json_string",
+            "AppRequest.json_int",
+            "Router.new",
+            "Router.with_limits",
+            "Router.route",
+            "Router.public_route",
+            "Router.before",
+            "Router.after",
+            "Router.with_auth",
+            "Router.public_routes",
+            "Router.dispatch",
             // ADR 0032 決定 2（PR 6-3g-b）。
             "http.default_limits",
             "http.parser",
@@ -1327,6 +1429,14 @@ mod tests {
                 matches!(
                     w,
                     "AppConfig"
+                        | "Router"
+                        | "AppRequest"
+                        | "AuthIdentity"
+                        | "AuthPolicy"
+                        | "RouteHandler"
+                        | "BeforeHook"
+                        | "AfterHook"
+                        | "AuthVerifier"
                         | "AppLimits"
                         | "ConfigError"
                         | "Path"

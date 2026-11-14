@@ -330,6 +330,7 @@ fn run(port: Int, timeout: Int) -> Result<Int, PgError>
             "encoding",
             "transaction",
         ] {
+            eprintln!("Startup case={case} mode={mode}");
             let l = listener();
             let port = l.local_addr().unwrap().port();
             let c = p.spawn(

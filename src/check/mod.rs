@@ -246,6 +246,9 @@ const PRELUDE_TYPES: &[&str] = &[
     "HttpHeader",
     "HttpResponse",
     "HttpError",
+    "JsonValue",
+    "JsonNode",
+    "JsonField",
 ];
 /// `std.os.net` が実体を宣言する前置きの型（上の 3 つ）。そのモジュール自身の検査でだけ、宣言と `impl` を許す。
 pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "NetError"];
@@ -258,6 +261,8 @@ pub(crate) fn home_types(embedded: bool, mname: &str) -> &'static [&'static str]
         &[]
     } else if mname == NET_MODULE {
         NET_TYPES
+    } else if mname == crate::stdlib::embedded::JSON_MODULE {
+        crate::stdlib::JSON_TYPES
     } else if mname == HTTP_MODULE || mname == HTTP_LIMITS_MODULE {
         crate::stdlib::HTTP_TYPES
     } else {
@@ -606,8 +611,8 @@ pub(crate) fn check_module_embedded(
 pub fn std_heads() -> &'static [&'static str] {
     // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
     // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
-    // `net` は ADR 0031 決定 3-1（名前空間 `net`）で、`http` は ADR 0032 決定 2-1（名前空間 `http`）で足した。
-    &["console", "env", "fs", "http", "net", "raw", "std"]
+    // `net` は ADR 0031、`http` は ADR 0032、`json` は ADR 0033 判断点 G（Issue #455）で足した。
+    &["console", "env", "fs", "http", "json", "net", "raw", "std"]
 }
 
 /// 標準の前置きの名前（型・値）と名前空間の頭か。`use` で取り込む名前に使えない。

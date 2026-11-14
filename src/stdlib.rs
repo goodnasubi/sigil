@@ -91,6 +91,11 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("PgConnectLimits", 0, Layer::Os),
     ("PgConn", 0, Layer::Os),
     ("PgError", 0, Layer::Os),
+    ("PgValue", 0, Layer::Os),
+    ("PgParam", 0, Layer::Os),
+    ("PgColumn", 0, Layer::Os),
+    ("PgResult", 0, Layer::Os),
+    ("PgQueryLimits", 0, Layer::Os),
     ("HttpLimits", 0, Layer::Os),
     ("HttpParser", 0, Layer::Os),
     // 接続（ADR 0032 決定 3-2、PR 6-3g-c）。`TcpStream` を持つので `Sendable` だけで、`Shareable` でない。
@@ -149,9 +154,21 @@ pub struct AuthVerifier {
 "#;
 
 /// PostgreSQL 接続の内部定義と結ぶ公開型（ADR 0034）。
-pub const PG_TYPES: &[&str] = &["PgConfig", "PgConnectLimits", "PgConn", "PgError"];
+pub const PG_TYPES: &[&str] = &[
+    "PgConfig",
+    "PgConnectLimits",
+    "PgConn",
+    "PgError",
+    "PgValue",
+    "PgParam",
+    "PgColumn",
+    "PgResult",
+    "PgQueryLimits",
+];
 pub const PG_ERROR_ARMS: &[&str] = &[
     "UnsupportedCredential",
+    "SqlState",
+    "OutcomeUnknown",
     "Authentication",
     "Connection",
     "Timeout",
@@ -472,6 +489,8 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
     (Layer::Os, "pg", "config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>", "none"),
     (Layer::Os, "pg", "default_connect_limits() -> PgConnectLimits", "none"),
+    (Layer::Os, "pg", "default_query_limits() -> PgQueryLimits", "none"),
+    (Layer::Os, "pg", "param(oid: Int, value: Option<PgValue>) -> Result<PgParam, PgError>", "none"),
     (Layer::Os, "pg", "connect(config: PgConfig, limits: &PgConnectLimits) -> Result<PgConn, PgError>", "net.client, random, clock, task.spawn, task.suspend"),
     // HTTP の上限の既定値と増分の解釈器（ADR 0032 決定 2-3・4-3、PR 6-3g-b）。実体は `std.http`（lower が名前で結ぶ）。
     // I/O をしない（効果なし）。
@@ -751,6 +770,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         &[
             ("is_some(self: &Option<T>) -> Bool", "none"),
             ("is_none(self: &Option<T>) -> Bool", "none"),
+            ("take(self: &mut Option<T>) -> Option<T>", "none"),
             ("unwrap_or(self: Option<T>, default: T) -> T", "none"),
             (
                 "map<U>(self: Option<T>, f: fn(T) -> U) -> Option<U>",
@@ -875,6 +895,26 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ),
         ],
     ),
+    (Layer::Os, "PgQueryLimits", &[
+        ("with_timeout(self: PgQueryLimits, ms: Int) -> Result<PgQueryLimits, PgError>", "none"),
+        ("with_result_bounds(self: PgQueryLimits, wire: Int, rows: Int) -> Result<PgQueryLimits, PgError>", "none"),
+    ]),
+    (Layer::Os, "PgConn", &[
+        ("query(self: &mut PgConn, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> Result<PgResult, PgError>", "net.client, clock, task.spawn, task.suspend"),
+        ("is_closed(self: &PgConn) -> Bool", "none"),
+    ]),
+    (Layer::Os, "PgColumn", &[
+        ("column_name(self: &PgColumn) -> String", "none"),
+        ("type_oid(self: &PgColumn) -> Int", "none"),
+    ]),
+    (Layer::Os, "PgResult", &[
+        ("columns(self: &PgResult) -> Int", "none"),
+        ("rows(self: &PgResult) -> Int", "none"),
+        ("column(self: &PgResult, index: Int) -> Option<&PgColumn>", "none"),
+        ("row(self: &PgResult, index: Int) -> Option<&List<Option<PgValue>>>", "none"),
+        ("command(self: &PgResult) -> String", "none"),
+        ("status(self: &PgResult) -> Int", "none"),
+    ]),
     (Layer::Os, "PgConnectLimits", &[("with_timeout(self: PgConnectLimits, ms: Int) -> Result<PgConnectLimits, PgError>", "none")]),
     (Layer::Os, "TcpClient", &[
         ("read(self: &mut TcpClient, max: Int) -> Result<Bytes, NetError>", "net.client, task.suspend"),
@@ -1254,6 +1294,25 @@ mod tests {
             "PgConnectLimits.with_timeout",
             "PgConn",
             "PgError",
+            "PgValue",
+            "PgParam",
+            "PgColumn",
+            "PgResult",
+            "PgQueryLimits",
+            "pg.param",
+            "pg.default_query_limits",
+            "PgQueryLimits.with_timeout",
+            "PgQueryLimits.with_result_bounds",
+            "PgConn.query",
+            "PgConn.is_closed",
+            "PgColumn.column_name",
+            "PgColumn.type_oid",
+            "PgResult.columns",
+            "PgResult.rows",
+            "PgResult.column",
+            "PgResult.row",
+            "PgResult.command",
+            "PgResult.status",
             // ADR 0032 決定 2（PR 6-3g-b）。
             "http.default_limits",
             "http.parser",
@@ -1487,6 +1546,11 @@ mod tests {
                         | "PgConnectLimits"
                         | "PgConn"
                         | "PgError"
+                        | "PgValue"
+                        | "PgParam"
+                        | "PgColumn"
+                        | "PgResult"
+                        | "PgQueryLimits"
                         | "HttpLimits"
                         | "HttpParser"
                         | "HttpProgress"

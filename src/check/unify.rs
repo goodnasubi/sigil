@@ -279,7 +279,12 @@ impl Ck {
                     // PostgreSQL 接続と秘密を持つ設定も、移せるが共有・複製・表示はできない。
                     Some(p == Prop::Sendable)
                 }
-                Some(TypeDef::Opaque(_)) if n.as_str() == "PgConnectLimits" => {
+                Some(TypeDef::Opaque(_))
+                    if matches!(
+                        n.as_str(),
+                        "PgConnectLimits" | "PgQueryLimits" | "PgParam" | "PgColumn" | "PgResult"
+                    ) =>
+                {
                     Some(matches!(p, Prop::Sendable | Prop::Shareable))
                 }
                 Some(TypeDef::Opaque(_))

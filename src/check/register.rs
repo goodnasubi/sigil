@@ -104,8 +104,29 @@ impl Ck {
                 params: vec![],
                 variants: crate::stdlib::PG_ERROR_ARMS
                     .iter()
-                    .map(|a| ((*a).to_string(), vec![]))
+                    .map(|a| {
+                        (
+                            (*a).to_string(),
+                            if *a == "SqlState" {
+                                vec![Ty::Str]
+                            } else {
+                                vec![]
+                            },
+                        )
+                    })
                     .collect(),
+            },
+        );
+        self.types.insert(
+            "PgValue".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: vec![
+                    ("Boolean".into(), vec![Ty::Bool]),
+                    ("Integer".into(), vec![Ty::Int]),
+                    ("Text".into(), vec![Ty::Str]),
+                    ("Binary".into(), vec![Ty::Named("Bytes".into(), vec![])]),
+                ],
             },
         );
         self.types.insert(

@@ -1,0 +1,113 @@
+module main
+  targets server
+  trust none
+
+// ソケットを開かず、共有ルーター・認証差し込み口・篩型の入力検証を試す。
+// 具体的なトークンの暗号検証は段階6-6の責務。この例の検証器は実運用に使わない。
+type UserId = Int where self > 0 && self <= 999;
+
+fn read_user(req: &AppRequest) -> Result<HttpResponse, HttpResponse>
+  intent "パスと問い合わせを篩型で検証し失敗は400にする"
+  requires none
+  ensures none
+  effects none
+{
+  let id = web.validate(UserId.check(req.param_int(&"id")?))?;
+  let name = req.query(&"name")?;
+  return Ok(HttpResponse.new(200, "hello ".as_bytes().concat(&name.as_bytes())));
+}
+
+fn user(req: &AppRequest) -> HttpResponse
+  intent "入力検証の結果をHTTP応答へ写す"
+  requires none
+  ensures none
+  effects none
+{
+  return read_user(&req).unwrap_or(web.error_response(400));
+}
+
+fn health(req: &AppRequest) -> HttpResponse
+  intent "明示的な公開経路の応答"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpResponse.new(200, "ok".as_bytes());
+}
+
+fn demo_auth(req: &AppRequest) -> Result<AuthIdentity, HttpResponse>
+  intent "テスト用の認証検証器。実運用では暗号検証する実装へ差し替える"
+  requires none
+  ensures none
+  effects none
+{
+  let token = req.header(&"authorization").unwrap_or(Bytes.new());
+  if token.to_string_utf8().unwrap_or("") == "Bearer demo-only" {
+    return Ok(AuthIdentity.new("demo-user"));
+  }
+  return Err(web.error_response(401));
+}
+
+fn before(req: &AppRequest) -> Option<HttpResponse>
+  intent "認証を通過した要求または公開要求を記録する"
+  requires none
+  ensures none
+  effects console
+{
+  console.log(&req.path());
+  return None;
+}
+
+fn after(req: &AppRequest, response: HttpResponse) -> HttpResponse
+  intent "通常応答と前処理の中断応答に共通ヘッダーを付ける"
+  requires none
+  ensures none
+  effects none
+{
+  return response.with_header(&"x-example", &"sigil.web".as_bytes());
+}
+
+fn make_router() -> Result<Router, HttpResponse>
+  intent "既定必須の経路と明示的な公開経路を登録する"
+  requires none
+  ensures none
+  effects none
+{
+  let protected = Router.new().route("GET", "/users/:id", RouteHandler { handle: user })?;
+  let router = protected.public_route("GET", "/health", RouteHandler { handle: health })?;
+  return Ok(router.with_auth(AuthVerifier { verify: demo_auth }).before(BeforeHook { run: before }).after(AfterHook { run: after }));
+}
+
+fn main() -> String
+  intent "共有された経路表をソケットなしで読み出して要求を処理する"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let mut router = Router.new();
+  match make_router() {
+    Ok(value) => {
+      router = value;
+    }
+    Err(_) => {
+      return "route registration failed";
+    }
+  }
+  let shared = SyncShared.new(router);
+  let limits = http.default_limits();
+  let mut parser = http.parser(&limits);
+  let request = "GET /users/42?name=Sigil HTTP/1.1\r\nHost: example\r\nAuthorization: Bearer demo-only\r\n\r\n".as_bytes();
+  match parser.feed(&request, 0) {
+    Ok(progress) => {
+      match progress {
+        HttpProgress.Done(req, _) => {
+          let router_ref = shared.borrow();
+          return router_ref.dispatch(&req).body().to_string_utf8().unwrap_or("");
+        }
+        HttpProgress.NeedMore => {}
+      }
+    }
+    Err(_) => {}
+  }
+  return "invalid request";
+}

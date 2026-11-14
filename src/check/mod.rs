@@ -234,6 +234,7 @@ const PRELUDE_TYPES: &[&str] = &[
     "RootSlot",
     // TCP のソケットの型（ADR 0031 決定 3-1）。実体は埋め込みモジュール `std.os.net` が持つ。利用者が同じ名前の型を
     // 宣言できると、表のシグネチャの型（fd を所有する型）と取り違えるので、前置きの名前にする。
+    "ShutdownSignal",
     "TcpListener",
     "TcpStream",
     "TcpClient",
@@ -264,7 +265,13 @@ const PRELUDE_TYPES: &[&str] = &[
     "JsonField",
 ];
 /// `std.os.net` が実体を宣言する前置きの型（所有型 3 つと NetError）。そのモジュール自身の検査でだけ、宣言と `impl` を許す。
-pub(crate) const NET_TYPES: &[&str] = &["TcpListener", "TcpStream", "TcpClient", "NetError"];
+pub(crate) const NET_TYPES: &[&str] = &[
+    "ShutdownSignal",
+    "TcpListener",
+    "TcpStream",
+    "TcpClient",
+    "NetError",
+];
 
 /// 埋め込みモジュール `mname` 自身の検査で、宣言と `impl` を許す前置きの型（実体を持つ型）。ほかのモジュールは空。
 /// `std.http` は `std.http.limits` の関数を `use` し、その型 `HttpLimits` が見えるので、両方に `HTTP_TYPES` を許す。

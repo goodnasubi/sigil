@@ -1,0 +1,14 @@
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸: SigilはAIが実装し人間が仕様をレビューする。trust noneを維持し、信頼基盤を最小化し、既存ADR0033判断点K/ADR0018のSIGTERM/SIGINT終了要件に従う。所有者はIssue483のK1実装とPR作成を明示承認、mergeは別途人間。範囲外6-4g/limits/workflowsは変更しない。案: SIGTERM/INTのみraw.syscallで許可しopaque ShutdownSignalがfdを所有、最初のtask起動前にmaskを設定して全workerへ継承、失敗時restore。task.roots_graceは既存roots IRを再利用し受付本体が終了した瞬間から有限猶予でdrain/期限cancel。web.run_untilはtrust noneのまま受付loopと注入停止待機を既存raceで競合し、停止でacceptおよび満杯reserveを中断、既存rootはdrain。評価器はsleep/channel停止を注入。任意signal handlersや6-4gは導入しない。",
+  "questions": {
+    "implementation": {
+      "type": "choice",
+      "criteria": {
+        "adopt": "K1の限定APIと既存機構合成を採用し、公開APIに必須の起動順と有限graceを記録し検証する",
+        "expand": "任意signal handlerと汎用signal mask操作を導入する",
+        "defer": "SIGTERM/SIGINTの優雅な停止を実装しない"
+      }
+    }
+  }
+}

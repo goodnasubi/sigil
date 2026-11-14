@@ -1294,6 +1294,37 @@ impl<'p> M<'p> {
                 }
             }
             SYS_CLOSE => {}
+            // ADR 0033 K: 非同期ハンドラは持たず SIGTERM / SIGINT のみ。
+            SYS_RT_SIGPROCMASK | SYS_SIGNALFD4 => {
+                if a[3] != 8 && n == SYS_RT_SIGPROCMASK {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall rt_sigprocmask: sigsetsize は 8 のみ許可",
+                    ));
+                }
+                if n == SYS_RT_SIGPROCMASK {
+                    if !matches!(a[0], 0 | 1) || a[4] != 0 || a[5] != 0 {
+                        return Err(self.syscall_stop(loc, "raw.syscall rt_sigprocmask: SIG_BLOCK / SIG_UNBLOCK のみ許可（未使用引数は 0）"));
+                    }
+                    if a[2] != 0 {
+                        self.check_raw_access(addr_of(a[2], "oldset")?, 8, loc)?;
+                    }
+                } else if a[0] != -1 || a[2] != 8 || a[3] != 526336 || a[4] != 0 || a[5] != 0 {
+                    return Err(self.syscall_stop(loc, "raw.syscall signalfd4: 新規 fd・sigsetsize 8・NONBLOCK|CLOEXEC のみ許可（未使用引数は 0）"));
+                }
+                let set = addr_of(a[1], "set")?;
+                self.check_raw_access(set, 8, loc)?;
+                let mut bytes = [0u8; 8];
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = self.peek_u8(set + i, loc)?;
+                }
+                let mask = u64::from_le_bytes(bytes);
+                if (n == SYS_SIGNALFD4 || a[0] == 0) && mask != SHUTDOWN_MASK
+                    || mask & !SHUTDOWN_MASK != 0
+                {
+                    return Err(self.syscall_stop(loc, "raw.syscall signal: SIGTERM / SIGINT のみ許可（block と signalfd は両方を指定）"));
+                }
+            }
             // ソケット系（ADR 0031 決定 3-4・判断点 D の案 B、PR 6-3e）。`std.os.net` が使う形だけを通す。
             // 番地を渡す引数は、生きた塊の範囲に収まることを確かめる。カーネルが書く長さは、検査した大きさを超えない。
             SYS_SOCKET => {
@@ -1561,6 +1592,9 @@ const SYS_CLOSE: i64 = 3;
 const SYS_FSTAT: i64 = 5;
 const SYS_MMAP: i64 = 9;
 const SYS_MUNMAP: i64 = 11;
+const SYS_RT_SIGPROCMASK: i64 = 14;
+const SYS_SIGNALFD4: i64 = 289;
+const SHUTDOWN_MASK: u64 = (1 << (15 - 1)) | (1 << (2 - 1));
 const SYS_EXIT_GROUP: i64 = 231;
 const SYS_OPENAT: i64 = 257;
 const SYS_NEWFSTATAT: i64 = 262;

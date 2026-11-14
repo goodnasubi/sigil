@@ -128,6 +128,7 @@ struct GroupSt {
     waiters: VecDeque<usize>,
     /// 起動したルートの記録（`Sched.started` の番号。起動の順）。
     starts: Vec<usize>,
+    grace_ms: Option<i64>,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -291,6 +292,7 @@ fn fp_frames(frames: &[Frame]) -> Option<u64> {
 enum Wake {
     Sleep(usize),
     Timeout(usize),
+    Drain(usize),
 }
 
 pub(super) struct Sched {
@@ -719,6 +721,20 @@ impl<'p> M<'p> {
                         // `task.roots` の本体が戻ったら、以後の起動を止める（起動済みのルートは待つ）。
                         if let ScopeKind::Roots { group } = self.sch.scopes[sid].kind {
                             self.sch.groups[group].closed = true;
+                            if self.sch.scopes[sid].live > 0 {
+                                if let Some(ms) = self.sch.groups[group].grace_ms {
+                                    let base = if self.sch.realtime.is_some() {
+                                        self.sch.clock = self.rt_clock();
+                                        self.rt_clock_up()
+                                    } else {
+                                        self.sch.clock
+                                    };
+                                    let at = base.saturating_add(ms);
+                                    let seq = self.sch.seq;
+                                    self.sch.seq += 1;
+                                    self.sch.sleepers.push((at, seq, Wake::Drain(sid)));
+                                }
+                            }
                         }
                         if self.sch.scopes[sid].live > 0 {
                             let cur = self.sch.cur;
@@ -782,6 +798,9 @@ impl<'p> M<'p> {
             }
             ScopeKind::Roots { group } => {
                 let g = *group;
+                self.sch
+                    .sleepers
+                    .retain(|s| !matches!(s.2, Wake::Drain(x) if x == sid));
                 self.cancel_roots(g);
             }
             _ => {}
@@ -934,6 +953,13 @@ impl<'p> M<'p> {
                 Wake::Sleep(t) => {
                     if self.sch.tasks[t].state == State::Sleeping {
                         self.wake(t, None);
+                    }
+                }
+                Wake::Drain(sid) => {
+                    if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                        self.cancel_scope(sid);
+                        self.sch.tasks[w].waiting_scope = None;
+                        self.wake(w, None);
                     }
                 }
                 Wake::Timeout(sid) => {
@@ -1338,7 +1364,20 @@ impl<'p> M<'p> {
                         Some("task.roots: limit は 1 以上 4096 以下"),
                     ));
                 }
-                let f = self.read(locals, &args[1]);
+                let grace_ms = if args.len() == 3 {
+                    let ms = self.read_int(locals, &args[1]);
+                    if !(1..=300000).contains(&ms) {
+                        return Op::Fail(self.stop_at(
+                            stop,
+                            Some(StopKind::StdRequiresViolated),
+                            Some("task.roots_grace: grace_ms は 1 以上 300000 以下"),
+                        ));
+                    }
+                    Some(ms)
+                } else {
+                    None
+                };
+                let f = self.read(locals, &args[args.len() - 1]);
                 let sid = self.sch.scopes.len();
                 let gid = self.sch.groups.len();
                 self.sch.scopes.push(ScopeSt {
@@ -1352,6 +1391,7 @@ impl<'p> M<'p> {
                     closed: false,
                     waiters: VecDeque::new(),
                     starts: vec![],
+                    grace_ms,
                 });
                 let gref = Val::Ref(Ptr {
                     slot: new_slot(Val::Int(gid as i64)),
@@ -1505,6 +1545,9 @@ impl<'p> M<'p> {
         if sc.live == 0 {
             if let Some(w) = sc.waiter.take() {
                 self.sch.tasks[w].waiting_scope = None;
+                self.sch
+                    .sleepers
+                    .retain(|s| !matches!(s.2, Wake::Drain(x) if x == sid));
                 self.finish_scope(sid);
                 self.wake(w, None);
             }
@@ -1815,6 +1858,13 @@ impl<'p> M<'p> {
                 Wake::Sleep(t) => {
                     if self.sch.tasks[t].state == State::Sleeping {
                         self.wake(t, None);
+                    }
+                }
+                Wake::Drain(sid) => {
+                    if let Some(w) = self.sch.scopes[sid].waiter.take() {
+                        self.cancel_scope(sid);
+                        self.sch.tasks[w].waiting_scope = None;
+                        self.wake(w, None);
                     }
                 }
                 Wake::Timeout(sid) => {

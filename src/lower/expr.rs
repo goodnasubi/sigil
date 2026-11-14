@@ -698,7 +698,11 @@ impl<'a> L<'a> {
                 let ops = self.args_of(args)?;
                 // `net.listen`（ADR 0031 決定 3-2）は組み込みでなく、埋め込みモジュール `std.os.net` の Sigil の関数が
                 // 実体（評価器とネイティブで共用）。結合後の名前で引いて、利用者の関数と同じ呼び出しにする。
-                if r.name == "net.listen" || r.name == "net.connect" || r.name == "random.bytes" {
+                if r.name == "net.listen"
+                    || r.name == "net.connect"
+                    || r.name == "net.shutdown_signal"
+                    || r.name == "random.bytes"
+                {
                     self.core_only = false;
                     let full = if r.name == "random.bytes" {
                         format!("{}.bytes", crate::stdlib::embedded::RANDOM_MODULE)
@@ -801,7 +805,7 @@ impl<'a> L<'a> {
                     "task.sleep" => Builtin::TaskSleep,
                     "task.channel" => Builtin::TaskChannel,
                     // 複数ルートの入口（ADR 0031 決定 4-1）。検査器の登録と実体は PR 6-3d。
-                    "task.roots" => Builtin::RootsScope,
+                    "task.roots" | "task.roots_grace" => Builtin::RootsScope,
                     n => return bail(format!("名前空間の関数 {n}")),
                 };
                 Ok(self.emit_call(Callee::Builtin(b), ops, ret))

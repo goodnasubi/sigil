@@ -2,7 +2,7 @@ module std.web
   targets server
   trust none
 
-// ADR 0033 E・I・J / Issue #460。設定・定型応答・ルーター。停止処理は後続段。
+// ADR 0033 E・I・J / Issue #460。設定・定型応答・ルーター。停止処理は task.roots_grace と task.race を組み合わせる。
 // 前段ヘッダーを解釈する API や信頼フラグは持たない。HttpRequest.header の値は未検証の生値。
 // 不正な設定は Result の Err で起動側に返し、失敗時には待ち受けを開始しない。
 // ConfigError は変数名だけを保持し、設定値（秘密を含む）を保持・表示しない。

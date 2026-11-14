@@ -104,12 +104,12 @@ thread_local! {
     pub(super) static DROP_LOG: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     pub(super) static TYPES: RefCell<Rc<Vec<TypeDef>>> = RefCell::new(Rc::new(vec![]));
     /// fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`・`TcpClient`）の型番号。無いプログラムでは `usize::MAX`。
-    pub(super) static FD_TYPES: StdCell<[usize; 3]> = const { StdCell::new([usize::MAX; 3]) };
+    pub(super) static FD_TYPES: StdCell<[usize; 4]> = const { StdCell::new([usize::MAX; 4]) };
 }
 
 /// 実行するプログラムの、fd を所有する型の番号を記録する（値の破棄で `close` するため）。
 pub(super) fn set_fd_types(types: &[TypeDef]) {
-    let mut ids = [usize::MAX; 3];
+    let mut ids = [usize::MAX; 4];
     for (slot, name) in ids.iter_mut().zip(crate::stdlib::NET_FD_TYPES) {
         if let Some(i) = types.iter().position(|t| t.name == *name) {
             *slot = i;
@@ -128,7 +128,7 @@ fn close_owned_fd(a: &Agg) {
     let Tag::Struct(t) = a.tag else {
         return;
     };
-    let ids = FD_TYPES.try_with(|c| c.get()).unwrap_or([usize::MAX; 3]);
+    let ids = FD_TYPES.try_with(|c| c.get()).unwrap_or([usize::MAX; 4]);
     if !ids.contains(&t) {
         return;
     }

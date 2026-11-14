@@ -103,6 +103,10 @@ fn empty_group_does_not_install_a_timer() {
     let end = src.find("    task.sleep(0);").unwrap();
     let mut empty = src;
     empty.replace_range(start..end, "");
+    let empty = empty.replace(
+        "clock, console, task.spawn, task.suspend",
+        "clock, console, task.suspend",
+    );
     let o = common::run_with(&empty, "run", &[], &Options::captured()).unwrap();
     assert_eq!(o.value, "7");
     assert_eq!(o.output, "2\n");

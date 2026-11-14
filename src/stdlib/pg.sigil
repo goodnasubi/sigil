@@ -941,11 +941,15 @@ fn receive(stream: &mut TcpClient, budget: &mut PgBudget) -> Result<PgFrame, PgE
 {
   let mut d = decoder(1048576)?;
   while true {
-    let data = match stream.read(1) { Ok(b) => Ok(b), Err(e) => Err(PgError.Connection), }?;
-    if data.len() == 0 { return Err(PgError.Connection); }
-    match d.feed(&data)? {
-      PgProgress.Done(f, n) => { budget.accept(&f)?; return Ok(f); }
-      PgProgress.NeedMore(n) => {}
+    match stream.read(1) {
+      Ok(data) => {
+        if data.len() == 0 { return Err(PgError.Connection); }
+        match d.feed(&data)? {
+          PgProgress.Done(f, n) => { budget.accept(&f)?; return Ok(f); }
+          PgProgress.NeedMore(n) => {}
+        }
+      }
+      Err(e) => { return Err(PgError.Connection); }
     }
   }
   return Err(PgError.Protocol);

@@ -286,21 +286,29 @@ fn startup_authentication_and_rejections_match_both_engines() {
   targets server
   trust none
 pub fn main(port: Int, timeout: Int) -> Int
+  intent "接続結果を固定分類で返す"
+  requires none
+  ensures none
+  effects net.client, random, task.suspend, task.spawn, clock
+{
+  match run(port, timeout) { Ok(n) => { return n; } Err(e) => { return 99; } }
+}
+fn run(port: Int, timeout: Int) -> Result<Int, PgError>
   intent "期限内に認証を完了し接続を所有する"
   requires none
   ensures none
   effects net.client, random, task.suspend, task.spawn, clock
 {
-  let cfg = pg.config("127.0.0.1", port, "user", "database", Secret.from_bytes("pencil".as_bytes())).unwrap();
-  let limits = pg.default_connect_limits().with_timeout(timeout).unwrap();
+  let cfg = pg.config("127.0.0.1", port, "user", "database", Secret.from_bytes("pencil".as_bytes()))?;
+  let limits = pg.default_connect_limits().with_timeout(timeout)?;
   match pg.connect(cfg, &limits) {
-    Ok(c) => { return 0; }
-    Err(PgError.Protocol) => { return 1; }
-    Err(PgError.LimitExceeded) => { return 2; }
-    Err(PgError.Timeout) => { return 3; }
-    Err(PgError.Authentication) => { return 5; }
-    Err(PgError.Connection) => { return 6; }
-    Err(e) => { return 4; }
+    Ok(c) => { return Ok(0); }
+    Err(PgError.Protocol) => { return Ok(1); }
+    Err(PgError.LimitExceeded) => { return Ok(2); }
+    Err(PgError.Timeout) => { return Ok(3); }
+    Err(PgError.Authentication) => { return Ok(5); }
+    Err(PgError.Connection) => { return Ok(6); }
+    Err(e) => { return Ok(4); }
   }
 }
 

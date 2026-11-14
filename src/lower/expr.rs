@@ -698,10 +698,19 @@ impl<'a> L<'a> {
                 let ops = self.args_of(args)?;
                 // `net.listen`（ADR 0031 決定 3-2）は組み込みでなく、埋め込みモジュール `std.os.net` の Sigil の関数が
                 // 実体（評価器とネイティブで共用）。結合後の名前で引いて、利用者の関数と同じ呼び出しにする。
-                if r.name == "net.listen" {
+                if r.name == "net.listen" || r.name == "net.connect" || r.name == "random.bytes" {
                     self.core_only = false;
-                    let Some(&decl) = self.fns.get(crate::stdlib::embedded::NET_LISTEN_FN) else {
-                        return bail("net.listen の実体（std.os.net）が結ばれていない");
+                    let full = if r.name == "random.bytes" {
+                        format!("{}.bytes", crate::stdlib::embedded::RANDOM_MODULE)
+                    } else {
+                        format!(
+                            "{}.{}",
+                            crate::stdlib::embedded::NET_MODULE,
+                            r.name.strip_prefix("net.").unwrap()
+                        )
+                    };
+                    let Some(&decl) = self.fns.get(full.as_str()) else {
+                        return bail(format!("{} の実体が結ばれていない", r.name));
                     };
                     return self.user_call(decl, &r.targs, ops, ret);
                 }

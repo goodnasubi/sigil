@@ -262,7 +262,9 @@ impl Ck {
                 }
                 // fd を所有する型（ADR 0031 決定 3-1）。ハンドラのタスクへ移せる（`Sendable`）が、複数のタスクが
                 // 同じ接続を同時に読み書きできない（`Shareable` でない）。複製・比較・表示も持たない。
-                Some(TypeDef::Opaque(_)) if matches!(n.as_str(), "TcpListener" | "TcpStream") => {
+                Some(TypeDef::Opaque(_))
+                    if matches!(n.as_str(), "TcpListener" | "TcpStream" | "TcpClient") =>
+                {
                     Some(p == Prop::Sendable)
                 }
                 // HTTP の中身を見せない型（ADR 0032 決定 2-2）。値（`Int`・`Bytes`・`String`・一覧）だけを持つので、タスクへ移せて

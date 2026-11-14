@@ -73,11 +73,13 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("RootGroup", 0, Layer::Core),
     ("RootSlot", 0, Layer::Core),
     // TCP のソケット（ADR 0031 決定 3、PR 6-3e）。中身は `std.os.net` の Sigil 実装が持つ（`Secret` と同じ作法）。
-    // `TcpListener`・`TcpStream` は 1 つの値が 1 つの fd を所有し、破棄で閉じる。複製できず、`Sendable` だが
+    // `TcpListener`・`TcpStream`・`TcpClient` は 1 つの値が 1 つの fd を所有し、破棄で閉じる。複製できず、`Sendable` だが
     // `Shareable` でない（性質は検査器が型名ごとに持つ）。`NetError` は腕を `match` できる列挙で、検査器は
     // この行を列挙として登録し直す（`NET_ERROR_ARMS`）。
     ("TcpListener", 0, Layer::Os),
     ("TcpStream", 0, Layer::Os),
+    // ADR 0034 決定 4: 接続側専用の所有型。
+    ("TcpClient", 0, Layer::Os),
     ("NetError", 0, Layer::Os),
     // HTTP/1.1 の解釈と型（ADR 0032 決定 2、PR 6-3g-b）。中身は `std.http`・`std.http.limits` の Sigil 実装が持つ（`TcpStream` と
     // 同じ作法）。型の名前は平らな名前空間（ADR 0021）で利用者の型と衝突しないよう `Http` で始め、前置きの名前にする
@@ -101,7 +103,11 @@ pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
 pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
 /// `std.os.net` が実体を持つ、fd を所有する型（結合後の名前）。値の破棄で `close(2)` を 1 回呼ぶ
 /// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
-pub const NET_FD_TYPES: &[&str] = &["std.os.net.TcpListener", "std.os.net.TcpStream"];
+pub const NET_FD_TYPES: &[&str] = &[
+    "std.os.net.TcpListener",
+    "std.os.net.TcpStream",
+    "std.os.net.TcpClient",
+];
 /// `HttpError` の腕（ADR 0032 決定 2-2）。並びは `std.http` の宣言と同じ（単体テストで固定する）。
 pub const HTTP_ERROR_ARMS: &[&str] = &[
     "BadRequest",
@@ -379,6 +385,9 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>",
         "net.server",
     ),
+    // ADR 0034 決定 4: 実効果を接続側と乱数で分ける。既存サーバー側 API の意味は変えない。
+    (Layer::Os, "net", "connect(host: &String, port: Int) -> Result<TcpClient, NetError>", "net.client, task.suspend"),
+    (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
     // HTTP の上限の既定値と増分の解釈器（ADR 0032 決定 2-3・4-3、PR 6-3g-b）。実体は `std.http`（lower が名前で結ぶ）。
     // I/O をしない（効果なし）。
     (Layer::Os, "http", "default_limits() -> HttpLimits", "none"),
@@ -406,6 +415,18 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
 
 /// シグネチャ（`Entry` の最初の要素）に対応する `requires` 節。ない関数は `none`。
 pub const REQUIRES: &[(&str, &str)] = &[
+    (
+        "connect(host: &String, port: Int) -> Result<TcpClient, NetError>",
+        "1 <= port && port <= 65535",
+    ),
+    (
+        "read(self: &mut TcpClient, max: Int) -> Result<Bytes, NetError>",
+        "1 <= max && max <= 65536",
+    ),
+    (
+        "bytes(len: Int) -> Option<Bytes>",
+        "1 <= len && len <= 65536",
+    ),
     // ソケットの契約（ADR 0031 決定 3-2）。1 回の読みの大きさの上限を、API の側で破れなくする（ADR 0020 決定 4）。
     (
         "listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>",
@@ -722,6 +743,10 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ),
         ],
     ),
+    (Layer::Os, "TcpClient", &[
+        ("read(self: &mut TcpClient, max: Int) -> Result<Bytes, NetError>", "net.client, task.suspend"),
+        ("write_all(self: &mut TcpClient, data: &Bytes) -> Result<Unit, NetError>", "net.client, task.suspend"),
+    ]),
     // HTTP の型（ADR 0032 決定 2-2・2-3、PR 6-3g-b）。実体は `std.http`・`std.http.limits` の `impl`。取り出す関数は写しを返す。
     (
         Layer::Os,
@@ -1029,6 +1054,12 @@ mod tests {
             "TcpStream.write_all",
             "TcpStream.shutdown",
             "NetError",
+            // ADR 0034 決定 4。
+            "net.connect",
+            "TcpClient",
+            "TcpClient.read",
+            "TcpClient.write_all",
+            "random.bytes",
             // ADR 0032 決定 2（PR 6-3g-b）。
             "http.default_limits",
             "http.parser",
@@ -1243,6 +1274,7 @@ mod tests {
                         | "IoError"
                         | "TcpListener"
                         | "TcpStream"
+                        | "TcpClient"
                         | "NetError"
                         | "HttpLimits"
                         | "HttpParser"

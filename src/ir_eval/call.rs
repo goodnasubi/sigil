@@ -1254,11 +1254,11 @@ impl<'p> M<'p> {
                 }
                 self.check_raw_access(addr_of(a[3], "optval")?, 4, loc)?;
             }
-            SYS_BIND => {
+            SYS_BIND | SYS_CONNECT => {
                 if a[2] != SOCKADDR_IN_SIZE as i64 {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall bind: addrlen は 16（sockaddr_in）のみ許可",
+                        "raw.syscall bind/connect: addrlen は 16（sockaddr_in）のみ許可",
                     ));
                 }
                 let sa = addr_of(a[1], "addr")?;
@@ -1267,7 +1267,9 @@ impl<'p> M<'p> {
                 let family =
                     u16::from_le_bytes([self.peek_u8(sa, loc)?, self.peek_u8(sa + 1, loc)?]);
                 if i64::from(family) != AF_INET {
-                    return Err(self.syscall_stop(loc, "raw.syscall bind: AF_INET のみ許可"));
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall bind/connect: AF_INET のみ許可")
+                    );
                 }
             }
             SYS_LISTEN => {}
@@ -1285,6 +1287,36 @@ impl<'p> M<'p> {
                         "raw.syscall getsockname: *addrlen は 16（検査した領域の大きさ）のみ許可",
                     ));
                 }
+            }
+            SYS_GETSOCKOPT => {
+                if a[1] != SOL_SOCKET || a[2] != SO_ERROR {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall getsockopt: SOL_SOCKET・SO_ERROR のみ許可",
+                    ));
+                }
+                let opt = addr_of(a[3], "optval")?;
+                let len = addr_of(a[4], "optlen")?;
+                self.check_raw_access(opt, 4, loc)?;
+                self.check_raw_access(len, 4, loc)?;
+                let mut bytes = [0u8; 4];
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = self.peek_u8(len + i, loc)?;
+                }
+                if u32::from_le_bytes(bytes) != 4 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall getsockopt: *optlen は 4 のみ許可")
+                    );
+                }
+            }
+            SYS_GETRANDOM => {
+                if !(1..=65536).contains(&a[1]) || a[2] != 0 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall getrandom: 長さは 1..65536・flags は 0 のみ許可",
+                    ));
+                }
+                self.check_raw_access(addr_of(a[0], "buf")?, a[1] as usize, loc)?;
             }
             SYS_ACCEPT4 => {
                 if a[1] != 0 || a[2] != 0 {
@@ -1468,6 +1500,9 @@ const SYS_OPENAT: i64 = 257;
 const SYS_NEWFSTATAT: i64 = 262;
 const SYS_UNLINKAT: i64 = 263;
 const SYS_SOCKET: i64 = 41;
+const SYS_CONNECT: i64 = 42;
+const SYS_GETSOCKOPT: i64 = 55;
+const SYS_GETRANDOM: i64 = 318;
 const SYS_SENDTO: i64 = 44;
 const SYS_RECVFROM: i64 = 45;
 const SYS_SHUTDOWN: i64 = 48;
@@ -1483,6 +1518,7 @@ const SOCK_NONBLOCK: i64 = 0o4000;
 const SOCK_CLOEXEC: i64 = 0o2000000;
 const SOL_SOCKET: i64 = 1;
 const SO_REUSEADDR: i64 = 2;
+const SO_ERROR: i64 = 4;
 const MSG_NOSIGNAL: i64 = 0x4000;
 const SHUT_WR: i64 = 1;
 const PROT_READ: i64 = 1;

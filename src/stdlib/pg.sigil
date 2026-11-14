@@ -2,7 +2,7 @@ module std.pg
   targets server
   trust none
 
-// ADR 0034 決定 2 / #463。接続・認証・文実行を含まない純粋な部品。
+// ADR 0034 決定 1・2・6。SCRAM と Startup は同じ Sigil 本体で評価する。
 // 埋込みモジュール間で利用する。公開 query の入口は 6-5d で追加する。
 // feed は一フレームまで消費し、Done/NeedMore の整数は入力から消費したバイト数。
 // 呼出側は未消費分を再投入し、EOFでは finish を呼ぶ。受信エラー後は再利用しない。
@@ -11,7 +11,16 @@ module std.pg
 // BackendKeyData の秘密とサーバー詳細文は返さず、エラーは SQLSTATE だけを返す。
 // 最大値: wire 一メッセージ1MiB、結果4MiB/10000行/256列、SQL64KiB/256パラメータ。
 // 自前バッファは一メッセージ以下。型変換の一時値も wire 長以下（byteaは縮小）。
+use std.pg_scram.credential;
+use std.pg_scram.first;
+use std.pg_scram.respond;
+use std.pg_scram.verify;
+
 pub enum PgError {
+  UnsupportedCredential,
+  Authentication,
+  Connection,
+  Timeout,
   Protocol,
   LimitExceeded,
   TypeMismatch,
@@ -821,4 +830,209 @@ impl PgColumn {
   {
     return self.oid;
   }
+}
+
+
+// 接続は fd を一つだけ所有する。認証失敗と timeout はこの値を返さず、TcpClient の破棄で閉じる。
+pub struct PgConn {
+  stream: TcpClient,
+}
+
+pub struct PgConfig {
+  host: String,
+  port: Int,
+  user: String,
+  database: String,
+  password: Secret,
+}
+
+pub struct PgConnectLimits {
+  timeout_ms: Int,
+}
+
+pub fn config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>
+  intent "接続前に資格情報と設定を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if port < 1 || port > 65535 { return Err(PgError.Protocol); }
+  let u = user.as_bytes();
+  let d = database.as_bytes();
+  if u.len() == 0 || d.len() == 0 || u.len() > 1024 || d.len() > 1024 { return Err(PgError.UnsupportedCredential); }
+  let mut i = 0;
+  while i < u.len() { if u.get(i).unwrap_or(0) == 0 { return Err(PgError.UnsupportedCredential); } i = i + 1; }
+  i = 0;
+  while i < d.len() { if d.get(i).unwrap_or(0) == 0 { return Err(PgError.UnsupportedCredential); } i = i + 1; }
+  let pw = password.expose();
+  let valid = credential(&pw);
+  let wipe = Secret.from_bytes(pw);
+  if !valid { return Err(PgError.UnsupportedCredential); }
+  return Ok(PgConfig { host: host, port: port, user: user, database: database, password: password });
+}
+
+pub fn default_connect_limits() -> PgConnectLimits
+  intent "認証全体の上限を10秒にする"
+  requires none
+  ensures none
+  effects none
+{
+  return PgConnectLimits { timeout_ms: 10000 };
+}
+
+impl PgConnectLimits {
+  pub fn with_timeout(self: PgConnectLimits, ms: Int) -> Result<PgConnectLimits, PgError>
+    intent "期限を10秒以下に狭める"
+    requires none
+    ensures none
+    effects none
+  {
+    if ms < 1 || ms > 10000 { return Err(PgError.LimitExceeded); }
+    return Ok(PgConnectLimits { timeout_ms: ms });
+  }
+}
+
+pub fn connect(config: PgConfig, limits: &PgConnectLimits) -> Result<PgConn, PgError>
+  intent "SCRAMとStartupを期限内に完了しidle接続を返す"
+  requires none
+  ensures none
+  effects net.client, random, clock, task.spawn, task.suspend
+{
+  match task.timeout(limits.timeout_ms, || connect_inner(&config)) {
+    Some(r) => { return r; }
+    None => { return Err(PgError.Timeout); }
+  }
+}
+
+fn startup(user: &String, database: &String) -> Bytes
+  intent "protocol3とUTF8と固定のbytea設定を送る"
+  requires none
+  ensures none
+  effects none
+{
+  let mut body = Bytes.new();
+  body.push_u32_be(196608);
+  body.extend(&"user\u{0}".as_bytes()); body.extend(&user.as_bytes()); body.push(0);
+  body.extend(&"database\u{0}".as_bytes()); body.extend(&database.as_bytes()); body.push(0);
+  body.extend(&"client_encoding\u{0}UTF8\u{0}options\u{0}-c bytea_output=hex\u{0}\u{0}".as_bytes());
+  let mut out = Bytes.new(); out.push_u32_be(body.len() + 4); out.extend(&body);
+  return out;
+}
+
+fn scram_error(e: ScramError) -> PgError
+  intent "秘密を含まない固定分類へ変換する"
+  requires none
+  ensures none
+  effects none
+{
+  return match e {
+    ScramError.LimitExceeded => PgError.LimitExceeded,
+    ScramError.UnsupportedCredential => PgError.UnsupportedCredential,
+    ScramError.Protocol => PgError.Authentication,
+  };
+}
+
+// 1バイトずつ読むのでフレームの先を消費しない。保持量はdecoderの一メッセージ上限内。
+fn receive(stream: &mut TcpClient, budget: &mut PgBudget) -> Result<PgFrame, PgError>
+  intent "上限付きフレームを受け取る"
+  requires none
+  ensures none
+  effects net.client, task.suspend
+{
+  let mut d = decoder(1048576)?;
+  while true {
+    let data = match stream.read(1) { Ok(b) => Ok(b), Err(e) => Err(PgError.Connection), }?;
+    if data.len() == 0 { return Err(PgError.Connection); }
+    match d.feed(&data)? {
+      PgProgress.Done(f, n) => { budget.accept(&f)?; return Ok(f); }
+      PgProgress.NeedMore(n) => {}
+    }
+  }
+  return Err(PgError.Protocol);
+}
+
+fn send(stream: &mut TcpClient, data: &Bytes) -> Result<Bool, PgError>
+  intent "フレーム全体を送る"
+  requires none
+  ensures none
+  effects net.client, task.suspend
+{
+  match stream.write_all(&data) { Ok(v) => { return Ok(true); } Err(e) => { return Err(PgError.Connection); } }
+}
+
+fn auth(f: &PgFrame, code: Int) -> Result<Bytes, PgError>
+  intent "認証の種類とサイズを検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if f.tag != 82 || f.body.len() < 4 { return Err(PgError.Authentication); }
+  if f.body.read_u32_be(0).unwrap_or(0 - 1) != code { return Err(PgError.Authentication); }
+  if f.body.len() > 16388 { return Err(PgError.LimitExceeded); }
+  return Ok(part(&f.body, 4, f.body.len()));
+}
+
+fn sasl(mechanisms: &Bytes) -> Result<Bool, PgError>
+  intent "SCRAM-SHA-256だけを選択する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut r = PgReader { data: mechanisms.clone(), pos: 0 };
+  let mut found = false;
+  while r.pos < r.data.len() {
+    let name = cstring(&mut r)?;
+    if name == "" {
+      if r.pos != r.data.len() || !found { return Err(PgError.Authentication); }
+      return Ok(true);
+    }
+    if name == "SCRAM-SHA-256" { if found { return Err(PgError.Authentication); } found = true; }
+  }
+  return Err(PgError.Authentication);
+}
+
+fn connect_inner(c: &PgConfig) -> Result<PgConn, PgError>
+  intent "認証の応答を順番に検証する"
+  requires none
+  ensures none
+  effects net.client, random, task.suspend
+{
+  let nonce = match random.bytes(24) { Some(b) => Ok(b), None => Err(PgError.Connection), }?;
+  let initial = match first(&nonce) { Ok(b) => Ok(b), Err(e) => Err(scram_error(e)), }?;
+  let mut stream = match net.connect(&c.host, c.port) { Ok(s) => Ok(s), Err(e) => Err(PgError.Connection), }?;
+  send(&mut stream, &startup(&c.user, &c.database))?;
+  let mut b = budget(4194304, 0)?;
+  let methods = auth(&receive(&mut stream, &mut b)?, 10)?;
+  sasl(&methods)?;
+  let mut body = "SCRAM-SHA-256\u{0}".as_bytes(); body.push_u32_be(initial.len()); body.extend(&initial);
+  send(&mut stream, &frame(112, body, 1048576)?)?;
+  let challenge = auth(&receive(&mut stream, &mut b)?, 11)?;
+  let reply = match respond(&c.password, &nonce, &challenge) { Ok(r) => Ok(r), Err(e) => Err(scram_error(e)), }?;
+  send(&mut stream, &frame(112, reply.message, 1048576)?)?;
+  let final = auth(&receive(&mut stream, &mut b)?, 12)?;
+  match verify(&reply.signature, &final) {
+    Ok(true) => {}
+    Ok(false) => { return Err(PgError.Authentication); }
+    Err(e) => { return Err(scram_error(e)); }
+  }
+  let ok = auth(&receive(&mut stream, &mut b)?, 0)?;
+  if ok.len() != 0 { return Err(PgError.Authentication); }
+  let mut encoding = false;
+  let mut key = false;
+  while true {
+    let f = receive(&mut stream, &mut b)?;
+    match backend(&f, &List.new())? {
+      PgBackend.ParameterStatus(k, v) => {
+        if k == "client_encoding" { if v != "UTF8" { return Err(PgError.Protocol); } encoding = true; }
+      }
+      PgBackend.BackendKeyData => { if key { return Err(PgError.Protocol); } key = true; }
+      PgBackend.NoticeResponse => {}
+      PgBackend.ReadyForQuery(status) => {
+        if status != 73 || !encoding { return Err(PgError.Protocol); }
+        return Ok(PgConn { stream: stream });
+      }
+      _ => { return Err(PgError.Protocol); }
+    }
+  }
+  return Err(PgError.Protocol);
 }

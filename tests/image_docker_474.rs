@@ -90,22 +90,81 @@ fn oci_archive_loads_inspects_and_runs_non_root_in_docker() {
 
     let layer_digest = report_digest(&gen_out.stdout, "layer");
     let config_digest = report_digest(&gen_out.stdout, "config");
+    let manifest_digest = report_digest(&gen_out.stdout, "manifest");
 
     // 1. 生成した OCI archive を docker load する
     let archive_arg = archive_path.to_string_lossy().into_owned();
     let load_out = docker_ok(&["load", "-i", &archive_arg]);
     println!("docker load: {}", load_out.trim());
 
-    // index.json の org.opencontainers.image.ref.name は "sigil-app:latest"、
-    // Docker の構成によってはタグ名または config digest（image ID）で参照される
-    let image_ref = if docker(&["image", "inspect", "sigil-app:latest"])
-        .status
-        .success()
-    {
-        "sigil-app:latest".to_string()
-    } else {
-        config_digest.clone()
-    };
+    // load したイメージへの参照は Docker の構成で変わる。containerd image store
+    // （DriverStatus の io.containerd.snapshotter.v1）では、load が
+    // "Loaded image: sigil-app:latest" と表示してもタグ名でも config digest
+    // （従来の image ID）でも inspect できず "No such image" になることが
+    // CI（Docker 29.4.2）で確認された。containerd 側の同一性は manifest digest
+    // に寄るため、候補を順に試し、`docker image ls` の実物とも突き合わせて、
+    // 実際に inspect できる参照を採用する。
+    let ls_out = docker_ok(&[
+        "image",
+        "ls",
+        "--no-trunc",
+        "--format",
+        "{{.ID}} {{.Repository}}:{{.Tag}} {{.Digest}}",
+    ]);
+    println!("docker image ls:\n{}", ls_out.trim());
+
+    let manifest_hex = manifest_digest.trim_start_matches("sha256:");
+    let config_hex = config_digest.trim_start_matches("sha256:");
+    let mut candidates: Vec<String> = vec![
+        "sigil-app:latest".to_string(),
+        "docker.io/library/sigil-app:latest".to_string(),
+        format!("sigil-app@{manifest_digest}"),
+        manifest_digest.clone(),
+        config_digest.clone(),
+        config_hex.to_string(),
+    ];
+    // ls の実物から、対象イメージの行（名前か digest で一致）の ID と名前を候補に足す
+    for line in ls_out.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(id), Some(repo_tag), Some(digest)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if repo_tag.contains("sigil-app")
+            || digest.contains(manifest_hex)
+            || id.contains(config_hex)
+        {
+            candidates.push(id.to_string());
+            candidates.push(repo_tag.to_string());
+        }
+    }
+    candidates.dedup();
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut image_ref: Option<String> = None;
+    for cand in &candidates {
+        let out = docker(&["image", "inspect", cand]);
+        if out.status.success() {
+            image_ref = Some(cand.clone());
+            break;
+        }
+        tried.push(format!(
+            "{cand}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let image_ref = image_ref.unwrap_or_else(|| {
+        panic!(
+            "load したイメージを inspect できる参照が無い:\nload: {}\nls:\n{}\nconfig: {}\nmanifest: {}\n試した参照:\n{}",
+            load_out.trim(),
+            ls_out.trim(),
+            config_digest,
+            manifest_digest,
+            tried.join("\n")
+        )
+    });
+    println!("image ref: {}", image_ref);
 
     // 2 & 3. docker inspect で image config と非 root User 設定を検証する
     let inspect_fmt = concat!(

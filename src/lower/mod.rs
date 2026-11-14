@@ -308,6 +308,7 @@ impl<'a> L<'a> {
         self.adt("Option", vec![ir::Ty::Unit])?;
         self.adt("Result", vec![ir::Ty::Unit, ir::Ty::Unit])?;
         self.adt("IoError", vec![])?;
+        self.adt("BinaryIoError", vec![])?;
         self.lower_globals()?;
         let s0 = self.stop(StopKind::StackExhausted, entry, decl.span.line, None, "");
         debug_assert_eq!(s0, 0);
@@ -321,13 +322,13 @@ impl<'a> L<'a> {
             BYTES_FREE_FN, BYTES_FROM_RAW_FN, BYTES_GET_FN, BYTES_IS_EMPTY_FN, BYTES_LEN_FN,
             BYTES_PUSH_FN, BYTES_PUSH_U16_BE_FN, BYTES_PUSH_U32_BE_FN, BYTES_PUSH_U32_LE_FN,
             BYTES_PUSH_U64_BE_FN, BYTES_READ_U32_BE_FN, BYTES_SET_FN, BYTES_SLICE_FN,
-            CONSOLE_LOG_FN, ENV_GET_FN, FREE_FN, FS_READ_FN, FS_WRITE_FN, INT_ROTL_FN,
-            INT_ROTR32_FN, INT_ROTR_FN, LIST_CREATE_FN, LIST_FREE_FN, LIST_GET_FN, LIST_LEN_FN,
-            LIST_PUSH_FN, LIST_SUM_FLOAT_FN, LIST_SUM_INT_FN, LIVE_FN, PATH_FILE_NAME_FN,
-            PATH_JOIN_FN, PATH_PARENT_FN, STR_BYTES_FN, STR_CLONE_FN, STR_CMP_FN, STR_CONCAT_FN,
-            STR_DATA_FN, STR_EQ_FN, STR_FREE_FN, STR_FROM_UTF8_FN, STR_IS_EMPTY_FN, STR_LEN_FN,
-            STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN, STR_TRIM_FN, THREAD_JOIN_FN,
-            THREAD_MAIN_FN, THREAD_SPAWN_FN,
+            CONSOLE_LOG_FN, ENV_GET_FN, FREE_FN, FS_READ_BYTES_FN, FS_READ_FN, FS_WRITE_BYTES_FN,
+            FS_WRITE_FN, INT_ROTL_FN, INT_ROTR32_FN, INT_ROTR_FN, LIST_CREATE_FN, LIST_FREE_FN,
+            LIST_GET_FN, LIST_LEN_FN, LIST_PUSH_FN, LIST_SUM_FLOAT_FN, LIST_SUM_INT_FN, LIVE_FN,
+            PATH_FILE_NAME_FN, PATH_JOIN_FN, PATH_PARENT_FN, STR_BYTES_FN, STR_CLONE_FN,
+            STR_CMP_FN, STR_CONCAT_FN, STR_DATA_FN, STR_EQ_FN, STR_FREE_FN, STR_FROM_UTF8_FN,
+            STR_IS_EMPTY_FN, STR_LEN_FN, STR_LINES_FN, STR_NEW_LOSSY_FN, STR_PARSE_INT_FN,
+            STR_TRIM_FN, THREAD_JOIN_FN, THREAD_MAIN_FN, THREAD_SPAWN_FN,
         };
         for n in [
             BYTES_EMPTY_FN,
@@ -373,6 +374,8 @@ impl<'a> L<'a> {
             THREAD_MAIN_FN,
             FS_READ_FN,
             FS_WRITE_FN,
+            FS_READ_BYTES_FN,
+            FS_WRITE_BYTES_FN,
             PATH_JOIN_FN,
             PATH_FILE_NAME_FN,
             PATH_PARENT_FN,
@@ -722,6 +725,18 @@ impl<'a> L<'a> {
                     v("Other", vec![ir::Ty::Path]),
                 ],
             },
+            "BinaryIoError" => {
+                let io = self.adt("IoError", vec![])?;
+                ir::TypeKind::Enum {
+                    variants: vec![
+                        v("InvalidLimit", vec![ir::Ty::Int]),
+                        v("InvalidPath", vec![]),
+                        v("TooLarge", vec![ir::Ty::Int]),
+                        v("UnsupportedFile", vec![]),
+                        v("Io", vec![ir::Ty::Adt(io)]),
+                    ],
+                }
+            }
             "LockBroken" => ir::TypeKind::Struct { fields: vec![] },
             _ => {
                 if let Some(&s) = self.structs.get(name) {

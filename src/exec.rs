@@ -130,6 +130,9 @@ pub struct Options {
     /// この表（パス -> 内容）を引き、ない `p` は `Err(IoError.NotFound(p))` を返す。`fs.write` は表を書き換える。
     /// `None`（既定）のときは実際のファイルを読み書きする。
     pub fs_files: Option<std::collections::BTreeMap<String, String>>,
+    /// バイナリ API 専用の差替え表。Some なら実 OS へフォールバックしない。
+    /// fs_files と同じパスでも別状態（実 OS では同じファイルを指す）。
+    pub fs_bytes: Option<std::collections::BTreeMap<String, Vec<u8>>>,
     /// `env.get` の差し替え。`Some` ならこの表だけを読み、`None` なら実行環境を読む。
     pub env_vars: Option<std::collections::BTreeMap<String, String>>,
     /// `console.log` の出力を `Outcome::output` に溜める（テスト用）。偽（既定）なら本物の標準出力へ書き、`output` は空。
@@ -161,6 +164,7 @@ impl Default for Options {
             stack_bytes: 256 * 1024 * 1024,
             trace_drops: false,
             fs_files: None,
+            fs_bytes: None,
             env_vars: None,
             capture_console: false,
             trust_base: Vec::new(),

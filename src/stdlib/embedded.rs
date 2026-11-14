@@ -33,6 +33,9 @@ pub const CONSOLE_LOG_FN: &str = "std.os.console.log";
 pub const FS_MODULE: &str = "std.os.fs";
 pub const FS_READ_FN: &str = "std.os.fs.read";
 pub const FS_WRITE_FN: &str = "std.os.fs.write";
+/// 上限付きバイナリ I/O の入口（ADR 0036）。
+pub const FS_READ_BYTES_FN: &str = "std.os.fs.read_bytes";
+pub const FS_WRITE_BYTES_FN: &str = "std.os.fs.write_bytes";
 
 /// `env` の Sigil 実装のモジュール名と入口の関数（結合後の名前。ADR 0025 補足 C-7、PR 3-6c、補足 L）。
 /// `std.os.console` と同じく、暗黙に結ぶプラットフォーム層で、入口の `targets` との照合は免除する。

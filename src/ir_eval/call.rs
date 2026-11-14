@@ -107,6 +107,18 @@ impl<'p> M<'p> {
         self.variant(self.io, spath::io_arm(kind), vec![Val::Path(path)])
     }
 
+    fn binary_error(&self, error: super::binary_io::Error, max: i64, path: Rc<str>) -> Val {
+        use super::binary_io::Error;
+        let (arm, fields) = match error {
+            Error::InvalidLimit => (0, vec![Val::Int(max)]),
+            Error::InvalidPath => (1, vec![]),
+            Error::TooLarge => (2, vec![Val::Int(max)]),
+            Error::UnsupportedFile => (3, vec![]),
+            Error::Io(e) => (4, vec![self.io_error(e.kind(), path)]),
+        };
+        self.variant(self.binary_io, arm, fields)
+    }
+
     // --- 標準ライブラリ ---
 
     fn list_len(&self, s: &Slot, p: &[u32]) -> usize {
@@ -793,6 +805,56 @@ impl<'p> M<'p> {
                             Some("SyncShared でない値への borrow"),
                         ))
                     }
+                }
+            }
+            FsReadBytes => {
+                use super::binary_io as bio;
+                let path = self.text_of(locals, &args[0]);
+                let max = self.read_int(locals, &args[1]);
+                let result = bio::validate(&path, max).and_then(|cap| match &self.fs_bytes {
+                    Some(files) => match self
+                        .fs_bytes_written
+                        .get(&*path)
+                        .or_else(|| files.get(&*path))
+                    {
+                        Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
+                        Some(_) => Err(bio::Error::TooLarge),
+                        None => Err(bio::Error::Io(std::io::ErrorKind::NotFound.into())),
+                    },
+                    None => bio::read(&path, cap),
+                });
+                match result {
+                    Ok(bytes) => self.ok(Val::Bytes(Rc::new(RefCell::new(bytes)))),
+                    Err(e) => self.err(self.binary_error(e, max, path)),
+                }
+            }
+            FsWriteBytes => {
+                use super::binary_io as bio;
+                let path = self.text_of(locals, &args[0]);
+                let max = self.read_int(locals, &args[2]);
+                let (slot, field) = self.view(locals, &args[1]);
+                let result = bio::validate(&path, max).and_then(|cap| {
+                    with_val(&slot, &field, |v| {
+                        let Val::Bytes(bytes) = v else {
+                            unreachable!("checked Bytes argument")
+                        };
+                        let bytes = bytes.borrow();
+                        if bytes.len() > cap {
+                            return Err(bio::Error::TooLarge);
+                        }
+                        match &self.fs_bytes {
+                            Some(_) => {
+                                self.fs_bytes_written
+                                    .insert(path.to_string(), bytes.clone());
+                                Ok(())
+                            }
+                            None => bio::write(&path, &bytes),
+                        }
+                    })
+                });
+                match result {
+                    Ok(()) => self.ok(Val::Unit),
+                    Err(e) => self.err(self.binary_error(e, max, path)),
                 }
             }
             FsRead => {

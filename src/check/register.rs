@@ -52,6 +52,20 @@ impl Ck {
                 ],
             },
         );
+        // 上限付きバイナリ I/O の通常列挙型（ADR 0036 決定 1）。IoError の定義は変更しない。
+        self.types.insert(
+            "BinaryIoError".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: vec![
+                    ("InvalidLimit".into(), vec![Ty::Int]),
+                    ("InvalidPath".into(), vec![]),
+                    ("TooLarge".into(), vec![Ty::Int]),
+                    ("UnsupportedFile".into(), vec![]),
+                    ("Io".into(), vec![Ty::Named("IoError".into(), vec![])]),
+                ],
+            },
+        );
         // `NetError` は腕を `match` できる列挙（ADR 0031 決定 3-3、判断点 B）。表の行（OS 層の印）は残し、
         // 型の定義だけを列挙に置き換える。実体は `std.os.net` の同じ並びの宣言（lower が名前で結ぶ）。
         self.types.insert(

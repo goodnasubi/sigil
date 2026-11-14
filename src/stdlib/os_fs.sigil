@@ -14,6 +14,7 @@ module std.os.fs
 // 失敗の種類は `kind` の番地（8 バイト）に書く。`std.os.console` と同じく入口の `targets` との照合は免除する（補足 J・K）。
 // 排他を持たない単一スレッド前提（補足 A-5）。利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
 
+use std.core.bytes.from_raw;
 use std.core.string.new;
 use std.core.string.valid_utf8;
 
@@ -151,4 +152,205 @@ pub fn write(pp: Addr, pl: Int, dp: Addr, dl: Int, kind: Addr) -> Int
     return 1;
   }
   return 0;
+}
+
+// ADR 0036: バイナリ専用。既存文字列 I/O の振る舞いは変更しない。
+// kind は BinaryIoError の腕、kind+8 は IoError の腕（Io の場合のみ）。
+fn binary_path(pp: Addr, pl: Int) -> Bool
+  intent "確保と OS 操作の前にパスの長さと NUL を検査する"
+  requires none
+  ensures none
+  effects none
+  unchecked "pp..pp+pl は生存する UTF-8 の借用。pl>=0。4095 超なら番地を読まず拒否し、ゼロ長でも読まない"
+{
+  if pl > 4095 {
+    return false;
+  }
+  let mut i = 0;
+  while i < pl {
+    if raw.load_u8(raw.offset(pp, i)) == 0 {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn binary_io(kind: Addr, r: Int)
+  intent "OS エラーの分類をバイナリ用出力へ書く"
+  requires none
+  ensures none
+  effects none
+  unchecked "kind は独占した16バイトの書込み可能領域、8バイト境界。r は負の errno"
+{
+  raw.store_i64(kind, 4);
+  raw.store_i64(raw.offset(kind, 8), classify(r));
+}
+
+fn binary_stat(fd: Int, max: Int, reading: Bool, kind: Addr) -> Bool
+  intent "開いた fd の種別と読込み前のサイズを確認する"
+  requires none
+  ensures none
+  effects fs
+  unchecked "Linux x86-64 SYS_fstat=5。stat は144バイト・8バイト境界、st_mode は+24の下位32ビット、st_size は+48。fd は呼出し側の単独所有でここでは閉じない。kind は16バイト・8バイト境界。stat は成功時のみ読み同じサイズで全経路解放する"
+{
+  let stat = raw.alloc(144, 8);
+  let mut r = -4;
+  while r == -4 {
+    r = raw.syscall(5, fd, raw.addr_to_int(stat), 0, 0, 0, 0);
+  }
+  if r < 0 {
+    raw.free(stat, 144, 8);
+    binary_io(kind, r);
+    return false;
+  }
+  let mode = raw.load_i64(raw.offset(stat, 24)) & 61440;
+  let size = raw.load_i64(raw.offset(stat, 48));
+  raw.free(stat, 144, 8);
+  if mode != 32768 {
+    raw.store_i64(kind, 3);
+    return false;
+  }
+  if reading && size > max {
+    raw.store_i64(kind, 2);
+    return false;
+  }
+  return true;
+}
+
+fn binary_close(fd: Int, good: Bool, kind: Addr) -> Bool
+  intent "fd を一度だけ閉じ、先行失敗がなければ close 失敗を返す"
+  requires none
+  ensures none
+  effects fs
+  unchecked "fd は単独所有で未close。Linux x86-64 SYS_close=3 はEINTRでも再試行しない。kind は16バイト・8バイト境界。呼出し後はfdを利用しない"
+{
+  let r = raw.syscall(3, fd, 0, 0, 0, 0, 0);
+  if good && r < 0 {
+    binary_io(kind, r);
+    return false;
+  }
+  return good;
+}
+
+pub fn read_bytes(pp: Addr, pl: Int, max: Int, kind: Addr) -> Addr
+  intent "上限付きで通常ファイルを読み、EOFとclose成功後だけ所有Bytesを返す。失敗は空番地"
+  requires none
+  ensures none
+  effects fs
+  unchecked "pp..pp+pl は生存するUTF-8借用、pl>=0。kind は独占16バイト・8バイト境界。max→pathの順で検査する。Linux x86-64 openat=257/read=0/fstat=5/close=3。fdは単独所有で一度だけclose。0<=n<=max<=134217728、read要求は残量以下か独立probe1。max=0なら本体確保も番地読出しもしない。全経路で本体を同じmaxで、probeを1で解放。from_rawは実長をコピーし、頭を呼出し側へ一回所有移譲する"
+{
+  if max < 0 || max > 134217728 {
+    raw.store_i64(kind, 0);
+    return raw.addr_null();
+  }
+  if !binary_path(pp, pl) {
+    raw.store_i64(kind, 1);
+    return raw.addr_null();
+  }
+  let fd = open(pp, pl, 526336, 0);
+  if fd < 0 {
+    binary_io(kind, fd);
+    return raw.addr_null();
+  }
+  if !binary_stat(fd, max, true, kind) {
+    binary_close(fd, false, kind);
+    return raw.addr_null();
+  }
+  let mut buf = raw.addr_null();
+  if max > 0 {
+    buf = raw.alloc(max, 1);
+  }
+  let probe = raw.alloc(1, 1);
+  let mut n = 0;
+  let mut good = true;
+  let mut go = true;
+  while go {
+    let mut dst = probe;
+    let mut count = 1;
+    if n < max {
+      dst = raw.offset(buf, n);
+      count = max - n;
+    }
+    let r = raw.syscall(0, fd, raw.addr_to_int(dst), count, 0, 0, 0);
+    if r > 0 {
+      if n == max {
+        raw.store_i64(kind, 2);
+        good = false;
+        go = false;
+      } else {
+        n = n + r;
+      }
+    } else {
+      if r != -4 {
+        go = false;
+        if r < 0 {
+          binary_io(kind, r);
+          good = false;
+        }
+      }
+    }
+  }
+  good = binary_close(fd, good, kind);
+  raw.free(probe, 1, 1);
+  let mut owned = raw.addr_null();
+  if good {
+    owned = from_raw(buf, n);
+  }
+  if max > 0 {
+    raw.free(buf, max, 1);
+  }
+  return owned;
+}
+
+pub fn write_bytes(pp: Addr, pl: Int, dp: Addr, dl: Int, max: Int, kind: Addr) -> Int
+  intent "借用Bytesを通常ファイルへ全量書き、close成功でのみ0を返す。失敗1、途中出力は残す"
+  requires none
+  ensures none
+  effects fs
+  unchecked "pp..pp+pl は生存UTF-8借用、dp..dp+dlは呼出し中生存するBytes共有借用、pl/dl>=0。ゼロ長なら番地を読まず、借用元を変更・保持・解放しない。kindは独占16バイト・8バイト境界。max→path→dlの順でopen前検査。Linux x86-64 openat=257/write=1/fstat=5/close=3、fdは単独所有で一度close。0<=n<=dl<=max<=134217728、部分writeは残量だけ、EINTRは同位置。失敗でもunlinkしない"
+{
+  if max < 0 || max > 134217728 {
+    raw.store_i64(kind, 0);
+    return 1;
+  }
+  if !binary_path(pp, pl) {
+    raw.store_i64(kind, 1);
+    return 1;
+  }
+  if dl > max {
+    raw.store_i64(kind, 2);
+    return 1;
+  }
+  let fd = open(pp, pl, 526913, 438);
+  if fd < 0 {
+    binary_io(kind, fd);
+    return 1;
+  }
+  if !binary_stat(fd, max, false, kind) {
+    binary_close(fd, false, kind);
+    return 1;
+  }
+  let mut n = 0;
+  let mut good = true;
+  while good && n < dl {
+    let r = raw.syscall(1, fd, raw.addr_to_int(raw.offset(dp, n)), dl - n, 0, 0, 0);
+    if r > 0 {
+      n = n + r;
+    } else {
+      if r != -4 {
+        good = false;
+        if r < 0 {
+          binary_io(kind, r);
+        } else {
+          binary_io(kind, -5);
+        }
+      }
+    }
+  }
+  good = binary_close(fd, good, kind);
+  if good {
+    return 0;
+  }
+  return 1;
 }

@@ -177,6 +177,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         // `env.get`・`fs.read`/`fs.write`・`Path` の埋め込み Sigil 関数へのシム。文字列は頭の番地で受け渡す
         "env_get" => ("pp", 'p'),
         "fs_read" => ("ppp", 'p'),
+        "fs_read_bytes" => ("pppp", 'p'),
+        "fs_write_bytes" => ("pppppp", 'i'),
         "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppp", 'p'),
         "path_file_name" | "path_parent" => ("pp", 'p'),
@@ -1212,13 +1214,16 @@ fn thread_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
 /// （補足 C-7 の 3-6b）。シムは公開しない。モジュールが結ばれていないプログラム（`raw.alloc` を差し替えた試験）では作らない。
 fn fs_path_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
-        ENV_GET_FN, FS_READ_FN, FS_WRITE_FN, PATH_FILE_NAME_FN, PATH_JOIN_FN, PATH_PARENT_FN,
+        ENV_GET_FN, FS_READ_BYTES_FN, FS_READ_FN, FS_WRITE_BYTES_FN, FS_WRITE_FN,
+        PATH_FILE_NAME_FN, PATH_JOIN_FN, PATH_PARENT_FN,
     };
     let mut out = vec![];
     for (name, target_fn) in [
         ("env_get", ENV_GET_FN),
         ("fs_read", FS_READ_FN),
         ("fs_write", FS_WRITE_FN),
+        ("fs_read_bytes", FS_READ_BYTES_FN),
+        ("fs_write_bytes", FS_WRITE_BYTES_FN),
         ("path_join", PATH_JOIN_FN),
         ("path_file_name", PATH_FILE_NAME_FN),
         ("path_parent", PATH_PARENT_FN),

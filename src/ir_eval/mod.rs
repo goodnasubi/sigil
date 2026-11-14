@@ -7,6 +7,7 @@
 //! - 構造体の破棄は、自分、次にフィールドを宣言の順（`Agg` の `Drop` と `drain`）。移動した部分を持つ構造体は、自分を記録しない（Rust と同じ）。
 //! - 複写（`Copy`）は破棄を記録しない写し（`silent`）。`clone` だけが破棄される値を増やす。
 
+mod binary_io;
 mod call;
 mod expr;
 mod sched;
@@ -53,11 +54,14 @@ struct M<'p> {
     out: String,
     capture: bool,
     fs: Option<BTreeMap<String, String>>,
+    fs_bytes: Option<&'p BTreeMap<String, Vec<u8>>>,
+    fs_bytes_written: BTreeMap<String, Vec<u8>>,
     env: Option<BTreeMap<String, String>>,
     canon: Vec<usize>,
     opt: usize,
     res: usize,
     io: usize,
+    binary_io: usize,
     /// 確保済みチャンクの境界情報（番地 -> 塊。由来タグ付き。ADR 0025 補足 A-3）
     chunks: BTreeMap<usize, Chunk>,
     sch: sched::Sched,
@@ -429,10 +433,13 @@ fn execute_roots(
         out: String::new(),
         capture: opts.capture_console,
         fs: opts.fs_files.clone(),
+        fs_bytes: opts.fs_bytes.as_ref(),
+        fs_bytes_written: BTreeMap::new(),
         env: opts.env_vars.clone(),
         opt: find("Option"),
         res: find("Result"),
         io: find("IoError"),
+        binary_io: find("BinaryIoError"),
         canon,
         chunks: BTreeMap::new(),
         sch: sched::Sched::new(opts.stack_bytes, opts.schedule_seed),

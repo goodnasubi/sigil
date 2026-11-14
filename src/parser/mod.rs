@@ -54,6 +54,7 @@ pub const RESERVED_NAMES: &[&str] = &[
     "Self",
     "Path",
     "IoError",
+    "BinaryIoError",
     "ParseError",
     "Shared",
     "Cell",

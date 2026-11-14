@@ -41,22 +41,25 @@ fn read_port_returns_the_port() {
 
 #[test]
 fn read_port_out_of_range() {
-    assert_eq!(read_port("70000"), "Err(ConfigError.OutOfRange(70000))");
-    assert_eq!(read_port("0"), "Err(ConfigError.OutOfRange(0))");
-    assert_eq!(read_port("-5"), "Err(ConfigError.OutOfRange(-5))");
+    assert_eq!(read_port("70000"), "Err(ReadPortError.OutOfRange(70000))");
+    assert_eq!(read_port("0"), "Err(ReadPortError.OutOfRange(0))");
+    assert_eq!(read_port("-5"), "Err(ReadPortError.OutOfRange(-5))");
 }
 
 #[test]
 fn read_port_not_a_number() {
-    assert_eq!(read_port("abc"), "Err(ConfigError.NotANumber(\"abc\"))");
-    assert_eq!(read_port(""), "Err(ConfigError.NotANumber(\"\"))");
+    assert_eq!(read_port("abc"), "Err(ReadPortError.NotANumber(\"abc\"))");
+    assert_eq!(read_port(""), "Err(ReadPortError.NotANumber(\"\"))");
 }
 
 #[test]
 fn read_port_missing_file_is_an_io_error() {
     let o = files(&[]);
     let r = go(&[PORT], "read_port", &[Arg::Str("/nope".into())], &o).unwrap();
-    assert_eq!(r.value, "Err(ConfigError.Io(IoError.NotFound(\"/nope\")))");
+    assert_eq!(
+        r.value,
+        "Err(ReadPortError.Io(IoError.NotFound(\"/nope\")))"
+    );
 }
 
 #[test]
@@ -116,7 +119,7 @@ fn cli_fs_double_runs_read_port() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert_eq!(
         String::from_utf8_lossy(&o.stdout),
-        "Err(ConfigError.OutOfRange(99999))\n"
+        "Err(ReadPortError.OutOfRange(99999))\n"
     );
     // 差し替えがなければ実ファイルを読む（`/etc/port` はない）。
     let o = std::process::Command::new(bin)
@@ -133,6 +136,6 @@ fn cli_fs_double_runs_read_port() {
     assert!(o.status.success());
     assert_eq!(
         String::from_utf8_lossy(&o.stdout),
-        "Err(ConfigError.Io(IoError.NotFound(\"/nonexistent-sigil-dir/port\")))\n"
+        "Err(ReadPortError.Io(IoError.NotFound(\"/nonexistent-sigil-dir/port\")))\n"
     );
 }

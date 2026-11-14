@@ -138,6 +138,7 @@ impl Ck {
                         let core = self.core;
                         if is_embedded_name(&s.name)
                             || crate::stdlib::HTTP_TYPES.contains(&s.name.as_str())
+                            || crate::stdlib::WEB_TYPES.contains(&s.name.as_str())
                         {
                             self.core = false;
                         }
@@ -282,7 +283,17 @@ impl Ck {
                         self.manual_properties.push((p.type_name.clone(), prop));
                     }
                 }
-                Item::Impl(i) => self.register_impl(i, false)?,
+                Item::Impl(i) => {
+                    // 埋め込みの型に付くシグネチャも、自由関数と同じく元モジュールの出力先で検査済み。
+                    let core = self.core;
+                    if matches!(&i.ty, Type::Path { path, .. } if is_embedded_name(&path.join(".")))
+                    {
+                        self.core = false;
+                    }
+                    let r = self.register_impl(i, false);
+                    self.core = core;
+                    r?;
+                }
                 _ => {}
             }
         }

@@ -95,7 +95,14 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("HttpHeader", 0, Layer::Os),
     ("HttpResponse", 0, Layer::Os),
     ("HttpError", 0, Layer::Os),
+    // フレームワークの設定（ADR 0033 E）。不変の値で、表示・直接構築は公開しない。
+    ("AppConfig", 0, Layer::Os),
+    ("AppLimits", 0, Layer::Os),
+    ("ConfigError", 0, Layer::Os),
 ];
+
+/// `std.web` の設定と安全な設定エラー（ADR 0033 E、Issue #460）。
+pub const WEB_TYPES: &[&str] = &["AppConfig", "AppLimits", "ConfigError"];
 
 /// `std.json` が実体を宣言する、平坦な JSON 表の型（ADR 0033、Issue #455）。
 pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
@@ -353,6 +360,8 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
 pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
+    (Layer::Os, "web", "load_config() -> Result<AppConfig, ConfigError>", "env"),
+    (Layer::Os, "web", "error_response(status: Int) -> HttpResponse", "none"),
     (Layer::Core, "json", "parse(data: &Bytes) -> Result<JsonValue, Int>", "none"),
     (Layer::Core, "json", "stringify(value: &JsonValue) -> Result<Bytes, Int>", "none"),
     (
@@ -538,6 +547,22 @@ pub const REQUIRES: &[(&str, &str)] = &[
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
 pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
+    (Layer::Os, "AppConfig", &[
+        ("host(self: &AppConfig) -> String", "none"),
+        ("port(self: &AppConfig) -> Int", "none"),
+        ("http_limits(self: &AppConfig) -> HttpLimits", "none"),
+        ("app_limits(self: &AppConfig) -> AppLimits", "none"),
+        ("log_memory_bound(self: &AppConfig)", "console"),
+    ]),
+    (Layer::Os, "AppLimits", &[
+        ("query_params_max(self: &AppLimits) -> Int", "none"),
+        ("json_max_depth(self: &AppLimits) -> Int", "none"),
+        ("shutdown_grace_ms(self: &AppLimits) -> Int", "none"),
+    ]),
+    (Layer::Os, "ConfigError", &[
+        ("name(self: &ConfigError) -> String", "none"),
+    ]),
+
     (Layer::Core, "JsonValue", &[
         ("new(nodes: List<JsonNode>, root: Int) -> JsonValue", "none"),
         ("nodes(self: &JsonValue) -> List<JsonNode>", "none"),
@@ -1076,6 +1101,21 @@ mod tests {
             "TcpClient.read",
             "TcpClient.write_all",
             "random.bytes",
+            // ADR 0033 E・I・J（Issue #460）。
+            "web.load_config",
+            "web.error_response",
+            "AppConfig",
+            "AppConfig.host",
+            "AppConfig.port",
+            "AppConfig.http_limits",
+            "AppConfig.app_limits",
+            "AppConfig.log_memory_bound",
+            "AppLimits",
+            "AppLimits.query_params_max",
+            "AppLimits.json_max_depth",
+            "AppLimits.shutdown_grace_ms",
+            "ConfigError",
+            "ConfigError.name",
             // ADR 0032 決定 2（PR 6-3g-b）。
             "http.default_limits",
             "http.parser",
@@ -1286,7 +1326,10 @@ mod tests {
             .any(|w| {
                 matches!(
                     w,
-                    "Path"
+                    "AppConfig"
+                        | "AppLimits"
+                        | "ConfigError"
+                        | "Path"
                         | "IoError"
                         | "BinaryIoError"
                         | "TcpListener"

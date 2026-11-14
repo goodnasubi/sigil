@@ -76,6 +76,7 @@ impl Proj<'_> {
                 || r == embedded::HTTP_LIMITS_MODULE
                 || r == embedded::HTTP_MODULE
                 || r == embedded::WEB_MODULE
+                || r == embedded::PG_MODULE
             {
                 continue;
             }

@@ -740,6 +740,15 @@ impl<'a> L<'a> {
                     };
                     return self.user_call(decl, &r.targs, ops, ret);
                 }
+                // PostgreSQL も評価器・ネイティブで同じ trust none の Sigil 実装を呼ぶ。
+                if let Some(f) = r.name.strip_prefix("pg.") {
+                    self.core_only = false;
+                    let full = format!("{}.{f}", crate::stdlib::embedded::PG_MODULE);
+                    let Some(&decl) = self.fns.get(full.as_str()) else {
+                        return bail(format!("{} の実体（std.pg）が結ばれていない", r.name));
+                    };
+                    return self.user_call(decl, &r.targs, ops, ret);
+                }
                 let b = match r.name.as_str() {
                     "console.log" => {
                         self.core_only = false;

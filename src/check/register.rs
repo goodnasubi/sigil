@@ -90,6 +90,17 @@ impl Ck {
                     .collect(),
             },
         );
+        // PostgreSQL のエラーも詳細文や資格情報を含まない固定の列挙で公開する。
+        self.types.insert(
+            "PgError".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: crate::stdlib::PG_ERROR_ARMS
+                    .iter()
+                    .map(|a| ((*a).to_string(), vec![]))
+                    .collect(),
+            },
+        );
         self.types.insert(
             "HttpProgress".into(),
             TypeDef::Enum {

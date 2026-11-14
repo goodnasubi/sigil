@@ -270,7 +270,15 @@ impl Ck {
                 // HTTP の中身を見せない型（ADR 0032 決定 2-2）。値（`Int`・`Bytes`・`String`・一覧）だけを持つので、タスクへ移せて
                 // 共有できる（`HttpLimits` を起動したルートへ移せる。決定 2-3）。比較・表示・複製の性質は持たない。
                 // 接続（ADR 0032 決定 3-2）は `TcpStream` を持つので、移せるが共有できない。
-                Some(TypeDef::Opaque(_)) if n.as_str() == "HttpConn" => Some(p == Prop::Sendable),
+                Some(TypeDef::Opaque(_))
+                    if matches!(n.as_str(), "HttpConn" | "PgConn" | "PgConfig") =>
+                {
+                    // PostgreSQL 接続と秘密を持つ設定も、移せるが共有・複製・表示はできない。
+                    Some(p == Prop::Sendable)
+                }
+                Some(TypeDef::Opaque(_)) if n.as_str() == "PgConnectLimits" => {
+                    Some(matches!(p, Prop::Sendable | Prop::Shareable))
+                }
                 Some(TypeDef::Opaque(_))
                     if crate::stdlib::HTTP_TYPES.contains(&n.as_str())
                         || crate::stdlib::WEB_TYPES.contains(&n.as_str()) =>

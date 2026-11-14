@@ -79,3 +79,4 @@ jobs:
         run: |
           docker --version
           cargo test --test m5_native -- --ignored runs_in_scratch_container
+          cargo test --test image_docker_474 -- --ignored

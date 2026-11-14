@@ -971,7 +971,7 @@ pub fn shutdown_open() -> Int
   intent "SIGTERM と SIGINT のみを受ける非ブロッキング close-on-exec の signalfd を作る"
   requires none
   ensures none
-  effects none
+  effects net.server
   unchecked "shutdown_block 後に呼ぶ。mask は所有する 8 バイト。成功時の fd の所有は呼出側に渡し、shutdown_close で一度だけ閉じる"
 {
   let mask = rec(1);
@@ -985,7 +985,7 @@ pub fn shutdown_read(fd: Int) -> Int
   intent "終了の合図を一つ読み、SIGTERM(15)・SIGINT(2) または負の errno を返す"
   requires none
   ensures none
-  effects none
+  effects net.server
   unchecked "fd は shutdown_open から取得し、所有者がまだ閉じていない。signalfd_siginfo 128 バイトは中断しない本関数の中だけで所有する"
 {
   let info = rec(16);

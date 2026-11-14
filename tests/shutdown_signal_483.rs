@@ -85,7 +85,7 @@ fn run() -> Int
   intent "SIGTERM/INT を非同期ハンドラ無しで受ける"
   requires none
   ensures none
-  effects none
+  effects net.server
   unchecked "試験プロセス自身だけにシグナルを送り、受信後にマスクを戻す"
 {
   let previous = shutdown_block();

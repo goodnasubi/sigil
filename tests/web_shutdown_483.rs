@@ -140,7 +140,7 @@ fn run() -> Int
             while true {
               let slot = g.reserve();
               match listener.accept() {
-                Err(_) => { return; }
+                Err(_) => { return 0; }
                 Ok(stream) => {
                   slot.start(stream, |c| { task.sleep(10); }, |c| {});
                 }
@@ -173,10 +173,11 @@ fn run() -> Int
         let (tx, rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
             let mut line = String::new();
-            let result = BufReader::new(stdout).read_line(&mut line);
-            tx.send((result, line)).unwrap();
+            let mut stdout = BufReader::new(stdout);
+            let result = stdout.read_line(&mut line);
+            tx.send((result, line, stdout)).unwrap();
         });
-        let (_, line) = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        let (_, line, _stdout) = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(result) => result,
             Err(_) => {
                 child.kill().unwrap();

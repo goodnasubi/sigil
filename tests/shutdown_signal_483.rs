@@ -161,7 +161,8 @@ fn main() -> Int
 {
   match net.shutdown_signal() {
     Ok(signal) => {
-      console.log("ready");
+      let ready = "ready";
+      console.log(&ready);
       match signal.wait() {
         Ok(u) => { return 0; }
         Err(e) => { return 2; }
@@ -196,14 +197,16 @@ fn main() -> Int
             let (sender, receiver) = std::sync::mpsc::channel();
             let reader = std::thread::spawn(move || {
                 let mut line = String::new();
-                BufReader::new(stdout).read_line(&mut line).unwrap();
+                let mut output = BufReader::new(stdout);
+                output.read_line(&mut line).unwrap();
                 let _ = sender.send(line);
+                output
             });
             assert_eq!(
                 receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
                 "ready\n"
             );
-            reader.join().unwrap();
+            let _stdout = reader.join().unwrap();
             assert!(Command::new("kill")
                 .args(["-s", signal, &child.0.id().to_string()])
                 .status()

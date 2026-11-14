@@ -3,6 +3,11 @@ module std.pg_scram
   trust none
 
 // ADR 0034: SCRAM の上位処理。ソケット、ログ、乱数源を持たない。
+use std.crypto.Secret;
+use std.crypto.hmac_sha256;
+use std.crypto.pbkdf2_sha256;
+use std.crypto.sha256;
+
 pub enum ScramError { Protocol, LimitExceeded, UnsupportedCredential, }
 pub struct ScramReply { message: Bytes, signature: Secret, }
 pub fn credential(password: &Bytes) -> Bool

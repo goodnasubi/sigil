@@ -602,7 +602,14 @@ fn probe() -> Int
     let opts = sigil::effects::Options {
         embedded_extra: vec![(
             "std.pg_scram".into(),
-            format!("{}\n{probe}", include_str!("../src/stdlib/pg_scram.sigil")),
+            format!(
+                "{}\n{probe}",
+                include_str!("../src/stdlib/pg_scram.sigil").replacen(
+                    "use std.crypto.sha256;\n",
+                    "use std.crypto.sha256;\nuse std.crypto.verify_hmac_sha256;\n",
+                    1
+                )
+            ),
         )],
         embedded_roots: vec!["std.pg_scram".into()],
         ..Default::default()

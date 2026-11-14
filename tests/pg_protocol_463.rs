@@ -158,6 +158,22 @@ fn value_boundaries() {
 #[test]
 fn limits_and_broken_frames() {
     run(r#"
+  // 許される最大wire長のヘッダーは受理し、1バイト超は本体の確保前に拒否。
+  let mut header = Bytes.new(); header.push(67); header.push_u32_be(1048575);
+  let mut exact = decoder(1048576)?;
+  match exact.feed(&header) { Ok(PgProgress.NeedMore(n)) => { if n != 5 { return 9; } } _ => { return 10; } }
+  match exact.finish() { Err(PgError.Protocol) => {} _ => { return 11; } }
+  let mut over = Bytes.new(); over.push(67); over.push_u32_be(1048576);
+  let mut capped = decoder(1048576)?;
+  match capped.feed(&over) { Err(PgError.LimitExceeded) => {} _ => { return 12; } }
+  match decoder(1048577) { Err(PgError.LimitExceeded) => {} _ => { return 13; } }
+  match budget(4194305, 10000) { Err(PgError.LimitExceeded) => {} _ => { return 14; } }
+  match budget(4194304, 10001) { Err(PgError.LimitExceeded) => {} _ => { return 15; } }
+  let mut sql_bytes = "a".as_bytes(); let mut doubling = 0;
+  while doubling < 16 { let copy = sql_bytes.clone(); sql_bytes.extend(&copy); doubling = doubling + 1; }
+  parse(&sql_bytes.to_string_utf8().unwrap_or(""), &List.new(), 1048576)?;
+  sql_bytes.push(97);
+  match parse(&sql_bytes.to_string_utf8().unwrap_or(""), &List.new(), 1048576) { Err(PgError.LimitExceeded) => {} _ => { return 16; } }
   let mut b = Bytes.new(); let mut i = 0;
   while i < 251 { b.push(65); i = i + 1; }
   frame(67, b.clone(), 256)?;

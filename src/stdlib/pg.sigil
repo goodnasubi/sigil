@@ -659,6 +659,9 @@ pub fn parse(sql: &String, params: &List<PgParam>, max: Int) -> Result<Bytes, Pg
   if sql.len() > 65536 || params.len() > 256 {
     return Err(PgError.LimitExceeded);
   }
+  if max < 5 || max > 1048576 || sql.len() > max - 5 || params.len() * 4 + 4 > max - 5 - sql.len() {
+    return Err(PgError.LimitExceeded);
+  }
   let b = sql.as_bytes();
   let mut i = 0;
   while i < b.len() {
@@ -666,9 +669,6 @@ pub fn parse(sql: &String, params: &List<PgParam>, max: Int) -> Result<Bytes, Pg
       return Err(PgError.Protocol);
     }
     i = i + 1;
-  }
-  if max < 5 || max > 1048576 || b.len() > max - 5 || params.len() * 4 + 4 > max - 5 - b.len() {
-    return Err(PgError.LimitExceeded);
   }
   let mut out = Bytes.new();
   out.push(0);

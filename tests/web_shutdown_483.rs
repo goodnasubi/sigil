@@ -2,6 +2,11 @@
 use sigil::exec::Options;
 
 fn run(accept: &str, stop: &str, grace: i64) -> sigil::exec::Outcome {
+    let accept_spawn = if accept.contains("slot.start") {
+        "task.spawn, "
+    } else {
+        ""
+    };
     let src = format!(
         r#"module m.shutdown
   targets server
@@ -13,7 +18,7 @@ fn accept(g: &RootGroup)
   intent "受付と処理を模擬する"
   requires none
   ensures none
-  effects task.spawn, task.suspend, clock, console
+  effects {accept_spawn}task.suspend, clock, console
 {{
 {accept}
 }}
@@ -148,14 +153,28 @@ fn run() -> Int
     sigil::native::build(&[source], "run", &sigil::codegen::Opts::default(), &exe).unwrap();
     for signal in ["-TERM", "-INT"] {
         let mut child = Command::new(&exe)
+            .env("SIGIL_WORKERS", "2")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut line = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut line)
-            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line);
+            tx.send((result, line)).unwrap();
+        });
+        let (_, line) = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(_) => {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                reader.join().unwrap();
+                panic!("終了合図の準備が期限を超えた");
+            }
+        };
+        reader.join().unwrap();
         assert!(line.trim().parse::<u16>().unwrap() > 0);
         assert!(Command::new("kill")
             .args([signal, &child.id().to_string()])

@@ -1032,7 +1032,7 @@ pub fn run_until(limit: Int, grace_ms: Int, accept: fn(&RootGroup) -> Unit, stop
 {
   task.roots_grace(limit, grace_ms, |g| {
     let mut waits = List.new();
-    waits.push(|| { accept(g); return 0; });
+    waits.push(|| { accept(&g); return 0; });
     waits.push(|| { stop(); return 0; });
     task.race(waits);
   });

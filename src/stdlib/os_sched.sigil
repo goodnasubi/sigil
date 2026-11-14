@@ -63,6 +63,7 @@ use std.os.io.io_sleep_until;
 use std.os.io.io_stop;
 use std.os.io.io_take;
 use std.os.io.io_wait_fd;
+use std.os.io.shutdown_seal;
 use std.os.thread.join;
 use std.os.thread.spawn;
 
@@ -3201,6 +3202,7 @@ pub fn workers_start()
   effects none
   unchecked "ルートタスクを積んだ後、他のワーカーを作る前に主スレッドだけが呼ぶ。領域は各 256MiB 固定（仮想領域）。上限は OS の資源制限、指定は最大 2147483647"
 {
+  shutdown_seal();
   let s = sched();
   let count = worker_count();
   st(s, S_WORKERS, count);

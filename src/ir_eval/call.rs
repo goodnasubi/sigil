@@ -1401,6 +1401,9 @@ impl<'p> M<'p> {
             SYS_OPENAT | SYS_UNLINKAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
             }
+            SYS_FSTAT => {
+                self.check_raw_access(addr_of(a[1], "statbuf")?, STAT_SIZE, loc)?;
+            }
             SYS_NEWFSTATAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
                 self.check_raw_access(addr_of(a[2], "statbuf")?, STAT_SIZE, loc)?;
@@ -1523,6 +1526,7 @@ const STAT_SIZE: usize = 144;
 const SYS_READ: i64 = 0;
 const SYS_WRITE: i64 = 1;
 const SYS_CLOSE: i64 = 3;
+const SYS_FSTAT: i64 = 5;
 const SYS_MMAP: i64 = 9;
 const SYS_MUNMAP: i64 = 11;
 const SYS_EXIT_GROUP: i64 = 231;

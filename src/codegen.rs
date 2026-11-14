@@ -174,7 +174,8 @@ pub(crate) fn shim_spec(name: &str) -> Option<(&'static str, char)> {
         | "sched_step_end"
         | "sched_workers_start"
         | "sched_workers_join" => ("", 'v'),
-        // `fs.read`/`fs.write`/`Path`（`std.os.fs`・`std.core.path`。補足 C-7 の 3-6b）。文字列は頭の番地で受け渡す
+        // `env.get`・`fs.read`/`fs.write`・`Path` の埋め込み Sigil 関数へのシム。文字列は頭の番地で受け渡す
+        "env_get" => ("pp", 'p'),
         "fs_read" => ("ppp", 'p'),
         "fs_write" => ("ppppp", 'i'),
         "path_join" => ("pppp", 'p'),
@@ -1207,14 +1208,15 @@ fn thread_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     Ok(vec![(id, target, 1, 'v')])
 }
 
-/// `fs.read`/`fs.write`（`std.os.fs`）と `Path`（`std.core.path`）の関数を呼ぶ C の呼び出し規約のシムを宣言し、`rt` に登録する
+/// `env.get`（`std.os.env`）・`fs.read`/`fs.write`（`std.os.fs`）・`Path`（`std.core.path`）を呼ぶシムを宣言し、`rt` に登録する
 /// （補足 C-7 の 3-6b）。シムは公開しない。モジュールが結ばれていないプログラム（`raw.alloc` を差し替えた試験）では作らない。
 fn fs_path_shims(cg: &mut Cg<'_>) -> Result<Vec<Shim>, CgError> {
     use crate::stdlib::embedded::{
-        FS_READ_FN, FS_WRITE_FN, PATH_FILE_NAME_FN, PATH_JOIN_FN, PATH_PARENT_FN,
+        ENV_GET_FN, FS_READ_FN, FS_WRITE_FN, PATH_FILE_NAME_FN, PATH_JOIN_FN, PATH_PARENT_FN,
     };
     let mut out = vec![];
     for (name, target_fn) in [
+        ("env_get", ENV_GET_FN),
         ("fs_read", FS_READ_FN),
         ("fs_write", FS_WRITE_FN),
         ("path_join", PATH_JOIN_FN),

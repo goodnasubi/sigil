@@ -719,6 +719,10 @@ impl<'a> L<'a> {
                         self.core_only = false;
                         Builtin::ConsoleLog
                     }
+                    "env.get" => {
+                        self.core_only = false;
+                        Builtin::EnvGet
+                    }
                     "fs.read" => {
                         self.core_only = false;
                         Builtin::FsRead
@@ -1012,6 +1016,7 @@ impl<'a> L<'a> {
             ("Sender", "send") => (ChanSend, false),
             ("Receiver", "recv") => (ChanRecv, false),
             ("SyncShared", "get") => (SyncSharedGet, false),
+            ("SyncShared", "borrow") => (SyncSharedBorrow, false),
             ("Lock", "acquire") => (LockAcquire, false),
             ("LockGuard", "get") => (LockGuardGet, false),
             ("LockGuard", "get_mut") => (LockGuardGetMut, false),

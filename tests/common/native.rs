@@ -506,7 +506,21 @@ fn check_impl(
         }
         Err(e) => panic!("{func}: ネイティブのビルドに失敗: {e}"),
     }
-    let got = exec(&exe, exec_args);
+    let got = if let Some(vars) = &opts.env_vars {
+        let output = Command::new(&exe)
+            .args(exec_args.iter().map(arg_text))
+            .env_clear()
+            .envs(vars)
+            .output()
+            .unwrap();
+        Ran {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: output.status.code(),
+        }
+    } else {
+        exec(&exe, exec_args)
+    };
     let _ = std::fs::remove_dir_all(&dir);
     let recovered;
     let want = if recover_stack {
@@ -521,6 +535,7 @@ fn check_impl(
             stack_bytes: Options::default().stack_bytes,
             trace_drops: opts.trace_drops,
             fs_files: opts.fs_files.clone(),
+            env_vars: opts.env_vars.clone(),
             capture_console: opts.capture_console,
             trust_base: opts.trust_base.clone(),
             schedule_seed: opts.schedule_seed,

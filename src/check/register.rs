@@ -366,7 +366,10 @@ impl Ck {
             ),
             (
                 "<T> SyncShared<T>",
-                &[("new(value: T) -> SyncShared<T>", "none")],
+                &[
+                    ("new(value: T) -> SyncShared<T>", "none"),
+                    ("borrow(self: &SyncShared<T>) -> &T", "task.share"),
+                ],
             ),
             (
                 "<T: Copyable> SyncShared<T>",

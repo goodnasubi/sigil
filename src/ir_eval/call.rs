@@ -765,6 +765,36 @@ impl<'p> M<'p> {
                 }
                 Val::Unit
             }
+            EnvGet => {
+                let name = self.text_of(locals, &args[0]);
+                // ネイティブの getenv と同じ名前の制限。差し替え表でも外部環境へフォールバックしない。
+                let value = if name.is_empty() || name.contains(['\0', '=']) {
+                    None
+                } else {
+                    match &self.env {
+                        Some(vars) => vars.get(&*name).cloned(),
+                        None => std::env::var_os(&*name).map(|s| s.to_string_lossy().into_owned()),
+                    }
+                };
+                match value {
+                    Some(s) => self.some(Val::Str(s.into())),
+                    None => self.none(),
+                }
+            }
+            SyncSharedBorrow => {
+                let (s, p) = self.view(locals, &args[0]);
+                let slot = with_val(&s, &p, |v| super::sched::shared_cell(v).cloned());
+                match slot {
+                    Some(slot) => Val::Ref(Ptr { slot, path: vec![] }),
+                    None => {
+                        return Err(self.stop_at(
+                            loc,
+                            Some(StopKind::StdRequiresViolated),
+                            Some("SyncShared でない値への borrow"),
+                        ))
+                    }
+                }
+            }
             FsRead => {
                 let path = self.text_of(locals, &args[0]);
                 match &self.fs {

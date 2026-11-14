@@ -497,6 +497,16 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.st(x, blk, 0);
                 (blk, u)
             }
+            SyncSharedBorrow => {
+                let (v, ty) = self.val(&args[0]);
+                match strip(&ty) {
+                    Ty::Shared(i) => match *i {
+                        Ty::Cell(t) => (self.ld(v, 0), Ty::Ref(t)),
+                        _ => (self.unsupported("borrow の対象が SyncShared でない"), u),
+                    },
+                    _ => (self.unsupported("borrow の対象が SyncShared でない"), u),
+                }
+            }
             SharedGet | SyncSharedGet => {
                 let (v, ty) = self.val(&args[0]);
                 let (w, inner) = match strip(&ty) {
@@ -564,6 +574,22 @@ impl<'a, 'p> Fx<'a, 'p> {
                 self.rt("console_log", &[p, n]);
                 self.scall(SFn::End, &[]);
                 (self.ic(0), u)
+            }
+            EnvGet => {
+                let (name, _) = self.val(&args[0]);
+                let p = self.rt("str_data", &[name]);
+                let n = self.rt("str_bytes", &[name]);
+                let st = self.rt("env_get", &[p, n]);
+                let found = self.b.ins().icmp_imm_s(IntCC::NotEqual, st, 0);
+                let r = self.branch(
+                    found,
+                    |s| s.mk_enum_c(0, &[st]),
+                    |s| {
+                        let z = s.ic(0);
+                        s.mk_enum_c(1, &[z])
+                    },
+                );
+                (r, u)
             }
             FsRead => {
                 let (path, _) = self.val(&args[0]);

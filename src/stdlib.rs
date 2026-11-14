@@ -348,6 +348,12 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     ),
     (
         Layer::Os,
+        "env",
+        "get(name: &String) -> Option<String>",
+        "env",
+    ),
+    (
+        Layer::Os,
         "fs",
         "read(p: &Path) -> Result<String, IoError>",
         "fs.read",
@@ -985,6 +991,7 @@ mod tests {
         // ADR 0014 決定 2 の OS 層。行を層の間で移すには ADR を改める。
         let want: BTreeSet<String> = [
             "console.log",
+            "env.get",
             "fs.read",
             "fs.write",
             "Path",

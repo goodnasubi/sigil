@@ -251,6 +251,11 @@ const PRELUDE_TYPES: &[&str] = &[
     "AppConfig",
     "AppLimits",
     "ConfigError",
+    // PostgreSQL の接続型（ADR 0034 決定 1・3）。
+    "PgConfig",
+    "PgConnectLimits",
+    "PgConn",
+    "PgError",
     "JsonValue",
     "JsonNode",
     "JsonField",
@@ -270,6 +275,8 @@ pub(crate) fn home_types(embedded: bool, mname: &str) -> &'static [&'static str]
         crate::stdlib::WEB_TYPES
     } else if mname == crate::stdlib::embedded::JSON_MODULE {
         crate::stdlib::JSON_TYPES
+    } else if mname == crate::stdlib::embedded::PG_MODULE {
+        crate::stdlib::PG_TYPES
     } else if mname == HTTP_MODULE || mname == HTTP_LIMITS_MODULE {
         crate::stdlib::HTTP_TYPES
     } else {
@@ -619,9 +626,9 @@ pub fn std_heads() -> &'static [&'static str] {
     // 固定の一覧。追加は ADR 0021 の改訂を伴う（標準の名前空間が増えても自動では増えない。
     // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
     // `net` は ADR 0031、`http` は ADR 0032、`json` は ADR 0033 判断点 G（Issue #455）、`web` は同 E・I・J（Issue #460）で足した。
-    // `random` は ADR 0034 決定 4（Issue #462）で足した。
+    // `random` は ADR 0034 決定 4（Issue #462）、`pg` は決定 1・3（Issue #473）で足した。
     &[
-        "console", "env", "fs", "http", "json", "net", "random", "raw", "std", "web",
+        "console", "env", "fs", "http", "json", "net", "pg", "random", "raw", "std", "web",
     ]
 }
 

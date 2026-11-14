@@ -5,7 +5,7 @@ use crate::codegen::task::{self, SiteKind, CANCEL_CODE, HDR, SITE_W, SUSPEND};
 use crate::exec::StopKind;
 use crate::ir::{Builtin, Callee, Func, Operand, Place, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{types, BlockArg, InstBuilder, TrapCode, Value};
 use cranelift_module::Module;
 use std::collections::HashMap;
 
@@ -1492,6 +1492,30 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.switch_to_block(entry);
         let root = self.b.block_params(entry)[0];
         let rd = self.ld(root, 48);
+        // 中断する入口は main 本体より先にワーカーを作る。終了合図を使う場合だけ、
+        // 主スレッドでマスクを準備してから全ワーカーへ継承する（ADR 0033 K）。
+        // constructor から到達する通常関数なので SIR に既に存在する。
+        if let Some(f) = self
+            .cg
+            .p
+            .funcs
+            .iter()
+            .position(|f| f.name == "std.os.io.shutdown_prepare")
+        {
+            let result = self.plan_fn(self.cg.fids[f], &[]);
+            let negative = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, result[0], 0);
+            let stopped = self.b.ins().icmp_imm_s(IntCC::NotEqual, result[1], 0);
+            let failed = self.b.ins().bor(negative, stopped);
+            let (abort, ready) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(failed, abort, NOARGS, ready, NOARGS);
+            self.b.switch_to_block(abort);
+            let n = self.ic(231);
+            let code = self.ic(70);
+            let z = self.ic(0);
+            self.rt("syscall6", &[n, code, z, z, z, z, z]);
+            self.b.ins().trap(TrapCode::unwrap_user(1));
+            self.b.switch_to_block(ready);
+        }
         self.rt("sched_start", &[root, rd]);
         self.rt("sched_workers_start", &[]);
         let worker = self.cg.task.as_ref().expect("計画").worker_run;

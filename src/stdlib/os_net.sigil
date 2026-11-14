@@ -20,29 +20,28 @@ module std.os.net
 //   recvfrom 45、sendto 44、shutdown 48、close 3。
 // 利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
 
-use std.os.io.shutdown_block;
 use std.os.io.shutdown_open;
+use std.os.io.shutdown_prepare;
 use std.os.io.shutdown_read;
-use std.os.io.shutdown_restore;
 
-// ルートやスレッドを起動する前に main で一度だけ作る。作成時に SIGTERM/INT を
-// ブロックし、以後の全スレッドへ継承する。fd の破棄時もマスクは戻さない（破棄する
+// 利用のあるプログラムだけ、生成コードがワーカー起動前に SIGTERM/INT をブロックし、
+// 以後の全スレッドへ継承する。非中断の入口では作成時に準備する。
+// fd の破棄時もマスクは戻さない（破棄する
 // スレッドは作成したスレッドと異なり得るため）。プロセスの終了まで保持する機構。
 pub struct ShutdownSignal {
   fd: Int,
 }
 
 pub fn shutdown_signal() -> Result<ShutdownSignal, NetError>
-  intent "スレッド起動前に終了の合図 SIGTERM/INT を受ける所有 fd を作る"
+  intent "終了の合図 SIGTERM/INT を受ける所有 fd を作る（マスクはワーカー起動前に準備される）"
   requires none
   ensures none
   effects net.server
 {
-  let previous = shutdown_block();
-  if previous < 0 { return Err(classify(previous)); }
+  let prepared = shutdown_prepare();
+  if prepared < 0 { return Err(classify(prepared)); }
   let fd = shutdown_open();
   if fd < 0 {
-    shutdown_restore(previous);
     return Err(classify(fd));
   }
   return Ok(ShutdownSignal { fd: fd });

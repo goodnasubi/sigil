@@ -53,14 +53,14 @@ fn evaluator_allows_create_close_and_restore_only_shutdown_bits() {
   raw.store_i64(m, 16386);
   let blocked = raw.syscall(14, 0, raw.addr_to_int(m), raw.addr_to_int(prior_set), 8, 0, 0);
   let fd = raw.syscall(289, -1, raw.addr_to_int(m), 8, 526336, 0, 0);
-  let mut result = 0;
-  if blocked != 0 || fd < 0 { result = 1; }
+  let mut observed = 0;
+  if blocked != 0 || fd < 0 { observed = 1; }
   if fd >= 0 { raw.syscall(3, fd, 0, 0, 0, 0, 0); }
   raw.store_i64(m, 16386 - (raw.load_i64(prior_set) & 16386));
   let restored = raw.syscall(14, 1, raw.addr_to_int(m), 0, 8, 0, 0);
   raw.free(m, 8, 8);
   raw.free(prior_set, 8, 8);
-  return result + restored;
+  return observed + restored;
 "#,
     )
     .unwrap();
@@ -108,16 +108,18 @@ fn run() -> Int
 "#;
     let dir = common::native::scratch("shutdown-signal-483");
     let exe = dir.join("signal");
-    sigil::native::build(
-        &[source],
-        "run",
-        &sigil::codegen::Opts {
-            trust_base: vec!["std.os.signal_test".into()],
+    let entry = "module app.main\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"試験の入口\"\n  requires none\n  ensures none\n  effects none\n{ return 0; }\n";
+    let program = sigil::ir_eval::lower_sources_opts(
+        &[entry],
+        "std.os.signal_test.run",
+        &sigil::effects::Options {
+            embedded_extra: vec![("std.os.signal_test".into(), source.into())],
+            embedded_roots: vec!["std.os.signal_test".into()],
             ..Default::default()
         },
-        &exe,
     )
     .unwrap();
+    sigil::native::build_program(&program, &sigil::codegen::Opts::default(), &exe).unwrap();
     let output = Command::new("timeout")
         .arg("10s")
         .arg(exe)
@@ -139,4 +141,92 @@ fn shutdown_signal_is_opaque_and_cannot_be_cloned_in_trust_none() {
             .expect_err("所有 fd のアクセスを拒否する");
         assert!(format!("{error:?}").contains(expected), "{error:?}");
     }
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn native_public_signal_wait_inherits_mask_before_running_main_task() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let source = r#"module app.main
+  targets server
+  trust none
+
+fn main() -> Int
+  intent "中断する main でも全ワーカー起動前に終了合図のマスクが継承される"
+  requires none
+  ensures none
+  effects net.server, console, task.suspend
+{
+  match net.shutdown_signal() {
+    Ok(signal) => {
+      console.log("ready");
+      match signal.wait() {
+        Ok(u) => { return 0; }
+        Err(e) => { return 2; }
+      }
+    }
+    Err(e) => { return 1; }
+  }
+}
+"#;
+    let dir = common::native::scratch("shutdown-signal-public-483");
+    let exe = dir.join("signal");
+    sigil::native::build(&[source], "main", &sigil::codegen::Opts::default(), &exe).unwrap();
+    struct Guard(std::process::Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for workers in ["1", "4"] {
+        for signal in ["TERM", "INT"] {
+            let mut child = Guard(
+                Command::new(&exe)
+                    .env("SIGIL_WORKERS", workers)
+                    .env("SIGIL_RT_LIVE", "1")
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                let mut line = String::new();
+                BufReader::new(stdout).read_line(&mut line).unwrap();
+                let _ = sender.send(line);
+            });
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "ready\n"
+            );
+            reader.join().unwrap();
+            assert!(Command::new("kill")
+                .args(["-s", signal, &child.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(Instant::now() < deadline, "signal wait が終了しない");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let output = child.0.stderr.take().unwrap();
+            use std::io::Read;
+            let mut stderr = String::new();
+            BufReader::new(output).read_to_string(&mut stderr).unwrap();
+            assert!(
+                status.success(),
+                "workers={workers}, signal={signal}, status={status}, stderr={stderr}"
+            );
+            assert!(stderr.contains("sigil_blocks=0"), "{stderr}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

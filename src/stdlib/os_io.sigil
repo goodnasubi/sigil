@@ -922,6 +922,21 @@ pub fn io_loop(s: Int)
 // 最初のワーカー生成前の主スレッドだけが 0 -> 1 を書く。以後は全スレッドで読み取り
 // だけになる（再度 workers_start しても書かない）。タスク開始後の mask 設定を拒否する。
 global mut SHUTDOWN_SEALED: Int = 0
+global mut SHUTDOWN_PREPARED: Int = 0
+
+pub fn shutdown_prepare() -> Int
+  intent "終了合図を使うプログラムだけ、ワーカー起動前に主スレッドでマスクを準備する"
+  requires none
+  ensures none
+  effects none
+  unchecked "ネイティブ生成コードは利用のあるプログラムでだけワーカー生成前に呼ぶ。成功の印は生成前に一度書き、以後は読むだけ。非中断の入口では constructor が直接準備する"
+{
+  if SHUTDOWN_PREPARED != 0 { return 0; }
+  let previous = shutdown_block();
+  if previous < 0 { return previous; }
+  SHUTDOWN_PREPARED = 1;
+  return 0;
+}
 
 pub fn shutdown_seal()
   intent "ワーカー生成前に終了合図の新規設定を封じる"

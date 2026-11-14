@@ -1,0 +1,824 @@
+module std.pg
+  targets server
+  trust none
+
+// ADR 0034 決定 2 / #463。接続・認証・文実行を含まない純粋な部品。
+// 埋込みモジュール間で利用する。公開 query の入口は 6-5d で追加する。
+// feed は一フレームまで消費し、Done/NeedMore の整数は入力から消費したバイト数。
+// 呼出側は未消費分を再投入し、EOFでは finish を呼ぶ。受信エラー後は再利用しない。
+// budget は応答全体へ適用し、通知など行以外のメッセージも wire 上限に数える。
+// backend は形だけを検査する。応答順序・同期・期限・接続破棄は 6-5c/d の責務。
+// BackendKeyData の秘密とサーバー詳細文は返さず、エラーは SQLSTATE だけを返す。
+// 最大値: wire 一メッセージ1MiB、結果4MiB/10000行/256列、SQL64KiB/256パラメータ。
+// 自前バッファは一メッセージ以下。型変換の一時値も wire 長以下（byteaは縮小）。
+pub enum PgError {
+  Protocol,
+  LimitExceeded,
+  TypeMismatch,
+  UnsupportedType,
+}
+
+pub enum PgValue {
+  Boolean(Bool),
+  Integer(Int),
+  Text(String),
+  Binary(Bytes),
+}
+
+pub struct PgParam {
+  oid: Int,
+  value: Option<PgValue>,
+}
+
+pub struct PgColumn {
+  name: String,
+  oid: Int,
+}
+
+pub struct PgFrame {
+  tag: Int,
+  body: Bytes,
+}
+
+pub enum PgProgress {
+  NeedMore(Int),
+  Done(PgFrame, Int),
+}
+
+pub struct PgDecoder {
+  data: Bytes,
+  failed: Bool,
+  max: Int,
+}
+
+pub struct PgBudget {
+  wire: Int,
+  rows: Int,
+  max_wire: Int,
+  max_rows: Int,
+}
+
+struct PgReader {
+  data: Bytes,
+  pos: Int,
+}
+
+pub enum PgBackend {
+  RowDescription(List<PgColumn>),
+  DataRow(List<Option<PgValue>>),
+  CommandComplete(String),
+  ErrorResponse(String),
+  NoticeResponse,
+  ParameterStatus(String, String),
+  BackendKeyData,
+  ReadyForQuery(Int),
+  ParseComplete,
+  BindComplete,
+  NoData,
+  EmptyQueryResponse,
+}
+
+fn supported(oid: Int) -> Bool
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  return oid == 16 || oid == 21 || oid == 23 || oid == 20 || oid == 25 || oid == 1043 || oid == 17;
+}
+
+fn part(data: &Bytes, start: Int, end: Int) -> Bytes
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  return data.slice(start, end).unwrap_or(Bytes.new());
+}
+
+pub fn param(oid: Int, value: Option<PgValue>) -> Result<PgParam, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if !supported(oid) {
+    return Err(PgError.UnsupportedType);
+  }
+  let p = PgParam { oid: oid, value: value };
+  match encode_value(&p) {
+    Err(e) => {
+      return Err(e);
+    }
+    Ok(v) => {}
+  }
+  return Ok(p);
+}
+
+pub fn encode_value(p: &PgParam) -> Result<Option<Bytes>, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if !supported(p.oid) {
+    return Err(PgError.UnsupportedType);
+  }
+  match p.value {
+    None => {
+      return Ok(None);
+    }
+    Some(v) => {
+      match v {
+        PgValue.Boolean(b) => {
+          if p.oid != 16 {
+            return Err(PgError.TypeMismatch);
+          }
+          if b {
+            return Ok(Some("t".as_bytes()));
+          }
+          return Ok(Some("f".as_bytes()));
+        }
+        PgValue.Integer(n) => {
+          if !int_range(p.oid, n) {
+            return Err(PgError.TypeMismatch);
+          }
+          return Ok(Some(int_text(n)));
+        }
+        PgValue.Text(t) => {
+          if p.oid != 25 && p.oid != 1043 {
+            return Err(PgError.TypeMismatch);
+          }
+          if t.len() > 1048571 {
+            return Err(PgError.LimitExceeded);
+          }
+          let b = t.as_bytes();
+          let mut i = 0;
+          while i < b.len() {
+            if b.get(i).unwrap_or(0) == 0 {
+              return Err(PgError.TypeMismatch);
+            }
+            i = i + 1;
+          }
+          return Ok(Some(b));
+        }
+        PgValue.Binary(b) => {
+          if p.oid != 17 {
+            return Err(PgError.TypeMismatch);
+          }
+          if b.len() > 524284 {
+            return Err(PgError.LimitExceeded);
+          }
+          let mut out = "\\x".as_bytes();
+          let hex = "0123456789abcdef".as_bytes();
+          let mut i = 0;
+          while i < b.len() {
+            let x = b.get(i).unwrap_or(0);
+            out.push(hex.get(x / 16).unwrap_or(0));
+            out.push(hex.get(x % 16).unwrap_or(0));
+            i = i + 1;
+          }
+          return Ok(Some(out));
+        }
+      }
+    }
+  }
+}
+
+fn int_range(oid: Int, n: Int) -> Bool
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if oid == 21 {
+    return n >= 0 - 32768 && n <= 32767;
+  }
+  if oid == 23 {
+    return n >= 0 - 2147483648 && n <= 2147483647;
+  }
+  return oid == 20;
+}
+
+fn unhex(c: Int) -> Int
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 {
+    return c - 48;
+  }
+  if c >= 97 && c <= 102 {
+    return c - 87;
+  }
+  if c >= 65 && c <= 70 {
+    return c - 55;
+  }
+  return 0 - 1;
+}
+
+pub fn decode_value(oid: Int, data: &Bytes) -> Result<PgValue, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if !supported(oid) {
+    return Err(PgError.UnsupportedType);
+  }
+  if data.len() > 1048571 {
+    return Err(PgError.LimitExceeded);
+  }
+  if oid == 17 {
+    if data.len() < 2 || data.get(0).unwrap_or(0) != 92 || data.get(1).unwrap_or(0) != 120 || data.len() % 2 != 0 {
+      return Err(PgError.TypeMismatch);
+    }
+    let mut out = Bytes.new();
+    let mut i = 2;
+    while i < data.len() {
+      let a = unhex(data.get(i).unwrap_or(0));
+      let b = unhex(data.get(i + 1).unwrap_or(0));
+      if a < 0 || b < 0 {
+        return Err(PgError.TypeMismatch);
+      }
+      out.push(a * 16 + b);
+      i = i + 2;
+    }
+    return Ok(PgValue.Binary(out));
+  }
+  let t = data.to_string_utf8().map_err(|e| PgError.TypeMismatch)?;
+  if oid == 25 || oid == 1043 {
+    return Ok(PgValue.Text(t));
+  }
+  if oid == 16 {
+    if t == "t" {
+      return Ok(PgValue.Boolean(true));
+    }
+    if t == "f" {
+      return Ok(PgValue.Boolean(false));
+    }
+    return Err(PgError.TypeMismatch);
+  }
+  let mut i = 0;
+  if data.get(0).unwrap_or(0) == 45 {
+    i = 1;
+  }
+  if i == data.len() {
+    return Err(PgError.TypeMismatch);
+  }
+  while i < data.len() {
+    let c = data.get(i).unwrap_or(0);
+    if c < 48 || c > 57 {
+      return Err(PgError.TypeMismatch);
+    }
+    i = i + 1;
+  }
+  let n = t.parse_int().map_err(|e| PgError.TypeMismatch)?;
+  if !int_range(oid, n) {
+    return Err(PgError.TypeMismatch);
+  }
+  return Ok(PgValue.Integer(n));
+}
+
+pub fn decoder(max: Int) -> Result<PgDecoder, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if max < 5 || max > 1048576 {
+    return Err(PgError.LimitExceeded);
+  }
+  return Ok(PgDecoder { data: Bytes.new(), failed: false, max: max });
+}
+
+impl PgDecoder {
+  pub fn feed(self: &mut PgDecoder, input: &Bytes) -> Result<PgProgress, PgError>
+    intent "上限と形式を検査する"
+    requires none
+    ensures none
+    effects none
+  {
+    if self.failed {
+      return Err(PgError.Protocol);
+    }
+    let mut used = 0;
+    while used < input.len() {
+      self.data.push(input.get(used).unwrap_or(0));
+      used = used + 1;
+      if self.data.len() == 5 {
+        let n = self.data.read_u32_be(1).unwrap_or(0);
+        if n < 4 || n > 2147483647 {
+          self.failed = true;
+          return Err(PgError.Protocol);
+        }
+        if n > self.max - 1 {
+          self.failed = true;
+          return Err(PgError.LimitExceeded);
+        }
+      }
+      if self.data.len() >= 5 {
+        let n = self.data.read_u32_be(1).unwrap_or(0);
+        if self.data.len() == n + 1 {
+          let f = PgFrame { tag: self.data.get(0).unwrap_or(0), body: part(&self.data, 5, n + 1) };
+          self.data = Bytes.new();
+          return Ok(PgProgress.Done(f, used));
+        }
+      }
+    }
+    return Ok(PgProgress.NeedMore(used));
+  }
+
+  pub fn finish(self: &mut PgDecoder) -> Result<Bool, PgError>
+    intent "上限と形式を検査する"
+    requires none
+    ensures none
+    effects none
+  {
+    if self.failed || self.data.len() != 0 {
+      self.failed = true;
+      return Err(PgError.Protocol);
+    }
+    return Ok(true);
+  }
+}
+
+pub fn frame(tag: Int, body: Bytes, max: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if max < 5 || max > 1048576 || body.len() > max - 5 {
+    return Err(PgError.LimitExceeded);
+  }
+  if tag < 0 || tag > 255 {
+    return Err(PgError.Protocol);
+  }
+  let mut out = Bytes.new();
+  out.push(tag);
+  out.push_u32_be(body.len() + 4);
+  out.extend(&body);
+  return Ok(out);
+}
+
+pub fn budget(max_wire: Int, max_rows: Int) -> Result<PgBudget, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if max_wire < 1 || max_wire > 4194304 || max_rows < 0 || max_rows > 10000 {
+    return Err(PgError.LimitExceeded);
+  }
+  return Ok(PgBudget { wire: 0, rows: 0, max_wire: max_wire, max_rows: max_rows });
+}
+
+impl PgBudget {
+  pub fn accept(self: &mut PgBudget, f: &PgFrame) -> Result<Bool, PgError>
+    intent "上限と形式を検査する"
+    requires none
+    ensures none
+    effects none
+  {
+    let n = f.body.len() + 5;
+    if n > self.max_wire - self.wire {
+      return Err(PgError.LimitExceeded);
+    }
+    if f.tag == 68 {
+      if self.rows >= self.max_rows {
+        return Err(PgError.LimitExceeded);
+      }
+      self.rows = self.rows + 1;
+    }
+    self.wire = self.wire + n;
+    return Ok(true);
+  }
+}
+
+fn read_n(r: &mut PgReader, n: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if n < 0 || n > r.data.len() - r.pos {
+    return Err(PgError.Protocol);
+  }
+  let out = part(&r.data, r.pos, r.pos + n);
+  r.pos = r.pos + n;
+  return Ok(out);
+}
+
+fn uint(r: &mut PgReader, n: Int) -> Result<Int, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let b = read_n(&mut r, n)?;
+  let mut v = 0;
+  let mut i = 0;
+  while i < n {
+    v = v * 256 + b.get(i).unwrap_or(0);
+    i = i + 1;
+  }
+  return Ok(v);
+}
+
+fn cstring(r: &mut PgReader) -> Result<String, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let start = r.pos;
+  while r.pos < r.data.len() {
+    let c = r.data.get(r.pos).unwrap_or(0);
+    r.pos = r.pos + 1;
+    if c == 0 {
+      return match part(&r.data, start, r.pos - 1).to_string_utf8() {
+        Ok(t) => Ok(t),
+        Err(e) => Err(PgError.Protocol),
+      };
+    }
+  }
+  return Err(PgError.Protocol);
+}
+
+fn columns(r: &mut PgReader) -> Result<List<PgColumn>, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let count = uint(&mut r, 2)?;
+  if count > 256 {
+    return Err(PgError.LimitExceeded);
+  }
+  let mut out = List.new();
+  let mut i = 0;
+  while i < count {
+    let name = cstring(&mut r)?;
+    match read_n(&mut r, 6) {
+      Ok(b) => {}
+      Err(e) => {
+        return Err(e);
+      }
+    }
+    let oid = uint(&mut r, 4)?;
+    if !supported(oid) {
+      return Err(PgError.UnsupportedType);
+    }
+    match read_n(&mut r, 6) {
+      Ok(b) => {}
+      Err(e) => {
+        return Err(e);
+      }
+    }
+    match uint(&mut r, 2) {
+      Ok(n) => {
+        if n != 0 {
+          return Err(PgError.TypeMismatch);
+        }
+      }
+      Err(e) => {
+        return Err(e);
+      }
+    }
+    out.push(PgColumn { name: name, oid: oid });
+    i = i + 1;
+  }
+  return Ok(out);
+}
+
+fn row(r: &mut PgReader, cols: &List<PgColumn>) -> Result<List<Option<PgValue>>, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let count = uint(&mut r, 2)?;
+  if count > 256 {
+    return Err(PgError.LimitExceeded);
+  }
+  if count != cols.len() {
+    return Err(PgError.Protocol);
+  }
+  let mut out = List.new();
+  let mut i = 0;
+  while i < count {
+    let oid = match cols.get(i) {
+      Some(c) => c.oid,
+      None => 0,
+    };
+    let n = uint(&mut r, 4)?;
+    if n == 4294967295 {
+      out.push(None);
+    } else {
+      if n > 2147483647 {
+        return Err(PgError.Protocol);
+      }
+      let b = read_n(&mut r, n)?;
+      let v = decode_value(oid, &b)?;
+      out.push(Some(v));
+    }
+    i = i + 1;
+  }
+  return Ok(out);
+}
+
+fn error_fields(r: &mut PgReader) -> Result<String, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut sqlstate = "";
+  let mut seen = false;
+  while r.pos < r.data.len() {
+    let tag = uint(&mut r, 1)?;
+    if tag == 0 {
+      if !seen {
+        return Err(PgError.Protocol);
+      }
+      return Ok(sqlstate);
+    }
+    let t = cstring(&mut r)?;
+    if tag == 67 {
+      if seen || t.len() != 5 {
+        return Err(PgError.Protocol);
+      }
+      let b = t.as_bytes();
+      let mut i = 0;
+      while i < 5 {
+        let c = b.get(i).unwrap_or(0);
+        if !(c >= 48 && c <= 57) && !(c >= 65 && c <= 90) {
+          return Err(PgError.Protocol);
+        }
+        i = i + 1;
+      }
+      sqlstate = t;
+      seen = true;
+    }
+  }
+  return Err(PgError.Protocol);
+}
+
+pub fn backend(f: &PgFrame, cols: &List<PgColumn>) -> Result<PgBackend, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if f.body.len() > 1048571 {
+    return Err(PgError.LimitExceeded);
+  }
+  let mut r = PgReader { data: f.body.clone(), pos: 0 };
+  let v = backend_body(f.tag, &mut r, &cols)?;
+  if r.pos != r.data.len() {
+    return Err(PgError.Protocol);
+  }
+  return Ok(v);
+}
+
+fn backend_body(tag: Int, r: &mut PgReader, cols: &List<PgColumn>) -> Result<PgBackend, PgError>
+  intent "応答の種類を解釈する"
+  requires none
+  ensures none
+  effects none
+{
+  match tag {
+    84 => {
+      return Ok(PgBackend.RowDescription(columns(&mut r)?));
+    }
+    68 => {
+      return Ok(PgBackend.DataRow(row(&mut r, &cols)?));
+    }
+    67 => {
+      return Ok(PgBackend.CommandComplete(cstring(&mut r)?));
+    }
+    69 => {
+      return Ok(PgBackend.ErrorResponse(error_fields(&mut r)?));
+    }
+    78 => {
+      match error_fields(&mut r) {
+        Ok(t) => {}
+        Err(e) => {
+          return Err(e);
+        }
+      }
+      return Ok(PgBackend.NoticeResponse);
+    }
+    83 => {
+      let k = cstring(&mut r)?;
+      let v = cstring(&mut r)?;
+      return Ok(PgBackend.ParameterStatus(k, v));
+    }
+    75 => {
+      match read_n(&mut r, 8) {
+        Ok(b) => {}
+        Err(e) => {
+          return Err(e);
+        }
+      }
+      return Ok(PgBackend.BackendKeyData);
+    }
+    90 => {
+      let c = uint(&mut r, 1)?;
+      if c != 73 && c != 84 && c != 69 {
+        return Err(PgError.Protocol);
+      }
+      return Ok(PgBackend.ReadyForQuery(c));
+    }
+    49 => {
+      return Ok(PgBackend.ParseComplete);
+    }
+    50 => {
+      return Ok(PgBackend.BindComplete);
+    }
+    110 => {
+      return Ok(PgBackend.NoData);
+    }
+    73 => {
+      return Ok(PgBackend.EmptyQueryResponse);
+    }
+    _ => {
+      return Err(PgError.Protocol);
+    }
+  }
+}
+
+pub fn parse(sql: &String, params: &List<PgParam>, max: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if sql.len() > 65536 || params.len() > 256 {
+    return Err(PgError.LimitExceeded);
+  }
+  let b = sql.as_bytes();
+  let mut i = 0;
+  while i < b.len() {
+    if b.get(i).unwrap_or(0) == 0 {
+      return Err(PgError.Protocol);
+    }
+    i = i + 1;
+  }
+  if max < 5 || max > 1048576 || b.len() > max - 5 || params.len() * 4 + 4 > max - 5 - b.len() {
+    return Err(PgError.LimitExceeded);
+  }
+  let mut out = Bytes.new();
+  out.push(0);
+  out.extend(&b);
+  out.push(0);
+  out.push_u16_be(params.len());
+  i = 0;
+  while i < params.len() {
+    match params.get(i) {
+      None => {
+        return Err(PgError.Protocol);
+      }
+      Some(p) => {
+        match encode_value(&p) {
+          Ok(v) => {}
+          Err(e) => {
+            return Err(e);
+          }
+        }
+        out.push_u32_be(p.oid);
+      }
+    }
+    i = i + 1;
+  }
+  return frame(80, out, max);
+}
+
+pub fn bind(params: &List<PgParam>, max: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if params.len() > 256 || max < 13 || max > 1048576 {
+    return Err(PgError.LimitExceeded);
+  }
+  let mut out = Bytes.new();
+  out.push(0);
+  out.push(0);
+  out.push_u16_be(0);
+  out.push_u16_be(params.len());
+  let mut i = 0;
+  while i < params.len() {
+    match params.get(i) {
+      None => {
+        return Err(PgError.Protocol);
+      }
+      Some(p) => {
+        let v = encode_value(&p)?;
+        if out.len() > max - 11 {
+          return Err(PgError.LimitExceeded);
+        }
+        match v {
+          None => {
+            out.push_u32_be(4294967295);
+          }
+          Some(b) => {
+            if b.len() > max - 11 - out.len() {
+              return Err(PgError.LimitExceeded);
+            }
+            out.push_u32_be(b.len());
+            out.extend(&b);
+          }
+        }
+      }
+    }
+    i = i + 1;
+  }
+  out.push_u16_be(0);
+  return frame(66, out, max);
+}
+
+pub fn describe(max: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = Bytes.new();
+  b.push(80);
+  b.push(0);
+  return frame(68, b, max);
+}
+
+pub fn execute(max: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = Bytes.new();
+  b.push(0);
+  b.push_u32_be(0);
+  return frame(69, b, max);
+}
+
+pub fn sync(max: Int) -> Result<Bytes, PgError>
+  intent "上限と形式を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  return frame(83, Bytes.new(), max);
+}
+
+fn int_text(n: Int) -> Bytes
+  intent "最小整数も桁あふれなしで十進化する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut v = n;
+  if v > 0 {
+    v = 0 - v;
+  }
+  let mut rev = Bytes.new();
+  rev.push(48 - v % 10);
+  v = v / 10;
+  while v != 0 {
+    rev.push(48 - v % 10);
+    v = v / 10;
+  }
+  let mut out = Bytes.new();
+  if n < 0 {
+    out.push(45);
+  }
+  let mut i = rev.len();
+  while i > 0 {
+    i = i - 1;
+    out.push(rev.get(i).unwrap_or(0));
+  }
+  return out;
+}
+
+impl PgColumn {
+  pub fn column_name(self: &PgColumn) -> String
+    intent "列名を写す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.name.clone();
+  }
+
+  pub fn type_oid(self: &PgColumn) -> Int
+    intent "列のOIDを読む"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.oid;
+  }
+}

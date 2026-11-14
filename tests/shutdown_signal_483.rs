@@ -233,3 +233,96 @@ fn main() -> Int
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn native_program_without_signal_api_keeps_default_signal_actions() {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    // 別の std.os.net 操作と task.suspend を使っても、未使用の shutdown_signal が
+    // lower されて mask を変えてしまわないことを、実際の既定終了で確かめる。
+    let source = r#"module app.main
+  targets server
+  trust none
+
+fn main() -> Int
+  intent "終了合図の API を使わないサーバーはシグナルの既定動作を保つ"
+  requires none
+  ensures none
+  effects net.server, console, task.suspend
+{
+  let host = "127.0.0.1";
+  match net.listen(&host, 0, 1) {
+    Ok(listener) => {
+      let ready = "ready";
+      console.log(&ready);
+      match listener.accept() {
+        Ok(stream) => { return 0; }
+        Err(e) => { return 2; }
+      }
+    }
+    Err(e) => { return 1; }
+  }
+}
+"#;
+    let dir = common::native::scratch("shutdown-signal-unused-483");
+    let exe = dir.join("listener");
+    sigil::native::build(&[source], "main", &sigil::codegen::Opts::default(), &exe).unwrap();
+    struct Guard(std::process::Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for workers in ["1", "4"] {
+        for (signal, expected) in [("TERM", 15), ("INT", 2)] {
+            let mut child = Guard(
+                Command::new(&exe)
+                    .env("SIGIL_WORKERS", workers)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            );
+            let stdout = child.0.stdout.take().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                let mut output = BufReader::new(stdout);
+                let mut line = String::new();
+                output.read_line(&mut line).unwrap();
+                let _ = sender.send(line);
+                output
+            });
+            assert_eq!(
+                receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "ready\n"
+            );
+            let _stdout = reader.join().unwrap();
+            assert!(Command::new("kill")
+                .args(["-s", signal, &child.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "未使用 API がシグナルをブロックした"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(
+                status.signal(),
+                Some(expected),
+                "workers={workers}, signal={signal}, status={status}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

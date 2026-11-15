@@ -521,7 +521,7 @@ Core 層に次の不透明型と入口を定める。名前と効果は後続実
 
 ## 補足 A: 段階 6-5 完了記録（6-5g、2026-11-15 JST）
 
-段階 6-5（PostgreSQL クライアント）の全段（6-5a〜6-5g）の実装および検証が完了した。本節に統合成果、ADR 0020 の関門確認結果、信頼基盤の増分と残存制限、`sigil spec` の実効果、`native-report` の結果、および後続（6-6 認証・7-1 総合サービス）への引き継ぎ事項を記録する。
+段階 6-5（PostgreSQL クライアント）の各段（6-5a〜6-5g）の実装および検証状況を記録する。本節に統合成果、ADR 0020 の関門確認結果（G2 の未完了項目を含む）、信頼基盤の増分と残存制限、`sigil spec` の実効果、`native-report` の結果、および後続（6-6 認証・7-1 総合サービス）への引き継ぎ事項（効果境界の整合等）を記録する。
 
 ### A-1. 6-5a〜6-5g の実装成果一覧
 
@@ -537,7 +537,7 @@ Core 層に次の不透明型と入口を定める。名前と効果は後続実
 
 ### A-2. ADR 0020 の関門確認結果
 
-ADR 0020 決定 3 の関門（G1・G2・G3）に照らして 6-5 の安全性を確認した。
+ADR 0020 決定 3 の関門（G1・G2・G3）に照らして 6-5 の状況を確認した。
 
 1. **G1（脅威と対策の確認）**:
    - 入力: protocol v3 のフレーム長上限（1MiB）、深さ・列数・行数上限（`with_result_bounds`）、NUL 終端・UTF-8 検査を実装。SQL は Parse/Bind でパラメータ分離しインジェクションを防止。
@@ -546,7 +546,9 @@ ADR 0020 決定 3 の関門（G1・G2・G3）に照らして 6-5 の安全性を
    - 資源: fd 所有型（`TcpClient`）と `CapacityPermit` による二重 close / 資源漏洩防止。各種タイムアウト（connect 5s/10s, query 30s, cleanup 5s, acquire 30s）および接続数・待機数上限を適用。
 2. **G2（段階の完了確認）**:
    - 決定 1 の検査: 定数時間照合、秘密の非表示、SQLSTATE・固定エラー分類のみのエラー応答を `tests/pg_query_492.rs` 等で確認済み。
-   - 決定 2 の対象の追加と短い実行: 各種境界値・異常系・型変換・エラー復旧のテストが通常の CI ジョブで安定して緑。
+   - 決定 2 の対象の追加と短い実行:
+     - PostgreSQL サーバー通信文の解釈（`fuzz_pg_backend`）: `tests/pg_protocol_463.rs` の `short_fuzz_fragmentation` によりフレーム分割・変異・任意バイト列に対する短いファジング実行を確認済み。
+     - SCRAM 通信文（`server-first`・`server-final`）の解釈（`fuzz_scram`）: `tests/pg_scram_473.rs` において RFC 7677 固定テストベクトル、フォーマットおよび境界値・異常値の検査は確認されているが、**ADR 0020 決定 2 が要求する SCRAM 通信文のファジング対象（`fuzz_scram`）の追加と短い実行は未実施**。このため G2 のファジング関門については SCRAM 解釈が**未完了項目（残存課題）**として残る（公開前関門 G3 までに実施が必要）。
    - 決定 4 の上限のテスト: 行数上限・バイト数上限（`with_result_bounds`）、接続数・待機数上限（`with_capacity`）、各種タイムアウト（`with_timeout`, `with_timeouts`）を検証済み。
 3. **G3（公開前レビューの確認事項）**:
    - 本ドライバは内部網（サービスと同一ネットワーク）専用であり、平文通信前提のためインターネット等への外部直接接続は不可。
@@ -565,6 +567,7 @@ ADR 0020 決定 3 の関門（G1・G2・G3）に照らして 6-5 の安全性を
    - クエリ: 単一文クエリのみ（prepared statement の外部公開ハンドル、pipeline、ストリーミング、COPY、LISTEN/NOTIFY 非対応）。
    - 運用: ORM、スキーマ移行、レプリケーション、自動リトライ、CancelRequest は非対応。
    - 評価器性能: 評価器での PBKDF2 4096 反復は計算時間を要するため、実接続結合テストでは `fixture()` またはネイティブ実行による検証を基本とする（Issue #484）。
+   - 関門・効果境界: G2 関門における SCRAM 通信文のファジング（`fuzz_scram`）は未実施（A-2 参照）。Web ハンドラ（`WEB_CALLBACKS`）の効果上限 `D` と `std.pg` の必要効果（`net.client`）の境界整合は未解決（A-6 参照）。
 
 ### A-4. `sigil spec` の実効果
 
@@ -594,9 +597,11 @@ ADR 0020 決定 3 の関門（G1・G2・G3）に照らして 6-5 の安全性を
 
 ### A-6. P1 サービスへの接続と引き継ぎ事項
 
-1. **フレームワーク（段階 6-4）との結合**:
-   - `std.web` のハンドラ・フック・認証検証器の効果上限 `D` は `clock, console, db, env, random, task` であり、`std.pg` の公開操作（`clock, net.client, random, task`）はすべて許容される。
-   - `PgPool` は `Cloneable` / `Sendable` / `Shareable` であり、Web サーバーの起動時に初期化して `SyncShared` やクロージャを通じて各接続ルートへ共有可能。要求ハンドラ内で `pool.acquire()` して `lease.query()` を実行し、`lease.release()` で清掃返却する運用が可能。
+1. **フレームワーク（段階 6-4）との結合と効果境界の課題**:
+   - `PgPool` 型自体は `Cloneable` / `Sendable` / `Shareable` であり、Web サーバーの起動時に初期化して `SyncShared` やクロージャを通じて各接続ルートへ共有可能な設計である。
+   - しかし、`std.web` のハンドラ・フック・認証検証器の効果上限 `D`（`src/stdlib.rs:145-158` の `WEB_CALLBACKS`）は `clock, console, db, env, random, task` のみを許容しており、`std.pg` の公開操作（`PgPool.acquire`, `PgLease.query`, `PgLease.release`）が必要とする `net.client` は含まれない（`src/effects.rs` において `db` と `net.client` は独立した別カテゴリ）。
+   - そのため、現行の型・効果検査のもとでは要求ハンドラ内から `PgPool.acquire()` や `PgLease.query()` を直接呼び出すと効果検査エラーとなり、そのままではサービス実装へ引き継げない。
+   - **未解決の引き継ぎ事項（効果境界の整合）**: 要求ハンドラから PostgreSQL クライアントを呼び出せるようにするための効果境界の整合（`WEB_CALLBACKS` の許容効果に `net.client` を追加するか、`std.pg` 側で `db` 効果へ集約・抽象化するか、あるいはミドルウェア／アダプタ層で効果境界を変換・吸収するか）は未解決であり、後続の段階（6-6 認証・7-1 総合サービス）への引き継ぎ課題とする。
 2. **後続（6-6 認証・7-1 総合サービス）への引き継ぎ**:
    - DB 接続情報（ホスト・ポート・ユーザー・DB名・パスワード）は `env.get`（`effects env`）で取得し、`Secret.from_bytes` で安全に包んで `pg.config` へ渡す。
    - 終了シグナル（`net.shutdown_signal()`）受信時は、`task.roots_grace` で Web 要求のドレインが完了した後に、プールの接続を破棄してプロセスを正常終了できる。

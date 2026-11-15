@@ -28,7 +28,7 @@ Sigil は、AI がコードを書き、人間は仕様だけをレビューす�
    - 起票は必ずスクリプト経由。使えない環境で手動起票する場合も、本文末尾に `<!-- backlog-id: <spawn_rules の id> -->` を必ず含める。
    - 同じ `spawn_rules` から重複したら、番号の小さい方を正とする。大きい方を作ったエージェントが、正へのリンクをコメントして自分でクローズする。
 2. **タスク確保（排他ロック）**
-   - `agent:<agent>` ラベルを排他ロックに使う（`<agent>` は `claude` / `gemini` / `muse` / `codex`）。
+   - `agent:<agent>` ラベルを排他ロックに使う（`<agent>` は `claude` / `gemini` / `muse` / `codex`。agy はブランチ名の接頭辞に `agy` を使い、ロック用ラベルは `agent:gemini` を使う）。
    - 着手前に `gh issue list --state open` と `gh pr list --state open` を確認する。
    - `agent:*` か `blocked` の付いた Issue、および同じ `lane:*` のオープン PR があるレーンの Issue は絶対に取らない（1 レーン同時に 1 PR まで）。
    - 未着手の Issue を選んだら、即座に自分のラベルを付け、ブランチ名をコメントしてロックする:
@@ -63,7 +63,7 @@ Agent-Model: <モデル名>
 Agent-Env: cloud
 ```
 
-- `Agent:` は必須。値は `claude` / `gemini` / `muse` / `codex`（ブランチ名の `<agent>` と同じ）。
+- `Agent:` は必須。値は `claude` / `gemini` / `muse` / `codex` / `antigravity`（agy の `Agent:` は `antigravity`。それ以外はブランチ名の `<agent>` と同じ）。
 - `Agent-Model:` は必須。自分が動いているモデルの識別名を、その実行環境で名乗っている名前のまま書く（例: `claude-sonnet-5-5-medium`、`gemini-4-argon-medium`、`gpt-oss-120b-medium`）。正確な識別名が分からないときは、判明している最も具体的な名前を書く。
 - `Agent-Env:` は必須。値は `local-windows` / `cloud`。
 - トレーラーは本文と空行 1 行をあけ、末尾にまとめる。
@@ -123,7 +123,7 @@ cargo test --test <変更範囲のテスト>
 | 変更の種類 | 人間のレビュー | マージの条件 |
 |---|---|---|
 | コードのみ（仕様に影響しない） | 不要 | CI が緑 + 別系統のエージェントの承認 |
-| 仕様の変更（`sigil spec` の出力・文法・型規則） | 事前承認は必須としない。「判断の手順」に従う | CI が緑 + 別系統のエージェントの承認 |
+| 仕様の変更（`sigil spec` の出力・文法・型規則） | 不要。「判断の手順」に従う | CI が緑 + 別系統のエージェントの承認 |
 | ADR の追加・変更 | 不要 | CI が緑 + 別系統のエージェントの承認 |
 | セキュリティ関連（ADR 0020、CODEOWNERS 対象） | **必須** | CODEOWNERS の承認 |
 

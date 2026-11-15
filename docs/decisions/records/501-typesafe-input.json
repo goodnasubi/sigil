@@ -1,0 +1,22 @@
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸（固定）: SigilはAIが実装し人間は仕様をレビューする。ADR0001/0005/0027の明示能力・最小信頼基盤・曖昧さ削減・独立検証、所有者のCodex積極利用と2026-11-08委任、ADR0018判断6c=HMAC署名Bearer検証のみ（発行なし、鍵は環境変数）、ADR0020のHMAC-SHA256固定・署名前payload解釈禁止・定数時間照合・短鍵拒否・G1/G2・自前fuzz、ADR0033既定拒否を優先する。Issue501はADR起草のみ。採用候補: sigil1.<payload>.<tag>、RFC4648 base64url無padding厳格正規形、署名対象ASCII sigil1.<payload>全体、タグ32bytes。payload固定順binary: iat8/exp8（非負Unix秒上限253402300799、大端）、aud長2+ASCII識別子1..128、sub長2+ASCII識別子1..256（識別子は英数字._:-）、余剰禁止。0<=iat<=now<exp、exp-iat<=3600秒、時計誤差猶予なし、audは環境設定と一致。token上限1024bytes。鍵はSIGIL_AUTH_HMAC_KEY_HEXの64桁小文字hex（32bytes、暗号乱数由来）、audはSIGIL_AUTH_AUDIENCE、起動一回env読込で不備時待受禁止、Secret保持。純粋検証はnow秒と検証済configを明示受取、move closureでAuthVerifierへ接続し要求時clock効果のみ。AppRequestヘッダ重複数API追加が必要（現headerは最初のみ）。Authorization単一値のみ、BearerはASCII大小不問、SP1個、token以外の空白/カンマ拒否、query/cookie不可。clock Unix秒API未整備なので6-6aに最小OS壁時計境界と評価器差替え・native検査を入れる。OSエラー時401、起動時失敗停止。外部認証失敗は固定401 unauthorized、WWW-Authenticate: Bearer、cache-control:no-store、理由/秘密なし。HTTP構文不正と既存上限エラーはHTTP既存応答を維持。署名比較は既存verify_hmac_sha256を再利用して秘密境界だけCT登録（公開token解析や認証成否で分岐する全検証器はCT対象にしない）、全HTTP処理時間一致は主張しない。期限内replayと暗号化なしを明示、TLS前段/内部網と短命/鍵交換再起動で運用。段分け: a時計/重複API、b純粋トークン検証+CT、c設定/統合、d fuzz/上限/秘密/統合/G2完了記録。",
+  "questions": {
+    "Profile": {
+      "type": "choice",
+      "criteria": {
+        "bounded": "上記の期限・aud付き固定binary独自profileを採用。仕様とtest vectorsを列挙しJWT互換は称さない",
+        "jwt": "JWT/JSON汎用クレームとalg欄/複数方式を導入する",
+        "timeless": "無期限のsubjectだけの署名tokenで時計追加を避ける"
+      }
+    },
+    "Integration": {
+      "type": "choice",
+      "criteria": {
+        "minimal": "上記の最小時計境界・重複検査API・env起動一回とmove closure・純粋coreで接続し4段に分ける",
+        "ambient": "各要求でenvを読み直し大域可変鍵と最初のAuthorizationだけを使う",
+        "expand": "汎用時刻日時ライブラリと発行/失効DB/OIDCも本段に含める"
+      }
+    }
+  }
+}

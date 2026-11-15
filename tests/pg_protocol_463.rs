@@ -21,6 +21,9 @@ fn source(sig: &str, body: &str) -> String {
         pure.replacen("module std.pg", "module app.pg", 1)
     )
     .replace("PgError", "ProtocolTestError")
+    .replace("PgValue", "ProtocolTestValue")
+    .replace("PgParam", "ProtocolTestParam")
+    .replace("PgColumn", "ProtocolTestColumn")
 }
 fn convert(body: &str) -> String {
     let mut b = body.replace(".unwrap()", "?").replace(r"\0", r"\u{0}");

@@ -706,7 +706,7 @@ spec:
   効果: なし
 
 === tests/data/messy.expected.sigil
-check: 34:1: 型エラー: 型引数 `E` が同じ名前の型を隠している
+check: 41:1: 型エラー: 型引数 `E` が同じ名前の型を隠している
 spec:
 モジュール m.a
   出力先: サーバー
@@ -743,7 +743,7 @@ spec:
   効果: なし
 
 === tests/data/messy.sigil
-check: 34:1: 型エラー: 型引数 `E` が同じ名前の型を隠している
+check: 41:1: 型エラー: 型引数 `E` が同じ名前の型を隠している
 spec:
 モジュール m.a
   出力先: サーバー

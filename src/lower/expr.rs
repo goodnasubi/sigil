@@ -984,6 +984,23 @@ impl<'a> L<'a> {
             }
             return self.user_call(decl, &r.targs, ops, ret);
         }
+        if owner == "Option" && name == "take" {
+            let (mut place, ty) = self.expr_place(recv)?;
+            if super::is_ref(&ty) {
+                place = place.deref();
+            }
+            let ir::Ty::Adt(tid) = ret.clone() else {
+                return bail("Option.take の戻り値の型");
+            };
+            // 置換値は移動より先に作る。移動と None の格納の間に確保・中断・呼出しを挟まない。
+            let none = self.fresh(
+                Rvalue::Aggregate(AggKind::Variant(tid, ir::OPTION_NONE), vec![]),
+                ret.clone(),
+            );
+            let value = self.fresh(Rvalue::Use(Operand::Move(place.clone())), ret);
+            self.assign(place, Rvalue::Use(none));
+            return Ok(value);
+        }
         if name == "clone" {
             let (p, ty) = self.expr_place(recv)?;
             let ty = peel(&ty).clone();

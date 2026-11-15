@@ -3,7 +3,7 @@ module std.pg
   trust none
 
 // ADR 0034 決定 1・2・6。SCRAM と Startup は同じ Sigil 本体で評価する。
-// 埋込みモジュール間で利用する。公開 query の入口は 6-5d で追加する。
+// 接続と単一文 query はこの共通 Sigil 実装を評価器・ネイティブで利用する。
 // feed は一フレームまで消費し、Done/NeedMore の整数は入力から消費したバイト数。
 // 呼出側は未消費分を再投入し、EOFでは finish を呼ぶ。受信エラー後は再利用しない。
 // budget は応答全体へ適用し、通知など行以外のメッセージも wire 上限に数える。
@@ -18,6 +18,8 @@ use std.pg_scram.verify;
 
 pub enum PgError {
   UnsupportedCredential,
+  SqlState(String),
+  OutcomeUnknown,
   Authentication,
   Connection,
   Timeout,
@@ -835,7 +837,7 @@ impl PgColumn {
 
 // 接続は fd を一つだけ所有する。認証失敗と timeout はこの値を返さず、TcpClient の破棄で閉じる。
 pub struct PgConn {
-  stream: TcpClient,
+  stream: Option<TcpClient>,
 }
 
 pub struct PgConfig {
@@ -1033,7 +1035,243 @@ fn connect_inner(c: &PgConfig) -> Result<PgConn, PgError>
       PgBackend.NoticeResponse => {}
       PgBackend.ReadyForQuery(status) => {
         if status != 73 || !encoding { return Err(PgError.Protocol); }
-        return Ok(PgConn { stream: stream });
+        return Ok(PgConn { stream: Some(stream) });
+      }
+      _ => { return Err(PgError.Protocol); }
+    }
+  }
+  return Err(PgError.Protocol);
+}
+
+// 結果の文字列・バイト列は wire 累積以下。各値は少なくとも長さ欄4バイトを消費する。
+// 値スロットは max_wire / 4 以下（製品上限1048576個）、行の箱は10000個以下。
+// wire上限と合わせ、NULL/空値が多い応答にも復号後の保持量の固定上限を持たせる。
+pub struct PgResult {
+  result_cols: List<PgColumn>,
+  result_rows: List<List<Option<PgValue>>>,
+  command_tag: String,
+  ready_status: Int,
+}
+
+pub struct PgQueryLimits {
+  timeout_ms: Int,
+  max_wire: Int,
+  max_rows: Int,
+}
+
+pub fn default_query_limits() -> PgQueryLimits
+  intent "一操作30秒と結果の固定上限を選ぶ"
+  requires none
+  ensures none
+  effects none
+{
+  return PgQueryLimits { timeout_ms: 30000, max_wire: 4194304, max_rows: 10000 };
+}
+
+impl PgQueryLimits {
+  pub fn with_timeout(self: PgQueryLimits, ms: Int) -> Result<PgQueryLimits, PgError>
+    intent "一操作の期限を30秒以下に狭める"
+    requires none
+    ensures none
+    effects none
+  {
+    if ms < 1 || ms > 30000 { return Err(PgError.LimitExceeded); }
+    return Ok(PgQueryLimits { timeout_ms: ms, max_wire: self.max_wire, max_rows: self.max_rows });
+  }
+
+  pub fn with_result_bounds(self: PgQueryLimits, wire: Int, rows: Int) -> Result<PgQueryLimits, PgError>
+    intent "結果の累積wireと行数の上限を狭める"
+    requires none
+    ensures none
+    effects none
+  {
+    if wire < 1 || wire > 4194304 || rows < 0 || rows > 10000 { return Err(PgError.LimitExceeded); }
+    return Ok(PgQueryLimits { timeout_ms: self.timeout_ms, max_wire: wire, max_rows: rows });
+  }
+}
+
+impl PgResult {
+  pub fn columns(self: &PgResult) -> Int
+    intent "列数を返す"
+    requires none
+    ensures none
+    effects none
+  { return self.result_cols.len(); }
+
+  pub fn rows(self: &PgResult) -> Int
+    intent "行数を返す"
+    requires none
+    ensures none
+    effects none
+  { return self.result_rows.len(); }
+
+  pub fn column(self: &PgResult, index: Int) -> Option<&PgColumn>
+    intent "列情報を借用して返す"
+    requires none
+    ensures none
+    effects none
+  { return self.result_cols.get(index); }
+
+  pub fn row(self: &PgResult, index: Int) -> Option<&List<Option<PgValue>>>
+    intent "行を借用して返す"
+    requires none
+    ensures none
+    effects none
+  { return self.result_rows.get(index); }
+
+  pub fn command(self: &PgResult) -> String
+    intent "完了タグを返す"
+    requires none
+    ensures none
+    effects none
+  { return self.command_tag.clone(); }
+
+  pub fn status(self: &PgResult) -> Int
+    intent "同期時のトランザクション状態を返す"
+    requires none
+    ensures none
+    effects none
+  { return self.ready_status; }
+}
+
+impl PgConn {
+  pub fn is_closed(self: &PgConn) -> Bool
+    intent "同期不明や期限切れで破棄された接続を識別する"
+    requires none
+    ensures none
+    effects none
+  { return self.stream.is_none(); }
+
+  pub fn query(self: &mut PgConn, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> Result<PgResult, PgError>
+    intent "単一文を期限内に実行し同期できた接続だけを保持する"
+    requires none
+    ensures none
+    effects net.client, clock, task.spawn, task.suspend
+  {
+    let mut pending = self.stream.take();
+    if pending.is_none() { return Err(PgError.Connection); }
+    match task.timeout(limits.timeout_ms, || query_pending(&mut pending, &sql, &params, &limits)) {
+      None => { return Err(PgError.Timeout); }
+      Some(done) => {
+        let (saved, answer) = done;
+        self.stream = saved;
+        return answer;
+      }
+    }
+  }
+}
+
+fn query_pending(pending: &mut Option<TcpClient>, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<TcpClient>, Result<PgResult, PgError>)
+  intent "期限付きの子の中で接続の所有を引き取る"
+  requires none
+  ensures none
+  effects net.client, task.suspend
+{
+  match pending.take() {
+    Some(stream) => { return query_owned(stream, &sql, &params, &limits); }
+    None => { return (None, Err(PgError.Connection)); }
+  }
+}
+
+fn query_owned(owned_stream: TcpClient, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<TcpClient>, Result<PgResult, PgError>)
+  intent "所有する接続を同期完了時だけ呼出元へ戻す"
+  requires none
+  ensures none
+  effects net.client, task.suspend
+{
+  let mut stream = owned_stream;
+  // 全入力の検査・符号化を送信より前、同じ期限内で行う。
+  match query_request(&sql, &params) {
+    Err(e) => { return (Some(stream), Err(e)); }
+    Ok(request) => {
+      match send(&mut stream, &request) {
+        Err(e) => { return (None, Err(PgError.OutcomeUnknown)); }
+        Ok(v) => {}
+      }
+      match query_receive(&mut stream, &limits) {
+        Ok(done) => { return (Some(stream), done); }
+        Err(PgError.Connection) => { return (None, Err(PgError.OutcomeUnknown)); }
+        Err(e) => { return (None, Err(e)); }
+      }
+    }
+  }
+}
+
+fn query_request(sql: &String, params: &List<PgParam>) -> Result<Bytes, PgError>
+  intent "値をBindへ分離した単一文の要求を作る"
+  requires none
+  ensures none
+  effects none
+{
+  let mut request = parse(&sql, &params, 1048576)?;
+  request.extend(&bind(&params, 1048576)?);
+  request.extend(&describe(1048576)?);
+  request.extend(&execute(1048576)?);
+  request.extend(&sync(1048576)?);
+  return Ok(request);
+}
+
+fn query_receive(stream: &mut TcpClient, limits: &PgQueryLimits) -> Result<Result<PgResult, PgError>, PgError>
+  intent "応答順序と上限を検証し文エラー後もReadyForQueryまで同期する"
+  requires none
+  ensures none
+  effects net.client, task.suspend
+{
+  let mut b = budget(limits.max_wire, limits.max_rows)?;
+  let mut phase = 0;
+  let mut columns = List.new();
+  let mut rows = List.new();
+  let mut command = "";
+  let mut error = "";
+  let mut cells = 0;
+  while true {
+    let f = receive(&mut stream, &mut b)?;
+    match backend(&f, &columns)? {
+      PgBackend.NoticeResponse => {}
+      PgBackend.ParameterStatus(k, v) => {
+        if (k == "client_encoding" && v != "UTF8") || (k == "bytea_output" && v != "hex") { return Err(PgError.Protocol); }
+      }
+      PgBackend.ErrorResponse(state) => {
+        if phase >= 4 || error != "" { return Err(PgError.Protocol); }
+        error = state;
+        phase = 5;
+      }
+      PgBackend.ReadyForQuery(status) => {
+        if phase == 5 { return Ok(Err(PgError.SqlState(error))); }
+        if phase != 4 { return Err(PgError.Protocol); }
+        return Ok(Ok(PgResult { result_cols: columns, result_rows: rows, command_tag: command, ready_status: status }));
+      }
+      PgBackend.ParseComplete => {
+        if phase != 0 { return Err(PgError.Protocol); }
+        phase = 1;
+      }
+      PgBackend.BindComplete => {
+        if phase != 1 { return Err(PgError.Protocol); }
+        phase = 2;
+      }
+      PgBackend.RowDescription(cs) => {
+        if phase != 2 { return Err(PgError.Protocol); }
+        columns = cs;
+        phase = 3;
+      }
+      PgBackend.NoData => {
+        if phase != 2 { return Err(PgError.Protocol); }
+        phase = 3;
+      }
+      PgBackend.DataRow(row) => {
+        if phase != 3 || columns.len() == 0 { return Err(PgError.Protocol); }
+        if row.len() > limits.max_wire / 4 - cells { return Err(PgError.LimitExceeded); }
+        cells = cells + row.len();
+        rows.push(row);
+      }
+      PgBackend.CommandComplete(tag) => {
+        if phase != 3 { return Err(PgError.Protocol); }
+        command = tag;
+        phase = 4;
+      }
+      PgBackend.EmptyQueryResponse => {
+        if phase != 3 || columns.len() != 0 { return Err(PgError.Protocol); }
+        phase = 4;
       }
       _ => { return Err(PgError.Protocol); }
     }

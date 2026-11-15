@@ -458,7 +458,6 @@ impl<'a, 'p> Fx<'a, 'p> {
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, x, 0);
         self.b.ins().brif(zero, skip, NOARGS, go, NOARGS);
         self.b.switch_to_block(go);
-        self.capacity_drop_direct(t, x, skip);
         let f = self.dstep_addr(t);
         self.ws_push(f, x);
         self.b.ins().jump(skip, NOARGS);

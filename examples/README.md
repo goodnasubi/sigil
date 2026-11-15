@@ -26,9 +26,6 @@
 | [08-traits](08-traits/) | 図形の面積を題材にしたトレイトの宣言と型ごとの実装、総称の制約越しの呼び出し | `trait` の宣言、`impl トレイト for 型`、総称の制約 `<T: Shape>`（[ADR 0022](../docs/decisions/0022-type-identity-traits-and-function-types.md)） |
 | [09-enums](09-enums/) | 注文の状態遷移（受付・支払済・発送済・取消）を題材にした列挙型の構築と分解、状態遷移 | `enum` のバリアント（値の形がバリアントごとに違う）、全バリアントを書き切る `match` の網羅性、値で受け取った列挙型の消費と再構築（[ADR 0008](../docs/decisions/0008-m0-notation.md)） |
 | [10-http-server](10-http-server/) | `task.roots` で接続ごとのルートを起動し、`http.serve_conn` で要求を読み応答を送る HTTP/1.1 サーバー（経路 `/`・`/echo`・404） | `http.conn`・`http.serve_conn`・`http.abort_conn`、接続の隔離と上限、名前のハンドラ（[ADR 0032](../docs/decisions/0032-p1-http-server.md)） |
-| [11-web-router](11-web-router/) | ソケット無しの Web ルーター | 経路照合・クエリ・篩型・認証差し込み口・前後フック（[ADR 0033](../docs/decisions/0033-p1-framework.md)） |
-| [12-bearer-auth](12-bearer-auth/) | Bearer トークン認証 | HMAC-SHA256 署名検証と fail-closed 401 応答（[ADR 0033](../docs/decisions/0033-p1-framework.md)） |
-| [13-postgres-client](13-postgres-client/) | PostgreSQL クライアント | 直接接続・単一文クエリ・接続プールと清掃・破棄（[ADR 0034](../docs/decisions/0034-p1-postgresql-client.md)） |
 
 ## 実行のしかた
 

@@ -533,7 +533,7 @@ Core 層に次の不透明型と入口を定める。名前と効果は後続実
 | **6-5d** | Issue #492 / PR #498 | 単一文クエリ実行（Parse/Bind/Describe/Execute/Sync）、型変換（Bool, Int2/4/8, Text, Varchar, Bytea, NULL）、文エラー後の ReadyForQuery 同期維持、結果上限・時間切れ。`tests/pg_query_492.rs` |
 | **6-5e** | Issue #499 / PR #506 | 接続プール（`PgPool`）、排他借出（`PgLease`）、`Capacity` / `CapacityPermit` による枠管理、`DISCARD ALL` によるアイドル復帰清掃、異常停止・タイムアウト時の安全な破棄。`tests/pg_pool_499.rs` |
 | **6-5f** | Issue #510 / PR #513 | 実 PostgreSQL（`postgres:17.6-bookworm` 固定イメージ・隔離網・使い捨て資格情報）を用いた CI 照合試験。`tests/pg_live_510.rs`, `.github/workflows/postgres.yml`, `docs/POSTGRES_CI.md` |
-| **6-5g** | Issue #519 / 本 PR | 6-5a〜6-5f の統合試験（`tests/pg_integration_6_5g.rs`）、最小サンプル（`examples/13-postgres-client/`）、ADR 0020 関門確認、完了記録。 |
+| **6-5g** | Issue #519 / PR #520（完了記録）・後続PR（サンプル・結合試験） | 6-5a〜6-5f の統合試験（`tests/pg_integration_6_5g.rs`）、最小サンプル（`examples/13-postgres-client/`）、ADR 0020 関門確認、完了記録。 |
 
 ### A-2. ADR 0020 の関門確認結果
 

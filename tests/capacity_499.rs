@@ -80,7 +80,7 @@ fn run(mode: Int) -> Int
     let d = c.clone();
     let p = c.try_acquire();
     if acquired(&d) || !acquired(&independent) { return 3; }
-    match p { Some(p) => { consume(p); } None => { return 4; } }
+    match p { Some(selected) => { consume(selected); } None => { return 4; } }
     if !acquired(&d) || !acquired(&c) { return 5; }
     return 0;
   }
@@ -116,8 +116,8 @@ fn run(mode: Int) -> Int
     return 0;
   }
   if mode == 5 {
-    let p = orphan();
-    consume(p);
+    let orphaned = orphan();
+    consume(orphaned);
     let c = capacity(1);
     let mut p = c.try_acquire();
     p = None;
@@ -131,11 +131,11 @@ fn run(mode: Int) -> Int
     let copy = c.clone();
     let r = task.roots(1, |g| {
       let root = g.reserve();
-      root.start(copy, move |capacity| {
-        let p = capacity.try_acquire();
+      root.start(copy, move |cap| {
+        let p = cap.try_acquire();
         let z = 0;
         let fail = 1 / z;
-      }, move |capacity| {});
+      }, move |cap| {});
       return 0;
     });
     if !acquired(&c) { return 17; }

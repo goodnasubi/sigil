@@ -444,6 +444,7 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
 pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
+    (Layer::Os, "web", "verify_bearer(key: &Secret, audience: &String, token: &Bytes, now: Int) -> Result<AuthIdentity, String>", "none"),
     (Layer::Os, "web", "load_config() -> Result<AppConfig, ConfigError>", "env"),
     (Layer::Os, "web", "error_response(status: Int) -> HttpResponse", "none"),
     (Layer::Os, "web", "validate<T>(value: Option<T>) -> Result<T, HttpResponse>", "none"),
@@ -1269,6 +1270,7 @@ mod tests {
             // ADR 0037 段階 6-6a。
             "clock.unix_seconds",
             // ADR 0033 E・I・J（Issue #460）。
+            "web.verify_bearer",
             "web.load_config",
             "web.error_response",
             "AppConfig",

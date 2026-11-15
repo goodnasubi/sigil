@@ -139,3 +139,66 @@ G2 の記録場所は **本 ADR の補足 A（6-6d の最後の PR で追加）*
 独自形式は汎用 JWT 実装の複雑さを避ける一方、外部の発行側がこのバイト仕様を正確に実装する必要がある。6-6b の独立ベクタと別系統レビューで照合する。自前 fuzz は網羅誘導ではなく、静的 CT 検査・計測にも ADR 0020 の限界がある。
 
 既存の ADR 一覧に 0034・0035 の行がないこと、および ADR 0033 補足 A に記載されたメモリ上限ログの出力先の整合課題は本件の範囲外。既存 ADR の記録や実装は修正しない。
+
+## 補足 A: 6-6 の G2 記録（定期 fuzz 接続待ち）
+
+**判定は保留**。6-6d の実装試験は以下のとおり通過したが、定期の長い実行への接続は人間担当の別 PR が必要で、接続成功を確認するまで Issue #512・6-6・G2 を完了とは扱わない。G3 の外部公開承認も与えない。
+
+### 対象の履歴と実際の境界
+
+| 段 | PR / 試験対象 SHA |
+|---|---|
+| ADR | [#502](https://github.com/goodnasubi/sigil/pull/502) |
+| 6-6a 信頼基盤 | [#504](https://github.com/goodnasubi/sigil/pull/504) / `d1ce17d4d692cc23c38a900ff5ed27284c465d65` |
+| 6-6a 境界入口 | [#505](https://github.com/goodnasubi/sigil/pull/505) / `f72f8ed698c1b910b8c55b9915d5b710143de7ef` |
+| 6-6b 純粋検証・CT | [#508](https://github.com/goodnasubi/sigil/pull/508) / `ae7b3ffd30a0247240a602cb727c1b03804af17c` |
+| 6-6c 設定・統合 | [#511](https://github.com/goodnasubi/sigil/pull/511) / `21368418f72bda1bf1a0739161dbd15b7f13afc2` |
+| 6-6d fuzz・上限 | Issue #512 の本 PR / `9bf4bd69c41febeb4e3e7958fa2db0ac3613794e` |
+
+試験の基点は main `ae0d736fa71646aacb46e8a6a504dc56d0bf344e`。提出前に `421a146` へrebaseし、間の差分が AGENTS.md と ADR 0034 のみで製品・試験コードが不変であることを確認した。6-6d は新規試験・fixture・本記録のみで、製品コード、信頼基盤、上限、依存、ワークフローを変更しない。
+
+- `AppRequest.header_count(&self, &String) -> Int` は `effects none`。全出現数を大小文字不問で数え、認証必須経路は1件だけ許す。HTTP parser の正規化を通らない直接 dispatch でも検査する。
+- `clock.unix_seconds() -> Option<Int>` は `effects clock`。OS 境界は `std.os.clock.os_clock_realtime_seconds` の Linux `clock_gettime(CLOCK_REALTIME)` だけ。評価器は固定時刻・失敗注入、native は OS 取得。戻り値の範囲を Sigil 側で確認する。今回の fuzz では両側とも公開固定時刻へ試験差替えする。
+- `web.verify_bearer(&Secret, &String, &Bytes, Int) -> Result<AuthIdentity, String>` は `effects none`。受信 ASCII を署名し、正規形と上限の確認後、署名が合って初めて payload を解釈する。成功時だけ `AuthIdentity.subject()` を返す。
+- `web.load_bearer_config() -> Result<BearerConfig, ConfigError>` は `effects env`。二つの変数を起動時各一回読み、`BearerConfig.into_verifier() -> Result<AuthVerifier, ConfigError>`（`effects clock`）が起動時計を確認し、設定を `move` クロージャで所有する。既存 `Router.with_auth` / `AuthVerifier.verify` に接続し、要求時計も一回だけ取得する。鍵の再読込・大域の可変鍵は作らない。
+
+### ADR 0020 決定 1: CT と秘密の流れ
+
+`cargo test --test ct_rules -- --nocapture` の全11試験が成功。`ct_rules_static` に当たる実名は `static_real_targets_are_clean`、`ct_rules_clif` は `clif_real_ct_equal_is_clean` と `clif_bearer_signature_adds_only_public_contract_branches` 等。登録漏れ検査 `completeness_no_missing_targets` と表の `table_is_well_formed` も成功した。
+
+既存表は `std.web.ct_bearer_signature` の `message`・受信 `tag` を公開、鍵を秘密として R1〜R6 を検査する。`verify_bearer` も `audience`・`token`・`now` を公開とした上で鍵の流れを検査し、照合 Bool だけを公開比較結果として扱う。鍵は既存 HMAC と CT 照合へ渡る。秘密領域から読み戻した値も秘密とする登録・領域追跡を維持し、検証器全体や公開入力の形式分岐を CT とは称さない。今回、暗号実装と Cranelift の版を変更していないため CT 計測の再実施はなく、G3 の計測は残る。静的/CLIF 検査を計測だけで置き換えない。
+
+`claims_are_unreachable_until_signature_matches_eval_native` は、本物の意味解釈入口だけを標識に置き換え、正しい署名の短い payload のみ到達し、無効署名なら到達しないことを両実行系で観測する。独立固定ベクタは署名32位置の各破壊と常に `unauthorized` となることを検査し、fuzz corpus の同じ32入力は実際の認証アダプタの固定401も検査する。不正 payload かつ署名不一致の入力も同じ応答となる。
+
+### ADR 0020 決定 2: fuzz・回帰・突き合わせ
+
+新規入口 `tests/fuzz_bearer_token.rs` は既存 `tests/common/fuzz.rs` を利用し、通常の `cargo test` で実行される。外部クレートは加えていない。公開固定鍵 `00 01 ... 1f`、audience `sigil.api`、Unix 秒 `1700000000` を用い、鍵は乱数入力・失敗入力へ入れない。
+
+- corpus は `tests/fuzz/corpus/bearer_token/` の138件。切断・区切り・非正規 base64url・末尾ビット・空・重複・カンマ・NUL・各長さ境界・整数最大・時刻境界・寿命・audience 不一致を含む。回帰は `tests/fuzz/regress/bearer_token/` の3件で、既知の否定入力を縮小した空 token、正しく署名する短い payload、空値の重複。今回発見した障害とは称さず、すべて毎回生成前に replay する。入力形式と固定ベクタからの由来は [試験入力の説明](../../tests/data/bearer_fuzz_512.md) に記録した。
+- 生成は random bytes / corpus変異 / 文法からの生成を順に回す。文法入力の payload は試験ドライバで正しく署名して意味解釈まで到達させ、受理可否と主体を Rust の独立 payload 判定にも突き合わせる。固定 token は6-6bの独立計算値を再利用する。
+- native は一度だけビルドし、64件以下・転送48KB以下でバッチ実行する。評価器の件数と全結果、native の終了状態・標準出力・標準エラーを比較する。異常停止・契約違反・範囲外・桁あふれ・スタック枯渇は試験失敗となる。評価器の CT は主張しない。
+- 保存先は `target/fuzz-failures/bearer_token/`。既存枠の `current` / `fail-<seed>-<index>` に加え、バッチ全入力のhexを `batch`、種・絶対入力番号・生成方法・mode・件数を `batch.meta` に実行前保存する。端数バッチの失敗も回収可能。成功した一時入力と生成実行ファイルは削除する。
+
+Codex Cloud、Linux x86-64、`rustc 1.100.0 (0ef1bc386 2026-11-09)`、`CARGO_BUILD_JOBS=2` での実測:
+
+| 実行 | 種 | 生成件数と内訳 | replay込み総数 | nativeビルド込み試験時間 |
+|---|---|---|---|---|
+| 既定の短い実行 | `5865676808348631041` | 12（random / mutation / grammar 各4） | 153（corpus138＋回帰3） | 3.735秒 |
+| 環境変数による追加実行 | `7` | 600（各200） | 741（同上） | 9.070秒 |
+
+追加の2テストファイルだけを実行した `cargo test --test fuzz_bearer_token --test bearer_limits_512 -- --nocapture` はビルドを含む wall **7.221秒**（fuzz3.735秒＋limit3.41秒）で成功した。ローカルでの追加分は60秒以内。通常 `cargo test` による全量CIの増分そのものは未実測で、共有runnerの負荷・コンパイル条件に依存するため、PRのCIで最終確認する。ローカル全量テストは実行していない。
+
+長い実行も同じ入口で `SIGIL_FUZZ_ITERS` / `SIGIL_FUZZ_SEED` を受け取ることは上記600件で確認した。ただし既存 `.github/workflows/fuzz.yml` は `fuzz_json` / `fuzz_parse` を個別指定し、本対象は未接続。必要な人間担当の別 PR と、同じseed/scale/失敗artifactを使う追加コマンドを [Issue #512 の記録](https://github.com/goodnasubi/sigil/issues/512#issuecomment-6897495321) に示した。別 PR のマージ・定期実行成功の確認前に G2 を閉じない。G3 の全対象1時間以上の実行も今回の600件で代替しない。
+
+### ADR 0020 決定 4: 全上限・統合・一時領域
+
+`cargo test --test bearer_limits_512` の2試験が成功した。
+
+- `limit_token_payload_audience_subject_key_lifetime_eval_native`: token1024/1025は内側形式不正なら拒否。payload404 / audience128 / subject256 の正規最大token590は成功し、payload405 / audience129 / subject257は拒否。鍵31/32/33バイト、寿命3600/3601も同じ固定ベクタ群で確認する。
+- `limit_key_hex_31_32_33_and_invalid_32`: 起動設定の31/32/33バイトと、32バイト相当64桁でも不正hexを確認する。成功以外は変数名と固定分類のみ。評価器/native両方で値・空ログ・空stderrを確認する。
+
+既存 `bearer_verify_507` の2試験と `bearer_config_509` の7試験も全成功。特に `native_connections_startup_rejection_sharing_and_fixed_response` は設定/起動時計失敗時の待受禁止とnative接続、`direct_dispatch_without_http_normalization_and_request_clock_failure` は正規化前の重複と要求時計失敗、`verified_identity_and_uniform_rejections_eval_native` は成功主体・全固定401・公開経路・before/after/ハンドラ未実行を確認する。`minimal_effects_ownership_and_traits` は最小効果、所有設定の共有・破棄、`authentication_is_hidden_in_evaluator_and_native_drop_traces` は両実行系の秘密非表示を確認する。
+
+復号用 `Bytes` と不正hexの部分復号領域は `Secret` へ移して破棄時にゼロ化する。鍵の環境変数 `String`、OS環境、ほかの通常コピーまで消去するとは主張しない。`BearerConfig` / 検証器は表示・鍵取出しAPIを持たず、`ConfigError` は値を保持しない。HTTPヘッダ・要求・`AppRequest` の破棄ログは内容を伏せ、トークンや未検証クレームもログへ出さない。OS環境・ダンプ・プロセスアクセスの制御は配備責務として G3 に残す。
+
+fmt と `cargo clippy --all-targets -- -D warnings` は成功。未解決の送り先は、定期 fuzz 接続と実行証跡（人間担当の別PR・Issue #512）、全量CI（本PR）、外部公開前の時計監視・TLS終端/内部網・replay受容・鍵交換運用・CT計測/長時間fuzz（G3）。本記録は仕様の追加・外部公開承認ではない。

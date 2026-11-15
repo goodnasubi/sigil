@@ -1,0 +1,66 @@
+module main
+  targets server
+  trust none
+
+fn private_handler(req: &AppRequest) -> HttpResponse
+  intent "検証済み主体のみを返す"
+  requires none
+  ensures none
+  effects none
+{
+  match req.identity() {
+    Some(identity) => { return HttpResponse.new(200, identity.subject().as_bytes()); }
+    None => { return HttpResponse.new(500, "missing identity".as_bytes()); }
+  }
+}
+fn public_handler(req: &AppRequest) -> HttpResponse
+  intent "公開経路に主体を付けない"
+  requires none
+  ensures none
+  effects none
+{
+  match req.identity() {
+    Some(_) => { return HttpResponse.new(500, "unexpected identity".as_bytes()); }
+    None => { return HttpResponse.new(200, "public".as_bytes()); }
+  }
+}
+fn configured() -> Result<Router, ConfigError>
+  intent "すべての起動確認を待受より前に行う"
+  requires none
+  ensures none
+  effects env, clock
+{
+  let config = web.load_bearer_config()?;
+  let verifier = config.into_verifier()?;
+  let mut router = Router.new().with_auth(verifier);
+  router = router.route("GET", "/private", RouteHandler { handle: private_handler }).unwrap_or(Router.new());
+  router = router.public_route("GET", "/public", RouteHandler { handle: public_handler }).unwrap_or(Router.new());
+  return Ok(router);
+}
+fn main() -> Int
+  intent "起動設定失敗なら待受せず一接続だけ処理する例のサーバー"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task, net.server
+{
+  match configured() {
+    Err(e) => { console.log(&e.name()); return 1; }
+    Ok(router) => {
+      let shared = SyncShared.new(router);
+      match net.listen(&"127.0.0.1", 0, 4) {
+        Err(_) => { return 2; }
+        Ok(listener) => {
+          console.log(&listener.local_port());
+          match listener.accept() {
+            Err(_) => { return 3; }
+            Ok(stream) => {
+              let conn = http.conn(stream);
+              http.serve_conn(&conn, &http.default_limits(), move |req| { let router_ref = shared.borrow(); return router_ref.dispatch(&req); });
+            }
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}

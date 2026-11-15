@@ -112,6 +112,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("HttpError", 0, Layer::Os),
     // フレームワークの設定（ADR 0033 E）。不変の値で、表示・直接構築は公開しない。
     ("AppConfig", 0, Layer::Os),
+    ("BearerConfig", 0, Layer::Os),
     ("AppLimits", 0, Layer::Os),
     ("ConfigError", 0, Layer::Os),
     ("Router", 0, Layer::Os),
@@ -127,6 +128,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
 /// `std.web` の設定と安全な設定エラー（ADR 0033 E、Issue #460）。
 pub const WEB_TYPES: &[&str] = &[
     "AppConfig",
+    "BearerConfig",
     "AppLimits",
     "ConfigError",
     "Router",
@@ -445,6 +447,7 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
 pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "web", "verify_bearer(key: &Secret, audience: &String, token: &Bytes, now: Int) -> Result<AuthIdentity, String>", "none"),
+    (Layer::Os, "web", "load_bearer_config() -> Result<BearerConfig, ConfigError>", "env"),
     (Layer::Os, "web", "load_config() -> Result<AppConfig, ConfigError>", "env"),
     (Layer::Os, "web", "error_response(status: Int) -> HttpResponse", "none"),
     (Layer::Os, "web", "validate<T>(value: Option<T>) -> Result<T, HttpResponse>", "none"),
@@ -643,6 +646,7 @@ pub const REQUIRES: &[(&str, &str)] = &[
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
 pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
+    (Layer::Os, "BearerConfig", &[("into_verifier(self: BearerConfig) -> Result<AuthVerifier, ConfigError>", "clock")]),
     (Layer::Os, "AuthIdentity", &[
         ("new(subject: String) -> AuthIdentity", "none"),
         ("subject(self: &AuthIdentity) -> String", "none"),
@@ -688,6 +692,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
     ]),
     (Layer::Os, "ConfigError", &[
         ("name(self: &ConfigError) -> String", "none"),
+        ("kind(self: &ConfigError) -> String", "none"),
     ]),
 
     (Layer::Core, "JsonValue", &[
@@ -1272,6 +1277,9 @@ mod tests {
             // ADR 0033 E・I・J（Issue #460）。
             "web.verify_bearer",
             "web.load_config",
+            "web.load_bearer_config",
+            "BearerConfig",
+            "BearerConfig.into_verifier",
             "web.error_response",
             "AppConfig",
             "AppConfig.host",
@@ -1285,6 +1293,7 @@ mod tests {
             "AppLimits.shutdown_grace_ms",
             "ConfigError",
             "ConfigError.name",
+            "ConfigError.kind",
             "web.validate",
             "Router",
             "AppRequest",
@@ -1568,6 +1577,7 @@ mod tests {
                 matches!(
                     w,
                     "AppConfig"
+                        | "BearerConfig"
                         | "Router"
                         | "AppRequest"
                         | "AuthIdentity"

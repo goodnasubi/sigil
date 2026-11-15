@@ -1,0 +1,13 @@
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸を固定する。Sigil は AI が実装し人間が仕様をレビューする言語（ADR 0001）。既存言語のライブラリを持ち込まず（ADR 0005）、明示能力・最小信頼基盤・曖昧さ削減（ADR 0027）を優先する。所有者は Issue #509 の ADR 0037 段階6-6cのみの実装を委任した。ADR 0037の既決事項は変更しない：鍵は小文字hex64桁32bytes、audience必須、env.getで起動時一回、短鍵等は待受前拒否、immutable設定をmove closureで既存Router.with_authへ接続する。設定読込はenv、アダプタはclock、純粋検証はnone。起動時および要求時に壁時計を確認。固定401、公開経路はAuthPolicy.Public、Secretは表示しない。ここで判定するのは既決責務を具体化する公開APIの分割であり、認証方式/形式/寿命/公開範囲等の仕様を再選択しない。現実装案：web.load_bearer_config()->Result<BearerConfig,ConfigError> effects env。BearerConfig.into_verifier(self)->Result<AuthVerifier,ConfigError> effects clock が起動時計確認後に設定所有move closureを返す。ConfigError.name()->String は維持し、kind()->String effects none を追加してmissing/invalid/unavailableのみ返す。既存AppConfigのinvalid分類も固定文字列。待受開始側は両ResultのOk後にだけnet.listenする。鍵抽出/表示/再読込APIは追加しない。ADRのOS環境消去の保証外と既存Stringの上書きAPI不足は明記する。対案は読込と時計確認を一つの関数に混在させenv,clockとする形である。",
+  "questions": {
+    "api": {
+      "type": "choice",
+      "criteria": {
+        "A": "採用案：load_bearer_configはenvだけ、所有into_verifierはclockだけ、ConfigError.kindはnone。ADRの責務と効果を分離し既存with_authに接続する。",
+        "B": "対案：設定読込と時計確認と検証器構築を単一の公開関数へ統合しenv,clockの混合効果を宣言する。"
+      }
+    }
+  }
+}

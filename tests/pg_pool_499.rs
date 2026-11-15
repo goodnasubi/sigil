@@ -66,9 +66,9 @@ fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
     } else {
       match lease.release() {
         Ok(reused) => { if reused != (scenario == 0) { return Ok(89); } }
-        Err(PgError.Timeout) => { if scenario != 4 { return Ok(90); } }
-        Err(PgError.SqlState(code)) => { if scenario != 3 { return Ok(91); } }
-        Err(e) => { if scenario != 3 { return Ok(92); } }
+        Err(PgError.Timeout) => { if scenario != 4 && scenario != 14 { return Ok(90); } }
+        Err(PgError.SqlState(code)) => { if scenario != 3 && scenario != 13 { return Ok(91); } }
+        Err(e) => { if scenario != 3 && scenario != 11 && scenario != 12 { return Ok(92); } }
       }
     }
   }
@@ -194,10 +194,28 @@ fn exchange(l: TcpListener, case: i64) {
                 closed(&mut s);
             } else if case == 4 || case == 7 {
                 closed(&mut s);
+            } else if case == 11 || case == 12 {
+                answer(
+                    &mut s,
+                    if case == 11 {
+                        "SELECT 1"
+                    } else {
+                        "DISCARD ALL"
+                    },
+                    if case == 12 { b'T' } else { b'I' },
+                );
+                closed(&mut s);
             } else {
                 answer(&mut s, "DISCARD ALL", b'I');
                 request(&mut s, "SET bytea_output = 'hex'");
-                answer(&mut s, "SET", b'I');
+                if case == 13 {
+                    sql_error(&mut s, b"55000", b'I');
+                    closed(&mut s);
+                } else if case == 14 {
+                    closed(&mut s);
+                } else {
+                    answer(&mut s, "SET", b'I');
+                }
             }
         }
     }
@@ -227,7 +245,7 @@ fn pool_reuse_cleanup_status_deadlines_and_cancellation_match() {
     let exe = dir.join("pool");
     sigil::native::build_program(&p, &Default::default(), &exe).unwrap();
     for mode in [0, 1, 4] {
-        for case in 0..=10 {
+        for case in 0..=14 {
             let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             let port = l.local_addr().unwrap().port();
             let server = std::thread::spawn(move || exchange(l, case));
@@ -444,4 +462,250 @@ fn lease_does_not_expose_or_duplicate_its_connection() {
             "拒否されなかった: {operation}"
         );
     }
+}
+
+const AUTH_ABORT: &str = r#"module app.main
+  targets server
+  trust none
+pub fn main(port: Int, scenario: Int) -> Int
+  intent "認証中断後に同じ容量で新しい接続を作る"
+  requires none
+  ensures none
+  effects net.client, random, clock, task.spawn, task.suspend, task.share
+{
+  match exercise(port, scenario) { Ok(n) => { return n; } Err(e) => { return 99; } }
+}
+fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
+  intent "接続中の期限切れと取消の枠を回収する"
+  requires none
+  ensures none
+  effects net.client, random, clock, task.spawn, task.suspend, task.share
+{
+  let cfg = pg.config("127.0.0.1", port, "user", "database", Secret.from_bytes("pencil".as_bytes()))?;
+  let limits = pg.default_pool_limits().with_capacity(1, 1)?.with_timeouts(150, 500, 200, 1000)?;
+  let pool = pg.pool(cfg, &limits)?;
+  let mut i = 0;
+  while i < 2 {
+    if scenario >= 2 {
+      match task.timeout(80, || pool.acquire()) { None => {} Some(v) => { return Ok(1); } }
+    } else {
+      match pool.acquire() { Err(PgError.Timeout) => {} _ => { return Ok(2); } }
+    }
+    i = i + 1;
+  }
+  return Ok(0);
+}
+"#;
+
+fn startup_until_stall(s: &mut TcpStream, stage: i64) {
+    let mut len = [0; 4];
+    s.read_exact(&mut len).unwrap();
+    let n = u32::from_be_bytes(len) as usize;
+    assert!((8..=1048576).contains(&n));
+    let mut body = vec![0; n - 4];
+    s.read_exact(&mut body).unwrap();
+    assert_eq!(&body[..4], &196608u32.to_be_bytes());
+    if stage == 1 {
+        let mut auth = 10u32.to_be_bytes().to_vec();
+        auth.extend(b"SCRAM-SHA-256\0\0");
+        s.write_all(&packet(b'R', &auth)).unwrap();
+        let first = recv(s, b'p');
+        assert!(first.starts_with(b"SCRAM-SHA-256\0"));
+    }
+    closed(s);
+}
+
+#[test]
+fn startup_and_authentication_deadline_and_cancellation_recover_pool_slots() {
+    compare(
+        AUTH_ABORT,
+        vec![],
+        0..4,
+        "pg-pool-auth-abort-499",
+        |l, case| {
+            for _ in 0..2 {
+                startup_until_stall(&mut accept(&l), case % 2);
+            }
+        },
+    );
+}
+
+fn compare(
+    source: &str,
+    extra: Vec<(String, String)>,
+    cases: std::ops::Range<i64>,
+    name: &str,
+    server: fn(TcpListener, i64),
+) {
+    let opts = Options {
+        embedded_extra: extra.clone(),
+        ..Options::captured()
+    };
+    let p = sigil::ir_eval::lower_sources_opts(
+        &[source],
+        "main",
+        &sigil::effects::Options {
+            embedded_extra: extra,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    sigil::verify::verify(&p).unwrap();
+    let dir = scratch(name);
+    let exe = dir.join("program");
+    sigil::native::build_program(&p, &Default::default(), &exe).unwrap();
+    for mode in [0, 1, 4] {
+        for case in cases.clone() {
+            let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = l.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || server(l, case));
+            let value = if mode == 0 {
+                sigil::ir_eval::run_with(
+                    source,
+                    "main",
+                    &[Arg::Int(port.into()), Arg::Int(case)],
+                    &opts,
+                )
+                .unwrap()
+                .value
+            } else {
+                let out = Command::new(&exe)
+                    .env("SIGIL_WORKERS", mode.to_string())
+                    .env("SIGIL_RT_LIVE", "1")
+                    .arg(port.to_string())
+                    .arg(case.to_string())
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "mode={mode} case={case}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(String::from_utf8_lossy(&out.stderr).contains("live: sigil_blocks=0"));
+                String::from_utf8(out.stdout).unwrap().trim().to_owned()
+            };
+            assert_eq!(value, "0", "mode={mode} case={case}");
+            server.join().unwrap();
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn partial_connect_send_deadline_and_cancellation_close_before_reusing_capacity() {
+    // 送信バッファを確実に満たす試験専用の接続前処理。プール/permit/期限/破棄は製品本体。
+    // 実際の Startup は小さく loopback だけでは部分送信を強制できないため、境界へ大きな入力を置く。
+    let module = fixture().replace(
+        "Ok(s) => { return Ok(PgConn { stream: Some(s), ready_status: 73 }); }",
+        r#"Ok(s) => {
+      let mut stream = s;
+      match stream.read(1) {
+        Ok(marker) => {
+          if marker.get(0).unwrap_or(0) == 0 {
+            let mut bytes = "x".as_bytes();
+            let mut i = 0;
+            while i < 24 { let copy = bytes.clone(); bytes.extend(&copy); i = i + 1; }
+            match stream.write_all(&bytes) { Ok(v) => {} Err(e) => { return Err(PgError.Connection); } }
+          }
+        }
+        Err(e) => { return Err(PgError.Connection); }
+      }
+      return Ok(PgConn { stream: Some(stream), ready_status: 73 });
+    }"#,
+    );
+    assert!(module.contains("while i < 24"));
+    let source = AUTH_ABORT
+        .replace("while i < 2", "while i < 1")
+        .replace("with_timeouts(150,", "with_timeouts(2000,")
+        .replace("task.timeout(80,", "task.timeout(1200,")
+        .replace(
+            "  return Ok(0);",
+            "  let next = pool.acquire()?; return Ok(0);",
+        );
+    compare(
+        &source,
+        vec![("std.pg".into(), module)],
+        1..3,
+        "pg-pool-partial-499",
+        |l, _case| {
+            let mut first = accept(&l);
+            first.write_all(&[0]).unwrap();
+            let mut byte = [0];
+            first.read_exact(&mut byte).unwrap();
+            assert_eq!(byte[0], b'x');
+            // 最初の送信を読まずに次の接続を待ち、有限の送信バッファによる中断を保証する。
+            let mut next = accept(&l);
+            let mut rest = Vec::new();
+            first.read_to_end(&mut rest).unwrap();
+            assert!(
+                rest.len() + 1 < 16777216,
+                "全量が送信され中断点にならなかった"
+            );
+            next.write_all(&[1]).unwrap();
+            closed(&mut next);
+        },
+    );
+}
+
+const ROOT_ABORT: &str = r#"module app.main
+  targets server
+  trust none
+fn prepared(port: Int) -> Result<PgPool, PgError>
+  intent "ルート内で生成したプールに清掃済みidle接続を置く"
+  requires none
+  ensures none
+  effects net.client, random, clock, task.spawn, task.suspend, task.share
+{
+  let cfg = pg.config("127.0.0.1", port, "user", "database", Secret.from_bytes("pencil".as_bytes()))?;
+  let pool = pg.pool(cfg, &pg.default_pool_limits())?;
+  let lease = pool.acquire()?;
+  if !lease.release()? { return Err(PgError.Protocol); }
+  return Ok(pool);
+}
+pub fn main(port: Int, scenario: Int) -> Int
+  intent "所有ルートの異常停止後にidle接続を他ルートへ貸さない"
+  requires none
+  ensures none
+  effects net.client, random, clock, task.spawn, task.suspend, task.share
+{
+  let (tx, rx) = task.channel();
+  return task.roots(1, |g| {
+    let slot = g.reserve();
+    slot.start(port, move |p| {
+      match prepared(p) {
+        Ok(pool) => {
+          tx.send(pool.clone());
+          let zero = p - p;
+          let failed = 1 / zero;
+        }
+        Err(e) => {}
+      }
+    }, |p| {});
+    let shared = rx.recv();
+    task.sleep(20);
+    match shared.acquire() {
+      Err(PgError.LockBroken) => { return 0; }
+      _ => { return 1; }
+    }
+  });
+}
+"#;
+
+#[test]
+fn abnormal_pool_owner_root_closes_idle_and_propagates_lock_broken() {
+    compare(
+        ROOT_ABORT,
+        vec![("std.pg".into(), fixture())],
+        0..1,
+        "pg-pool-root-abort-499",
+        |l, _case| {
+            let mut s = accept(&l);
+            request(&mut s, "DISCARD ALL");
+            answer(&mut s, "DISCARD ALL", b'I');
+            request(&mut s, "SET bytea_output = 'hex'");
+            answer(&mut s, "SET", b'I');
+            // 清掃済みでも所有ルートの異常停止で閉じ、後続のqueryは一切来ない。
+            closed(&mut s);
+        },
+    );
 }

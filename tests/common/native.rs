@@ -542,6 +542,7 @@ fn check_impl(
             schedule_seed: opts.schedule_seed,
             embedded_extra: opts.embedded_extra.clone(),
             embedded_roots: opts.embedded_roots.clone(),
+            wall_clock: opts.wall_clock,
         };
         // common のラッパーには戻らない。元の小スタックでの停止結果も書き換えない。
         recovered = match sigil::ir_eval::run_sources_with(srcs, func, &args, &replay_opts) {

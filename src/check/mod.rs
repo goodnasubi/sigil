@@ -647,8 +647,9 @@ pub fn std_heads() -> &'static [&'static str] {
     // 増えたときは下の試験が落ちるので、ADR を改訂して一覧に足す）。
     // `net` は ADR 0031、`http` は ADR 0032、`json` は ADR 0033 判断点 G（Issue #455）、`web` は同 E・I・J（Issue #460）で足した。
     // `random` は ADR 0034 決定 4（Issue #462）、`pg` は決定 1・3（Issue #473）で足した。
+    // `clock` は ADR 0037 段階 6-6a（Issue #503）で足した。
     &[
-        "console", "env", "fs", "http", "json", "net", "pg", "random", "raw", "std", "web",
+        "clock", "console", "env", "fs", "http", "json", "net", "pg", "random", "raw", "std", "web",
     ]
 }
 

@@ -292,6 +292,7 @@ pub fn implicit_roots(opts: &crate::effects::Options) -> Vec<&'static str> {
             SCHED_MODULE,
             NET_MODULE,
             RANDOM_MODULE,
+            CLOCK_MODULE,
             HTTP_LIMITS_MODULE,
             HTTP_MODULE,
             PG_MODULE,

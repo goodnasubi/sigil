@@ -595,6 +595,47 @@ fn json_field(value: &JsonValue, name: &String) -> Option<JsonNode>
   return None;
 }
 
+fn ascii_lower_byte(b: Int) -> Int
+  intent "ASCII 英大文字を小文字に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  if b >= 65 && b <= 90 {
+    return b + 32;
+  }
+  return b;
+}
+
+fn ascii_eq_ignore_case(a: &String, b: &String) -> Bool
+  intent "ASCII 文字列を大文字小文字を区別せずに比較する"
+  requires none
+  ensures none
+  effects none
+{
+  let ab = a.as_bytes();
+  let bb = b.as_bytes();
+  if ab.len() != bb.len() {
+    return false;
+  }
+  let mut i = 0;
+  while i < ab.len() {
+    let ca = match ab.get(i) {
+      Some(c) => ascii_lower_byte(c),
+      None => -1,
+    };
+    let cb = match bb.get(i) {
+      Some(c) => ascii_lower_byte(c),
+      None => -2,
+    };
+    if ca != cb {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
 impl AppRequest {
   pub fn method(self: &AppRequest) -> String
     intent "入力を検査して安全な結果を返す"
@@ -637,7 +678,7 @@ impl AppRequest {
   }
 
   pub fn header(self: &AppRequest, name: &String) -> Option<Bytes>
-    intent "前段ヘッダーも未検証の生値としてのみ返す。名前はHTTPと同じ小文字"
+    intent "前段ヘッダーも未検証の生値としてのみ返す。名前は大文字小文字無視"
     requires none
     ensures none
     effects none
@@ -646,7 +687,8 @@ impl AppRequest {
     while i < self.app_headers.len() {
       match self.app_headers.get(i) {
         Some(h) => {
-          if h.name() == name {
+          let hname = h.name();
+          if ascii_eq_ignore_case(&hname, &name) {
             return Some(h.value());
           }
         }
@@ -655,6 +697,29 @@ impl AppRequest {
       i = i + 1;
     }
     return None;
+  }
+
+  pub fn header_count(self: &AppRequest, name: &String) -> Int
+    intent "ヘッダーの全出現件数を取得する（大文字小文字無視）"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut count = 0;
+    let mut i = 0;
+    while i < self.app_headers.len() {
+      match self.app_headers.get(i) {
+        Some(h) => {
+          let hname = h.name();
+          if ascii_eq_ignore_case(&hname, &name) {
+            count = count + 1;
+          }
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    return count;
   }
 
   pub fn param(self: &AppRequest, name: &String) -> Result<String, HttpResponse>

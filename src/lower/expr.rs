@@ -702,10 +702,13 @@ impl<'a> L<'a> {
                     || r.name == "net.connect"
                     || r.name == "net.shutdown_signal"
                     || r.name == "random.bytes"
+                    || r.name == "clock.unix_seconds"
                 {
                     self.core_only = false;
                     let full = if r.name == "random.bytes" {
                         format!("{}.bytes", crate::stdlib::embedded::RANDOM_MODULE)
+                    } else if r.name == "clock.unix_seconds" {
+                        format!("{}.unix_seconds", crate::stdlib::embedded::CLOCK_MODULE)
                     } else {
                         format!(
                             "{}.{}",

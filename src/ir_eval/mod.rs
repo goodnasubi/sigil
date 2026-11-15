@@ -69,6 +69,8 @@ struct M<'p> {
     pending_scope: Option<usize>,
     /// 大域の静的領域（`Program.globals` と同じ添字。単一スレッド前提、ADR 0025 補足 A-5）。
     globals: Vec<Slot>,
+    /// 壁時計取得のテスト用の差し替え（ADR 0037 段階 6-6a）。
+    wall_clock: Option<Result<i64, i64>>,
 }
 
 impl<'p> M<'p> {
@@ -436,6 +438,7 @@ fn execute_roots(
         fs_bytes: opts.fs_bytes.as_ref(),
         fs_bytes_written: BTreeMap::new(),
         env: opts.env_vars.clone(),
+        wall_clock: opts.wall_clock,
         opt: find("Option"),
         res: find("Result"),
         io: find("IoError"),

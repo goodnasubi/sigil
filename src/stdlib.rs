@@ -487,6 +487,8 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     // ADR 0034 決定 4: 実効果を接続側と乱数で分ける。既存サーバー側 API の意味は変えない。
     (Layer::Os, "net", "connect(host: &String, port: Int) -> Result<TcpClient, NetError>", "net.client, task.suspend"),
     (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
+    // ADR 0037 段階 6-6a: 最小壁時計入口。
+    (Layer::Os, "clock", "unix_seconds() -> Option<Int>", "clock"),
     (Layer::Os, "pg", "config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>", "none"),
     (Layer::Os, "pg", "default_connect_limits() -> PgConnectLimits", "none"),
     (Layer::Os, "pg", "default_query_limits() -> PgQueryLimits", "none"),
@@ -639,6 +641,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         ("body(self: &AppRequest) -> Bytes", "none"),
         ("identity(self: &AppRequest) -> Option<AuthIdentity>", "none"),
         ("header(self: &AppRequest, name: &String) -> Option<Bytes>", "none"),
+        ("header_count(self: &AppRequest, name: &String) -> Int", "none"),
         ("param(self: &AppRequest, name: &String) -> Result<String, HttpResponse>", "none"),
         ("query(self: &AppRequest, name: &String) -> Result<String, HttpResponse>", "none"),
         ("param_int(self: &AppRequest, name: &String) -> Result<Int, HttpResponse>", "none"),
@@ -1239,6 +1242,8 @@ mod tests {
             "TcpClient.read",
             "TcpClient.write_all",
             "random.bytes",
+            // ADR 0037 段階 6-6a。
+            "clock.unix_seconds",
             // ADR 0033 E・I・J（Issue #460）。
             "web.load_config",
             "web.error_response",
@@ -1270,6 +1275,7 @@ mod tests {
             "AppRequest.body",
             "AppRequest.identity",
             "AppRequest.header",
+            "AppRequest.header_count",
             "AppRequest.param",
             "AppRequest.query",
             "AppRequest.param_int",

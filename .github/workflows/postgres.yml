@@ -38,7 +38,7 @@ jobs:
       - name: PostgreSQL と試験実行ファイルの準備
         run: |
           docker pull "$POSTGRES_IMAGE"
-          cargo test --locked --test pg_query_492 --test pg_pool_499 --no-run --message-format=json > "$RUNNER_TEMP/pg-build.jsonl"
+          cargo test --locked --test pg_query_492 --test pg_pool_499 --test pg_live_510 --no-run --message-format=json > "$RUNNER_TEMP/pg-build.jsonl"
           python3 - <<'PY'
           import json, os
           paths = []
@@ -47,12 +47,12 @@ jobs:
                   item = json.loads(line)
                   if item.get('reason') == 'compiler-artifact' and item.get('executable') and item['profile']['test']:
                       paths.append(item['executable'])
-          assert len(paths) == 2, paths
+          assert len(paths) == 3, paths
           with open(os.environ['RUNNER_TEMP'] + '/pg-tests.txt', 'w') as output:
               output.write('\n'.join(paths) + '\n')
           PY
 
-      - name: 隔離した PostgreSQL の起動・疎通と既存 d/e 試験
+      - name: 隔離した PostgreSQL の起動・実サーバー d/e 試験
         shell: bash
         run: |
           set -euo pipefail
@@ -63,7 +63,7 @@ jobs:
             docker network rm "$network" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          export POSTGRES_USER=sigil_ci POSTGRES_DB=sigil_ci
+          export POSTGRES_USER=sigil_ci POSTGRES_DB=sigil_ci POSTGRES_PORT=5432
           POSTGRES_PASSWORD="$(openssl rand -hex 32)"
           export POSTGRES_PASSWORD
           echo "::add-mask::$POSTGRES_PASSWORD"
@@ -89,10 +89,14 @@ jobs:
           docker exec "$container" sh -eu -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "SELECT 1"'
           pid="$(docker inspect --format '{{.State.Pid}}' "$container")"
           # 同じ network namespace の 127.0.0.1 で実行する。FS/ツールはホストを使う。
-          # 現在の d/e 試験は模擬相手のみ。実サーバーの製品クライアント試験は未提供。
+          # 実サーバー試験は ignored を明示実行し、設定不足や失敗を成功扱いしない。
           status=0
           while IFS= read -r executable; do
-            if ! sudo nsenter --target "$pid" --net -- "$executable" --test-threads=1; then
+            args=(--test-threads=1)
+            if [[ "$(basename "$executable")" == pg_live_510-* ]]; then
+              args+=(--ignored)
+            fi
+            if ! sudo --preserve-env=POSTGRES_USER,POSTGRES_DB,POSTGRES_PASSWORD,POSTGRES_PORT nsenter --target "$pid" --net -- "$executable" "${args[@]}"; then
               status=1
             fi
           done < "$RUNNER_TEMP/pg-tests.txt"

@@ -186,6 +186,17 @@ impl<'a, 'p> Fx<'a, 'p> {
                         if def.secret {
                             // 秘密は中身も長さも出さない（補足 H-1。移行前の種類 17 と同じ）。
                             self.sb_lit(b"Secret(***)");
+                        } else if matches!(
+                            def.name.as_str(),
+                            "std.http.HttpHeader"
+                                | "std.http.HttpRequest"
+                                | "std.http.HttpParser"
+                                | "std.http.HttpBuf"
+                                | "std.web.AppRequest"
+                        ) {
+                            // Authorization を含み得る標準型の trace に入力を出さない。
+                            self.sb_lit(def.name.as_bytes());
+                            self.sb_lit(b"(***)");
                         } else {
                             self.moved_guard(w);
                             self.sb_lit(def.name.as_bytes());

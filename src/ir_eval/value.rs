@@ -395,6 +395,21 @@ fn show_agg(ts: &[TypeDef], a: &Agg) -> String {
         }
         Tag::Struct(t) => {
             let def = &ts[t];
+            // 表示可否は名前ではなく組込み Secret の型標識で決める。
+            if def.secret {
+                return "Secret(***)".into();
+            }
+            // 認証ヘッダを保持し得る標準型は入れ子も含めて固定表示にする。
+            if matches!(
+                def.name.as_str(),
+                "std.http.HttpHeader"
+                    | "std.http.HttpRequest"
+                    | "std.http.HttpParser"
+                    | "std.http.HttpBuf"
+                    | "std.web.AppRequest"
+            ) {
+                return format!("{}(***)", def.name);
+            }
             let names: Vec<&str> = match &def.kind {
                 TypeKind::Struct { fields } => fields.iter().map(|(n, _)| n.as_str()).collect(),
                 _ => vec![],

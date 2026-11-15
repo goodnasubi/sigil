@@ -23,6 +23,7 @@ pub struct AppLimits {
 
 pub struct ConfigError {
   config_name: String,
+  config_kind: String,
 }
 
 fn read_limit(name: &String, fallback: Int, cap: Int) -> Result<Int, ConfigError>
@@ -46,7 +47,7 @@ fn read_limit(name: &String, fallback: Int, cap: Int) -> Result<Int, ConfigError
       }
     }
   }
-  return Err(ConfigError { config_name: name.clone() });
+  return Err(ConfigError { config_name: name.clone(), config_kind: "invalid" });
 }
 
 pub fn load_config() -> Result<AppConfig, ConfigError>
@@ -212,6 +213,15 @@ impl AppLimits {
 }
 
 impl ConfigError {
+  pub fn kind(self: &ConfigError) -> String
+    intent "設定値を含まない固定分類を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.config_kind.clone();
+  }
+
   pub fn name(self: &ConfigError) -> String
     intent "不正な設定の変数名だけを返す"
     requires none
@@ -1035,12 +1045,12 @@ impl Router {
                         request.app_identity = Some(identity);
                       }
                       Err(_) => {
-                        return Some(error_response(401));
+                        return Some(bearer_unauthorized());
                       }
                     }
                   }
                   None => {
-                    return Some(error_response(401));
+                    return Some(bearer_unauthorized());
                   }
                 }
               }
@@ -1083,6 +1093,136 @@ impl Router {
     }
     return Some(error_response(404));
   }
+}
+
+// ADR 0037 / 6-6c。表示・鍵の取出し・再読込 API を持たない起動時設定。
+pub struct BearerConfig {
+  bearer_key: Secret,
+  bearer_audience: String,
+}
+
+pub fn load_bearer_config() -> Result<BearerConfig, ConfigError>
+  intent "起動時に鍵と audience を一回読み不正値を固定分類で拒否する"
+  requires none
+  ensures none
+  effects env
+{
+  // 両変数をここだけで各一回読む。失敗しても値をエラーに保持しない。
+  let key_text = env.get(&"SIGIL_AUTH_HMAC_KEY_HEX");
+  let audience_text = env.get(&"SIGIL_AUTH_AUDIENCE");
+  let mut key = "";
+  match key_text {
+    Some(text) => { key = text; }
+    None => { return Err(ConfigError { config_name: "SIGIL_AUTH_HMAC_KEY_HEX", config_kind: "missing" }); }
+  }
+  let key_bytes = key.as_bytes();
+  if key_bytes.len() != 64 {
+    let wipe = Secret.from_bytes(key_bytes);
+    return Err(ConfigError { config_name: "SIGIL_AUTH_HMAC_KEY_HEX", config_kind: "invalid" });
+  }
+  let mut decoded = Bytes.new();
+  let mut i = 0;
+  while i < 64 {
+    let hi = bearer_hex(key_bytes.get(i).unwrap_or(256));
+    let lo = bearer_hex(key_bytes.get(i + 1).unwrap_or(256));
+    if hi < 0 || lo < 0 {
+      let wipe = Secret.from_bytes(key_bytes);
+      let partial = Secret.from_bytes(decoded);
+      return Err(ConfigError { config_name: "SIGIL_AUTH_HMAC_KEY_HEX", config_kind: "invalid" });
+    }
+    decoded.push(hi * 16 + lo);
+    i = i + 2;
+  }
+  let wipe = Secret.from_bytes(key_bytes);
+  let secret = Secret.from_bytes(decoded);
+  let mut audience = "";
+  match audience_text {
+    Some(text) => { audience = text; }
+    None => { return Err(ConfigError { config_name: "SIGIL_AUTH_AUDIENCE", config_kind: "missing" }); }
+  }
+  if !bearer_identifier(&audience.as_bytes(), 128) {
+    return Err(ConfigError { config_name: "SIGIL_AUTH_AUDIENCE", config_kind: "invalid" });
+  }
+  return Ok(BearerConfig { bearer_key: secret, bearer_audience: audience });
+}
+
+fn bearer_hex(c: Int) -> Int
+  intent "小文字 hex の一桁だけを受け付ける"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 { return c - 48; }
+  if c >= 97 && c <= 102 { return c - 87; }
+  return -1;
+}
+
+impl BearerConfig {
+  pub fn into_verifier(self: BearerConfig) -> Result<AuthVerifier, ConfigError>
+    intent "待受前に時計を確認し不変設定を所有する検証クロージャを作る"
+    requires none
+    ensures none
+    effects clock
+  {
+    match clock.unix_seconds() {
+      None => { return Err(ConfigError { config_name: "clock.unix_seconds", config_kind: "unavailable" }); }
+      Some(_) => {}
+    }
+    let config = self;
+    return Ok(AuthVerifier { verify: move |req| bearer_request(&config, &req) });
+  }
+}
+
+fn bearer_request(config: &BearerConfig, req: &AppRequest) -> Result<AuthIdentity, HttpResponse>
+  intent "単一の Bearer を抽出し要求時の一回の時計取得で検証する"
+  requires none
+  ensures none
+  effects clock
+{
+  // 不正ヘッダでも時計を一回だけ取得する。公開経路では呼ばれない。
+  let now = clock.unix_seconds();
+  if req.header_count(&"authorization") != 1 { return Err(bearer_unauthorized()); }
+  let value = req.header(&"authorization").unwrap_or(Bytes.new());
+  if value.len() < 8 { return Err(bearer_unauthorized()); }
+  let prefix = value.slice(0, 7).unwrap_or(Bytes.new());
+  if !bearer_scheme(&prefix) { return Err(bearer_unauthorized()); }
+  let token = value.slice(7, value.len()).unwrap_or(Bytes.new());
+  match now {
+    None => { return Err(bearer_unauthorized()); }
+    Some(sec) => {
+      match verify_bearer(&config.bearer_key, &config.bearer_audience, &token, sec) {
+        Ok(identity) => { return Ok(identity); }
+        Err(_) => { return Err(bearer_unauthorized()); }
+      }
+    }
+  }
+}
+
+fn bearer_scheme(prefix: &Bytes) -> Bool
+  intent "Bearer と一個の SP を ASCII 大小不問で比較する"
+  requires none
+  ensures none
+  effects none
+{
+  let expected = "bearer ".as_bytes();
+  if prefix.len() != 7 { return false; }
+  let mut i = 0;
+  while i < 7 {
+    let mut c = prefix.get(i).unwrap_or(256);
+    if c >= 65 && c <= 90 { c = c + 32; }
+    if c != expected.get(i).unwrap_or(257) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn bearer_unauthorized() -> HttpResponse
+  intent "認証失敗は理由にかかわらず固定の401とベアラー見出しだけを返す"
+  requires none
+  ensures none
+  effects none
+{
+  return error_response(401).with_header(&"www-authenticate", &"Bearer".as_bytes()).with_header(&"cache-control", &"no-store".as_bytes());
 }
 
 // ADR 0037 / Issue #507: 純粋な検証核。設定読込・HTTP・時計取得は行わない。

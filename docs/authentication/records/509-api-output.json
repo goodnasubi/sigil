@@ -1,0 +1,18 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "api": {
+      "type": "choice",
+      "choice": "A",
+      "confidence": 1.0,
+      "probabilities": {
+        "A": 1.0,
+        "B": 0.0
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 960,
+    "output_tokens": 31
+  }
+}

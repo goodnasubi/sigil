@@ -1,0 +1,18 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "trace": {
+      "type": "choice",
+      "choice": "A",
+      "confidence": 0.9,
+      "probabilities": {
+        "A": 0.95,
+        "B": 0.05
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 1032,
+    "output_tokens": 31
+  }
+}

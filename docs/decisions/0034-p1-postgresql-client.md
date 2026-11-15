@@ -1,6 +1,6 @@
 # 0034: PostgreSQL クライアント（段階 6-5）
 
-- **状態**: 提案（Issue #446）。判断点 A〜G は typesafe-ai 正式判定で決定済み。実装とマージの承認を意味しない。
+- **状態**: 実装完了（Issue #519）。判断点 A〜G は typesafe-ai 正式判定で決定済み。6-5a〜6-5g の実装・検証完了（補足 A）。
 - **日付**: 2026-11-14（JST）
 - **起草・判定実行**: Codex Cloud（OpenAI 系統）
 - **対象**: PostgreSQL protocol v3 のクライアント／ドライバと接続プール。サーバー実装は対象外。
@@ -518,3 +518,90 @@ Core 層に次の不透明型と入口を定める。名前と効果は後続実
   }
 }
 ```
+
+## 補足 A: 段階 6-5 完了記録（6-5g、2026-11-15 JST）
+
+段階 6-5（PostgreSQL クライアント）の各段（6-5a〜6-5g）の実装および検証状況を記録する。本節に統合成果、ADR 0020 の関門確認結果（G2 の未完了項目を含む）、信頼基盤の増分と残存制限、`sigil spec` の実効果、`native-report` の結果、および後続（6-6 認証・7-1 総合サービス）への引き継ぎ事項（効果境界の整合等）を記録する。
+
+### A-1. 6-5a〜6-5g の実装成果一覧
+
+| 段 | Issue / PR | 成果と検証 |
+|---|---|---|
+| **6-5a** | Issue #462 / PR #469 | outbound `net.connect`、fd を所有する `TcpClient` 型、OS 暗号乱数境界（Linux `getrandom`）。`tests/pg_socket_boundary.rs` |
+| **6-5b** | Issue #463 / PR #466 | PostgreSQL protocol v3 のメッセージ符号化・復号（`std.pg` の純粋部）。`tests/pg_protocol_463.rs` |
+| **6-5c** | Issue #473 / PR #481 | StartupMessage・SCRAM-SHA-256 認証（RFC 7677）、`Option.take` 先行契約。`tests/pg_startup_473.rs`, `tests/pg_scram_473.rs` |
+| **6-5d** | Issue #492 / PR #498 | 単一文クエリ実行（Parse/Bind/Describe/Execute/Sync）、型変換（Bool, Int2/4/8, Text, Varchar, Bytea, NULL）、文エラー後の ReadyForQuery 同期維持、結果上限・時間切れ。`tests/pg_query_492.rs` |
+| **6-5e** | Issue #499 / PR #506 | 接続プール（`PgPool`）、排他借出（`PgLease`）、`Capacity` / `CapacityPermit` による枠管理、`DISCARD ALL` によるアイドル復帰清掃、異常停止・タイムアウト時の安全な破棄。`tests/pg_pool_499.rs` |
+| **6-5f** | Issue #510 / PR #513 | 実 PostgreSQL（`postgres:17.6-bookworm` 固定イメージ・隔離網・使い捨て資格情報）を用いた CI 照合試験。`tests/pg_live_510.rs`, `.github/workflows/postgres.yml`, `docs/POSTGRES_CI.md` |
+| **6-5g** | Issue #519 / PR #520（完了記録）・後続PR（サンプル・結合試験） | 6-5a〜6-5f の統合試験（`tests/pg_integration_6_5g.rs`）、最小サンプル（`examples/13-postgres-client/`）、ADR 0020 関門確認、完了記録。 |
+
+### A-2. ADR 0020 の関門確認結果
+
+ADR 0020 決定 3 の関門（G1・G2・G3）に照らして 6-5 の状況を確認した。
+
+1. **G1（脅威と対策の確認）**:
+   - 入力: protocol v3 のフレーム長上限（1MiB）、深さ・列数・行数上限（`with_result_bounds`）、NUL 終端・UTF-8 検査を実装。SQL は Parse/Bind でパラメータ分離しインジェクションを防止。
+   - 認証: SCRAM-SHA-256 のみ（平文・内部網限定）。反復回数は 4096〜100000 に制限。ServerSignature・ClientProof は定数時間照合（`ct_eq`）で検証。
+   - 秘密: パスワードは `Secret` 型で保護し Displayable 非実装、破棄時にゼロクリア。エラーメッセージ（SQLSTATE のみ）やログに秘密・生 SQL・パラメータ値を含めない。
+   - 資源: fd 所有型（`TcpClient`）と `CapacityPermit` による二重 close / 資源漏洩防止。各種タイムアウト（connect 5s/10s, query 30s, cleanup 5s, acquire 30s）および接続数・待機数上限を適用。
+2. **G2（段階の完了確認）**:
+   - 決定 1 の検査: 定数時間照合、秘密の非表示、SQLSTATE・固定エラー分類のみのエラー応答を `tests/pg_query_492.rs` 等で確認済み。
+   - 決定 2 の対象の追加と短い実行:
+     - PostgreSQL サーバー通信文の解釈（`fuzz_pg_backend`）: `tests/pg_protocol_463.rs` の `short_fuzz_fragmentation` によりフレーム分割・変異・任意バイト列に対する短いファジング実行を確認済み。
+     - SCRAM 通信文（`server-first`・`server-final`）の解釈（`fuzz_scram`）: `tests/pg_scram_473.rs` において RFC 7677 固定テストベクトル、フォーマットおよび境界値・異常値の検査は確認されているが、**ADR 0020 決定 2 が要求する SCRAM 通信文のファジング対象（`fuzz_scram`）の追加と短い実行は未実施**。このため G2 のファジング関門については SCRAM 解釈が**未完了項目（残存課題）**として残る（公開前関門 G3 までに実施が必要）。
+   - 決定 4 の上限のテスト: 行数上限・バイト数上限（`with_result_bounds`）、接続数・待機数上限（`with_capacity`）、各種タイムアウト（`with_timeout`, `with_timeouts`）を検証済み。
+3. **G3（公開前レビューの確認事項）**:
+   - 本ドライバは内部網（サービスと同一ネットワーク）専用であり、平文通信前提のためインターネット等への外部直接接続は不可。
+
+### A-3. 信頼基盤の増分と残存制限
+
+1. **信頼基盤の増分**:
+   - outbound `net.connect`（非ブロッキングソケット、SO_ERROR による完了確認、fd 所有型 `TcpClient`、`sigil_rt_net_close` シム）
+   - OS 暗号乱数境界（Linux x86-64 `getrandom`、`random.bytes`）
+   - `Option.take`（所有権移動の最小汎用契約）
+   - `Capacity` / `CapacityPermit`（上限付き共有資源の排他枠管理と drop 時の自動返却）
+   - 上位のプロトコル解釈・型変換・SCRAM 認証・プール管理（`std.pg`, `std.pg_scram`）はすべて `trust none` の Sigil 実装で、`unchecked` や `raw.*` を含まない。
+2. **残存制限**:
+   - 通信: 平文通信のみ（TLS、SCRAM-SHA-256-PLUS 非対応）。DB はサービスと同じ内部網に配置する。
+   - 認証: SCRAM-SHA-256 のみ（password, md5 非対応）。
+   - クエリ: 単一文クエリのみ（prepared statement の外部公開ハンドル、pipeline、ストリーミング、COPY、LISTEN/NOTIFY 非対応）。
+   - 運用: ORM、スキーマ移行、レプリケーション、自動リトライ、CancelRequest は非対応。
+   - 評価器性能: 評価器での PBKDF2 4096 反復は計算時間を要するため、実接続結合テストでは `fixture()` またはネイティブ実行による検証を基本とする（Issue #484）。
+   - 関門・効果境界: G2 関門における SCRAM 通信文のファジング（`fuzz_scram`）は未実施（A-2 参照）。Web ハンドラ（`WEB_CALLBACKS`）の効果上限 `D` と `std.pg` の必要効果（`net.client`）の境界整合は未解決（A-6 参照）。
+
+### A-4. `sigil spec` の実効果
+
+`sigil spec --std` の出力のとおり、`std.pg` および `std.pg_scram` の公開 API は名目上の `db` 単独への集約を行わず、実際の実効果（`net.client, random, clock, task`）を宣言し、推論効果と完全一致している。
+
+- `pg.config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>`: `effects none`
+- `pg.connect(config: PgConfig, limits: &PgConnectLimits) -> Result<PgConn, PgError>`: `effects clock, net.client, random, task.spawn, task.suspend`
+- `PgConn.query(self: &mut PgConn, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> Result<PgResult, PgError>`: `effects clock, net.client, task.spawn, task.suspend`
+- `pg.pool(config: PgConfig, limits: &PgPoolLimits) -> Result<PgPool, PgError>`: `effects none`
+- `PgPool.acquire(self: &PgPool) -> Result<PgLease, PgError>`: `effects clock, net.client, random, task`
+- `PgLease.query(self: &mut PgLease, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> Result<PgResult, PgError>`: `effects clock, net.client, task.spawn, task.suspend`
+- `PgLease.release(self: PgLease) -> Result<Bool, PgError>`: `effects clock, net.client, task`
+
+### A-5. native-report の結果
+
+`scripts/native-report.sh` による評価器とネイティブ実行ファイルの突き合わせ結果は以下のとおり基準を満たしている。
+
+```
+== 突き合わせ / 飛ばし（理由別） ==
+突き合わせ 445 件（下限 400）
+飛ばし 9 件（上限 10。仕様上ビルドで止める入口引数 0 件は上限の対象外）
+      1  コマンドラインで書けない引数
+      1  コマンドラインで書けない引数の型
+      2  スタックの枯渇（実行ファイルでは枯渇しない）
+      5  停止でない失敗
+```
+
+### A-6. P1 サービスへの接続と引き継ぎ事項
+
+1. **フレームワーク（段階 6-4）との結合と効果境界の課題**:
+   - `PgPool` 型自体は `Cloneable` / `Sendable` / `Shareable` であり、Web サーバーの起動時に初期化して `SyncShared` やクロージャを通じて各接続ルートへ共有可能な設計である。
+   - しかし、`std.web` のハンドラ・フック・認証検証器の効果上限 `D`（`src/stdlib.rs:145-158` の `WEB_CALLBACKS`）は `clock, console, db, env, random, task` のみを許容しており、`std.pg` の公開操作（`PgPool.acquire`, `PgLease.query`, `PgLease.release`）が必要とする `net.client` は含まれない（`src/effects.rs` において `db` と `net.client` は独立した別カテゴリ）。
+   - そのため、現行の型・効果検査のもとでは要求ハンドラ内から `PgPool.acquire()` や `PgLease.query()` を直接呼び出すと効果検査エラーとなり、そのままではサービス実装へ引き継げない。
+   - **未解決の引き継ぎ事項（効果境界の整合）**: 要求ハンドラから PostgreSQL クライアントを呼び出せるようにするための効果境界の整合（`WEB_CALLBACKS` の許容効果に `net.client` を追加するか、`std.pg` 側で `db` 効果へ集約・抽象化するか、あるいはミドルウェア／アダプタ層で効果境界を変換・吸収するか）は未解決であり、後続の段階（6-6 認証・7-1 総合サービス）への引き継ぎ課題とする。
+2. **後続（6-6 認証・7-1 総合サービス）への引き継ぎ**:
+   - DB 接続情報（ホスト・ポート・ユーザー・DB名・パスワード）は `env.get`（`effects env`）で取得し、`Secret.from_bytes` で安全に包んで `pg.config` へ渡す。
+   - 終了シグナル（`net.shutdown_signal()`）受信時は、`task.roots_grace` で Web 要求のドレインが完了した後に、プールの接続を破棄してプロセスを正常終了できる。

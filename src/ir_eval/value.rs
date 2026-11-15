@@ -3,6 +3,10 @@ use crate::shared_text::fmt_float;
 use std::cell::{Cell as StdCell, RefCell};
 use std::cmp::Ordering;
 use std::rc::Rc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    Arc,
+};
 
 use super::Slot;
 
@@ -27,6 +31,22 @@ pub(super) enum Val {
     Guard(Rc<GuardTok>),
     /// `RootGroup.reserve` が返す起動の権利（`RootSlot`。ADR 0031 決定 4-1）。起動せずに最後の写しを破棄すると上限が返る。
     RootSlot(Rc<RootSlotTok>),
+    Capacity(Arc<CapacityState>),
+    CapacityPermit(Rc<CapacityPermitTok>),
+}
+
+/// 容量の実体。permit は所有元の最後の写しよりも長く生きられる。
+pub(super) struct CapacityState {
+    pub(super) limit: usize,
+    pub(super) used: AtomicUsize,
+}
+
+pub(super) struct CapacityPermitTok(pub(super) Arc<CapacityState>);
+
+impl Drop for CapacityPermitTok {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, AtomicOrdering::AcqRel);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -274,6 +294,8 @@ pub(super) fn shadow(v: &Val) -> Val {
         Val::Bytes(b) => Val::Bytes(b.clone()),
         Val::Guard(g) => Val::Guard(g.clone()),
         Val::RootSlot(t) => Val::RootSlot(t.clone()),
+        Val::Capacity(c) => Val::Capacity(c.clone()),
+        Val::CapacityPermit(p) => Val::CapacityPermit(p.clone()),
     }
 }
 
@@ -437,6 +459,8 @@ pub(super) fn show_val(ts: &[TypeDef], v: &Val, quote: bool) -> String {
         Val::Bytes(b) => format!("Bytes({:?})", *b.borrow()),
         Val::Guard(_) => "LockGuard".into(),
         Val::RootSlot(_) => "RootSlot".into(),
+        Val::Capacity(_) => "Capacity".into(),
+        Val::CapacityPermit(_) => "CapacityPermit".into(),
     }
 }
 

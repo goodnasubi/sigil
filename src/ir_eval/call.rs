@@ -1257,7 +1257,8 @@ impl<'p> M<'p> {
             RootsScope | RootReserve | RootStart | IoWaitFd | TaskScope | TaskAllOk | TaskRace
             | TaskTimeout | TaskYield | TaskSleep | TaskChannel | ScopeSpawn | TaskJoin
             | ChanSend | ChanRecv | SyncSharedNew | SyncSharedGet | LockNew | LockAcquire
-            | LockGuardGet | LockGuardGetMut | AtomicNew | AtomicLoad | AtomicStore => {
+            | LockGuardGet | LockGuardGetMut | CapacityNew | CapacityTryAcquire | AtomicNew
+            | AtomicLoad | AtomicStore => {
                 unreachable!("タスク関連の組み込み操作はスケジューラ側で特別に処理される")
             }
         })

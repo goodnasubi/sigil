@@ -229,6 +229,8 @@ const PRELUDE_TYPES: &[&str] = &[
     "LockGuard",
     "LockBroken",
     "Atomic",
+    "Capacity",
+    "CapacityPermit",
     // 複数ルートの入口の前置き型（ADR 0031 決定 4-1）。
     "RootGroup",
     "RootSlot",
@@ -264,6 +266,9 @@ const PRELUDE_TYPES: &[&str] = &[
     "PgConfig",
     "PgConnectLimits",
     "PgConn",
+    "PgPool",
+    "PgLease",
+    "PgPoolLimits",
     "PgError",
     "PgValue",
     "PgParam",

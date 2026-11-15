@@ -16,8 +16,8 @@ use crate::exec::StopKind;
 use crate::ir::*;
 
 use super::value::{
-    list_of, new_slot, shadow, with_val, Agg, GuardTok, Ptr, RootSlotTok, Tag, Val, LOCK_EVENTS,
-    ROOT_EVENTS, UNWINDING,
+    list_of, new_slot, shadow, with_val, Agg, CapacityPermitTok, CapacityState, GuardTok, Ptr,
+    RootSlotTok, Tag, Val, LOCK_EVENTS, ROOT_EVENTS, UNWINDING,
 };
 use super::{Slot, E, M};
 
@@ -258,7 +258,9 @@ fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32, n: &mut usize) -> bool {
             Ok(b) => (18u8, &*b).hash(h),
             Err(_) => return false,
         },
-        Val::Guard(_) | Val::RootSlot(_) => return false,
+        Val::Guard(_) | Val::RootSlot(_) | Val::Capacity(_) | Val::CapacityPermit(_) => {
+            return false
+        }
     }
     true
 }
@@ -436,6 +438,8 @@ fn is_task_op(b: Builtin) -> bool {
             | LockAcquire
             | LockGuardGet
             | LockGuardGetMut
+            | CapacityNew
+            | CapacityTryAcquire
             | AtomicNew
             | AtomicLoad
             | AtomicStore
@@ -1272,6 +1276,46 @@ impl<'p> M<'p> {
                     self.sch.tasks[cur].state = State::Recv;
                     Op::Block
                 }
+            }
+            CapacityNew => {
+                let limit = self.read_int(locals, &args[0]);
+                Op::Val(if (1..=4096).contains(&limit) {
+                    self.some(Val::Capacity(std::sync::Arc::new(CapacityState {
+                        limit: limit as usize,
+                        used: std::sync::atomic::AtomicUsize::new(0),
+                    })))
+                } else {
+                    self.none()
+                })
+            }
+            CapacityTryAcquire => {
+                let (s, p) = self.view(locals, &args[0]);
+                let capacity = with_val(&s, &p, |v| match v {
+                    Val::Capacity(c) => Some(c.clone()),
+                    _ => None,
+                });
+                let permit = capacity.and_then(|c| {
+                    use std::sync::atomic::Ordering::AcqRel;
+                    let mut used = c.used.load(std::sync::atomic::Ordering::Acquire);
+                    while used < c.limit {
+                        match c.used.compare_exchange_weak(
+                            used,
+                            used + 1,
+                            AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        ) {
+                            Ok(_) => {
+                                return Some(Val::CapacityPermit(Rc::new(CapacityPermitTok(c))))
+                            }
+                            Err(current) => used = current,
+                        }
+                    }
+                    None
+                });
+                Op::Val(match permit {
+                    Some(p) => self.some(p),
+                    None => self.none(),
+                })
             }
             SyncSharedNew | AtomicNew => Op::Val(Val::Shared(Rc::new(Val::Cell(Rc::new(
                 RefCell::new(self.owned(locals, &args[0])),

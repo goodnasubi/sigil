@@ -27,6 +27,7 @@ pub enum PgError {
   LimitExceeded,
   TypeMismatch,
   UnsupportedType,
+  LockBroken,
 }
 
 pub enum PgValue {
@@ -838,6 +839,7 @@ impl PgColumn {
 // 接続は fd を一つだけ所有する。認証失敗と timeout はこの値を返さず、TcpClient の破棄で閉じる。
 pub struct PgConn {
   stream: Option<TcpClient>,
+  ready_status: Int,
 }
 
 pub struct PgConfig {
@@ -1035,7 +1037,7 @@ fn connect_inner(c: &PgConfig) -> Result<PgConn, PgError>
       PgBackend.NoticeResponse => {}
       PgBackend.ReadyForQuery(status) => {
         if status != 73 || !encoding { return Err(PgError.Protocol); }
-        return Ok(PgConn { stream: Some(stream) });
+        return Ok(PgConn { stream: Some(stream), ready_status: 73 });
       }
       _ => { return Err(PgError.Protocol); }
     }
@@ -1149,19 +1151,21 @@ impl PgConn {
     effects net.client, clock, task.spawn, task.suspend
   {
     let mut pending = self.stream.take();
+    self.ready_status = 0;
     if pending.is_none() { return Err(PgError.Connection); }
     match task.timeout(limits.timeout_ms, || query_pending(&mut pending, &sql, &params, &limits)) {
       None => { return Err(PgError.Timeout); }
       Some(done) => {
-        let (saved, answer) = done;
+        let (saved, status, answer) = done;
         self.stream = saved;
+        self.ready_status = status;
         return answer;
       }
     }
   }
 }
 
-fn query_pending(pending: &mut Option<TcpClient>, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<TcpClient>, Result<PgResult, PgError>)
+fn query_pending(pending: &mut Option<TcpClient>, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<TcpClient>, Int, Result<PgResult, PgError>)
   intent "期限付きの子の中で接続の所有を引き取る"
   requires none
   ensures none
@@ -1169,11 +1173,11 @@ fn query_pending(pending: &mut Option<TcpClient>, sql: &String, params: &List<Pg
 {
   match pending.take() {
     Some(stream) => { return query_owned(stream, &sql, &params, &limits); }
-    None => { return (None, Err(PgError.Connection)); }
+    None => { return (None, 0, Err(PgError.Connection)); }
   }
 }
 
-fn query_owned(owned_stream: TcpClient, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<TcpClient>, Result<PgResult, PgError>)
+fn query_owned(owned_stream: TcpClient, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<TcpClient>, Int, Result<PgResult, PgError>)
   intent "所有する接続を同期完了時だけ呼出元へ戻す"
   requires none
   ensures none
@@ -1182,16 +1186,16 @@ fn query_owned(owned_stream: TcpClient, sql: &String, params: &List<PgParam>, li
   let mut stream = owned_stream;
   // 全入力の検査・符号化を送信より前、同じ期限内で行う。
   match query_request(&sql, &params) {
-    Err(e) => { return (Some(stream), Err(e)); }
+    Err(e) => { return (Some(stream), 0, Err(e)); }
     Ok(request) => {
       match send(&mut stream, &request) {
-        Err(e) => { return (None, Err(PgError.OutcomeUnknown)); }
+        Err(e) => { return (None, 0, Err(PgError.OutcomeUnknown)); }
         Ok(v) => {}
       }
       match query_receive(&mut stream, &limits) {
-        Ok(done) => { return (Some(stream), done); }
-        Err(PgError.Connection) => { return (None, Err(PgError.OutcomeUnknown)); }
-        Err(e) => { return (None, Err(e)); }
+        Ok(done) => { let (status, answer) = done; return (Some(stream), status, answer); }
+        Err(PgError.Connection) => { return (None, 0, Err(PgError.OutcomeUnknown)); }
+        Err(e) => { return (None, 0, Err(e)); }
       }
     }
   }
@@ -1211,7 +1215,7 @@ fn query_request(sql: &String, params: &List<PgParam>) -> Result<Bytes, PgError>
   return Ok(request);
 }
 
-fn query_receive(stream: &mut TcpClient, limits: &PgQueryLimits) -> Result<Result<PgResult, PgError>, PgError>
+fn query_receive(stream: &mut TcpClient, limits: &PgQueryLimits) -> Result<(Int, Result<PgResult, PgError>), PgError>
   intent "応答順序と上限を検証し文エラー後もReadyForQueryまで同期する"
   requires none
   ensures none
@@ -1237,9 +1241,9 @@ fn query_receive(stream: &mut TcpClient, limits: &PgQueryLimits) -> Result<Resul
         phase = 5;
       }
       PgBackend.ReadyForQuery(status) => {
-        if phase == 5 { return Ok(Err(PgError.SqlState(error))); }
+        if phase == 5 { return Ok((status, Err(PgError.SqlState(error)))); }
         if phase != 4 { return Err(PgError.Protocol); }
-        return Ok(Ok(PgResult { result_cols: columns, result_rows: rows, command_tag: command, ready_status: status }));
+        return Ok((status, Ok(PgResult { result_cols: columns, result_rows: rows, command_tag: command, ready_status: status })));
       }
       PgBackend.ParseComplete => {
         if phase != 0 { return Err(PgError.Protocol); }
@@ -1277,4 +1281,335 @@ fn query_receive(stream: &mut TcpClient, limits: &PgQueryLimits) -> Result<Resul
     }
   }
   return Err(PgError.Protocol);
+}
+
+// 接続の宣言順で fd を閉じてから permit を返す。破棄に通信や待機はない。
+pub struct PgPooled {
+  conn: PgConn,
+  permit: CapacityPermit,
+}
+
+// List の借用から所有値を抜き取る入口を増やさず、上限16の固定保管庫を使う。
+pub struct PgIdle {
+  slot0: Option<PgPooled>,
+  slot1: Option<PgPooled>,
+  slot2: Option<PgPooled>,
+  slot3: Option<PgPooled>,
+  slot4: Option<PgPooled>,
+  slot5: Option<PgPooled>,
+  slot6: Option<PgPooled>,
+  slot7: Option<PgPooled>,
+  slot8: Option<PgPooled>,
+  slot9: Option<PgPooled>,
+  slot10: Option<PgPooled>,
+  slot11: Option<PgPooled>,
+  slot12: Option<PgPooled>,
+  slot13: Option<PgPooled>,
+  slot14: Option<PgPooled>,
+  slot15: Option<PgPooled>,
+}
+
+pub struct PgPoolLimits {
+  connections: Int,
+  waiters: Int,
+  connect_ms: Int,
+  query_ms: Int,
+  cleanup_ms: Int,
+  acquire_ms: Int,
+}
+
+pub struct PgPool {
+  config: Lock<PgConfig>,
+  idle: SyncShared<Lock<PgIdle>>,
+  connections: Capacity,
+  waiters: Capacity,
+  connect_ms: Int,
+  query_ms: Int,
+  cleanup_ms: Int,
+  acquire_ms: Int,
+}
+
+pub struct PgLease {
+  held: Option<PgPooled>,
+  pool: PgPool,
+}
+
+pub fn default_pool_limits() -> PgPoolLimits
+  intent "プール16接続と64待機および各期限の最大値を選ぶ"
+  requires none
+  ensures none
+  effects none
+{
+  return PgPoolLimits { connections: 16, waiters: 64, connect_ms: 10000, query_ms: 30000, cleanup_ms: 5000, acquire_ms: 30000 };
+}
+
+impl PgPoolLimits {
+  pub fn with_capacity(self: PgPoolLimits, connections: Int, waiters: Int) -> Result<PgPoolLimits, PgError>
+    intent "接続と待機の容量をADRの上限以下へ狭める"
+    requires none
+    ensures none
+    effects none
+  {
+    if connections < 1 || connections > 16 || waiters < 1 || waiters > 64 { return Err(PgError.LimitExceeded); }
+    return Ok(PgPoolLimits { connections: connections, waiters: waiters, connect_ms: self.connect_ms, query_ms: self.query_ms, cleanup_ms: self.cleanup_ms, acquire_ms: self.acquire_ms });
+  }
+
+  pub fn with_timeouts(self: PgPoolLimits, connect_ms: Int, query_ms: Int, cleanup_ms: Int, acquire_ms: Int) -> Result<PgPoolLimits, PgError>
+    intent "接続と操作と清掃と借出の期限を最大値以下へ狭める"
+    requires none
+    ensures none
+    effects none
+  {
+    if connect_ms < 1 || connect_ms > 10000 || query_ms < 1 || query_ms > 30000 || cleanup_ms < 1 || cleanup_ms > 5000 || acquire_ms < 1 || acquire_ms > 30000 { return Err(PgError.LimitExceeded); }
+    return Ok(PgPoolLimits { connections: self.connections, waiters: self.waiters, connect_ms: connect_ms, query_ms: query_ms, cleanup_ms: cleanup_ms, acquire_ms: acquire_ms });
+  }
+
+  pub fn max_result_wire(self: &PgPoolLimits) -> Int
+    intent "全接続の一回の結果wire保持上限を値で返す"
+    requires none
+    ensures none
+    effects none
+  { return self.connections * 4194304; }
+}
+
+pub fn pool(config: PgConfig, limits: &PgPoolLimits) -> Result<PgPool, PgError>
+  intent "明示上限の未接続プールを作る"
+  requires none
+  ensures none
+  effects none
+{
+  let connections = match Capacity.new(limits.connections) { Some(c) => Ok(c), None => Err(PgError.LimitExceeded), }?;
+  let waiters = match Capacity.new(limits.waiters) { Some(c) => Ok(c), None => Err(PgError.LimitExceeded), }?;
+  let idle = PgIdle {
+    slot0: None,
+    slot1: None,
+    slot2: None,
+    slot3: None,
+    slot4: None,
+    slot5: None,
+    slot6: None,
+    slot7: None,
+    slot8: None,
+    slot9: None,
+    slot10: None,
+    slot11: None,
+    slot12: None,
+    slot13: None,
+    slot14: None,
+    slot15: None,
+  };
+  return Ok(PgPool { config: Lock.new(config), idle: SyncShared.new(Lock.new(idle)), connections: connections, waiters: waiters, connect_ms: limits.connect_ms, query_ms: limits.query_ms, cleanup_ms: limits.cleanup_ms, acquire_ms: limits.acquire_ms });
+}
+
+impl PgPool {
+  pub fn clone(self: &PgPool) -> PgPool
+    intent "同じ接続保管庫と容量を参照するプールの持ち手を作る"
+    requires none
+    ensures none
+    effects none
+  {
+    return PgPool { config: self.config.clone(), idle: self.idle.clone(), connections: self.connections.clone(), waiters: self.waiters.clone(), connect_ms: self.connect_ms, query_ms: self.query_ms, cleanup_ms: self.cleanup_ms, acquire_ms: self.acquire_ms };
+  }
+
+  pub fn acquire(self: &PgPool) -> Result<PgLease, PgError>
+    intent "期限内に排他所有する接続を一つだけ借り出す"
+    requires none
+    ensures none
+    effects net.client, random, clock, task.spawn, task.share, task.suspend
+  {
+    let pool = self.clone();
+    match task.timeout(pool.acquire_ms, || acquire_inner(&pool)) {
+      None => { return Err(PgError.Timeout); }
+      Some(answer) => { return answer; }
+    }
+  }
+}
+
+fn idle_take(idle: &mut PgIdle) -> Option<PgPooled>
+  intent "固定保管庫から接続の所有を一つだけ取り出す"
+  requires none
+  ensures none
+  effects none
+{
+  if idle.slot0.is_some() { return idle.slot0.take(); }
+  if idle.slot1.is_some() { return idle.slot1.take(); }
+  if idle.slot2.is_some() { return idle.slot2.take(); }
+  if idle.slot3.is_some() { return idle.slot3.take(); }
+  if idle.slot4.is_some() { return idle.slot4.take(); }
+  if idle.slot5.is_some() { return idle.slot5.take(); }
+  if idle.slot6.is_some() { return idle.slot6.take(); }
+  if idle.slot7.is_some() { return idle.slot7.take(); }
+  if idle.slot8.is_some() { return idle.slot8.take(); }
+  if idle.slot9.is_some() { return idle.slot9.take(); }
+  if idle.slot10.is_some() { return idle.slot10.take(); }
+  if idle.slot11.is_some() { return idle.slot11.take(); }
+  if idle.slot12.is_some() { return idle.slot12.take(); }
+  if idle.slot13.is_some() { return idle.slot13.take(); }
+  if idle.slot14.is_some() { return idle.slot14.take(); }
+  if idle.slot15.is_some() { return idle.slot15.take(); }
+  return None;
+}
+
+fn idle_put(idle: &mut PgIdle, held: PgPooled) -> Bool
+  intent "清掃済み接続の所有を空いた固定欄へ移す"
+  requires none
+  ensures none
+  effects none
+{
+  if idle.slot0.is_none() { idle.slot0 = Some(held); return true; }
+  if idle.slot1.is_none() { idle.slot1 = Some(held); return true; }
+  if idle.slot2.is_none() { idle.slot2 = Some(held); return true; }
+  if idle.slot3.is_none() { idle.slot3 = Some(held); return true; }
+  if idle.slot4.is_none() { idle.slot4 = Some(held); return true; }
+  if idle.slot5.is_none() { idle.slot5 = Some(held); return true; }
+  if idle.slot6.is_none() { idle.slot6 = Some(held); return true; }
+  if idle.slot7.is_none() { idle.slot7 = Some(held); return true; }
+  if idle.slot8.is_none() { idle.slot8 = Some(held); return true; }
+  if idle.slot9.is_none() { idle.slot9 = Some(held); return true; }
+  if idle.slot10.is_none() { idle.slot10 = Some(held); return true; }
+  if idle.slot11.is_none() { idle.slot11 = Some(held); return true; }
+  if idle.slot12.is_none() { idle.slot12 = Some(held); return true; }
+  if idle.slot13.is_none() { idle.slot13 = Some(held); return true; }
+  if idle.slot14.is_none() { idle.slot14 = Some(held); return true; }
+  if idle.slot15.is_none() { idle.slot15 = Some(held); return true; }
+  return false;
+}
+
+fn pool_config(pool: &PgPool) -> Result<PgConfig, PgError>
+  intent "設定のロック内で資格情報を内部コピーし接続待機前にロックを解放する"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  match pool.config.acquire() {
+    Err(e) => { return Err(PgError.LockBroken); }
+    Ok(g) => {
+      let c = g.get();
+      return Ok(PgConfig { host: c.host.clone(), port: c.port, user: c.user.clone(), database: c.database.clone(), password: Secret.from_bytes(c.password.expose()) });
+    }
+  }
+}
+
+fn take_idle(pool: &PgPool) -> Result<Option<PgPooled>, PgError>
+  intent "共有保管庫を待機なしの所有移動の間だけ守る"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let idle_lock = pool.idle.borrow();
+  match idle_lock.acquire() {
+    Err(e) => { return Err(PgError.LockBroken); }
+    Ok(g0) => { let mut g = g0; return Ok(idle_take(g.get_mut())); }
+  }
+}
+
+fn acquire_inner(pool: &PgPool) -> Result<PgLease, PgError>
+  intent "idleと接続枠を検査し満杯の間だけ上限付き待機枠を所有する"
+  requires none
+  ensures none
+  effects net.client, random, clock, task.spawn, task.share, task.suspend
+{
+  let mut waiting = None;
+  while true {
+    let reused = take_idle(&pool)?;
+    match reused {
+      Some(held) => { return Ok(PgLease { held: Some(held), pool: pool.clone() }); }
+      None => {}
+    }
+    match pool.connections.try_acquire() {
+      Some(permit) => {
+        if waiting.is_some() { let returned_waiter = waiting.take(); }
+        let cfg = pool_config(&pool)?;
+        let limits = PgConnectLimits { timeout_ms: pool.connect_ms };
+        let conn = connect(cfg, &limits)?;
+        return Ok(PgLease { held: Some(PgPooled { conn: conn, permit: permit }), pool: pool.clone() });
+      }
+      None => {}
+    }
+    if waiting.is_none() {
+      match pool.waiters.try_acquire() {
+        Some(permit) => { waiting = Some(permit); }
+        None => { return Err(PgError.LimitExceeded); }
+      }
+    }
+    task.yield();
+  }
+  return Err(PgError.Connection);
+}
+
+impl PgLease {
+  pub fn query(self: &mut PgLease, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> Result<PgResult, PgError>
+    intent "leaseの接続を操作の子へ移し取消では接続と容量を一緒に捨てる"
+    requires none
+    ensures none
+    effects net.client, clock, task.spawn, task.suspend
+  {
+    let mut pending = self.held.take();
+    let mut ms = self.pool.query_ms;
+    if limits.timeout_ms < ms { ms = limits.timeout_ms; }
+    match task.timeout(ms, || lease_query(&mut pending, &sql, &params, &limits)) {
+      None => { return Err(PgError.Timeout); }
+      Some(done) => {
+        let (held, answer) = done;
+        self.held = held;
+        return answer;
+      }
+    }
+  }
+
+  pub fn release(self: PgLease) -> Result<Bool, PgError>
+    intent "正常な明示返却だけを期限付き清掃しidleへ戻す"
+    requires none
+    ensures none
+    effects net.client, clock, task.spawn, task.share, task.suspend
+  {
+    let pool = self.pool.clone();
+    let mut pending = self.held;
+    match task.timeout(pool.cleanup_ms, || release_pending(&pool, &mut pending)) {
+      None => { return Err(PgError.Timeout); }
+      Some(answer) => { return answer; }
+    }
+  }
+}
+
+fn lease_query(pending: &mut Option<PgPooled>, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> (Option<PgPooled>, Result<PgResult, PgError>)
+  intent "子が接続と枠を所有し閉鎖された接続をleaseへ残さない"
+  requires none
+  ensures none
+  effects net.client, clock, task.spawn, task.suspend
+{
+  match pending.take() {
+    None => { return (None, Err(PgError.Connection)); }
+    Some(owned) => {
+      let mut held = owned;
+      let answer = held.conn.query(&sql, &params, &limits);
+      if held.conn.is_closed() { return (None, answer); }
+      return (Some(held), answer);
+    }
+  }
+}
+
+fn release_pending(pool: &PgPool, pending: &mut Option<PgPooled>) -> Result<Bool, PgError>
+  intent "idle確認とDISCARD ALLとhex再設定がすべて成功した接続だけを返す"
+  requires none
+  ensures none
+  effects net.client, clock, task.spawn, task.share, task.suspend
+{
+  match pending.take() {
+    None => { return Ok(false); }
+    Some(owned) => {
+      let mut held = owned;
+      if held.conn.ready_status != 73 || held.conn.is_closed() { return Ok(false); }
+      let limits = PgQueryLimits { timeout_ms: pool.cleanup_ms, max_wire: 4194304, max_rows: 10000 };
+      let discarded = held.conn.query(&"DISCARD ALL", &List.new(), &limits)?;
+      if discarded.status() != 73 || discarded.command() != "DISCARD ALL" { return Err(PgError.Protocol); }
+      let reset = held.conn.query(&"SET bytea_output = 'hex'", &List.new(), &limits)?;
+      if reset.status() != 73 || reset.command() != "SET" { return Err(PgError.Protocol); }
+      let idle_lock = pool.idle.borrow();
+      match idle_lock.acquire() {
+        Err(e) => { return Err(PgError.LockBroken); }
+        Ok(g0) => { let mut g = g0; return Ok(idle_put(g.get_mut(), held)); }
+      }
+    }
+  }
 }

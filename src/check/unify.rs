@@ -274,7 +274,7 @@ impl Ck {
                 // 共有できる（`HttpLimits` を起動したルートへ移せる。決定 2-3）。比較・表示・複製の性質は持たない。
                 // 接続（ADR 0032 決定 3-2）は `TcpStream` を持つので、移せるが共有できない。
                 Some(TypeDef::Opaque(_))
-                    if matches!(n.as_str(), "HttpConn" | "PgConn" | "PgConfig") =>
+                    if matches!(n.as_str(), "HttpConn" | "PgConn" | "PgConfig" | "PgLease") =>
                 {
                     // PostgreSQL 接続と秘密を持つ設定も、移せるが共有・複製・表示はできない。
                     Some(p == Prop::Sendable)
@@ -282,7 +282,13 @@ impl Ck {
                 Some(TypeDef::Opaque(_))
                     if matches!(
                         n.as_str(),
-                        "PgConnectLimits" | "PgQueryLimits" | "PgParam" | "PgColumn" | "PgResult"
+                        "PgConnectLimits"
+                            | "PgQueryLimits"
+                            | "PgPoolLimits"
+                            | "PgPool"
+                            | "PgParam"
+                            | "PgColumn"
+                            | "PgResult"
                     ) =>
                 {
                     Some(matches!(p, Prop::Sendable | Prop::Shareable))
@@ -291,6 +297,10 @@ impl Ck {
                     if crate::stdlib::HTTP_TYPES.contains(&n.as_str())
                         || crate::stdlib::WEB_TYPES.contains(&n.as_str()) =>
                 {
+                    Some(matches!(p, Prop::Sendable | Prop::Shareable))
+                }
+                Some(TypeDef::Opaque(_)) if n == "CapacityPermit" => Some(p == Prop::Sendable),
+                Some(TypeDef::Opaque(_)) if n == "Capacity" => {
                     Some(matches!(p, Prop::Sendable | Prop::Shareable))
                 }
                 Some(TypeDef::Opaque(_)) => match (n.as_str(), p) {

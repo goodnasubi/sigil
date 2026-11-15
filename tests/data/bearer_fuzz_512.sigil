@@ -1,0 +1,112 @@
+module test.bearer512
+  targets server
+  trust none
+
+fn encode(data: &Bytes) -> Bytes
+ intent "試験専用の正規base64url生成"
+ requires none ensures none effects none
+{
+ let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".as_bytes();
+ let mut out = Bytes.new(); let mut acc = 0; let mut bits = 0; let mut i = 0;
+ while i < data.len() {
+  acc = (acc << 8) | data.get(i).unwrap_or(0); bits = bits + 8;
+  while bits >= 6 {
+   bits = bits - 6; out.push(alphabet.get((acc >> bits) & 63).unwrap_or(0));
+  }
+  acc = acc & ((1 << bits) - 1); i = i + 1;
+ }
+ if bits > 0 { out.push(alphabet.get((acc << (6 - bits)) & 63).unwrap_or(0)); }
+ return out;
+}
+fn verify_input(input: &Bytes) -> String
+ intent "公開入力だけを復号し固定設定で検証する"
+ requires none ensures none effects env, clock, console, db, random, task
+{
+ let mut kb = Bytes.new(); let mut i = 0;
+ while i < 32 { kb.push(i); i = i + 1; }
+ let mode = input.get(0).unwrap_or(0);
+ let data = input.slice(1, input.len()).unwrap_or(Bytes.new());
+ if mode == 2 {
+  return request(&data);
+ }
+ let key = Secret.from_bytes(kb);
+ let mut token = data;
+ if mode == 1 {
+  let signed = "sigil1.".as_bytes().concat(&encode(&token));
+  let tag = hmac_sha256(&key, &signed);
+  token = signed.concat(&".".as_bytes()).concat(&encode(&tag.expose()));
+ }
+ match web.verify_bearer(&key, &"sigil.api", &token, 1700000000) {
+  Ok(identity) => { return "ok:".as_bytes().concat(&identity.subject().as_bytes()).to_string_utf8().unwrap_or(""); }
+  Err(reason) => { if reason != "unauthorized" { return "INVALID ERROR"; } return "err"; }
+ }
+}
+fn digit(c: Int) -> Int
+ intent "試験転送形式のhexを復号する"
+ requires none ensures none effects none
+{ if c >= 48 && c <= 57 { return c - 48; } return c - 97 + 10; }
+fn probe(input: String) -> String
+ intent "入力をまとめて検証して全結果を返す"
+ requires none ensures none effects env, clock, console, db, random, task
+{
+ let text = input.as_bytes(); let mut answers = Bytes.new(); let mut data = Bytes.new(); let mut i = 0;
+ while i < text.len() {
+  let c = text.get(i).unwrap_or(0);
+  if c == 10 {
+   answers = answers.concat(&verify_input(&data).as_bytes()).concat(&"\n".as_bytes()); data = Bytes.new(); i = i + 1;
+  } else {
+   data.push(digit(c) * 16 + digit(text.get(i + 1).unwrap_or(0))); i = i + 2;
+  }
+ }
+ return answers.to_string_utf8().unwrap_or("");
+}
+
+fn handler(req: &AppRequest) -> HttpResponse
+ intent "検証済み主体のみを返す"
+ requires none ensures none effects none
+{
+ match req.identity() {
+  Some(identity) => { return HttpResponse.new(200, identity.subject().as_bytes()); }
+  None => { return HttpResponse.new(500, "INVALID IDENTITY".as_bytes()); }
+ }
+}
+fn request(data: &Bytes) -> String
+ intent "正規化前の入力を実際の認証アダプタへ送る"
+ requires none ensures none effects env, clock, console, db, random, task
+{
+ match configured() {
+ Err(_) => { return "INVALID CONFIG"; }
+ Ok(router) => {
+ let mut parser = http.parser(&http.default_limits());
+ match parser.feed(&data, 0) {
+  Err(_) => { return "INVALID PARSER"; }
+  Ok(progress) => {
+   match progress {
+    HttpProgress.NeedMore => { return "INVALID INCOMPLETE"; }
+    HttpProgress.Done(req, _) => {
+     let response = router.dispatch(&req);
+     if response.status() == 200 { return "ok:".as_bytes().concat(&response.body()).to_string_utf8().unwrap_or(""); }
+     if response.status() != 401 { return "INVALID STATUS"; }
+     let mut text = response.body(); let hs = response.headers(); let mut i = 0;
+     while i < hs.len() {
+      match hs.get(i) { Some(h) => { text = text.concat(&"|".as_bytes()).concat(&h.name().as_bytes()).concat(&":".as_bytes()).concat(&h.value()); } None => {} }
+      i = i + 1;
+     }
+     let answer = text.to_string_utf8().unwrap_or("");
+     if answer != "unauthorized|content-type:text/plain; charset=utf-8|www-authenticate:Bearer|cache-control:no-store" { return "INVALID RESPONSE"; }
+     return answer;
+    }
+   }
+  }
+ }
+ }
+ }
+}
+fn configured() -> Result<Router, ConfigError>
+ intent "固定公開設定を所有するルーター"
+ requires none ensures none effects env, clock
+{
+ let config = web.load_bearer_config()?;
+ let verifier = config.into_verifier()?;
+ return Ok(Router.new().with_auth(verifier).route("GET", "/private", RouteHandler { handle: handler }).unwrap_or(Router.new()));
+}

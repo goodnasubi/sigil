@@ -258,7 +258,9 @@ fn fp_val(v: &Val, h: &mut DefaultHasher, d: u32, n: &mut usize) -> bool {
             Ok(b) => (18u8, &*b).hash(h),
             Err(_) => return false,
         },
-        Val::Guard(_) | Val::RootSlot(_) => return false,
+        Val::Guard(_) | Val::RootSlot(_) | Val::Capacity(_) | Val::CapacityPermit(_) => {
+            return false
+        }
     }
     true
 }
@@ -1294,10 +1296,21 @@ impl<'p> M<'p> {
                 });
                 let permit = capacity.and_then(|c| {
                     use std::sync::atomic::Ordering::AcqRel;
-                    c.used
-                        .fetch_update(AcqRel, AcqRel, |used| (used < c.limit).then_some(used + 1))
-                        .ok()
-                        .map(|_| Val::CapacityPermit(Rc::new(CapacityPermitTok(c))))
+                    let mut used = c.used.load(std::sync::atomic::Ordering::Acquire);
+                    while used < c.limit {
+                        match c.used.compare_exchange_weak(
+                            used,
+                            used + 1,
+                            AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        ) {
+                            Ok(_) => {
+                                return Some(Val::CapacityPermit(Rc::new(CapacityPermitTok(c))))
+                            }
+                            Err(current) => used = current,
+                        }
+                    }
+                    None
                 });
                 Op::Val(match permit {
                     Some(p) => self.some(p),

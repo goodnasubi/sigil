@@ -568,7 +568,7 @@ fn shared<T: Shareable>(x: &T)
  intent "共有性" requires none ensures none effects none {{}}
 fn probe() -> Int
  intent "不変設定と所有検証器の移送と共有"
- requires none ensures none effects env, clock
+ requires none ensures none effects env, clock, task.share
 {{
  match web.load_bearer_config() {{
    Err(_) => {{ return 1; }}
@@ -576,7 +576,7 @@ fn probe() -> Int
      sent(&config); shared(&config);
      match config.into_verifier() {{
        Err(_) => {{ return 2; }}
-       Ok(verifier) => {{ sent(&verifier); shared(&verifier); let router = Router.new().with_auth(verifier); sent(&router); shared(&router); return 0; }}
+       Ok(verifier) => {{ sent(&verifier); shared(&verifier); let router = Router.new().with_auth(verifier); sent(&router); shared(&router); let refs = SyncShared.new(router); let copy = refs.clone(); let first = refs.borrow(); let second = copy.borrow(); return first.public_routes().len() + second.public_routes().len(); }}
      }}
    }}
  }}

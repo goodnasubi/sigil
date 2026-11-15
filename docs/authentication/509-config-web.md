@@ -41,3 +41,7 @@ native buildはまとめて再利用する。試験時だけOS時計モジュー
 parser非経由試験はHttpParser.feedの試験時差替えで、所有モジュール内で生HttpRequestを直接構築する。混合ケースの同値Authorization二件をRouter.dispatchへ渡し、HTTP正規化に依存しないことを両実行系で確認する。ネイティブの`SIGIL_AUTH_*`環境取得は起動時の二回を越えると失敗する差替えにし、要求時の再読込がないことを観測する。TCP試験では最終wire応答の完全一致、成功主体、公開経路、時計失敗、起動設定失敗でポートを出さないことを確認する。
 
 実token付きの評価器dispatchとネイティブ接続の破棄traceに、文字列/バイト数値列のいずれでも鍵・token・ヘッダ値が出ないことを確認する。全量cargo testはCIに委任し、検証結果はPRに記録する。6-6dのfuzz/G2記録は追加しない。
+
+Codex Cloudで`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --test bearer_config_509`（7件）、`cargo test --test app_config_460`（25件）、`cargo test --test bearer_verify_507`（2件）、`cargo test --test clock_boundary_503`（7件）、`cargo test --test crypto_secret`（9件）、`cargo test --test ct_rules`（11件）、`cargo test --test web_router_478`（6件）、`cargo test --lib stdlib::`（11件）、例12の型/効果検査、`git diff --check`が通過。共有試験はSyncSharedのcloneと二つの借用後、最後の所有者がSecretを一度だけ破棄することを両実行系で観測する。
+
+6-6bの意味解釈観測試験が`bearer_claims`以降を差替える既存の前提を維持するため、統合段のコードは純粋核の前に置く。既存試験の観測方法を変更しない。

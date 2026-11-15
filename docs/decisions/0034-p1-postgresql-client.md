@@ -141,6 +141,51 @@ Issue #492 の単一文実装・突き合わせテストは作業用 patch に�
 - T（transaction）・E（failed transaction）、途中送信、同期状態不明、文の取消、期限切れ、ルート異常停止、清掃失敗は返却せず閉じる。トランザクションの途中での返却は、ADR 0018 決定 7 の選択肢のうち「捨てる」を採る。暗黙 ROLLBACK は送らない。
 - drop は待機・通信・非同期清掃をせず閉じ、枠を回収する。待たない破棄と既存の取り消し順序を守る。SQL の実行結果が不明な接続を自動で再接続・再実行しない。
 
+### 6-5e の先行契約追補: 中断しない容量枠の所有と回収（Issue #499）
+
+**状態**: 契約追補の提案（2026-11-15 JST）。typesafe-ai の正式判定は A（確率 1.00、confidence 1.00）。この追補は未実装であり、既存の API 表・型検査・SIR・評価器・ネイティブを変更しない。契約のレビューと、後続の実装・正負試験が完了するまで、6-5e 本体は停止する。所有者レビュー必須、マージは行わない。
+
+#### 不足する所有の部品
+
+接続・借出待機の数を `Atomic` や `Lock` 内の整数で管理しても、加算後の取消・異常停止では通常の減算コードに到達しない。現在の言語に利用者が定義できる自動破棄のフックはなく、`Option.take` は値の所有を移すだけで共有カウンタを減らさない。接続の `TcpClient` は閉じられるが、容量の回収を任意の Sigil 関数へ委ねることはできない。
+
+既存の自動回収する持ち手も、契約を変えずには代用できない。
+
+- `LockGuard` は取消・異常停止の巻き戻しで `Lock` を壊し、以後は `LockBroken` を返す（ADR 0026 決定 4、`src/ir_eval/sched.rs` の `settle_locks`）。正常な枠を他ルートで再利用する持ち手とは異なる。さらに `Sendable` を持たない（`src/check/unify.rs`）。共有状態の保護には引き続き既存の `Lock` と破損契約を用いる。
+- `RootSlot` は `RootGroup` の範囲に縛られ、構造体のフィールドやタスク間移動には使えない（ADR 0031 決定 4-1、`src/check/unify.rs`）。DB の枠のために別ルートや背景タスクを起動したり、この制約を緩めたりしない。
+- チャネルへの返送は `task.suspend` を持ち、破棄からは呼べない。返却用の背景タスクを作っても、取り消された利用者から回収の通知を送る問題が残る。
+
+#### 最小の汎用契約
+
+Core 層に次の不透明型と入口を定める。名前と効果は後続実装の契約であり、この文書の追加で利用可能にはならない。
+
+| 入口 | intent | requires / ensures | effects |
+|---|---|---|---|
+| `Capacity.new(limit: Int) -> Option<Capacity>` | 明示上限の空の容量管理を作る | `none` / `none` | `none` |
+| `Capacity.try_acquire(self: &Capacity) -> Option<CapacityPermit>` | 空きがある場合だけ一枠の所有を渡す | `none` / `none` | `task.share` |
+
+- `new` は `1 <= limit && limit <= 4096` の場合だけ `Some` を返し、範囲外は `None`。上限は生成後に変更できない。割当失敗の扱いは既存の確保器契約に従い、隠れた無制限の待機列を作らない。
+- `try_acquire` は競合する呼出しに対して不可分に空きを検査・予約する。空きがなければ直ちに `None`、あれば一枠だけを所有する `Some(permit)`。待機・利用者コード・通信・中断を挟まず、枠の予約と持ち手の成立の間に取消を見せない。公平性・待機・期限をこの入口は保証しない。
+- `Capacity` は `Sendable`・`Shareable` で、`clone` は同じ容量実体を指す写しを作る（`Atomic` と同様）。`Copyable` は持たない。`CapacityPermit` は `Sendable` のみで、`Copyable`・`Cloneable`・`Shareable` を持たず、通常の構造体・`Option` 等に所有してタスク間で移動できる。内部の整数や解放関数を利用者へ出さない。
+- permit の通常破棄・取消・ルート異常停止は、その一枠をちょうど一度返す。移動元の破棄は返さず、移動先だけが返す。`LockGuard` の破損状態とは独立し、permit の所有者が停止しても容量を壊さない。共有状態を保護する `Lock` の破損検出をこの契約で迂回しない。
+- 破棄は待機登録・通信・確保・利用者コールバック・非同期清掃を行わず、待たずに完了する。必要な内部の不可分操作だけを行い、既存の取消順序（待機登録解除の後で所有値を破棄）を保つ。型に公開の `release` や `forget` を設けず、二重返却を防ぐ。
+- permit は対応する容量実体の生存を保つ。最後の `Capacity` の写しが先に破棄されても、生きている permit は安全に返却でき、最後の持ち手の後に実体を回収する。permit と別の容量を取り違えない。
+
+#### 6-5e への結線と検証責務
+
+プールは接続枠用と借出待機枠用に別の容量実体を持つ。プール API では ADR の上限（接続 16・待機 64）以下だけを許し、設定超過・待機枠不足は `PgError.LimitExceeded`、借出 30 秒以下の期限切れは `PgError.Timeout` に写す。上記の 4096 は汎用部品の上限であり、DB 上限を拡大しない。
+
+接続中・idle 保管中・貸出中・清掃中は同じ接続 permit を接続と一緒に保持する。借出待機中だけ待機 permit を保持し、成功・失敗・取消のすべてで返す。接続を捨てる経路では、所有するソケットを閉じた後に接続 permit を返し、まだ生きた fd の枠を先に貸さない。接続や待機の所有値と permit を切り離した中断点を設けない。idle 接続の取り出し・挿入は既存の `Lock` で保護し、`LockBroken` は失敗として伝える。清掃・query・借出の待機は既存の中断機構と期限を使い、プールを Rust の別実装にしない。
+
+後続実装では少なくとも次を評価器とネイティブ（1・4 workers）で突き合わせる。
+
+- 境界値・満杯・複数実体の独立性・共有 clone・競合取得で上限を超えないこと。permit の移動・入れ子・再代入・通常破棄で一度だけ回収すること。
+- permit の複製・共有・二重所有を負試験で拒否し、所有のタスク間移動を正試験で通すこと。最後の容量の写しを先に破棄しても漏れ・解放後参照がないこと。
+- 接続・認証・部分送信・受信・借出・清掃の各中断点で期限切れと取消を起こし、fd・接続枠・待機枠を回収すること。ルート異常停止後も他ルートが枠を使え、共有状態の `LockBroken` は隠されないこと。
+- `DISCARD ALL` と ReadyForQuery I、`bytea_output=hex` 再設定がすべて成功した明示 release だけで再利用し、T/E・同期不明・清掃失敗では fd を閉じてから枠を返すこと。
+
+型・効果の登録、所有移動と破棄の lowering／SIR、容量の不可分操作と生存管理、評価器・ネイティブの取消・破棄への結線は信頼基盤差分として列挙し、所有者および別系統のレビューを受ける。新規 syscall・許可表・`unchecked` を本契約で自動的に承認しない。現時点の差分はこの契約文書のみで、信頼基盤の実装差分はない。
+
 ## 決定 6: 資源の上限と確認
 
 | 項目 | P1 の既定・最大 |
@@ -416,6 +461,55 @@ Issue #492 の単一文実装・突き合わせテストは作業用 patch に�
   },
   "usage": {
     "input_tokens": 1540,
+    "output_tokens": 51
+  }
+}
+```
+
+### 4 回目: 6-5e の容量枠の先行契約（2026-11-15 JST）
+
+固定評価軸で最小の容量持ち手・汎用 Drop・プール全体の builtin 化・既存の持ち手の契約変更を比較した。A を採用し、次点は 0.00 で近接なし。これは契約追補の提案であり、実装・マージの承認ではない。Issue #499 の指示に従い、本契約だけの独立 PR を作成して停止する。
+
+入力:
+
+```json
+{
+  "model": "jev-1.13.0",
+  "state": "固定評価軸（優先順）: 1. Sigilの理念: 宣言効果と推論効果の完全一致、所有権による二重解放・漏れの防止、信頼基盤を小さく明示・列挙可能にする。2. 所有者方針: Issue #499はADR0034決定5・6のpool/leaseだけ。契約変更が必要ならその変更だけ独立PRにしてIssueへ日本語でコメントし停止、merge禁止、workflow/limits変更禁止。3. dropは待機・通信・非同期清掃なし。取消とルート異常停止でもfd/接続枠/待機枠を回収し他ルートへ壊れた接続を貸さない。4. 上位protocol/poolはtrust noneの単一Sigil実装を評価器/nativeで共用。\n状況: main6e9c796、6-5d実装済み。公開APIはLock.acquireとAtomic.load/storeとchannel.send/recv。ユーザー定義の破棄フックはない。カウンタを増やした後の取消では減算コードを実行できない。LockGuardをpermit代わりに保持するとtimeout取消でもlockが壊れ（src/ir_eval/sched.rs settle_locks、cancel経路）、他ルートへ枠を再利用できない。LockGuardはSendableでもない。RootSlotは既存のdrop回収だがRootGroupの範囲に縛られ、構造体フィールド/タスク境界で使えず上限付き共有poolに流用できない。\n候補A契約: Core層Capacity.new(limit:Int)->Option<Capacity>、1..4096以外None、effects none。Capacity.try_acquire(self:&Capacity)->Option<CapacityPermit>、effects task.share、中断なし、空きがあれば1枠を所有するpermit、なければNone。CapacityはSendable/Shareable/Cloneable、cloneは同じ実体。PermitはSendableのみで複製/共有不可。permitの通常drop/取消/異常停止は対応する1枠をちょうど一度返し、ユーザーコード/待機/通信/確保なし、Lockの破損状態を変更しない。permitが生きる間容量実体も生存し、容量の最後の持ち手drop後も安全。検査例外なし。poolは接続用/待機用の独立Capacityを持ち、idle接続/接続中/lease/清掃が接続permitを持ち、待機は待機permitを持つ。共有接続リストは別Lockで保護し壊れたらLockBrokenを返す。待機方法や公平性は新契約で保証せず既存task.timeout/yield等で実装する。今回PRは未実装の契約文書だけ、API表/SIR/評価器/nativeへの実装と正負テストは後続。",
+  "questions": {
+    "CapacityOwnership": {
+      "type": "choice",
+      "criteria": {
+        "A": "汎用のCapacity/CapacityPermitの最小契約をADR0034へ追補して独立PRで停止。drop回収だけを信頼基盤に追加、pool本体はSigil。",
+        "B": "汎用ユーザー定義Dropを新規導入。効果/中断/異常停止の言語契約と全破棄経路を変更してpoolの減算を呼ぶ。",
+        "C": "pool全体をRust builtinへ移しfd所有/清掃/期限も二重実装する。",
+        "D": "RootSlot/LockGuardの範囲・Sendable・poison契約をpoolのため変更する。"
+      }
+    }
+  }
+}
+```
+
+応答:
+
+```json
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "CapacityOwnership": {
+      "type": "choice",
+      "choice": "A",
+      "confidence": 1.0,
+      "probabilities": {
+        "A": 1.0,
+        "B": 0.0,
+        "C": 0.0,
+        "D": 0.0
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 1338,
     "output_tokens": 51
   }
 }

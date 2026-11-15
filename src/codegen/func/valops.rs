@@ -434,6 +434,21 @@ impl<'a, 'p> Fx<'a, 'p> {
         (f, x)
     }
 
+    /// 容量の所有部品は作業列を拡張せず、その場で一定量の回収だけを行う。
+    /// 値が 0 でない経路だけから呼ぶ。通常の Cell / Shared は従来の列へ進む。
+    fn capacity_drop_direct(&mut self, t: &Ty, w: Value, end: CBlock) {
+        if !matches!(t, Ty::Cell(_) | Ty::Shared(_)) {
+            return;
+        }
+        let marked = self.capacity_mark(w);
+        let (direct, normal) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(marked, direct, NOARGS, normal, NOARGS);
+        self.b.switch_to_block(direct);
+        self.gen_call(Gk::Dstep, t, &[w]);
+        self.b.ins().jump(end, NOARGS);
+        self.b.switch_to_block(normal);
+    }
+
     /// 子 `x`（型 `t`）を作業の列に積む。0（移動済み）と、破棄の対象でない型は積まない。
     fn push_child(&mut self, t: &Ty, x: Value) {
         if !aggregate(t) {
@@ -443,6 +458,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, x, 0);
         self.b.ins().brif(zero, skip, NOARGS, go, NOARGS);
         self.b.switch_to_block(go);
+        self.capacity_drop_direct(t, x, skip);
         let f = self.dstep_addr(t);
         self.ws_push(f, x);
         self.b.ins().jump(skip, NOARGS);
@@ -517,6 +533,7 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().brif(zero, end, NOARGS, go, NOARGS);
 
         self.b.switch_to_block(go);
+        self.capacity_drop_direct(t, w, end);
         let ws = self.ws_base();
         let base = self.ld(ws, 0);
         let f0 = self.dstep_addr(t);

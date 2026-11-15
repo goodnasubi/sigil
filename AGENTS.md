@@ -107,7 +107,8 @@ cargo test --test <変更範囲のテスト>
 
 | ファイル | 規則 |
 |---|---|
-| `.github/workflows/**`, `.github/CODEOWNERS` | 人間のみ変更する |
+| `.github/workflows/**` | エージェントが通常の PR 手続き（CI が緑 + 別系統のエージェントの承認）で変更できる |
+| `.github/CODEOWNERS` | 人間のみ変更する |
 | `src/limits.rs` | CODEOWNERS により人間のみ |
 | `src/ast.rs`, `src/ir.rs` | 契約変更。変更だけの小さい PR を単独で出し、`contract-change` ラベルを付ける |
 | `Cargo.toml`, `Cargo.lock` | 依存の追加は ADR が必要。単独の PR にする |

@@ -1,0 +1,106 @@
+name: PostgreSQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Docker Hub library/postgres の公式イメージ。版と OCI index の両方を固定する。
+  POSTGRES_IMAGE: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
+
+jobs:
+  postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: postgres-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      # 依存取得・ビルド・pull は隔離網の外で完了させる。
+      - name: PostgreSQL と試験実行ファイルの準備
+        run: |
+          docker pull "$POSTGRES_IMAGE"
+          cargo test --locked --test pg_query_492 --test pg_pool_499 --no-run --message-format=json > "$RUNNER_TEMP/pg-build.jsonl"
+          python3 - <<'PY'
+          import json, os
+          paths = []
+          with open(os.environ['RUNNER_TEMP'] + '/pg-build.jsonl') as source:
+              for line in source:
+                  item = json.loads(line)
+                  if item.get('reason') == 'compiler-artifact' and item.get('executable') and item['profile']['test']:
+                      paths.append(item['executable'])
+          assert len(paths) == 2, paths
+          with open(os.environ['RUNNER_TEMP'] + '/pg-tests.txt', 'w') as output:
+              output.write('\n'.join(paths) + '\n')
+          PY
+
+      - name: 隔離した PostgreSQL の起動・疎通と既存 d/e 試験
+        shell: bash
+        run: |
+          set -euo pipefail
+          network="sigil-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          container="$network"
+          cleanup() {
+            docker rm -f -v "$container" >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          export POSTGRES_USER=sigil_ci POSTGRES_DB=sigil_ci
+          POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+          export POSTGRES_PASSWORD
+          echo "::add-mask::$POSTGRES_PASSWORD"
+          docker network create --internal "$network"
+          # ポート公開・host network・永続volumeなし。Unix socket も SCRAM に固定する。
+          docker run -d --name "$container" --network "$network" \
+            --env POSTGRES_USER --env POSTGRES_DB --env POSTGRES_PASSWORD \
+            --env POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
+            --env 'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256' \
+            "$POSTGRES_IMAGE" -c password_encryption=scram-sha-256
+          test "$(docker network inspect --format '{{.Internal}}' "$network")" = true
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$container")" = 1
+          test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$container")" = 0
+          ready=false
+          for attempt in {1..60}; do
+            if docker exec "$container" pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec "$container" sh -eu -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "SELECT 1"'
+          pid="$(docker inspect --format '{{.State.Pid}}' "$container")"
+          # 同じ network namespace の 127.0.0.1 で実行する。FS/ツールはホストを使う。
+          # 現在の d/e 試験は模擬相手のみ。実サーバーの製品クライアント試験は未提供。
+          status=0
+          while IFS= read -r executable; do
+            if ! sudo nsenter --target "$pid" --net -- "$executable" --test-threads=1; then
+              status=1
+            fi
+          done < "$RUNNER_TEMP/pg-tests.txt"
+          exit "$status"
+
+      - name: 取消・失敗時の PostgreSQL と隔離網の回収
+        if: always()
+        run: |
+          name="sigil-pg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker rm -f -v "$name" >/dev/null 2>&1 || true
+          docker network rm "$name" >/dev/null 2>&1 || true

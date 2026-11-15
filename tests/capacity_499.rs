@@ -61,7 +61,7 @@ fn compete(c: &Capacity) -> Int
       permits.push(p);
       i = i + 1;
     }
-    if acquired(c) { return 99; }
+    if acquired(&c) { return 99; }
     return count;
   });
 }
@@ -87,12 +87,12 @@ fn run(mode: Int) -> Int
   if mode == 1 {
     let c = capacity(1);
     let copy = c.clone();
-    let result = task.timeout(5, move || {
+    let timed = task.timeout(5, move || {
       let p = copy.try_acquire();
       task.sleep(100);
       return 1;
     });
-    match result { None => {} _ => { return 6; } }
+    match timed { None => {} _ => { return 6; } }
     if !acquired(&c) { return 7; }
     return 0;
   }

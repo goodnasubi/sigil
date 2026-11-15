@@ -17,13 +17,21 @@ fn discard(lease: PgLease)
   ensures none
   effects none
 { return; }
+fn release_owned(pending: &mut Option<PgLease>) -> Result<Bool, PgError>
+  intent "取消される子へleaseの所有を渡す"
+  requires none
+  ensures none
+  effects net.client, clock, task.spawn, task.suspend, task.share
+{
+  match pending.take() { Some(lease) => { return lease.release(); } None => { return Ok(false); } }
+}
 pub fn main(port: Int, scenario: Int) -> Int
   intent "同じ応答列でプールの再利用と破棄を検査する"
   requires none
   ensures none
   effects net.client, random, clock, task.spawn, task.suspend, task.share
 {
-  match exercise(port, scenario) { Ok(n) => { return n; } Err(e) => { return 99; } }
+  match exercise(port, scenario) { Ok(n) => { return n; } Err(PgError.LockBroken) => { return 95; } Err(PgError.OutcomeUnknown) => { return 94; } Err(PgError.LimitExceeded) => { return 93; } Err(PgError.Timeout) => { return 98; } Err(PgError.Protocol) => { return 97; } Err(PgError.Connection) => { return 96; } Err(e) => { return 99; } }
 }
 fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
   intent "最大一接続で清掃と取消の後に枠を再利用する"
@@ -56,13 +64,14 @@ fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
     discard(lease);
   } else {
     match lease.query(&"SELECT 1", &List.new(), &query_limits) {
-      Ok(query_result) => { if query_result.status() != 73 && scenario != 1 { return Ok(84); } }
+      Ok(answer_one) => { if answer_one.status() != 73 && scenario != 1 { return Ok(84); } }
       Err(PgError.SqlState(code)) => { if scenario != 2 || code != "25P02" { return Ok(85); } }
       Err(PgError.Timeout) => { if scenario != 5 { return Ok(86); } }
       Err(e) => { return Ok(87); }
     }
     if scenario == 7 {
-      match task.timeout(80, move || lease.release()) { None => {} Some(r) => { return Ok(88); } }
+      let mut pending = Some(lease);
+      match task.timeout(80, || release_owned(&mut pending)) { None => {} Some(r) => { return Ok(88); } }
     } else {
       match lease.release() {
         Ok(reused) => { if reused != (scenario == 0) { return Ok(89); } }
@@ -358,7 +367,10 @@ fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
   let pool = pg.pool(cfg, &limits)?;
   let mut leases = List.new();
   let mut i = 0;
-  while i < 16 { leases.push(pool.acquire()?); i = i + 1; }
+  while i < 16 {
+    match pool.acquire() { Ok(lease) => { leases.push(lease); } Err(PgError.Timeout) => { return Ok(200 + i); } Err(e) => { return Ok(300 + i); } }
+    i = i + 1;
+  }
   let total = task.scope(|scope| {
 "#,
     );
@@ -374,7 +386,7 @@ fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
   });
   if total != 129 { return Ok(total); }
   discard_all(leases);
-  let next = pool.acquire()?;
+  match pool.acquire() { Ok(next) => {} Err(PgError.Timeout) => { return Ok(400); } Err(PgError.LockBroken) => { return Ok(401); } Err(e) => { return Ok(402); } }
   return Ok(0);
 }
 "#,
@@ -451,6 +463,8 @@ fn lease_does_not_expose_or_duplicate_its_connection() {
         "let copy = lease.clone();",
         "let socket = lease.stream;",
         "let internal = lease.held;",
+        "let idle = pool.idle;",
+        "let capacity = pool.connections;",
         "let duplicate = lease; discard(lease); discard(duplicate);",
     ] {
         let source = SOURCE.replace(
@@ -462,6 +476,8 @@ fn lease_does_not_expose_or_duplicate_its_connection() {
             "拒否されなかった: {operation}"
         );
     }
+    let source = format!("{SOURCE}\nfn leak(p: PgPooled) -> PgConn\n  intent \"内部ソケットを盗まない\"\n  requires none\n  ensures none\n  effects none\n{{ return p.conn; }}\n");
+    assert!(sigil::ir_eval::lower_sources(&[&source], "main").is_err());
 }
 
 const AUTH_ABORT: &str = r#"module app.main
@@ -618,6 +634,7 @@ fn partial_connect_send_deadline_and_cancellation_close_before_reusing_capacity(
         .replace("while i < 2", "while i < 1")
         .replace("with_timeouts(150,", "with_timeouts(2000,")
         .replace("task.timeout(80,", "task.timeout(1200,")
+        .replace("200, 1000", "200, 3000")
         .replace(
             "  return Ok(0);",
             "  let next = pool.acquire()?; return Ok(0);",
@@ -671,10 +688,11 @@ pub fn main(port: Int, scenario: Int) -> Int
   let (tx, rx) = task.channel();
   return task.roots(1, |g| {
     let slot = g.reserve();
+    let tx_root = tx.clone();
     slot.start(port, move |p| {
       match prepared(p) {
         Ok(pool) => {
-          tx.send(pool.clone());
+          tx_root.send(pool.clone());
           let zero = p - p;
           let failed = 1 / zero;
         }

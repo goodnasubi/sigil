@@ -131,7 +131,7 @@ fn run(mode: Int) -> Int
     let copy = c.clone();
     let r = task.roots(1, |g| {
       let root = g.reserve();
-      root.start(copy, move |cap| {
+      root.start(copy.clone(), move |cap| {
         let p = cap.try_acquire();
         let z = 0;
         let fail = 1 / z;

@@ -1417,7 +1417,8 @@ impl PgPool {
     ensures none
     effects net.client, random, clock, task.spawn, task.share, task.suspend
   {
-    match task.timeout(self.acquire_ms, || acquire_inner(&self)) {
+    let pool = self.clone();
+    match task.timeout(pool.acquire_ms, || acquire_inner(&pool)) {
       None => { return Err(PgError.Timeout); }
       Some(answer) => { return answer; }
     }
@@ -1495,7 +1496,8 @@ fn take_idle(pool: &PgPool) -> Result<Option<PgPooled>, PgError>
   ensures none
   effects task.share, task.suspend
 {
-  match pool.idle.borrow().acquire() {
+  let idle_lock = pool.idle.borrow();
+  match idle_lock.acquire() {
     Err(e) => { return Err(PgError.LockBroken); }
     Ok(g0) => { let mut g = g0; return Ok(idle_take(g.get_mut())); }
   }
@@ -1561,9 +1563,9 @@ impl PgLease {
     ensures none
     effects net.client, clock, task.spawn, task.share, task.suspend
   {
-    let mut owned = self;
-    let mut pending = owned.held.take();
-    match task.timeout(owned.pool.cleanup_ms, || release_pending(&owned.pool, &mut pending)) {
+    let pool = self.pool.clone();
+    let mut pending = self.held;
+    match task.timeout(pool.cleanup_ms, || release_pending(&pool, &mut pending)) {
       None => { return Err(PgError.Timeout); }
       Some(answer) => { return answer; }
     }
@@ -1603,7 +1605,8 @@ fn release_pending(pool: &PgPool, pending: &mut Option<PgPooled>) -> Result<Bool
       if discarded.status() != 73 || discarded.command() != "DISCARD ALL" { return Err(PgError.Protocol); }
       let reset = held.conn.query(&"SET bytea_output = 'hex'", &List.new(), &limits)?;
       if reset.status() != 73 || reset.command() != "SET" { return Err(PgError.Protocol); }
-      match pool.idle.borrow().acquire() {
+      let idle_lock = pool.idle.borrow();
+      match idle_lock.acquire() {
         Err(e) => { return Err(PgError.LockBroken); }
         Ok(g0) => { let mut g = g0; return Ok(idle_put(g.get_mut(), held)); }
       }

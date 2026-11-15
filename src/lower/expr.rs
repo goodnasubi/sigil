@@ -859,6 +859,7 @@ impl<'a> L<'a> {
                     ("SyncShared", "new") => Builtin::SyncSharedNew,
                     ("Lock", "new") => Builtin::LockNew,
                     ("Atomic", "new") => Builtin::AtomicNew,
+                    ("Capacity", "new") => Builtin::CapacityNew,
                     (o, n) => return bail(format!("型の関数 {o}.{n}")),
                 };
                 let ops = self.args_of(args)?;
@@ -1084,6 +1085,7 @@ impl<'a> L<'a> {
             ("Lock", "acquire") => (LockAcquire, false),
             ("LockGuard", "get") => (LockGuardGet, false),
             ("LockGuard", "get_mut") => (LockGuardGetMut, false),
+            ("Capacity", "try_acquire") => (CapacityTryAcquire, false),
             ("Atomic", "load") => (AtomicLoad, false),
             ("Atomic", "store") => (AtomicStore, false),
             ("RootGroup", "reserve") => (RootReserve, false),

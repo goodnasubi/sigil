@@ -417,6 +417,8 @@ pub enum Builtin {
     /// `LockGuard` の中身への参照（`get` / `get_mut`。ADR 0026 決定 3、Issue #188）。
     LockGuardGet,
     LockGuardGetMut,
+    CapacityNew,
+    CapacityTryAcquire,
     AtomicNew,
     AtomicLoad,
     AtomicStore,

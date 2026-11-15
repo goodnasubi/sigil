@@ -70,6 +70,8 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("LockGuard", 1, Layer::Core),
     ("LockBroken", 0, Layer::Core),
     ("Atomic", 1, Layer::Core),
+    ("Capacity", 0, Layer::Core),
+    ("CapacityPermit", 0, Layer::Core),
     // 複数ルートの入口の前置き型（ADR 0031 決定 4-1、PR 6-3d）。`Scope` と同じく性質を持たない。
     ("RootGroup", 0, Layer::Core),
     ("RootSlot", 0, Layer::Core),
@@ -90,6 +92,9 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("PgConfig", 0, Layer::Os),
     ("PgConnectLimits", 0, Layer::Os),
     ("PgConn", 0, Layer::Os),
+    ("PgPool", 0, Layer::Os),
+    ("PgLease", 0, Layer::Os),
+    ("PgPoolLimits", 0, Layer::Os),
     ("PgError", 0, Layer::Os),
     ("PgValue", 0, Layer::Os),
     ("PgParam", 0, Layer::Os),

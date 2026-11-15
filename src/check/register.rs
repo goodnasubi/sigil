@@ -489,6 +489,7 @@ impl Ck {
                     ("get_mut(self: &mut LockGuard<T>) -> &mut T", "task.share"),
                 ],
             ),
+            ("Capacity", &[("new(limit: Int) -> Option<Capacity>", "none"), ("try_acquire(self: &Capacity) -> Option<CapacityPermit>", "task.share")]),
             ("<T> Atomic<T>", &[("new(value: T) -> Atomic<T>", "none")]),
             (
                 "<T: Copyable> Atomic<T>",

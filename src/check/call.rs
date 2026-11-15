@@ -507,13 +507,21 @@ impl Ck {
                 if matches!(self.types.get(&n), Some(TypeDef::Opaque(_)))
                     && matches!(
                         n.as_str(),
-                        "ShutdownSignal" | "TcpListener" | "TcpStream" | "TcpClient"
+                        "ShutdownSignal"
+                            | "TcpListener"
+                            | "TcpStream"
+                            | "TcpClient"
+                            | "CapacityPermit"
+                            | "PgLease"
                     )
                 {
                     return true;
                 }
                 // `Shared`・`SyncShared`・`Atomic` の `clone` は同じ実体を指す（複製しない）ので数えない。
-                if matches!(n.as_str(), "Shared" | "SyncShared" | "Atomic") {
+                if matches!(
+                    n.as_str(),
+                    "Shared" | "SyncShared" | "Atomic" | "Capacity" | "PgPool"
+                ) {
                     return false;
                 }
                 if args.iter().any(|a| self.owns_fd(a, seen)) {

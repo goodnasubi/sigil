@@ -22,3 +22,25 @@ pub fn os_clock_realtime_seconds() -> Result<Int, Int>
   raw.free(ts, 16, 8);
   return Ok(sec);
 }
+
+// Unix 秒を取得する最小壁時計入口（ADR 0037 段階 6-6a）。
+// 取得失敗および範囲外（0..=253402300799）は None を返し、推測値や 0 で成功させない。
+pub fn unix_seconds() -> Option<Int>
+  intent "OS 壁時計から Unix 秒を取得し、有効範囲内の場合のみ Some で返す"
+  requires none
+  ensures none
+  effects clock
+{
+  match os_clock_realtime_seconds() {
+    Ok(sec) => {
+      if sec >= 0 && sec <= 253402300799 {
+        return Some(sec);
+      }
+      return None;
+    }
+    Err(_) => {
+      return None;
+    }
+  }
+}
+

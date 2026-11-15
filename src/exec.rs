@@ -146,6 +146,10 @@ pub struct Options {
     pub embedded_extra: Vec<(String, String)>,
     /// 暗黙に結ぶ埋め込みモジュール（`effects::Options::embedded_roots`）。
     pub embedded_roots: Vec<String>,
+    /// 壁時計取得のテスト用の差し替え（ADR 0037 段階 6-6a）。
+    /// `Some(Ok(sec))` なら固定の Unix 秒、`Some(Err(errno))` なら時計取得の失敗を注入する。
+    /// `None`（既定）のときは実 OS の clock_gettime を呼ぶ。
+    pub wall_clock: Option<Result<i64, i64>>,
 }
 
 impl Options {
@@ -171,6 +175,7 @@ impl Default for Options {
             schedule_seed: None,
             embedded_extra: Vec::new(),
             embedded_roots: Vec::new(),
+            wall_clock: None,
         }
     }
 }

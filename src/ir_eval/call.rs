@@ -1163,7 +1163,28 @@ impl<'p> M<'p> {
                 let a4 = self.read_int(locals, &args[5]);
                 let a5 = self.read_int(locals, &args[6]);
                 self.check_syscall(n, [a0, a1, a2, a3, a4, a5], loc)?;
-                let ret = issue_syscall(n, [a0, a1, a2, a3, a4, a5]);
+                let ret = if let (SYS_CLOCK_GETTIME, Some(injected)) = (n, self.wall_clock) {
+                    match injected {
+                        Ok(sec) => {
+                            let tp = a1 as usize as *mut i64;
+                            unsafe {
+                                tp.write(sec);
+                                tp.add(1).write(0);
+                            }
+                            0
+                        }
+                        Err(err) => {
+                            let code = err.abs();
+                            if code == 0 {
+                                -1
+                            } else {
+                                -code
+                            }
+                        }
+                    }
+                } else {
+                    issue_syscall(n, [a0, a1, a2, a3, a4, a5])
+                };
                 if n == SYS_MMAP && !(-4095..0).contains(&ret) {
                     let len = (a1 as usize).div_ceil(PAGE) * PAGE;
                     self.chunks.insert(

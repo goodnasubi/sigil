@@ -1411,6 +1411,15 @@ impl<'p> M<'p> {
                 }
                 self.check_raw_access(addr_of(a[0], "buf")?, a[1] as usize, loc)?;
             }
+            SYS_CLOCK_GETTIME => {
+                if a[0] != CLOCK_REALTIME || a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall clock_gettime: CLOCK_REALTIME (0) のみ許可（未使用引数は 0）",
+                    ));
+                }
+                self.check_raw_access(addr_of(a[1], "tp")?, 16, loc)?;
+            }
             SYS_ACCEPT4 => {
                 if a[1] != 0 || a[2] != 0 {
                     return Err(self.syscall_stop(
@@ -1603,6 +1612,8 @@ const SYS_SOCKET: i64 = 41;
 const SYS_CONNECT: i64 = 42;
 const SYS_GETSOCKOPT: i64 = 55;
 const SYS_GETRANDOM: i64 = 318;
+const SYS_CLOCK_GETTIME: i64 = 228;
+const CLOCK_REALTIME: i64 = 0;
 const SYS_SENDTO: i64 = 44;
 const SYS_RECVFROM: i64 = 45;
 const SYS_SHUTDOWN: i64 = 48;

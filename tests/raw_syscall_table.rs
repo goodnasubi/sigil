@@ -349,3 +349,27 @@ fn recvfrom_and_sendto_buffers_and_flags_are_checked() {
     );
     assert_eq!(r.unwrap(), "-88");
 }
+
+#[test]
+fn clock_gettime_realtime_restrictions_and_execution() {
+    // CLOCK_REALTIME (0) 以外は拒否。
+    stops(
+        "  let ts = raw.alloc(16, 8);\n  return raw.syscall(228, 1, raw.addr_to_int(ts), 0, 0, 0, 0);",
+        "clock_gettime",
+    );
+    // 領域不足は拒否。
+    stops(
+        "  let ts = raw.alloc(8, 8);\n  return raw.syscall(228, 0, raw.addr_to_int(ts), 0, 0, 0, 0);",
+        "範囲外",
+    );
+    // 未使用引数非ゼロは拒否。
+    stops(
+        "  let ts = raw.alloc(16, 8);\n  return raw.syscall(228, 0, raw.addr_to_int(ts), 1, 0, 0, 0);",
+        "clock_gettime",
+    );
+    // 正常実行: 0 が返り、秒が正の値。
+    let r = run(
+        "  let ts = raw.alloc(16, 8);\n  raw.set(ts, 0, 16);\n  let res = raw.syscall(228, 0, raw.addr_to_int(ts), 0, 0, 0, 0);\n  let sec = raw.load_i64(ts);\n  raw.free(ts, 16, 8);\n  if res == 0 && sec > 0 { return 1; } else { return 0; }",
+    );
+    assert_eq!(r.unwrap(), "1");
+}

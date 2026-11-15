@@ -1,0 +1,77 @@
+// 例 13: PostgreSQL クライアント（ADR 0034）
+// std.pg による直接接続・単一文クエリ・接続プールの最小サンプル。
+// 接続は単一の fd を所有し、期限切れや障害時は所有型の破棄で安全に閉じられる。
+// プール（PgPool）は排他 lease（PgLease）を貸し出し、正常な release() 時に清掃（DISCARD ALL）して idle へ戻す。
+
+module examples.postgres_client
+  targets server
+  trust none
+
+fn make_config(port: Int) -> Result<PgConfig, PgError>
+  intent "接続設定を構築する"
+  requires none
+  ensures none
+  effects none
+{
+  let password = Secret.from_bytes("pencil".as_bytes());
+  return pg.config("127.0.0.1", port, "user", "database", password);
+}
+
+fn direct_query(port: Int) -> Result<Int, PgError>
+  intent "直接接続による単一文クエリを実行する"
+  requires none
+  ensures none
+  effects clock, net.client, random, task.spawn, task.suspend
+{
+  let cfg = make_config(port)?;
+  let connect_limits = pg.default_connect_limits();
+  let query_limits = pg.default_query_limits();
+  let mut conn = pg.connect(cfg, &connect_limits)?;
+  let mut params = List.new();
+  params.push(pg.param(23, Some(PgValue.Integer(42)))?);
+  let res = conn.query(&"SELECT $1 AS val", &params, &query_limits)?;
+  if res.rows() != 1 || res.columns() != 1 {
+    return Err(PgError.Protocol);
+  }
+  return Ok(0);
+}
+
+fn pooled_query(port: Int) -> Result<Int, PgError>
+  intent "接続プール経由で lease を借り出しクエリを実行して返却する"
+  requires none
+  ensures none
+  effects clock, net.client, random, task
+{
+  let cfg = make_config(port)?;
+  let pool_limits = pg.default_pool_limits();
+  let pool = pg.pool(cfg, &pool_limits)?;
+  let mut lease = pool.acquire()?;
+  let empty_params = List.new();
+  let query_limits = pg.default_query_limits();
+  let res = lease.query(&"SELECT 1", &empty_params, &query_limits)?;
+  if res.rows() != 1 {
+    return Err(PgError.Protocol);
+  }
+  if !lease.release()? {
+    return Err(PgError.Protocol);
+  }
+  return Ok(0);
+}
+
+pub fn main(port: Int) -> Int
+  intent "PostgreSQL クライアントの最小サンプル（接続・単一文・プール）を実行する"
+  requires none
+  ensures none
+  effects clock, net.client, random, task
+{
+  match direct_query(port) {
+    Ok(d) => {}
+    Err(e) => {
+      return 1;
+    }
+  }
+  return match pooled_query(port) {
+    Ok(p) => 0,
+    Err(e) => 2,
+  };
+}

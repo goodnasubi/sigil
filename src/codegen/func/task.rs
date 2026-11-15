@@ -504,6 +504,22 @@ impl<'a, 'p> Fx<'a, 'p> {
             self.b.ins().jump(after, NOARGS);
             self.b.switch_to_block(after);
         }
+        if b == LockAcquire {
+            // 起床で保持者に選ばれた後、guard を作る前の取消でも保持を返す。
+            // 破損の判定は通常の guard 破棄と同じ sched_lock_release に任せる。
+            let has = self.rt("sched_has_resume", &[]);
+            let (release, after) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(has, release, NOARGS, after, NOARGS);
+            self.b.switch_to_block(release);
+            let lock = self.rt("sched_take_resume", &[]);
+            let held = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, lock, 0);
+            let release_held = self.b.create_block();
+            self.b.ins().brif(held, release_held, NOARGS, after, NOARGS);
+            self.b.switch_to_block(release_held);
+            self.rt("sched_lock_release", &[lock]);
+            self.b.ins().jump(after, NOARGS);
+            self.b.switch_to_block(after);
+        }
         if matches!(b, TaskJoin | ChanRecv | AtomicLoad) {
             let has = self.rt("sched_has_resume", &[]);
             let (dropb, after) = (self.b.create_block(), self.b.create_block());

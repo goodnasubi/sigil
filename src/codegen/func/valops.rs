@@ -11,7 +11,9 @@ use super::{aggregate, strip, Fx, NOARGS};
 use crate::codegen::{norm_with, shim_sig, Gk, SFn, TCB_WS_OFF, WS_INLINE_ITEMS};
 use crate::ir::{Ty, TypeKind};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, Block as CBlock, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{
+    types, AtomicRmwOp, Block as CBlock, BlockArg, InstBuilder, MemFlagsData, Value,
+};
 use cranelift_module::Module;
 
 /// 塊の頭の第 1 語に立つ「黙った」印（補足 G-4。`val.rs` の `SILENT` と同じ）。
@@ -20,6 +22,9 @@ const SILENT: i64 = 1 << 62;
 const GUARD: i64 = 1 << 61;
 /// 塊の頭の第 1 語に立つ「`RootSlot`」の印（ADR 0031 決定 4-1）。最後の参照を破棄するとき、使われていなければ上限を返す。
 const ROOT_SLOT: i64 = 1 << 60;
+// Capacity の共有実体と、一枠の所有権。型の隠れた表現だけに付ける印。
+const CAPACITY_STATE: i64 = 1 << 59;
+const CAPACITY_PERMIT: i64 = 1 << 58;
 /// 解放した塊の参照の数の場所に書く印（`val.rs` の `FREED` と同じ）。
 const FREED: i64 = 0x5afe_dead_0000_0001;
 /// 二重解放の停止の報告（補足 G-4）。
@@ -106,21 +111,64 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().iadd_imm_s(h, 16)
     }
 
-    /// 参照の数を 1 増やす（中身の番地 `w` の前の語）。
-    fn rc_inc(&mut self, w: Value) {
-        let r = self.b.ins().iadd_imm_s(w, -8);
-        let c = self.ld(r, 0);
-        let c1 = self.b.ins().iadd_imm_s(c, 1);
-        self.st(c1, r, 0);
+    /// Capacity の共有参照は別ワーカーでも増減する。既存の値の参照規則は変えない。
+    fn capacity_mark(&mut self, w: Value) -> Value {
+        let h = self.b.ins().iadd_imm_s(w, -16);
+        let flags = self.ld(h, 0);
+        self.b
+            .ins()
+            .band_imm_s(flags, CAPACITY_STATE | CAPACITY_PERMIT)
     }
 
-    /// 参照の数を 1 減らし、新しい値を返す。
+    pub(super) fn capacity_retain(&mut self, w: Value) {
+        self.rc_inc(w);
+    }
+
+    pub(super) fn mark_capacity(&mut self, w: Value, permit: bool) {
+        let h = self.b.ins().iadd_imm_s(w, -16);
+        let flags = self.ld(h, 0);
+        let marked = self.b.ins().bor_imm_s(
+            flags,
+            if permit {
+                CAPACITY_PERMIT
+            } else {
+                CAPACITY_STATE
+            },
+        );
+        self.st(marked, h, 0);
+    }
+
+    fn rc_inc(&mut self, w: Value) {
+        self.rc_change(w, 1);
+    }
+
     fn rc_dec(&mut self, w: Value) -> Value {
+        self.rc_change(w, -1)
+    }
+
+    fn rc_change(&mut self, w: Value, delta: i64) -> Value {
         let r = self.b.ins().iadd_imm_s(w, -8);
-        let c = self.ld(r, 0);
-        let c1 = self.b.ins().iadd_imm_s(c, -1);
-        self.st(c1, r, 0);
-        c1
+        let marked = self.capacity_mark(w);
+        self.branch(
+            marked,
+            |s| {
+                let d = s.ic(delta);
+                let old = s.b.ins().atomic_rmw(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    AtomicRmwOp::Add,
+                    r,
+                    d,
+                );
+                s.b.ins().iadd_imm_s(old, delta)
+            },
+            |s| {
+                let old = s.ld(r, 0);
+                let next = s.b.ins().iadd_imm_s(old, delta);
+                s.st(next, r, 0);
+                next
+            },
+        )
     }
 
     /// 守りの塊 `w` の頭に守りの印を立てる（破棄で `Lock` の解放を知らせる）。
@@ -425,7 +473,10 @@ impl<'a, 'p> Fx<'a, 'p> {
         let fv = self.ic(FREED);
         self.st(fv, h, 8);
         let hd = self.ld(h, 0);
-        let n = self.b.ins().band_imm_s(hd, !(SILENT | GUARD | ROOT_SLOT));
+        let n = self.b.ins().band_imm_s(
+            hd,
+            !(SILENT | GUARD | ROOT_SLOT | CAPACITY_STATE | CAPACITY_PERMIT),
+        );
         let total = self.b.ins().iadd_imm_s(n, 16);
         let eight = self.ic(8);
         self.rt("raw_free", &[h, total, eight]);
@@ -655,6 +706,47 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let z = self.b.ins().icmp_imm_s(IntCC::Equal, cnt, 0);
                 self.b.ins().brif(z, dead, NOARGS, end, NOARGS);
                 self.b.switch_to_block(dead);
+                // permit は値の破棄の作業列を使わず、一枠と共有実体を直接返す。
+                // この経路では待機・通信・確保・利用者の関数を呼ばない。
+                let h = self.b.ins().iadd_imm_s(w, -16);
+                let flags = self.ld(h, 0);
+                let permit = self.b.ins().band_imm_s(flags, CAPACITY_PERMIT);
+                let (ret, chk) = (self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(permit, ret, NOARGS, chk, NOARGS);
+                self.b.switch_to_block(ret);
+                let outer = self.ld(w, 8);
+                let inner = self.ld(outer, 0);
+                let minus = self.ic(-1);
+                self.b.ins().atomic_rmw(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    AtomicRmwOp::Add,
+                    inner,
+                    minus,
+                );
+                let left = self.rc_dec(outer);
+                let last = self.b.ins().icmp_imm_s(IntCC::Equal, left, 0);
+                self.branch(
+                    last,
+                    |s| {
+                        s.blk_free(inner);
+                        s.blk_free(outer);
+                        s.ic(0)
+                    },
+                    |s| s.ic(0),
+                );
+                self.blk_free(w);
+                self.b.ins().jump(end, NOARGS);
+                self.b.switch_to_block(chk);
+                let state = self.b.ins().band_imm_s(flags, CAPACITY_STATE);
+                let (free_state, normal) = (self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(state, free_state, NOARGS, normal, NOARGS);
+                self.b.switch_to_block(free_state);
+                let inner = self.ld(w, 0);
+                self.blk_free(inner);
+                self.blk_free(w);
+                self.b.ins().jump(end, NOARGS);
+                self.b.switch_to_block(normal);
                 // `Lock` の守り（`LockGuard`。頭に守りの印がある）の最後の参照が消えた: 解放を知らせる（語 8 が Lock のレコード）。
                 if self.cg.rt.contains_key("sched_lock_release") {
                     let h = self.b.ins().iadd_imm_s(w, -16);

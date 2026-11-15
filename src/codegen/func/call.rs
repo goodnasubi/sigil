@@ -1078,7 +1078,7 @@ impl<'a, 'p> Fx<'a, 'p> {
             RootsScope | RootReserve | RootStart | IoWaitFd | TaskScope | TaskAllOk | TaskRace
             | TaskTimeout | TaskYield | TaskSleep | TaskChannel | ScopeSpawn | TaskJoin
             | ChanSend | ChanRecv | SyncSharedNew | LockNew | LockAcquire | LockGuardGet
-            | LockGuardGetMut | AtomicNew | AtomicLoad => {
+            | LockGuardGetMut | AtomicNew | AtomicLoad | CapacityNew | CapacityTryAcquire => {
                 self.task_builtin(b, args, stop).expect("並行処理の操作")
             }
         }

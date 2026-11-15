@@ -5,7 +5,7 @@ use crate::codegen::task::{self, SiteKind, CANCEL_CODE, HDR, SITE_W, SUSPEND};
 use crate::exec::StopKind;
 use crate::ir::{Builtin, Callee, Func, Operand, Place, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, TrapCode, Value};
+use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlagsData, TrapCode, Value};
 use cranelift_module::Module;
 use std::collections::HashMap;
 
@@ -1020,6 +1020,77 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (g, _) = self.val(&args[0]);
                 let l = self.ld(g, 8);
                 (l, Ty::Ref(Box::new(Ty::Unit)))
+            }
+            CapacityNew => {
+                let (limit, _) = self.val(&args[0]);
+                let low = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::SignedGreaterThanOrEqual, limit, 1);
+                let high = self
+                    .b
+                    .ins()
+                    .icmp_imm_s(IntCC::SignedLessThanOrEqual, limit, 4096);
+                let valid = self.b.ins().band(low, high);
+                let result = self.branch(
+                    valid,
+                    |s| {
+                        let inner = s.blk(16);
+                        let zero = s.ic(0);
+                        s.st(zero, inner, 0);
+                        s.st(limit, inner, 8);
+                        let outer = s.blk(8);
+                        s.st(inner, outer, 0);
+                        s.mark_capacity(outer, false);
+                        s.mk_enum_c(0, &[outer])
+                    },
+                    |s| s.mk_enum_c(1, &[]),
+                );
+                (result, u)
+            }
+            CapacityTryAcquire => {
+                let (outer, _) = self.val(&args[0]);
+                let inner = self.ld(outer, 0);
+                let limit = self.ld(inner, 8);
+                let (head, attempt, won, full, done) = (
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                    self.b.create_block(),
+                );
+                self.b.append_block_param(done, types::I64);
+                self.b.ins().jump(head, NOARGS);
+                self.b.switch_to_block(head);
+                let used = self
+                    .b
+                    .ins()
+                    .atomic_load(types::I64, MemFlagsData::trusted(), inner);
+                let has = self.b.ins().icmp(IntCC::SignedLessThan, used, limit);
+                self.b.ins().brif(has, attempt, NOARGS, full, NOARGS);
+                self.b.switch_to_block(attempt);
+                let next = self.b.ins().iadd_imm_s(used, 1);
+                let old = self
+                    .b
+                    .ins()
+                    .atomic_cas(MemFlagsData::trusted(), inner, used, next);
+                let ok = self.b.ins().icmp(IntCC::Equal, old, used);
+                self.b.ins().brif(ok, won, NOARGS, head, NOARGS);
+                self.b.switch_to_block(won);
+                // 予約と持ち手の成立の間に中断点はない。
+                self.capacity_retain(outer);
+                let permit = self.blk(16);
+                let zero = self.ic(0);
+                self.st(zero, permit, 0);
+                self.st(outer, permit, 8);
+                self.mark_capacity(permit, true);
+                let some = self.mk_enum_c(0, &[permit]);
+                self.b.ins().jump(done, &[BlockArg::Value(some)]);
+                self.b.switch_to_block(full);
+                let none = self.mk_enum_c(1, &[]);
+                self.b.ins().jump(done, &[BlockArg::Value(none)]);
+                self.b.switch_to_block(done);
+                (self.b.block_params(done)[0], u)
             }
             SyncSharedNew | AtomicNew => {
                 let (x, _) = self.own(&args[0]);

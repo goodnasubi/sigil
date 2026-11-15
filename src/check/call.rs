@@ -475,12 +475,12 @@ impl Ck {
             }
             _ => {}
         }
-        // fd を所有する値（ADR 0031 決定 3-1）は複製できない。中に持つ型（構造体・列挙型・組・標準の入れ物）も同じ
+        // fd・容量の一枠・lease を排他所有する値は複製できない。中に持つ型（構造体・列挙型・組・標準の入れ物）も同じ
         // （複製すると 1 つの fd を 2 つの値が所有し、破棄で 2 回閉じる）。
         if self.owns_fd(rt, &mut Vec::new()) {
             return self.err(
                 ErrorKind::NoSuchMember,
-                format!("`{shown}` には `clone` がない（`TcpListener`・`TcpStream` は 1 つの値が 1 つの接続を所有し、複製できない。ADR 0031 決定 3-1）"),
+                format!("`{shown}` には `clone` がない（接続・容量枠・lease の所有は複製できない。ADR 0031 決定 3-1、ADR 0034 決定 5）"),
             );
         }
         if self.holds(rt, Prop::Copyable, 0) == Some(true) {
@@ -500,7 +500,7 @@ impl Ck {
         })
     }
 
-    /// 型 `t` が、fd を所有する標準の型（`TcpListener`・`TcpStream`）を値として中に持つか。参照の先と関数の型は数えない。
+    /// 型 `t` が、fd・容量枠・lease を排他所有する標準の型を値として中に持つか。参照の先と関数の型は数えない。
     fn owns_fd(&self, t: &Ty, seen: &mut Vec<String>) -> bool {
         match self.shallow(t) {
             Ty::Named(n, args) => {

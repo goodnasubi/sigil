@@ -104,11 +104,23 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
         &["nonce", "server_first", "bare"],
     ),
     ("std.pg_scram.verify", &["server_final"]),
+    // ADR 0037: 鍵だけが秘密。署名対象・受信タグ・設定 audience・時刻は公開。
+    ("std.web.ct_bearer_signature", &["message", "tag"]),
+    // 検証器全体は CT と称さない。公開入力の分岐と、以下で明示した
+    // 比較結果の公開後の分岐を許し、鍵の流れには R1〜R6 を適用する。
+    ("std.web.verify_bearer", &["audience", "token", "now"]),
 ];
 
 /// 対象表のうち、まだ実装が存在しない行（先行登録）。
 /// 実装が現れたら、ここから外して通常の行として扱う。
 const CT_AHEAD: &[&str] = &[];
+
+// ADR 0020 / 0037: 定数時間照合の Bool だけを関数外で公開する。
+// 一般の Bool 戻り値や検証器全体を除外しない。関数本体は引き続き検査する。
+const CT_PUBLIC_COMPARISONS: &[&str] = &[
+    "std.crypto.verify_hmac_sha256",
+    "std.web.ct_bearer_signature",
+];
 
 // ---------------------------------------------------------------------------
 // 違反の表現
@@ -356,7 +368,7 @@ fn apply_call(
             // 対象表の `len` の行の注記）。組み込みの *Len と同じ扱いに
             // しないと、`requires key.len() >= 32` のような「秘密の長さを
             // 見る契約」が、中身による分岐として誤検出される。
-            if is_ct && name == "len" {
+            if is_ct && (name == "len" || CT_PUBLIC_COMPARISONS.contains(&name.as_str())) {
                 set_place_taint(state, dest, false);
             } else {
                 set_place_taint(state, dest, any);
@@ -594,6 +606,7 @@ fn probe() -> Int
   let reply = respond(&s, &b, &b);
   let checked = verify(&s, &b);
   let initial = first(&b);
+  let bearer = web.verify_bearer(&s, &"api", &b, 0);
   if ct_eq(&inner, &b) && ok { return s.len() + d.len() + h.len() + p.len(); }
   return 0;
 }
@@ -646,6 +659,12 @@ fn table_is_well_formed() {
     let names: Vec<&str> = CT_FUNCTIONS.iter().map(|(n, _)| *n).collect();
     let set: BTreeSet<&str> = names.iter().copied().collect();
     assert_eq!(names.len(), set.len(), "対象表に関数名の重なりがある");
+    for name in CT_PUBLIC_COMPARISONS {
+        assert!(set.contains(name), "公開比較 {name} は CT 表に必要");
+        let program = corpus();
+        let func = program.funcs.iter().find(|f| f.name == *name).unwrap();
+        assert_eq!(func.ret, Ty::Bool, "公開できる比較結果は Bool だけ");
+    }
     for ahead in CT_AHEAD {
         assert!(set.contains(ahead), "先行登録 {ahead} が対象表にない");
     }
@@ -1042,4 +1061,56 @@ fn clif_scram_proof_and_signature_have_no_division() {
         let delta = clif_delta(tag, defs, call);
         assert_eq!(delta.div, 0, "SCRAM の CLIF に除算命令がある: {delta:?}");
     }
+}
+
+#[test]
+fn static_arbitrary_bool_return_is_not_a_public_comparison() {
+    // Bool という型だけで秘密由来の判定を公開しない。明示した照合入口以外は
+    // 関数外でもテイントが残り、結果による分岐は引き続き R1 になる。
+    let defs = format!(
+        "{}{}",
+        fx("ct_predicate(secret: Int) -> Bool", "return secret == 1;"),
+        fx(
+            "ct_caller(secret: Int) -> Int",
+            "if ct_predicate(secret) { return 1; } return 0;"
+        )
+    );
+    let program = fixture_program(&defs, "return ct_caller(7);");
+    let violations = analyze_with_table(&program, &[("ct_predicate", &[]), ("ct_caller", &[])]);
+    assert!(rules_of(&violations, "ct_caller").contains(&Rule::R1Branch));
+}
+
+#[test]
+fn clif_bearer_signature_adds_only_public_contract_branches() {
+    // HMAC と SHA は両側で同じ本体を生成する。差分が新しいラッパーだけに
+    // なるよう、基準側も verify_hmac_sha256 を直接呼ぶ（除算は公開の長さの
+    // padding に既存のものがあるため、推移的な全命令数をゼロとはしない）。
+    let source = include_str!("../src/stdlib/web.sigil");
+    let start = source.find("fn ct_bearer_signature(").unwrap();
+    let end = source[start..].find("fn bearer_digit(").unwrap() + start;
+    let defs = &source[start..end];
+    let make = |call: &str| {
+        format!(
+        "module {{MODULE}}\n  targets server\n  trust none\n{defs}\nfn main() -> Int\n  intent \"CT 境界\"\n  requires none\n  ensures none\n  effects none\n{{ let key = Secret.from_bytes(Bytes.new()); let b = Bytes.new(); return match {call}(&key, &b, &b) {{ true => 1, false => 0 }}; }}"
+    )
+    };
+    let wrapped = count_clif(&build_dump("bearerwrap", "a", &make("ct_bearer_signature")));
+    let direct = count_clif(&build_dump(
+        "bearerdirect",
+        "b",
+        &make("verify_hmac_sha256"),
+    ));
+    let program = corpus();
+    let wrapper = program
+        .funcs
+        .iter()
+        .find(|f| f.name == "std.web.ct_bearer_signature")
+        .unwrap();
+    assert_eq!(wrapped.div, direct.div, "ラッパーが除算を追加した");
+    assert!(
+        // 追加した関数の入口に guard_stack の公開スタック境界分岐が一つある
+        // （src/codegen/func/drop.rs）。SIR の項にはこの入口分岐がない。
+        wrapped.branch <= direct.branch + sir_branch_budget(wrapper) + 1,
+        "説明できない CLIF 分岐: {wrapped:?}, {direct:?}"
+    );
 }

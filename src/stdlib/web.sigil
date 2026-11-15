@@ -1084,3 +1084,152 @@ impl Router {
     return Some(error_response(404));
   }
 }
+
+// ADR 0037 / Issue #507: 純粋な検証核。設定読込・HTTP・時計取得は行わない。
+// key と audience は検証済み設定から渡す。入口でも不正な長さ等を Err にし、
+// 暗号の requires 違反へ進めない。失敗値は公開の固定文字列だけ。
+// token / audience / now は公開入力。鍵の内容は ct_bearer_signature だけへ流す。
+// 検証器全体の処理時間は一定ではない（形式と認証成否で分岐する）。
+pub fn verify_bearer(key: &Secret, audience: &String, token: &Bytes, now: Int) -> Result<AuthIdentity, String>
+  intent "受信トークンを署名検証後に解釈し主体だけを返す"
+  requires none
+  ensures none
+  effects none
+{
+  if key.len() != 32 || now < 0 || now > 253402300799 { return Err("unauthorized"); }
+  let expected_aud = audience.as_bytes();
+  if !bearer_identifier(&expected_aud, 128) { return Err("unauthorized"); }
+  if token.len() > 1024 || token.len() < 9 { return Err("unauthorized"); }
+  let mut dots = 0;
+  let mut split = 0;
+  let mut i = 0;
+  while i < token.len() {
+    if token.get(i).unwrap_or(0) == 46 { dots = dots + 1; split = i; }
+    i = i + 1;
+  }
+  if dots != 2 { return Err("unauthorized"); }
+  let prefix = token.slice(0, 7).unwrap_or(Bytes.new());
+  if prefix != "sigil1.".as_bytes() || split <= 7 { return Err("unauthorized"); }
+  let encoded = token.slice(7, split).unwrap_or(Bytes.new());
+  let tag_text = token.slice(split + 1, token.len()).unwrap_or(Bytes.new());
+  if tag_text.len() != 43 { return Err("unauthorized"); }
+  // ここでは復号と正規形・サイズの確認のみ。フィールドには触れない。
+  let payload = bearer_base64url(&encoded, 404)?;
+  let tag = bearer_base64url(&tag_text, 32)?;
+  if tag.len() != 32 { return Err("unauthorized"); }
+  let signed = token.slice(0, split).unwrap_or(Bytes.new());
+  if !ct_bearer_signature(&key, &signed, &tag) { return Err("unauthorized"); }
+  // 署名後の意味解釈はこの一箇所だけ。HMAC は上の一回だけ。
+  return bearer_claims(&payload, &expected_aud, now);
+}
+
+// 暗号の核だけを CT と称する。鍵は Secret、message/tag は公開の受信バイト。
+// 戻り値は明示的に公開される認証成否。鍵・期待 MAC を外へ返さない。
+fn ct_bearer_signature(key: &Secret, message: &Bytes, tag: &Bytes) -> Bool
+  intent "既存 HMAC の定数時間照合に受信署名対象を渡す"
+  requires none
+  ensures none
+  effects none
+{
+  return verify_hmac_sha256(&key, &message, &tag);
+}
+
+fn bearer_digit(c: Int) -> Int
+  intent "公開 base64url 文字を六ビット値へ変換する"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 65 && c <= 90 { return c - 65; }
+  if c >= 97 && c <= 122 { return c - 71; }
+  if c >= 48 && c <= 57 { return c + 4; }
+  if c == 45 { return 62; }
+  if c == 95 { return 63; }
+  return 0 - 1;
+}
+
+fn bearer_base64url(data: &Bytes, max: Int) -> Result<Bytes, String>
+  intent "パディング無し base64url の正規形だけを上限付きで復号する"
+  requires none
+  ensures none
+  effects none
+{
+  if data.len() == 0 || data.len() % 4 == 1 || data.len() > ((max * 4 + 2) / 3) { return Err("unauthorized"); }
+  let mut out = Bytes.new();
+  let mut acc = 0;
+  let mut bits = 0;
+  let mut i = 0;
+  while i < data.len() {
+    let value = bearer_digit(data.get(i).unwrap_or(0));
+    if value < 0 { return Err("unauthorized"); }
+    acc = (acc << 6) | value;
+    bits = bits + 6;
+    if bits >= 8 {
+      bits = bits - 8;
+      out.push((acc >> bits) & 255);
+      acc = acc & ((1 << bits) - 1);
+    }
+    i = i + 1;
+  }
+  // 正規アルファベット、不可能長の排除、未使用ビットゼロは
+  // 復号して再符号化した文字列との完全一致と同値。
+  if acc != 0 || out.len() > max { return Err("unauthorized"); }
+  return Ok(out);
+}
+
+fn bearer_identifier(data: &Bytes, max: Int) -> Bool
+  intent "公開の audience と subject の ASCII 制約を確かめる"
+  requires none
+  ensures none
+  effects none
+{
+  if data.len() == 0 || data.len() > max { return false; }
+  let mut i = 0;
+  while i < data.len() {
+    let c = data.get(i).unwrap_or(0);
+    if !((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 || c == 95 || c == 58 || c == 45) { return false; }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn bearer_time(data: &Bytes, offset: Int) -> Result<Int, String>
+  intent "符号無し大端の時刻を範囲検査してから Int に組み立てる"
+  requires none
+  ensures none
+  effects none
+{
+  let mut value = 0;
+  let mut i = 0;
+  while i < 8 {
+    let b = data.get(offset + i).unwrap_or(0);
+    // 乗算・加算より先に 9999 年末の範囲を検査する。
+    if value > (253402300799 - b) / 256 { return Err("unauthorized"); }
+    value = value * 256 + b;
+    i = i + 1;
+  }
+  return Ok(value);
+}
+
+fn bearer_claims(data: &Bytes, audience: &Bytes, now: Int) -> Result<AuthIdentity, String>
+  intent "署名済みの固定 binary の時刻と対象を検査し主体を作る"
+  requires none
+  ensures none
+  effects none
+{
+  if data.len() < 22 { return Err("unauthorized"); }
+  let iat = bearer_time(&data, 0)?;
+  let exp = bearer_time(&data, 8)?;
+  if exp <= iat || iat > now || now >= exp { return Err("unauthorized"); }
+  if exp - iat > 3600 { return Err("unauthorized"); }
+  let aud_len = data.get(16).unwrap_or(0) * 256 + data.get(17).unwrap_or(0);
+  if aud_len < 1 || aud_len > 128 || 20 + aud_len > data.len() { return Err("unauthorized"); }
+  let aud = data.slice(18, 18 + aud_len).unwrap_or(Bytes.new());
+  if !bearer_identifier(&aud, 128) || aud != audience { return Err("unauthorized"); }
+  let pos = 18 + aud_len;
+  let sub_len = data.get(pos).unwrap_or(0) * 256 + data.get(pos + 1).unwrap_or(0);
+  if sub_len < 1 || sub_len > 256 || pos + 2 + sub_len != data.len() { return Err("unauthorized"); }
+  let sub = data.slice(pos + 2, data.len()).unwrap_or(Bytes.new());
+  if !bearer_identifier(&sub, 256) { return Err("unauthorized"); }
+  return Ok(AuthIdentity.new(sub.to_string_utf8().unwrap_or("")));
+}

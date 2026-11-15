@@ -56,7 +56,7 @@ fn exercise(port: Int, scenario: Int) -> Result<Int, PgError>
     discard(lease);
   } else {
     match lease.query(&"SELECT 1", &List.new(), &query_limits) {
-      Ok(result) => { if result.status() != 73 && scenario != 1 { return Ok(84); } }
+      Ok(query_result) => { if query_result.status() != 73 && scenario != 1 { return Ok(84); } }
       Err(PgError.SqlState(code)) => { if scenario != 2 || code != "25P02" { return Ok(85); } }
       Err(PgError.Timeout) => { if scenario != 5 { return Ok(86); } }
       Err(e) => { return Ok(87); }

@@ -1,0 +1,24 @@
+module std.os.clock
+  targets server
+  trust base
+
+// Linux x86-64 の OS 壁時計の最小境界（ADR 0037 段階 6-6a）。
+// clock_gettime(CLOCK_REALTIME) で Unix 秒を取得する。
+pub fn os_clock_realtime_seconds() -> Result<Int, Int>
+  intent "clock_gettime(CLOCK_REALTIME = 0) を発行し、Unix 秒を取得する。失敗時は負の errno を Err で返す"
+  requires none
+  ensures none
+  effects clock
+  unchecked "16 バイトの timespec 領域（8 バイトの tv_sec と 8 バイトの tv_nsec）を確保し、clock_gettime(0, ts) だけを発行する。戻る前に確保領域を解放し、失敗時は負の戻り値を Err として返す"
+{
+  let ts = raw.alloc(16, 8);
+  raw.set(ts, 0, 16);
+  let r = raw.syscall(228, 0, raw.addr_to_int(ts), 0, 0, 0, 0);
+  if r != 0 {
+    raw.free(ts, 16, 8);
+    return Err(r);
+  }
+  let sec = raw.load_i64(ts);
+  raw.free(ts, 16, 8);
+  return Ok(sec);
+}

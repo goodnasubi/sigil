@@ -73,6 +73,7 @@ impl Proj<'_> {
                 || r == embedded::SCHED_MODULE
                 || r == embedded::NET_MODULE
                 || r == embedded::RANDOM_MODULE
+                || r == embedded::CLOCK_MODULE
                 || r == embedded::HTTP_LIMITS_MODULE
                 || r == embedded::HTTP_MODULE
                 || r == embedded::WEB_MODULE

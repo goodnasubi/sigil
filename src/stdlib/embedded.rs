@@ -65,6 +65,8 @@ pub const SCHED_MODULE: &str = "std.os.sched";
 pub const NET_MODULE: &str = "std.os.net";
 /// OS 暗号乱数の最小境界（ADR 0034 決定 4）。
 pub const RANDOM_MODULE: &str = "std.os.random";
+/// OS 壁時計の最小境界（ADR 0037 6-6a）。
+pub const CLOCK_MODULE: &str = "std.os.clock";
 /// `net.listen` の実体（結合後の名前）。lower が名前で結ぶ。
 pub const NET_LISTEN_FN: &str = "std.os.net.listen";
 /// fd を所有する値（`TcpListener`・`TcpStream`・`TcpClient`）の破棄で呼ぶ関数（結合後の名前）。ネイティブは `sigil_rt_net_close` の
@@ -249,6 +251,7 @@ pub const EMBEDDED: &[(&str, &str)] = &[
     (IO_MODULE, include_str!("os_io.sigil")),
     (NET_MODULE, include_str!("os_net.sigil")),
     (RANDOM_MODULE, include_str!("os_random.sigil")),
+    (CLOCK_MODULE, include_str!("os_clock.sigil")),
     (HTTP_LIMITS_MODULE, include_str!("http_limits.sigil")),
     (HTTP_MODULE, include_str!("http.sigil")),
     (JSON_MODULE, include_str!("json.sigil")),

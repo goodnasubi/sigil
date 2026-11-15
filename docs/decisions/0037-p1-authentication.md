@@ -153,7 +153,7 @@ G2 の記録場所は **本 ADR の補足 A（6-6d の最後の PR で追加）*
 | 6-6a 境界入口 | [#505](https://github.com/goodnasubi/sigil/pull/505) / `f72f8ed698c1b910b8c55b9915d5b710143de7ef` |
 | 6-6b 純粋検証・CT | [#508](https://github.com/goodnasubi/sigil/pull/508) / `ae7b3ffd30a0247240a602cb727c1b03804af17c` |
 | 6-6c 設定・統合 | [#511](https://github.com/goodnasubi/sigil/pull/511) / `21368418f72bda1bf1a0739161dbd15b7f13afc2` |
-| 6-6d fuzz・上限 | Issue #512 の本 PR / `9bf4bd69c41febeb4e3e7958fa2db0ac3613794e` |
+| 6-6d fuzz・上限 | [#518](https://github.com/goodnasubi/sigil/pull/518) / `9bf4bd69c41febeb4e3e7958fa2db0ac3613794e` |
 
 試験の基点は main `ae0d736fa71646aacb46e8a6a504dc56d0bf344e`。提出前に `421a146` へrebaseし、間の差分が AGENTS.md と ADR 0034 のみで製品・試験コードが不変であることを確認した。6-6d は新規試験・fixture・本記録のみで、製品コード、信頼基盤、上限、依存、ワークフローを変更しない。
 

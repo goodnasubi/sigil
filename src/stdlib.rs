@@ -184,6 +184,7 @@ pub const PG_ERROR_ARMS: &[&str] = &[
     "LimitExceeded",
     "TypeMismatch",
     "UnsupportedType",
+    "LockBroken",
 ];
 
 /// `std.json` が実体を宣言する、平坦な JSON 表の型（ADR 0033、Issue #455）。
@@ -498,6 +499,8 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "pg", "config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>", "none"),
     (Layer::Os, "pg", "default_connect_limits() -> PgConnectLimits", "none"),
     (Layer::Os, "pg", "default_query_limits() -> PgQueryLimits", "none"),
+    (Layer::Os, "pg", "default_pool_limits() -> PgPoolLimits", "none"),
+    (Layer::Os, "pg", "pool(config: PgConfig, limits: &PgPoolLimits) -> Result<PgPool, PgError>", "none"),
     (Layer::Os, "pg", "param(oid: Int, value: Option<PgValue>) -> Result<PgParam, PgError>", "none"),
     (Layer::Os, "pg", "connect(config: PgConfig, limits: &PgConnectLimits) -> Result<PgConn, PgError>", "net.client, random, clock, task.spawn, task.suspend"),
     // HTTP の上限の既定値と増分の解釈器（ADR 0032 決定 2-3・4-3、PR 6-3g-b）。実体は `std.http`（lower が名前で結ぶ）。
@@ -903,6 +906,19 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ),
         ],
     ),
+    (Layer::Os, "PgPoolLimits", &[
+        ("with_capacity(self: PgPoolLimits, connections: Int, waiters: Int) -> Result<PgPoolLimits, PgError>", "none"),
+        ("with_timeouts(self: PgPoolLimits, connect_ms: Int, query_ms: Int, cleanup_ms: Int, acquire_ms: Int) -> Result<PgPoolLimits, PgError>", "none"),
+        ("max_result_wire(self: &PgPoolLimits) -> Int", "none"),
+    ]),
+    (Layer::Os, "PgPool", &[
+        ("clone(self: &PgPool) -> PgPool", "none"),
+        ("acquire(self: &PgPool) -> Result<PgLease, PgError>", "net.client, random, clock, task.spawn, task.share, task.suspend"),
+    ]),
+    (Layer::Os, "PgLease", &[
+        ("query(self: &mut PgLease, sql: &String, params: &List<PgParam>, limits: &PgQueryLimits) -> Result<PgResult, PgError>", "net.client, clock, task.spawn, task.suspend"),
+        ("release(self: PgLease) -> Result<Bool, PgError>", "net.client, clock, task.spawn, task.share, task.suspend"),
+    ]),
     (Layer::Os, "PgQueryLimits", &[
         ("with_timeout(self: PgQueryLimits, ms: Int) -> Result<PgQueryLimits, PgError>", "none"),
         ("with_result_bounds(self: PgQueryLimits, wire: Int, rows: Int) -> Result<PgQueryLimits, PgError>", "none"),
@@ -1309,6 +1325,18 @@ mod tests {
             "PgQueryLimits",
             "pg.param",
             "pg.default_query_limits",
+            "pg.default_pool_limits",
+            "pg.pool",
+            "PgPool",
+            "PgLease",
+            "PgPoolLimits",
+            "PgPool.clone",
+            "PgPool.acquire",
+            "PgLease.query",
+            "PgLease.release",
+            "PgPoolLimits.with_capacity",
+            "PgPoolLimits.with_timeouts",
+            "PgPoolLimits.max_result_wire",
             "PgQueryLimits.with_timeout",
             "PgQueryLimits.with_result_bounds",
             "PgConn.query",

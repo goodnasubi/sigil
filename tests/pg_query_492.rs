@@ -118,7 +118,7 @@ fn fixture() -> String {
   effects net.client, random, task.suspend
 {
   let entropy = random.bytes(1);
-  match net.connect(&c.host, c.port) { Ok(s) => { return Ok(PgConn { stream: Some(s) }); } Err(e) => { return Err(PgError.Connection); } }
+  match net.connect(&c.host, c.port) { Ok(s) => { return Ok(PgConn { stream: Some(s), ready_status: 73 }); } Err(e) => { return Err(PgError.Connection); } }
 }
 "#,
         &src[b..]

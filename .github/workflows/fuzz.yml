@@ -80,6 +80,15 @@ jobs:
           SIGIL_FUZZ_ITERS=$((300000 * SCALE)) cargo test --test fuzz_parse fuzz_parse -- --nocapture
         timeout-minutes: 20
 
+      # ADR 0037 6-6d（Issue #512）。同じ入口で SIGIL_FUZZ_SEED（上で設定）と SIGIL_FUZZ_ITERS を受ける。
+      # 実測（ローカル、nativeビルド込み）: 3000 件 33 秒（約 100 件/秒）。基準 15000 件は約 2.5 分で、
+      # 共用 runner が 2 倍遅くても 10 分の枠に収まる。native は一度だけビルドして 64 件ずつ実行する。
+      # 失敗した入力は target/fuzz-failures/bearer_token/ に残り、下の artifact に含まれる。
+      - name: fuzz_bearer_token（長い実行）
+        run: |
+          SIGIL_FUZZ_ITERS=$((15000 * SCALE)) cargo test --test fuzz_bearer_token fuzz_bearer_token -- --nocapture
+        timeout-minutes: 10
+
       - name: depth_limit（release）
         timeout-minutes: 10
         run: cargo test --release --test depth_limit

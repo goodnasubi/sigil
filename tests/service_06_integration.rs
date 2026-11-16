@@ -253,11 +253,11 @@ fn service_06_live_integration() {
         )
     };
 
-    // サービスプロセスを起動
+    // サービスプロセスを起動（全22要求を確実に受け付けられるよう上限を設定）
     let mut child = Command::new(&exe)
         .env_clear()
         .env("PORT", "0")
-        .env("MAX_CONNS", "20")
+        .env("MAX_CONNS", "50")
         .env("POSTGRES_HOST", "127.0.0.1")
         .env("POSTGRES_PORT", pg_port.to_string())
         .env("POSTGRES_USER", &pg_user)

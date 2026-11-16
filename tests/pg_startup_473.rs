@@ -1,5 +1,5 @@
 //! ADR 0034 / #473: 外部模擬サーバーとの Startup/SCRAM 接続。
-//! 外部相手との同じ入出力を評価器・native（1/4 workers）で比べる（評価器で接続上限10秒に抵触するPBKDF2到達後の5ケースはnativeのみ、応答計算の両エンジン一致は `tests/pg_scram_473.rs` の `rfc7677` で確認）。
+//! 外部相手との同じ入出力を評価器・native（1/4 workers）で比べる（SCRAM の PBKDF2 を含む全ケースを評価器でも実行する。Issue #539 で SHA-256 圧縮関数を高速化し、評価器の PBKDF2 は接続上限10秒に収まる。応答計算の両エンジン一致は `tests/pg_scram_473.rs` の `rfc7677` でも確認）。
 //! 模擬サーバーは応答列だけを送り、Python標準暗号を独立した証明・署名の検算に使う。
 mod common;
 
@@ -330,18 +330,6 @@ fn run(port: Int, timeout: Int) -> Result<Int, PgError>
             "encoding",
             "transaction",
         ] {
-            // Issue #484 の再決定（コメント 6882194351）:
-            // SCRAM の応答計算（PBKDF2、下限4096回）は評価器（mode 0）で約10.5秒かかり接続上限10秒に抵触するため、
-            // 接続期限内に PBKDF2 完了を要する5ケースは mode 0 では skip し、native（mode 1/4）で確認する。
-            // 応答計算の両エンジン一致は接続上限の無い `tests/pg_scram_473.rs` の `rfc7677`（`common::run` 経由）で確認する。
-            if mode == 0
-                && matches!(
-                    case,
-                    "ok" | "signature" | "order" | "encoding" | "transaction"
-                )
-            {
-                continue;
-            }
             eprintln!("Startup case={case} mode={mode}");
             let l = listener();
             let port = l.local_addr().unwrap().port();

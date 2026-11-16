@@ -514,7 +514,14 @@ pub fn serve(port: Int, max_conns: Int) -> Int
   effects clock, console, env, net, random, task
 {
   match web.load_bearer_config() {
-    Ok(_) => {}
+    Ok(config) => {
+      match config.into_verifier() {
+        Ok(_) => {}
+        Err(_) => {
+          return 1;
+        }
+      }
+    }
     Err(_) => {
       return 1;
     }

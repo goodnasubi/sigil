@@ -388,7 +388,7 @@ fn service_06_live_integration() {
     assert_eq!(code, 200, "契約違反後も GET /health が成功: {res}");
     assert!(res.contains("ok"), "GET /health body: {res}");
 
-    // 12. 時計取得不能時の拒否（ADR 0037 決定 4: 推測値や 0 で成功させず 401 で拒否）
+    // 12. 起動時時計取得不能時の起動拒否（ADR 0037 決定 4: 待受前に壁時計を確認し、取得不能なら待ち受けを開始せず終了コード 1 で終了）
     let fail_clock = include_str!("../src/stdlib/os_clock.sigil")
         .replace("  return Ok(sec);", "  return Err(-1);");
     let fail_opts = sigil::effects::Options {
@@ -420,20 +420,60 @@ fn service_06_live_integration() {
 
     let fail_stdout = fail_child.stdout.take().expect("標準出力取得");
     let mut fail_reader = BufReader::new(fail_stdout);
-    let mut fail_port_line = String::new();
+    let mut fail_out_line = String::new();
     fail_reader
-        .read_line(&mut fail_port_line)
-        .expect("ポート出力読み取り");
-    let fail_srv_port: u16 = fail_port_line.trim().parse().expect("ポート番号解析");
-    let _fail_guard = ChildGuard { child: fail_child };
-
-    let (code, res) = send_http(
-        fail_srv_port,
-        &format!("GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"),
+        .read_line(&mut fail_out_line)
+        .expect("出力読み取り");
+    let fail_status = fail_child.wait().expect("プロセスの終了待機");
+    assert!(fail_status.success(), "プロセス終了");
+    assert_eq!(
+        fail_out_line.trim(),
+        "1",
+        "壁時計取得不能エラー（終了コード 1）で待ち受けを開始せず終了すること"
     );
-    assert_unauthorized(code, &res, "時計取得失敗時の GET /items");
     let _ = std::fs::remove_dir_all(&fail_dir);
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0037「決定 4」: 待ち受け開始前に壁時計を確認し、取得不能時は待ち受けを開始せず起動拒否することを確認する。
+#[test]
+fn service_06_unavailable_clock_refuses_startup() {
+    let src = service_src();
+    let fail_clock = include_str!("../src/stdlib/os_clock.sigil")
+        .replace("  return Ok(sec);", "  return Err(-1);");
+    let fail_opts = sigil::effects::Options {
+        embedded_extra: vec![("std.os.clock".into(), fail_clock)],
+        ..Default::default()
+    };
+    let fail_p = sigil::ir_eval::lower_sources_opts(&[&src], "main", &fail_opts)
+        .expect("時計失敗 lowering 成功");
+
+    let dir = scratch("service-06-no-clock");
+    let exe = dir.join("service");
+    sigil::native::build_program(&fail_p, &Default::default(), &exe).expect("ネイティブビルド成功");
+
+    let mut child = Command::new(&exe)
+        .env_clear()
+        .env("PORT", "0")
+        .env("SIGIL_AUTH_HMAC_KEY_HEX", TEST_KEY)
+        .env("SIGIL_AUTH_AUDIENCE", TEST_AUD)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("サービス起動");
+
+    let stdout = child.stdout.take().expect("標準出力取得");
+    let mut reader = BufReader::new(stdout);
+    let mut out_line = String::new();
+    reader.read_line(&mut out_line).expect("出力読み取り");
+    let status = child.wait().expect("プロセスの終了待機");
+    assert!(status.success(), "プロセス終了");
+    assert_eq!(
+        out_line.trim(),
+        "1",
+        "壁時計取得不能エラー（終了コード 1）で待ち受けを開始せず終了すること"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

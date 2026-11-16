@@ -205,14 +205,23 @@ fn count_authorization_headers(req: &HttpRequest) -> Int
   return count;
 }
 
-fn check_bearer_auth(req: &HttpRequest) -> Bool
+fn auth_unauthorized_response() -> HttpResponse
+  intent "ADR 0037決定3が要求するヘッダーを持つ固定の401応答を生成する"
+  requires none
+  ensures none
+  effects none
+{
+  return web.error_response(401).with_header(&"www-authenticate", &"Bearer".as_bytes()).with_header(&"cache-control", &"no-store".as_bytes());
+}
+
+fn check_bearer_auth(req: &HttpRequest) -> Result<Bool, HttpResponse>
   intent "AuthorizationヘッダーからBearerトークンを取り出し検証する"
   requires none
   ensures none
   effects clock, env
 {
   if count_authorization_headers(&req) != 1 {
-    return false;
+    return Err(auth_unauthorized_response());
   }
 
   let mut auth_key_hex = "";
@@ -221,7 +230,7 @@ fn check_bearer_auth(req: &HttpRequest) -> Bool
       auth_key_hex = k;
     }
     None => {
-      return false;
+      return Err(auth_unauthorized_response());
     }
   }
   let mut auth_aud = "";
@@ -230,7 +239,7 @@ fn check_bearer_auth(req: &HttpRequest) -> Bool
       auth_aud = a;
     }
     None => {
-      return false;
+      return Err(auth_unauthorized_response());
     }
   }
   let mut key = Secret.from_bytes(Bytes.new());
@@ -239,7 +248,7 @@ fn check_bearer_auth(req: &HttpRequest) -> Bool
       key = k;
     }
     None => {
-      return false;
+      return Err(auth_unauthorized_response());
     }
   }
 
@@ -247,7 +256,7 @@ fn check_bearer_auth(req: &HttpRequest) -> Bool
   match auth_opt {
     Some(auth) => {
       if auth.len() <= 7 {
-        return false;
+        return Err(auth_unauthorized_response());
       }
       let p0 = auth.get(0).unwrap_or(0);
       let p1 = auth.get(1).unwrap_or(0);
@@ -258,21 +267,20 @@ fn check_bearer_auth(req: &HttpRequest) -> Bool
       let p6 = auth.get(6).unwrap_or(0);
       let is_bearer = (p0 == 66 || p0 == 98) && (p1 == 101 || p1 == 69) && (p2 == 97 || p2 == 65) && (p3 == 114 || p3 == 82) && (p4 == 101 || p4 == 69) && (p5 == 114 || p5 == 82) && p6 == 32;
       if !is_bearer {
-        return false;
+        return Err(auth_unauthorized_response());
       }
       let token = auth.slice(7, auth.len()).unwrap_or(Bytes.new());
-      let now_env = env.get(&"SIGIL_AUTH_NOW");
-      let now = match now_env {
-        Some(s) => parse_positive_int(&s.as_bytes()).unwrap_or(0),
-        None => clock.unix_seconds().unwrap_or(0),
-      };
-      return match web.verify_bearer(&key, &auth_aud, &token, now) {
-        Ok(_) => true,
-        Err(_) => false,
+      let now_opt = clock.unix_seconds();
+      return match now_opt {
+        Some(now) => match web.verify_bearer(&key, &auth_aud, &token, now) {
+          Ok(_) => Ok(true),
+          Err(_) => Err(auth_unauthorized_response()),
+        },
+        None => Err(auth_unauthorized_response()),
       };
     }
     None => {
-      return false;
+      return Err(auth_unauthorized_response());
     }
   }
 }
@@ -481,8 +489,11 @@ fn handle(req: &HttpRequest) -> HttpResponse
   }
 
   if path == "/items".as_bytes() {
-    if !check_bearer_auth(&req) {
-      return HttpResponse.new(401, "unauthorized".as_bytes());
+    match check_bearer_auth(&req) {
+      Ok(_) => {}
+      Err(unauth) => {
+        return unauth;
+      }
     }
     if method == "POST" {
       return handle_items_post(&req);

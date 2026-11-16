@@ -109,12 +109,41 @@ fn send_http(port: u16, raw_request: &str) -> (u16, String) {
     (status_code, res_str)
 }
 
+/// ADR 0037「決定 3」: 認証失敗は 401、WWW-Authenticate: Bearer、Cache-Control: no-store、Content-Type: text/plain; charset=utf-8
+fn assert_unauthorized(code: u16, res: &str, case: &str) {
+    assert_eq!(code, 401, "{case} の status は 401: {res}");
+    let lower = res.to_ascii_lowercase();
+    assert!(
+        lower.contains("www-authenticate: bearer"),
+        "{case} に WWW-Authenticate: Bearer ヘッダーが含まれること: {res}"
+    );
+    assert!(
+        lower.contains("cache-control: no-store"),
+        "{case} に Cache-Control: no-store ヘッダーが含まれること: {res}"
+    );
+    assert!(
+        lower.contains("content-type: text/plain; charset=utf-8"),
+        "{case} に Content-Type: text/plain; charset=utf-8 ヘッダーが含まれること: {res}"
+    );
+    assert!(
+        res.contains("unauthorized"),
+        "{case} の body は unauthorized であること: {res}"
+    );
+}
+
 /// コンテナ（または環境変数）で PostgreSQL を用意し、
 /// サンプルのサービスを起動して HTTP 要求・入力検証・PostgreSQL 読み書き・認証・契約違反の隔離を検証する。
 #[test]
 fn service_06_live_integration() {
     let src = service_src();
-    let p = sigil::ir_eval::lower_sources(&[&src], "main").expect("lowering 成功");
+    // 指摘1: 実サービスコードから固定時刻環境変数を外し、試験側に隔離して std.os.clock の壁時計を差し替える
+    let clock = include_str!("../src/stdlib/os_clock.sigil")
+        .replace("  return Ok(sec);", &format!("  return Ok({TEST_NOW});"));
+    let opts = sigil::effects::Options {
+        embedded_extra: vec![("std.os.clock".into(), clock)],
+        ..Default::default()
+    };
+    let p = sigil::ir_eval::lower_sources_opts(&[&src], "main", &opts).expect("lowering 成功");
 
     let dir = scratch("service-06-live");
     let exe = dir.join("service");
@@ -236,7 +265,6 @@ fn service_06_live_integration() {
         .env("POSTGRES_PASSWORD", &pg_pass)
         .env("SIGIL_AUTH_HMAC_KEY_HEX", TEST_KEY)
         .env("SIGIL_AUTH_AUDIENCE", TEST_AUD)
-        .env("SIGIL_AUTH_NOW", TEST_NOW)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -262,14 +290,14 @@ fn service_06_live_integration() {
         srv_port,
         "GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
     );
-    assert_eq!(code, 401, "未認証 GET /items は 401: {res}");
+    assert_unauthorized(code, &res, "未認証 GET /items");
 
     // 3. 不正トークン: GET /items?id=1
     let (code, res) = send_http(
         srv_port,
         "GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer invalid\r\n\r\n",
     );
-    assert_eq!(code, 401, "不正トークン GET /items は 401: {res}");
+    assert_unauthorized(code, &res, "不正トークン GET /items");
 
     let auth_header = format!("Authorization: Bearer {TEST_TOKEN}\r\n");
 
@@ -280,14 +308,14 @@ fn service_06_live_integration() {
             "GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n{auth_header}Authorization: Bearer invalid\r\n\r\n"
         ),
     );
-    assert_eq!(code, 401, "重複 Authorization は 401: {res}");
+    assert_unauthorized(code, &res, "重複 Authorization（有効+無効）");
 
     // 3c. 重複 Authorization ヘッダー（同値の重複）: 401 で拒否
     let (code, res) = send_http(
         srv_port,
         &format!("GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n{auth_header}{auth_header}\r\n"),
     );
-    assert_eq!(code, 401, "同値重複 Authorization は 401: {res}");
+    assert_unauthorized(code, &res, "重複 Authorization（同値重複）");
 
     // 4. 入力検証（不正形式）: POST /items?id=abc&name=test
     let (code, res) = send_http(
@@ -359,6 +387,52 @@ fn service_06_live_integration() {
     let (code, res) = send_http(srv_port, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(code, 200, "契約違反後も GET /health が成功: {res}");
     assert!(res.contains("ok"), "GET /health body: {res}");
+
+    // 12. 時計取得不能時の拒否（ADR 0037 決定 4: 推測値や 0 で成功させず 401 で拒否）
+    let fail_clock = include_str!("../src/stdlib/os_clock.sigil")
+        .replace("  return Ok(sec);", "  return Err(-1);");
+    let fail_opts = sigil::effects::Options {
+        embedded_extra: vec![("std.os.clock".into(), fail_clock)],
+        ..Default::default()
+    };
+    let fail_p = sigil::ir_eval::lower_sources_opts(&[&src], "main", &fail_opts)
+        .expect("時計失敗 lowering 成功");
+    let fail_dir = scratch("service-06-clock-fail");
+    let fail_exe = fail_dir.join("service");
+    sigil::native::build_program(&fail_p, &Default::default(), &fail_exe)
+        .expect("時計失敗ネイティブビルド成功");
+
+    let mut fail_child = Command::new(&fail_exe)
+        .env_clear()
+        .env("PORT", "0")
+        .env("MAX_CONNS", "20")
+        .env("POSTGRES_HOST", "127.0.0.1")
+        .env("POSTGRES_PORT", pg_port.to_string())
+        .env("POSTGRES_USER", &pg_user)
+        .env("POSTGRES_DB", &pg_db)
+        .env("POSTGRES_PASSWORD", &pg_pass)
+        .env("SIGIL_AUTH_HMAC_KEY_HEX", TEST_KEY)
+        .env("SIGIL_AUTH_AUDIENCE", TEST_AUD)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("時計失敗サービス起動");
+
+    let fail_stdout = fail_child.stdout.take().expect("標準出力取得");
+    let mut fail_reader = BufReader::new(fail_stdout);
+    let mut fail_port_line = String::new();
+    fail_reader
+        .read_line(&mut fail_port_line)
+        .expect("ポート出力読み取り");
+    let fail_srv_port: u16 = fail_port_line.trim().parse().expect("ポート番号解析");
+    let _fail_guard = ChildGuard { child: fail_child };
+
+    let (code, res) = send_http(
+        fail_srv_port,
+        &format!("GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"),
+    );
+    assert_unauthorized(code, &res, "時計取得失敗時の GET /items");
+    let _ = std::fs::remove_dir_all(&fail_dir);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

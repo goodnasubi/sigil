@@ -51,15 +51,57 @@ fn service_06_parses_checks_and_is_canonical() {
 }
 
 struct ContainerGuard {
-    name: String,
+    container_name: String,
+    network_name: Option<String>,
 }
 
 impl Drop for ContainerGuard {
     fn drop(&mut self) {
         let _ = Command::new("docker")
-            .args(["rm", "-f", "-v", &self.name])
+            .args(["rm", "-f", "-v", &self.container_name])
             .output();
+        if let Some(ref net) = self.network_name {
+            let _ = Command::new("docker").args(["network", "rm", net]).output();
+        }
     }
+}
+
+fn generate_ephemeral_password() -> String {
+    // 1. /dev/urandom による暗号学的乱数
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let mut buf = [0u8; 32];
+        if f.read_exact(&mut buf).is_ok() {
+            let mut s = String::with_capacity(64);
+            for b in buf {
+                use std::fmt::Write;
+                let _ = write!(s, "{:02x}", b);
+            }
+            return s;
+        }
+    }
+    // 2. openssl コマンド
+    if let Ok(out) = Command::new("openssl")
+        .args(["rand", "-hex", "32"])
+        .output()
+    {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.len() == 64 {
+                return s;
+            }
+        }
+    }
+    // 3. フォールバック
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!(
+        "{:016x}{:016x}{:016x}{:016x}",
+        now.as_secs(),
+        now.subsec_nanos(),
+        std::process::id(),
+        0x51691
+    )
 }
 
 struct ChildGuard {
@@ -167,33 +209,55 @@ fn service_06_live_integration() {
         }
 
         let container_name = format!("sigil-test-pg-{}", std::process::id());
-        let guard = ContainerGuard {
-            name: container_name.clone(),
+        let network_name = format!("sigil-test-net-{}", std::process::id());
+
+        // 隔離網（専用 bridge ネットワーク）を作成
+        let net_out = Command::new("docker")
+            .args(["network", "create", &network_name])
+            .output();
+        let created_network = match net_out {
+            Ok(ref o) if o.status.success() => Some(network_name.clone()),
+            _ => None,
         };
+
+        let guard = ContainerGuard {
+            container_name: container_name.clone(),
+            network_name: created_network.clone(),
+        };
+
+        let ephemeral_password = generate_ephemeral_password();
+
+        let mut run_args = vec![
+            "run".to_string(),
+            "-d".to_string(),
+            "--name".to_string(),
+            container_name.clone(),
+        ];
+        if created_network.is_some() {
+            run_args.push("--network".to_string());
+            run_args.push(network_name);
+        }
+        run_args.extend([
+            "-e".to_string(),
+            "POSTGRES_USER=sigil_ci".to_string(),
+            "-e".to_string(),
+            "POSTGRES_DB=sigil_ci".to_string(),
+            "-e".to_string(),
+            format!("POSTGRES_PASSWORD={ephemeral_password}"),
+            "-e".to_string(),
+            "POSTGRES_HOST_AUTH_METHOD=scram-sha-256".to_string(),
+            "-e".to_string(),
+            "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256".to_string(),
+            "-p".to_string(),
+            "127.0.0.1:0:5432".to_string(),
+            "postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3".to_string(),
+            "-c".to_string(),
+            "password_encryption=scram-sha-256".to_string(),
+        ]);
 
         // 一時 PostgreSQL コンテナを起動
         let run_out = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--name",
-                &container_name,
-                "-e",
-                "POSTGRES_USER=sigil_ci",
-                "-e",
-                "POSTGRES_DB=sigil_ci",
-                "-e",
-                "POSTGRES_PASSWORD=secret",
-                "-e",
-                "POSTGRES_HOST_AUTH_METHOD=scram-sha-256",
-                "-e",
-                "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 --auth-local=scram-sha-256",
-                "-p",
-                "0:5432",
-                "postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3",
-                "-c",
-                "password_encryption=scram-sha-256",
-            ])
+            .args(&run_args)
             .output()
             .expect("docker run 実行");
         assert!(
@@ -202,14 +266,17 @@ fn service_06_live_integration() {
             String::from_utf8_lossy(&run_out.stderr)
         );
 
-        // ポート番号を取得
+        // ポート番号を取得（127.0.0.1 のみバインド）
         let port_out = Command::new("docker")
             .args(["port", &container_name, "5432"])
             .output()
             .expect("docker port 実行");
         let port_str = String::from_utf8_lossy(&port_out.stdout);
-        // 出力形式例: "0.0.0.0:32768" or "[::]:32768"
+        // 出力形式例: "127.0.0.1:32768"
         let host_port: u16 = port_str
+            .lines()
+            .next()
+            .expect("ポート出力行")
             .trim()
             .rsplit(':')
             .next()
@@ -249,7 +316,7 @@ fn service_06_live_integration() {
             host_port,
             "sigil_ci".into(),
             "sigil_ci".into(),
-            "secret".into(),
+            ephemeral_password,
         )
     };
 

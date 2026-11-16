@@ -92,10 +92,10 @@ fn check_bearer_auth(router: &Router, req: &HttpRequest) -> Result<Bool, HttpRes
   effects clock, console, db, env, random, task
 {
   let res = router.dispatch(&req);
-  if res.status() == 401 {
-    return Err(res);
+  if res.status() == 200 {
+    return Ok(true);
   }
-  return Ok(true);
+  return Err(res);
 }
 
 fn pg_config_from_env() -> Result<PgConfig, PgError>

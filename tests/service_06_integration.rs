@@ -317,6 +317,18 @@ fn service_06_live_integration() {
     );
     assert_unauthorized(code, &res, "重複 Authorization（同値重複）");
 
+    // 3d. 認証なし + 不正クエリ（%ZZ）: Router の 400 応答がそのまま返り保存・読み出しへ進まないこと（指摘1）
+    let (code, res) = send_http(
+        srv_port,
+        "POST /items?id=42&name=test&x=%ZZ HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(code, 400, "未認証+不正クエリ POST は 400: {res}");
+    let (code, res) = send_http(
+        srv_port,
+        "GET /items?id=42&x=%ZZ HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(code, 400, "未認証+不正クエリ GET は 400: {res}");
+
     // 4. 入力検証（不正形式）: POST /items?id=abc&name=test
     let (code, res) = send_http(
         srv_port,

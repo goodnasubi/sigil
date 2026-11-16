@@ -76,213 +76,26 @@ fn extract_query_param(q: &Bytes, key: &Bytes) -> Option<Bytes>
   return None;
 }
 
-fn parse_hex_byte(h: Int, l: Int) -> Option<Int>
-  intent "2文字の16進数から1バイトの数値を復元する"
+fn auth_ok_handler(req: &AppRequest) -> HttpResponse
+  intent "認証検証用の一致ハンドラ"
   requires none
   ensures none
   effects none
 {
-  let mut hv = 0 - 1;
-  if h >= 48 && h <= 57 {
-    hv = h - 48;
-  }
-  if h >= 97 && h <= 102 {
-    hv = h - 87;
-  }
-  if h >= 65 && h <= 70 {
-    hv = h - 55;
-  }
-  if hv < 0 {
-    return None;
-  }
-  let mut lv = 0 - 1;
-  if l >= 48 && l <= 57 {
-    lv = l - 48;
-  }
-  if l >= 97 && l <= 102 {
-    lv = l - 87;
-  }
-  if l >= 65 && l <= 70 {
-    lv = l - 55;
-  }
-  if lv < 0 {
-    return None;
-  }
-  return Some(hv * 16 + lv);
+  return HttpResponse.new(200, Bytes.new());
 }
 
-fn secret_from_hex(hex: &String) -> Option<Secret>
-  intent "16進数文字列からSecret鍵を構築する"
+fn check_bearer_auth(router: &Router, req: &HttpRequest) -> Result<Bool, HttpResponse>
+  intent "起動時に構築した認証検証器でBearerトークンを検証する"
   requires none
   ensures none
-  effects none
+  effects clock, console, db, env, random, task
 {
-  let b = hex.as_bytes();
-  if b.len() % 2 != 0 {
-    return None;
+  let res = router.dispatch(&req);
+  if res.status() == 401 {
+    return Err(res);
   }
-  let mut out = Bytes.new();
-  let mut i = 0;
-  while i < b.len() {
-    let h = b.get(i).unwrap_or(0);
-    let l = b.get(i + 1).unwrap_or(0);
-    match parse_hex_byte(h, l) {
-      Some(v) => {
-        out.push(v);
-      }
-      None => {
-        return None;
-      }
-    }
-    i = i + 2;
-  }
-  return Some(Secret.from_bytes(out));
-}
-
-fn ascii_lower_byte(b: Int) -> Int
-  intent "ASCII大文字を小文字に変換する"
-  requires none
-  ensures none
-  effects none
-{
-  if b >= 65 && b <= 90 {
-    return b + 32;
-  }
-  return b;
-}
-
-fn ascii_eq_ignore_case(a: &String, b: &String) -> Bool
-  intent "ASCII文字列を大文字小文字を区別せずに比較する"
-  requires none
-  ensures none
-  effects none
-{
-  let ab = a.as_bytes();
-  let bb = b.as_bytes();
-  if ab.len() != bb.len() {
-    return false;
-  }
-  let mut i = 0;
-  while i < ab.len() {
-    let ca = match ab.get(i) {
-      Some(c) => ascii_lower_byte(c),
-      None => -1,
-    };
-    let cb = match bb.get(i) {
-      Some(c) => ascii_lower_byte(c),
-      None => -2,
-    };
-    if ca != cb {
-      return false;
-    }
-    i = i + 1;
-  }
-  return true;
-}
-
-fn count_authorization_headers(req: &HttpRequest) -> Int
-  intent "要求内のAuthorizationヘッダーの全出現数を数える"
-  requires none
-  ensures none
-  effects none
-{
-  let auth_name = "authorization";
-  let hdrs = req.headers();
-  let mut count = 0;
-  let mut i = 0;
-  while i < hdrs.len() {
-    match hdrs.get(i) {
-      Some(h) => {
-        let hname = h.name();
-        if ascii_eq_ignore_case(&hname, &auth_name) {
-          count = count + 1;
-        }
-      }
-      None => {}
-    }
-    i = i + 1;
-  }
-  return count;
-}
-
-fn auth_unauthorized_response() -> HttpResponse
-  intent "ADR 0037決定3が要求するヘッダーを持つ固定の401応答を生成する"
-  requires none
-  ensures none
-  effects none
-{
-  return web.error_response(401).with_header(&"www-authenticate", &"Bearer".as_bytes()).with_header(&"cache-control", &"no-store".as_bytes());
-}
-
-fn check_bearer_auth(req: &HttpRequest) -> Result<Bool, HttpResponse>
-  intent "AuthorizationヘッダーからBearerトークンを取り出し検証する"
-  requires none
-  ensures none
-  effects clock, env
-{
-  if count_authorization_headers(&req) != 1 {
-    return Err(auth_unauthorized_response());
-  }
-
-  let mut auth_key_hex = "";
-  match env.get(&"SIGIL_AUTH_HMAC_KEY_HEX") {
-    Some(k) => {
-      auth_key_hex = k;
-    }
-    None => {
-      return Err(auth_unauthorized_response());
-    }
-  }
-  let mut auth_aud = "";
-  match env.get(&"SIGIL_AUTH_AUDIENCE") {
-    Some(a) => {
-      auth_aud = a;
-    }
-    None => {
-      return Err(auth_unauthorized_response());
-    }
-  }
-  let mut key = Secret.from_bytes(Bytes.new());
-  match secret_from_hex(&auth_key_hex) {
-    Some(k) => {
-      key = k;
-    }
-    None => {
-      return Err(auth_unauthorized_response());
-    }
-  }
-
-  let auth_opt = req.header(&"authorization");
-  match auth_opt {
-    Some(auth) => {
-      if auth.len() <= 7 {
-        return Err(auth_unauthorized_response());
-      }
-      let p0 = auth.get(0).unwrap_or(0);
-      let p1 = auth.get(1).unwrap_or(0);
-      let p2 = auth.get(2).unwrap_or(0);
-      let p3 = auth.get(3).unwrap_or(0);
-      let p4 = auth.get(4).unwrap_or(0);
-      let p5 = auth.get(5).unwrap_or(0);
-      let p6 = auth.get(6).unwrap_or(0);
-      let is_bearer = (p0 == 66 || p0 == 98) && (p1 == 101 || p1 == 69) && (p2 == 97 || p2 == 65) && (p3 == 114 || p3 == 82) && (p4 == 101 || p4 == 69) && (p5 == 114 || p5 == 82) && p6 == 32;
-      if !is_bearer {
-        return Err(auth_unauthorized_response());
-      }
-      let token = auth.slice(7, auth.len()).unwrap_or(Bytes.new());
-      let now_opt = clock.unix_seconds();
-      return match now_opt {
-        Some(now) => match web.verify_bearer(&key, &auth_aud, &token, now) {
-          Ok(_) => Ok(true),
-          Err(_) => Err(auth_unauthorized_response()),
-        },
-        None => Err(auth_unauthorized_response()),
-      };
-    }
-    None => {
-      return Err(auth_unauthorized_response());
-    }
-  }
+  return Ok(true);
 }
 
 fn pg_config_from_env() -> Result<PgConfig, PgError>
@@ -470,11 +283,11 @@ fn handle_items_get(req: &HttpRequest) -> HttpResponse
   }
 }
 
-fn handle(req: &HttpRequest) -> HttpResponse
+fn handle(router: &Router, req: &HttpRequest) -> HttpResponse
   intent "要求を振り分けて応答を生成する"
   requires none
   ensures none
-  effects clock, env, net.client, random, task.spawn, task.suspend
+  effects clock, console, db, env, net.client, random, task
 {
   let path = req.path();
   let method = req.method();
@@ -489,7 +302,7 @@ fn handle(req: &HttpRequest) -> HttpResponse
   }
 
   if path == "/items".as_bytes() {
-    match check_bearer_auth(&req) {
+    match check_bearer_auth(&router, &req) {
       Ok(_) => {}
       Err(unauth) => {
         return unauth;
@@ -511,12 +324,79 @@ pub fn serve(port: Int, max_conns: Int) -> Int
   intent "サービスを起動し指定接続数を処理する"
   requires 1 <= max_conns && max_conns <= 4096
   ensures none
-  effects clock, console, env, net, random, task
+  effects clock, console, db, env, net, random, task
 {
   match web.load_bearer_config() {
     Ok(config) => {
       match config.into_verifier() {
-        Ok(_) => {}
+        Ok(verifier) => {
+          let mut router = Router.new().with_auth(verifier);
+          match router.route("GET", "/items", RouteHandler { handle: auth_ok_handler }) {
+            Ok(r1) => {
+              router = r1;
+            }
+            Err(_) => {
+              return 1;
+            }
+          }
+          match router.route("POST", "/items", RouteHandler { handle: auth_ok_handler }) {
+            Ok(r2) => {
+              router = r2;
+            }
+            Err(_) => {
+              return 1;
+            }
+          }
+          let shared_router = SyncShared.new(router);
+
+          match pg_config_from_env() {
+            Ok(cfg) => {
+              match init_db(&cfg) {
+                Ok(_) => {}
+                Err(_) => {
+                  return 3;
+                }
+              }
+
+              match net.listen(&"127.0.0.1", port, http.default_limits().backlog()) {
+                Ok(listener) => {
+                  console.log(&listener.local_port());
+                  return task.roots(max_conns, |g| {
+                    let mut i = 0;
+                    while i < max_conns {
+                      let slot = g.reserve();
+                      match listener.accept() {
+                        Ok(stream) => {
+                          let conn = http.conn(stream);
+                          let router_ref = shared_router.clone();
+                          slot.start(conn, move |c| {
+                            let limits = http.default_limits();
+                            http.serve_conn(&c, &limits, |req| {
+                              let r = router_ref.borrow();
+                              return handle(&r, &req);
+                            });
+                          }, move |c| {
+                            let limits = http.default_limits();
+                            http.abort_conn(c, &limits);
+                          });
+                        }
+                        Err(_) => {}
+                      }
+                      i = i + 1;
+                    }
+                    return 0;
+                  });
+                }
+                Err(_) => {
+                  return 4;
+                }
+              }
+            }
+            Err(_) => {
+              return 2;
+            }
+          }
+        }
         Err(_) => {
           return 1;
         }
@@ -526,57 +406,13 @@ pub fn serve(port: Int, max_conns: Int) -> Int
       return 1;
     }
   }
-
-  match pg_config_from_env() {
-    Ok(cfg) => {
-      match init_db(&cfg) {
-        Ok(_) => {}
-        Err(_) => {
-          return 3;
-        }
-      }
-
-      match net.listen(&"127.0.0.1", port, http.default_limits().backlog()) {
-        Ok(listener) => {
-          console.log(&listener.local_port());
-          return task.roots(max_conns, |g| {
-            let mut i = 0;
-            while i < max_conns {
-              let slot = g.reserve();
-              match listener.accept() {
-                Ok(stream) => {
-                  let conn = http.conn(stream);
-                  slot.start(conn, move |c| {
-                    let limits = http.default_limits();
-                    http.serve_conn(&c, &limits, handle);
-                  }, move |c| {
-                    let limits = http.default_limits();
-                    http.abort_conn(c, &limits);
-                  });
-                }
-                Err(_) => {}
-              }
-              i = i + 1;
-            }
-            return 0;
-          });
-        }
-        Err(_) => {
-          return 4;
-        }
-      }
-    }
-    Err(_) => {
-      return 2;
-    }
-  }
 }
 
 pub fn main() -> Int
   intent "環境変数から設定を読み込みサービスを実行する"
   requires none
   ensures none
-  effects clock, console, env, net, random, task
+  effects clock, console, db, env, net, random, task
 {
   let port_str = env.get(&"PORT").unwrap_or("0");
   let port = parse_positive_int(&port_str.as_bytes()).unwrap_or(0);

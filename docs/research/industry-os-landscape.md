@@ -17,7 +17,7 @@
 - **規格の側も同型**である。IEC 61508（SIL）を傘として、自動車は ISO 26262（ASIL）、鉄道は EN 50128（SIL）、医療は IEC 62304（Class）、航空は DO-178C（DAL）と、業界規格が派生する。原子力だけは IEC 61513 / IEC 60880 という独自の体系を持ち、保護系では software 自体を避けて FPGA や relay logic に寄せる文化が残る点で異質である。
 - **Linux の位置は業界で共通**している。高性能・非安全側では事実上の標準だが、安全側では「そのまま」ではなく、(a) hypervisor 上の guest として隔離する、(b) 外部の高信頼 monitor で監視する、(c) SEooC（Safety Element out of Context）として定義済み構成だけを認証する、のいずれかの形でしか入らない。Red Hat In-Vehicle Operating System の ISO 26262 ASIL B 認証（exida、SEooC 方式、2025 年 GA）が、その到達点の目安である。航空の IMA では Linux は DAL A/B の土台としては不適とする議論が公然と行われている。
 - **オープンソース基盤にも認証の道はある**が、形が決まっている。RTEMS は Qualification Data Package（QDP）で ECSS 準拠の証跡を有償提供する形、Eclipse ThreadX は code は MIT で公開し認証 artifact を有償会員制にする形、FreeRTOS は認証版 SafeRTOS を別製品として切り出す形である。「code が開いていること」と「認証の証跡が使えること」は別商品である。
-- **認証の重さには明確な序列**がある。原子力 Category A ≒ 航空 DAL A ≒ 鉄道 SIL 4 が最重級で、言語・tool の新規参入が最も難しい。逆に小型ドローン、船舶（型式承認型）、IoT は software の lifecycle 規格による縛りが弱く、新しい言語が実績を積む余地が大きい。Sigil の参入順序はこの序列を逆向きにたどるのが現実的である（第 5 章）。
+- **認証の重さには明確な序列**がある。原子力 Category A ≒ 航空 DAL A ≒ 鉄道 SIL 4 が最重級で、言語・tool の新規参入が最も難しい。逆に小型ドローン、船舶の航海機器（型式承認型）、IoT は software の lifecycle 規格による縛りが弱く、新しい言語が実績を積む余地が大きい。Sigil の参入順序はこの序列を逆向きにたどるのが現実的である（第 5 章）。
 
 ---
 
@@ -35,7 +35,7 @@
 | エネルギー（電力） | QNX（変電所 IED、turbine 制御）、VxWorks、Linux（SCADA 上位系） | IEC 61850（通信）、NERC CIP（security）、系統連系の各国規格 | 冗長化と failover、長期連続運転、security 規制への対応 |
 | エネルギー（原子力） | 専用の小規模 system software、FPGA / relay logic（保護系） | IEC 61513（system）、IEC 61226（Category A / B / C）、IEC 60880（Category A software）、IEC 62138（B / C） | 共通原因故障への多様性、検証可能性の極端な重視、software を避ける設計文化 |
 | 建設機械・農業機械 | 専用 ECU + 小型 RTOS（PXROS-HR 等）、CODESYS、高性能側に QNX + ROS 2 | ISO 13849（PL）、ISO 25119（AgPL、農業）、ISO 19014（MPL、土工機械） | 過酷環境、mixed criticality を 1 つの ECU で、SIL 2 / PL d 級が中心 |
-| 船舶・海洋 | 商用 OS（Windows IoT 系、Linux）が航海機器に広く使われる。機関制御は専用 system | SOLAS / IMO 性能基準、IEC 61174（ECDIS）等の型式承認、船級協会（DNV 等）の承認 | 機器単位の型式承認が中心で、software の integrity level による階層化は弱い。冗長性と可用性 |
+| 船舶・海洋 | 商用 OS（Windows IoT 系、Linux）が航海機器に広く使われる。機関制御は専用 system | SOLAS / IMO 性能基準、IEC 61174（ECDIS）等の型式承認、船級協会（DNV 等）の承認、IACS UR E22（機関・推進等の制御系） | 航海機器は機器単位の型式承認が中心で、software の integrity level による階層化は弱い。機関・推進等の制御系は IACS UR E22 の Category I–III と software lifecycle 要求の対象。冗長性と可用性 |
 | ドローン / UAV | PX4 + NuttX、ArduPilot + ChibiOS（小型）、大型・認証型は航空系 stack へ収束 | 小型はほぼ無認証（電波・飛行規制中心）。大型 / eVTOL は DO-178C 等の航空規格へ | 小型は開発速度と生態系、大型は航空と同じ認証。落差が最も大きい業界 |
 | 通信インフラ・ネットワーク機器 | Linux（SONiC 等の network OS を含む）、RTOS（基地局の L1 処理等） | 安全規格ではなく可用性・security・相互接続性が中心。通信事業者の独自要件 | 長期連続運転、in-service upgrade、処理性能 |
 | 家電・IoT | FreeRTOS、Zephyr、Eclipse ThreadX、NuttX、Linux（高機能側） | IEC 60335 / UL 1998（家電 software の Class B / C）、製品安全と security（ETSI EN 303 645 等） | 量産コスト、OTA、security。安全は「単一故障で危険にならない」水準が中心 |
@@ -98,7 +98,7 @@ OS に求められるのは scan cycle の決定性と、数十年単位の保�
 
 ### 3.10 船舶・海洋
 
-船舶は他業界と制度が違う。SOLAS 条約と IMO の性能基準の下で、ECDIS（IEC 61174）のような**機器ごとの型式承認**を船級協会（DNV 等）が行う方式が中心で、software を integrity level で階層化する文化は弱い。航海機器の OS は商用 OS が広く使われ（DNV の型式承認証書の例では ECDIS の OS として Embedded Windows / Windows 10 IoT Enterprise LTSC が記載される）、機関・推進の制御は Kongsberg や Wärtsilä 等の専用 system である。自律運航（MASS）は IMO で規則の検討が進む段階で、安全 software の作法はまだ固まっていない。新しい言語にとっては「認証の壁は低いが、市場が機器 package 単位で閉じている」という業界である。
+船舶は他業界と制度が違う。SOLAS 条約と IMO の性能基準の下で、ECDIS（IEC 61174）のような**航海機器は機器ごとの型式承認**を船級協会（DNV 等）が行う方式が中心である。航海機器は IACS UR E22 の適用除外でもある（§1.2、SOLAS 第 V 章・第 IV 章で求められる航海・無線通信 system）。航海機器の OS は商用 OS が広く使われ（DNV の型式承認証書の例では ECDIS の OS として Embedded Windows / Windows 10 IoT Enterprise LTSC が記載される）。一方、**機関・推進・安全機能の制御系は UR E22 の対象**で、故障影響に応じた Category I–III（§3）が定められ、Category II・III は船別の Society 証書が必要で（§2）、software の lifecycle・検証要求（§4）が課される。たとえば推進制御・操舵制御・電力管理は Category III、推進・補機の警報監視・安全 system は Category II の例である。つまり「型式承認型で software の階層化が弱い」のは航海機器の話で、制御系への参入には Category II/III の証跡・検証負担が要る。自律運航（MASS）は IMO で規則の検討が進む段階で、安全 software の作法はまだ固まっていない。新しい言語にとっては、航海機器は「認証の壁は低いが、市場が機器 package 単位で閉じている」という業界である。
 
 ### 3.11 ドローン / UAV
 
@@ -158,7 +158,7 @@ Linux の安全用途への広がり方は、業界を問わず次の 3 形に�
 **最重**: 原子力 Category A（software 自体を避ける文化）、航空 DAL A、鉄道 SIL 4。いずれも数十年単位の実績と証跡が前提で、新規言語の最初の適用先にはならない。
 **重**: 自動車 ASIL D、産業 SIL 3。ただし自動車は AI 導入の圧力で「monitor」の隙間が生まれており、産業は runtime 文化がある。
 **中**: 医療 Class C（process 中心で、言語の認証という概念は薄い）、off-highway の PL d / AgPL d、宇宙（mission class による。payload 側は実験的採用の余地）。
-**軽**: ロボット（規格が形成期）、船舶（型式承認型で software の階層化が弱い）、小型ドローン、家電・IoT（Class B / C 水準と security が中心）。
+**軽**: ロボット（規格が形成期）、船舶の航海機器（型式承認型で software の階層化が弱い。機関・推進等の制御系は IACS UR E22 の Category II/III として lifecycle 要求がかかるため別評価）、小型ドローン、家電・IoT（Class B / C 水準と security が中心）。
 
 ---
 
@@ -253,6 +253,7 @@ Linux の安全用途への広がり方は、業界を問わず次の 3 形に�
 - TTControl TTC 2030（PXROS、SIL 2 / PL d / AgPL d / ASIL C の TÜV 認証）: https://www.ttcontrol.com/products/electronic-control-units/ttc-2030-family
 - Bosch Rexroth ORC2（農機向け QNX + ROS 2、ISO 13849 / 25119 / 19014）: https://www.boschrexroth.com/en/de/company/press/orc2-34112.html
 - ECDIS の DNV 型式承認証書（OS として Windows IoT 系が記載）: https://www.anschuetz.com/fileadmin/user_upload/Anschuetz_Synapsis_EcdisNX-05.XX.YY_DNV-EC-Mod-B_MEDB000058G-Rev5.pdf
+- IACS UR E22 Rev.3 Corr.1（2025 年 9 月、船舶の computer-based system。§1.2 で SOLAS の航海・無線通信 system を適用除外、§2 で Category II/III の船別認証、§3 で Category I–III、§4 で lifecycle 要求）: https://www.classnk.or.jp/HP/pdf/info_service/iacs_ur_and_ui/ur_e22_rev.3_corr.1_sep_2025_cln.pdf
 - UAV autopilot の学術 survey（PX4 + NuttX、ArduPilot + ChibiOS）: https://www.mdpi.com/2079-9292/13/23/4785
 - RTOS + middleware の landscape（認証型 UAS の stack、FreeRTOS / Zephyr / ThreadX の認証状況）: https://github.com/newslabntu/nano-ros/blob/HEAD/docs/research/rtos-framework-landscape-2026.md
 - Eclipse ThreadX / SafeRTOS / Zephyr の認証比較: https://www.bermondseyelectronics.com/news/zephyr-vs-freertos-vs-threadx-choosing-the-right-rtos/

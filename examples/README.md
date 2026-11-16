@@ -29,6 +29,7 @@
 | [11-web-router](11-web-router/) | ソケット無しの Web ルーター | 経路照合・クエリ・篩型・認証差し込み口・前後フック（[ADR 0033](../docs/decisions/0033-p1-framework.md)） |
 | [12-bearer-auth](12-bearer-auth/) | Bearer トークン認証 | HMAC-SHA256 署名検証と fail-closed 401 応答（[ADR 0033](../docs/decisions/0033-p1-framework.md)） |
 | [13-postgres-client](13-postgres-client/) | PostgreSQL クライアント | 直接接続・単一文クエリ・接続プールと清掃・破棄（[ADR 0034](../docs/decisions/0034-p1-postgresql-client.md)） |
+| [06-service](06-service/) | P1 完了サンプルのサービス | HTTP/1.1 サーバー、篩型による入力検証、PostgreSQL 読み書き、Bearer 認証、契約違反の隔離（[ADR 0018](../docs/decisions/0018-p1-scope.md)） |
 
 ## 実行のしかた
 

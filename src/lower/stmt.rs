@@ -148,6 +148,14 @@ impl<'a> L<'a> {
         match e {
             a::Expr::Paren(i) => self.root_ref(i),
             a::Expr::Field { expr, .. } => self.root_ref(expr),
+            a::Expr::SelfValue => match self.fb.self_local {
+                Some(l) => match &self.fb.locals[l].ty {
+                    ir::Ty::MutRef(_) => Some(true),
+                    ir::Ty::Ref(_) => Some(false),
+                    _ => None,
+                },
+                None => None,
+            },
             a::Expr::Name(n) => match self.lookup(n)?.ty {
                 ir::Ty::MutRef(_) => Some(true),
                 ir::Ty::Ref(_) => Some(false),

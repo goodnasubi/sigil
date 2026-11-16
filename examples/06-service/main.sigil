@@ -1,0 +1,547 @@
+// 例 06: P1 完了サンプルのサービス（ADR 0018 7-1）
+// HTTP/1.1 の要求を受け付け、篩型による入力検証を行い、
+// HMAC-SHA256 Bearer トークンによる認証を通した要求のみに PostgreSQL への読み書きを提供します。
+// 契約違反を起こした要求は 500 で安全に閉じられ、他の要求は継続して処理されます。
+
+module main
+  targets server
+  trust none
+
+// 1 から 10000 までの有効なアイテム識別子（篩型）
+type ItemId = Int where self > 0 && self <= 10000;
+
+fn assert_positive(x: Int) -> Int
+  intent "正の整数を求める。0以下は契約違反を引き起こす"
+  requires x > 0
+  ensures result > 0
+  effects none
+{
+  return x;
+}
+
+fn parse_positive_int(b: &Bytes) -> Option<Int>
+  intent "数字のバイト列から正の整数を解析する"
+  requires none
+  ensures none
+  effects none
+{
+  if b.len() == 0 {
+    return None;
+  }
+  let mut i = 0;
+  let mut acc = 0;
+  while i < b.len() {
+    let c = b.get(i).unwrap_or(0);
+    if c < 48 || c > 57 {
+      return None;
+    }
+    let d = c - 48;
+    if acc > 922337203685477580 || (acc == 922337203685477580 && d > 7) {
+      return None;
+    }
+    acc = acc * 10 + d;
+    i = i + 1;
+  }
+  return Some(acc);
+}
+
+fn hex_digit(b: Int) -> Int
+  intent "16進数文字を数値に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  if b >= 48 && b <= 57 {
+    return b - 48;
+  }
+  if b >= 65 && b <= 70 {
+    return b - 55;
+  }
+  if b >= 97 && b <= 102 {
+    return b - 87;
+  }
+  return -1;
+}
+
+fn decode_query_value(data: &Bytes) -> Option<String>
+  intent "クエリ値の百分率符号化（+は空白）を解き、UTF-8文字列に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  let mut i = 0;
+  while i < data.len() {
+    let mut b = data.get(i).unwrap_or(0);
+    if b == 37 {
+      if i + 2 >= data.len() {
+        return None;
+      }
+      let hi = hex_digit(data.get(i + 1).unwrap_or(0));
+      let lo = hex_digit(data.get(i + 2).unwrap_or(0));
+      if hi < 0 || lo < 0 {
+        return None;
+      }
+      b = hi * 16 + lo;
+      i = i + 2;
+    } else {
+      if b == 43 {
+        b = 32;
+      }
+    }
+    if b == 0 {
+      return None;
+    }
+    out.push(b);
+    i = i + 1;
+  }
+  return out.to_string_utf8().ok();
+}
+
+fn count_query_param(q: &Bytes, key: &Bytes) -> Int
+  intent "クエリ文字列中の指定キーの出現回数を数える"
+  requires none
+  ensures none
+  effects none
+{
+  if q.len() == 0 {
+    return 0;
+  }
+  let mut count = 0;
+  let mut start = 0;
+  let mut i = 0;
+  while i <= q.len() {
+    let current = q.get(i).unwrap_or(0);
+    if i == q.len() || current == 38 {
+      let mut split = start;
+      while split < i && q.get(split).unwrap_or(0) != 61 {
+        split = split + 1;
+      }
+      let k = q.slice(start, split).unwrap_or(Bytes.new());
+      if k == key {
+        count = count + 1;
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return count;
+}
+
+fn has_duplicate_query_keys(q: &Bytes) -> Bool
+  intent "クエリ文字列中に重複するキーが存在するか検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if q.len() == 0 {
+    return false;
+  }
+  let mut start = 0;
+  let mut i = 0;
+  while i <= q.len() {
+    let current = q.get(i).unwrap_or(0);
+    if i == q.len() || current == 38 {
+      let mut split = start;
+      while split < i && q.get(split).unwrap_or(0) != 61 {
+        split = split + 1;
+      }
+      let k = q.slice(start, split).unwrap_or(Bytes.new());
+      if count_query_param(&q, &k) > 1 {
+        return true;
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn extract_query_param(q: &Bytes, key: &Bytes) -> Option<Bytes>
+  intent "クエリ文字列から指定キーのバイト列を抽出する"
+  requires none
+  ensures none
+  effects none
+{
+  if q.len() == 0 {
+    return None;
+  }
+  let mut start = 0;
+  let mut i = 0;
+  while i <= q.len() {
+    let current = q.get(i).unwrap_or(0);
+    if i == q.len() || current == 38 {
+      let mut split = start;
+      while split < i && q.get(split).unwrap_or(0) != 61 {
+        split = split + 1;
+      }
+      if split < i {
+        let k = q.slice(start, split).unwrap_or(Bytes.new());
+        if k == key {
+          return Some(q.slice(split + 1, i).unwrap_or(Bytes.new()));
+        }
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return None;
+}
+
+fn auth_ok_handler(req: &AppRequest) -> HttpResponse
+  intent "認証検証用の一致ハンドラ"
+  requires none
+  ensures none
+  effects none
+{
+  return HttpResponse.new(200, Bytes.new());
+}
+
+fn check_bearer_auth(router: &Router, req: &HttpRequest) -> Result<Bool, HttpResponse>
+  intent "起動時に構築した認証検証器でBearerトークンを検証する"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let res = router.dispatch(&req);
+  if res.status() == 200 {
+    return Ok(true);
+  }
+  return Err(res);
+}
+
+fn pg_config_from_env() -> Result<PgConfig, PgError>
+  intent "環境変数からPostgreSQL設定を構築する"
+  requires none
+  ensures none
+  effects env
+{
+  let pg_host = env.get(&"POSTGRES_HOST").unwrap_or("127.0.0.1");
+  let pg_port_str = env.get(&"POSTGRES_PORT").unwrap_or("5432");
+  let pg_port = parse_positive_int(&pg_port_str.as_bytes()).unwrap_or(5432);
+  let pg_user = env.get(&"POSTGRES_USER").unwrap_or("sigil_ci");
+  let pg_db = env.get(&"POSTGRES_DB").unwrap_or("sigil_ci");
+  let pg_pass = env.get(&"POSTGRES_PASSWORD").unwrap_or("");
+  let pass_secret = Secret.from_bytes(pg_pass.as_bytes());
+  return pg.config(pg_host, pg_port, pg_user, pg_db, pass_secret);
+}
+
+fn init_db(cfg: &PgConfig) -> Result<Int, PgError>
+  intent "必要なテーブルを作成する"
+  requires none
+  ensures none
+  effects clock, net.client, random, task.spawn, task.suspend
+{
+  let connect_limits = pg.default_connect_limits();
+  let query_limits = pg.default_query_limits();
+  let mut conn = pg.connect(cfg.clone(), &connect_limits)?;
+  let _ = conn.query(&"CREATE TABLE IF NOT EXISTS items (id INT PRIMARY KEY, name TEXT);", &List.new(), &query_limits)?;
+  return Ok(0);
+}
+
+fn handle_items_post(req: &HttpRequest) -> HttpResponse
+  intent "POST /items でアイテムを検証・保存する"
+  requires none
+  ensures none
+  effects clock, env, net.client, random, task.spawn, task.suspend
+{
+  let q = req.query();
+  if has_duplicate_query_keys(&q) {
+    return HttpResponse.new(400, "duplicate query key".as_bytes());
+  }
+  let id_opt = extract_query_param(&q, &"id".as_bytes());
+  let name_opt = extract_query_param(&q, &"name".as_bytes());
+  match id_opt {
+    Some(id_bytes) => {
+      match parse_positive_int(&id_bytes) {
+        Some(id_num) => {
+          match ItemId.check(id_num) {
+            Some(id) => {
+              match name_opt {
+                Some(name_bytes) => {
+                  match decode_query_value(&name_bytes) {
+                    Some(name) => {
+                      if name.as_bytes().len() == 0 {
+                        return HttpResponse.new(400, "empty name".as_bytes());
+                      }
+
+                      match pg_config_from_env() {
+                        Ok(cfg) => {
+                          let connect_limits = pg.default_connect_limits();
+                          let query_limits = pg.default_query_limits();
+                          match pg.connect(cfg, &connect_limits) {
+                            Ok(c) => {
+                              let mut conn = c;
+                              let mut params = List.new();
+                              match pg.param(23, Some(PgValue.Integer(id))) {
+                                Ok(param_id) => {
+                                  match pg.param(25, Some(PgValue.Text(name))) {
+                                    Ok(param_name) => {
+                                      params.push(param_id);
+                                      params.push(param_name);
+                                      return match conn.query(&"INSERT INTO items (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2;", &params, &query_limits) {
+                                        Ok(_) => HttpResponse.new(200, "stored".as_bytes()),
+                                        Err(_) => HttpResponse.new(500, "database query error".as_bytes()),
+                                      };
+                                    }
+                                    Err(_) => {
+                                      return HttpResponse.new(500, "param error".as_bytes());
+                                    }
+                                  }
+                                }
+                                Err(_) => {
+                                  return HttpResponse.new(500, "param error".as_bytes());
+                                }
+                              }
+                            }
+                            Err(_) => {
+                              return HttpResponse.new(500, "database connection error".as_bytes());
+                            }
+                          }
+                        }
+                        Err(_) => {
+                          return HttpResponse.new(500, "config error".as_bytes());
+                        }
+                      }
+                    }
+                    None => {
+                      return HttpResponse.new(400, "invalid name encoding".as_bytes());
+                    }
+                  }
+                }
+                None => {
+                  return HttpResponse.new(400, "missing name".as_bytes());
+                }
+              }
+            }
+            None => {
+              return HttpResponse.new(400, "invalid id range".as_bytes());
+            }
+          }
+        }
+        None => {
+          return HttpResponse.new(400, "invalid id format".as_bytes());
+        }
+      }
+    }
+    None => {
+      return HttpResponse.new(400, "missing id".as_bytes());
+    }
+  }
+}
+
+fn handle_items_get(req: &HttpRequest) -> HttpResponse
+  intent "GET /items でアイテムを検証・取得する"
+  requires none
+  ensures none
+  effects clock, env, net.client, random, task.spawn, task.suspend
+{
+  let q = req.query();
+  if has_duplicate_query_keys(&q) {
+    return HttpResponse.new(400, "duplicate query key".as_bytes());
+  }
+  let id_opt = extract_query_param(&q, &"id".as_bytes());
+  match id_opt {
+    Some(id_bytes) => {
+      match parse_positive_int(&id_bytes) {
+        Some(id_num) => {
+          match ItemId.check(id_num) {
+            Some(id) => {
+              match pg_config_from_env() {
+                Ok(cfg) => {
+                  let connect_limits = pg.default_connect_limits();
+                  let query_limits = pg.default_query_limits();
+                  match pg.connect(cfg, &connect_limits) {
+                    Ok(c) => {
+                      let mut conn = c;
+                      let mut params = List.new();
+                      match pg.param(23, Some(PgValue.Integer(id))) {
+                        Ok(param_id) => {
+                          params.push(param_id);
+                          match conn.query(&"SELECT name FROM items WHERE id = $1;", &params, &query_limits) {
+                            Ok(res) => {
+                              if res.rows() > 0 {
+                                return match res.row(0) {
+                                  Some(r) => match r.get(0) {
+                                    Some(Some(PgValue.Text(t))) => HttpResponse.new(200, t.as_bytes()),
+                                    _ => HttpResponse.new(500, "column error".as_bytes()),
+                                  },
+                                  None => HttpResponse.new(404, "not found".as_bytes()),
+                                };
+                              }
+                              return HttpResponse.new(404, "not found".as_bytes());
+                            }
+                            Err(_) => {
+                              return HttpResponse.new(500, "database query error".as_bytes());
+                            }
+                          }
+                        }
+                        Err(_) => {
+                          return HttpResponse.new(500, "param error".as_bytes());
+                        }
+                      }
+                    }
+                    Err(_) => {
+                      return HttpResponse.new(500, "database connection error".as_bytes());
+                    }
+                  }
+                }
+                Err(_) => {
+                  return HttpResponse.new(500, "config error".as_bytes());
+                }
+              }
+            }
+            None => {
+              return HttpResponse.new(400, "invalid id range".as_bytes());
+            }
+          }
+        }
+        None => {
+          return HttpResponse.new(400, "invalid id format".as_bytes());
+        }
+      }
+    }
+    None => {
+      return HttpResponse.new(400, "missing id".as_bytes());
+    }
+  }
+}
+
+fn handle(router: &Router, req: &HttpRequest) -> HttpResponse
+  intent "要求を振り分けて応答を生成する"
+  requires none
+  ensures none
+  effects clock, console, db, env, net.client, random, task
+{
+  let path = req.path();
+  let method = req.method();
+
+  if path == "/health".as_bytes() && method == "GET" {
+    return HttpResponse.new(200, "ok".as_bytes());
+  }
+
+  if path == "/fault".as_bytes() {
+    let _ = assert_positive(0);
+    return HttpResponse.new(200, "fault".as_bytes());
+  }
+
+  if path == "/items".as_bytes() {
+    match check_bearer_auth(&router, &req) {
+      Ok(_) => {}
+      Err(unauth) => {
+        return unauth;
+      }
+    }
+    if method == "POST" {
+      return handle_items_post(&req);
+    }
+    if method == "GET" {
+      return handle_items_get(&req);
+    }
+    return HttpResponse.new(405, "method not allowed".as_bytes());
+  }
+
+  return HttpResponse.new(404, "not found".as_bytes());
+}
+
+pub fn serve(port: Int, max_conns: Int) -> Int
+  intent "サービスを起動し指定接続数を処理する"
+  requires 1 <= max_conns && max_conns <= 4096
+  ensures none
+  effects clock, console, db, env, net, random, task
+{
+  match web.load_bearer_config() {
+    Ok(config) => {
+      match config.into_verifier() {
+        Ok(verifier) => {
+          let mut router = Router.new().with_auth(verifier);
+          match router.route("GET", "/items", RouteHandler { handle: auth_ok_handler }) {
+            Ok(r1) => {
+              router = r1;
+            }
+            Err(_) => {
+              return 1;
+            }
+          }
+          match router.route("POST", "/items", RouteHandler { handle: auth_ok_handler }) {
+            Ok(r2) => {
+              router = r2;
+            }
+            Err(_) => {
+              return 1;
+            }
+          }
+          let shared_router = SyncShared.new(router);
+
+          match pg_config_from_env() {
+            Ok(cfg) => {
+              match init_db(&cfg) {
+                Ok(_) => {}
+                Err(_) => {
+                  return 3;
+                }
+              }
+
+              match net.listen(&"127.0.0.1", port, http.default_limits().backlog()) {
+                Ok(listener) => {
+                  console.log(&listener.local_port());
+                  return task.roots(max_conns, |g| {
+                    let mut i = 0;
+                    while i < max_conns {
+                      let slot = g.reserve();
+                      match listener.accept() {
+                        Ok(stream) => {
+                          let conn = http.conn(stream);
+                          let router_ref = shared_router.clone();
+                          slot.start(conn, move |c| {
+                            let limits = http.default_limits();
+                            http.serve_conn(&c, &limits, |req| {
+                              let r = router_ref.borrow();
+                              return handle(&r, &req);
+                            });
+                          }, move |c| {
+                            let limits = http.default_limits();
+                            http.abort_conn(c, &limits);
+                          });
+                        }
+                        Err(_) => {}
+                      }
+                      i = i + 1;
+                    }
+                    return 0;
+                  });
+                }
+                Err(_) => {
+                  return 4;
+                }
+              }
+            }
+            Err(_) => {
+              return 2;
+            }
+          }
+        }
+        Err(_) => {
+          return 1;
+        }
+      }
+    }
+    Err(_) => {
+      return 1;
+    }
+  }
+}
+
+pub fn main() -> Int
+  intent "環境変数から設定を読み込みサービスを実行する"
+  requires none
+  ensures none
+  effects clock, console, db, env, net, random, task
+{
+  let port_str = env.get(&"PORT").unwrap_or("0");
+  let port = parse_positive_int(&port_str.as_bytes()).unwrap_or(0);
+  let max_conns_str = env.get(&"MAX_CONNS").unwrap_or("100");
+  let max_conns = parse_positive_int(&max_conns_str.as_bytes()).unwrap_or(100);
+
+  return serve(port, max_conns);
+}

@@ -61,3 +61,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0039](0039-p2-1-javascript-output.md) | P2-1 JavaScript 出力 | 提案（予約: Issue #555、正式判定を ADR 内に記録） |
 | [0040](0040-p2-2-ui-model.md) | P2-2 UI の記述モデル | 提案（予約: Issue #557、正式判定を ADR 内に記録） |
 | [0041](0041-p2-3-fullstack.md) | P2-3 フルスタック（ブラウザ／サーバー分離・型付き通信・静的配信） | 提案（予約: Issue #561、正式判定を ADR 内に記録） |
+| [0042](0042-p2-4-wasm-output.md) | P2-4 WebAssembly 出力 | 提案（予約: Issue #565、正式判定は未実施・ADR 内に理由を記録） |

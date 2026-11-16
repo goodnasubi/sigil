@@ -294,6 +294,22 @@ fn service_06_live_integration() {
     );
     assert_eq!(code, 400, "id=99999 は 400: {res}");
 
+    // 6b. 入力検証（桁あふれ: 9223372036854775808）: GET /items?id=9223372036854775808
+    let (code, res) = send_http(
+        srv_port,
+        &format!(
+            "GET /items?id=9223372036854775808 HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"
+        ),
+    );
+    assert_eq!(code, 400, "桁あふれ GET id は 400: {res}");
+
+    // 6c. 入力検証（桁あふれ: 9223372036854775808）: POST /items?id=9223372036854775808&name=test
+    let (code, res) = send_http(
+        srv_port,
+        &format!("POST /items?id=9223372036854775808&name=test HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"),
+    );
+    assert_eq!(code, 400, "桁あふれ POST id は 400: {res}");
+
     // 7. 正常書き込み: POST /items?id=42&name=sigil_box_42
     let (code, res) = send_http(
         srv_port,
@@ -328,5 +344,39 @@ fn service_06_live_integration() {
     assert_eq!(code, 200, "契約違反後も GET /health が成功: {res}");
     assert!(res.contains("ok"), "GET /health body: {res}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR 0037「決定 2」: 必須設定（SIGIL_AUTH_HMAC_KEY_HEX）未設定時は待ち受けを開始せず起動拒否することを確認する。
+#[test]
+fn service_06_missing_auth_key_refuses_startup() {
+    let src = service_src();
+    let p = sigil::ir_eval::lower_sources(&[&src], "main").expect("lowering 成功");
+
+    let dir = scratch("service-06-no-key");
+    let exe = dir.join("service");
+    sigil::native::build_program(&p, &Default::default(), &exe).expect("ネイティブビルド成功");
+
+    let mut child = Command::new(&exe)
+        .env_clear()
+        .env("PORT", "0")
+        .env("SIGIL_AUTH_AUDIENCE", TEST_AUD)
+        // SIGIL_AUTH_HMAC_KEY_HEX は意図的に設定しない
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("サービス起動");
+
+    let stdout = child.stdout.take().expect("標準出力取得");
+    let mut reader = BufReader::new(stdout);
+    let mut out_line = String::new();
+    reader.read_line(&mut out_line).expect("出力読み取り");
+    let status = child.wait().expect("プロセスの終了待機");
+    assert!(status.success(), "プロセス終了");
+    assert_eq!(
+        out_line.trim(),
+        "1",
+        "認証設定エラー（終了コード 1）で待ち受けを開始せず終了すること"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

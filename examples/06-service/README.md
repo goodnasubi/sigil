@@ -30,8 +30,8 @@ HTTP/1.1 の要求を受け付け、篩型による入力検証を行い、HMAC-
 | `POSTGRES_USER` | `sigil_ci` | PostgreSQL ユーザー名 |
 | `POSTGRES_DB` | `sigil_ci` | PostgreSQL データベース名 |
 | `POSTGRES_PASSWORD` | `""` | PostgreSQL パスワード（SCRAM-SHA-256） |
-| `SIGIL_AUTH_HMAC_KEY_HEX` | （テスト用鍵） | HMAC-SHA256 秘密鍵（64文字 16進数） |
-| `SIGIL_AUTH_AUDIENCE` | `sigil.api` | 認証の対象サービス識別子（Audience） |
+| `SIGIL_AUTH_HMAC_KEY_HEX` | （なし・必須） | HMAC-SHA256 秘密鍵（64文字小文字16進数、ADR 0037） |
+| `SIGIL_AUTH_AUDIENCE` | （なし・必須） | 認証の対象サービス識別子（Audience、ADR 0037） |
 
 ## 実行方法
 
@@ -40,7 +40,7 @@ HTTP/1.1 の要求を受け付け、篩型による入力検証を行い、HMAC-
 sigil check --root examples/06-service examples/06-service/main.sigil
 
 # 実行
-PORT=8080 POSTGRES_PORT=5432 sigil run --root examples/06-service examples/06-service/main.sigil main
+PORT=8080 POSTGRES_PORT=5432 SIGIL_AUTH_HMAC_KEY_HEX=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f SIGIL_AUTH_AUDIENCE=sigil.api sigil run --root examples/06-service examples/06-service/main.sigil main
 ```
 
 ## 自動テスト

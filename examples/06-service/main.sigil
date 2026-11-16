@@ -35,7 +35,11 @@ fn parse_positive_int(b: &Bytes) -> Option<Int>
     if c < 48 || c > 57 {
       return None;
     }
-    acc = acc * 10 + (c - 48);
+    let d = c - 48;
+    if acc > 922337203685477580 || (acc == 922337203685477580 && d > 7) {
+      return None;
+    }
+    acc = acc * 10 + d;
     i = i + 1;
   }
   return Some(acc);
@@ -141,8 +145,24 @@ fn check_bearer_auth(req: &HttpRequest) -> Bool
   ensures none
   effects clock, env
 {
-  let auth_key_hex = env.get(&"SIGIL_AUTH_HMAC_KEY_HEX").unwrap_or("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
-  let auth_aud = env.get(&"SIGIL_AUTH_AUDIENCE").unwrap_or("sigil.api");
+  let mut auth_key_hex = "";
+  match env.get(&"SIGIL_AUTH_HMAC_KEY_HEX") {
+    Some(k) => {
+      auth_key_hex = k;
+    }
+    None => {
+      return false;
+    }
+  }
+  let mut auth_aud = "";
+  match env.get(&"SIGIL_AUTH_AUDIENCE") {
+    Some(a) => {
+      auth_aud = a;
+    }
+    None => {
+      return false;
+    }
+  }
   let mut key = Secret.from_bytes(Bytes.new());
   match secret_from_hex(&auth_key_hex) {
     Some(k) => {
@@ -412,6 +432,13 @@ pub fn serve(port: Int, max_conns: Int) -> Int
   ensures none
   effects clock, console, env, net, random, task
 {
+  match web.load_bearer_config() {
+    Ok(_) => {}
+    Err(_) => {
+      return 1;
+    }
+  }
+
   match pg_config_from_env() {
     Ok(cfg) => {
       match init_db(&cfg) {

@@ -273,6 +273,22 @@ fn service_06_live_integration() {
 
     let auth_header = format!("Authorization: Bearer {TEST_TOKEN}\r\n");
 
+    // 3b. 重複 Authorization ヘッダー（有効 Bearer 先頭 + 無効 Bearer）: 401 で拒否
+    let (code, res) = send_http(
+        srv_port,
+        &format!(
+            "GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n{auth_header}Authorization: Bearer invalid\r\n\r\n"
+        ),
+    );
+    assert_eq!(code, 401, "重複 Authorization は 401: {res}");
+
+    // 3c. 重複 Authorization ヘッダー（同値の重複）: 401 で拒否
+    let (code, res) = send_http(
+        srv_port,
+        &format!("GET /items?id=1 HTTP/1.1\r\nHost: localhost\r\n{auth_header}{auth_header}\r\n"),
+    );
+    assert_eq!(code, 401, "同値重複 Authorization は 401: {res}");
+
     // 4. 入力検証（不正形式）: POST /items?id=abc&name=test
     let (code, res) = send_http(
         srv_port,

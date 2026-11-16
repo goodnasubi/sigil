@@ -139,12 +139,82 @@ fn secret_from_hex(hex: &String) -> Option<Secret>
   return Some(Secret.from_bytes(out));
 }
 
+fn ascii_lower_byte(b: Int) -> Int
+  intent "ASCII大文字を小文字に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  if b >= 65 && b <= 90 {
+    return b + 32;
+  }
+  return b;
+}
+
+fn ascii_eq_ignore_case(a: &String, b: &String) -> Bool
+  intent "ASCII文字列を大文字小文字を区別せずに比較する"
+  requires none
+  ensures none
+  effects none
+{
+  let ab = a.as_bytes();
+  let bb = b.as_bytes();
+  if ab.len() != bb.len() {
+    return false;
+  }
+  let mut i = 0;
+  while i < ab.len() {
+    let ca = match ab.get(i) {
+      Some(c) => ascii_lower_byte(c),
+      None => -1,
+    };
+    let cb = match bb.get(i) {
+      Some(c) => ascii_lower_byte(c),
+      None => -2,
+    };
+    if ca != cb {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+fn count_authorization_headers(req: &HttpRequest) -> Int
+  intent "要求内のAuthorizationヘッダーの全出現数を数える"
+  requires none
+  ensures none
+  effects none
+{
+  let auth_name = "authorization";
+  let hdrs = req.headers();
+  let mut count = 0;
+  let mut i = 0;
+  while i < hdrs.len() {
+    match hdrs.get(i) {
+      Some(h) => {
+        let hname = h.name();
+        if ascii_eq_ignore_case(&hname, &auth_name) {
+          count = count + 1;
+        }
+      }
+      None => {}
+    }
+    i = i + 1;
+  }
+  return count;
+}
+
 fn check_bearer_auth(req: &HttpRequest) -> Bool
   intent "AuthorizationヘッダーからBearerトークンを取り出し検証する"
   requires none
   ensures none
   effects clock, env
 {
+  if count_authorization_headers(&req) != 1 {
+    return false;
+  }
+
   let mut auth_key_hex = "";
   match env.get(&"SIGIL_AUTH_HMAC_KEY_HEX") {
     Some(k) => {

@@ -98,6 +98,65 @@ fn decode_query_value(data: &Bytes) -> Option<String>
   return out.to_string_utf8().ok();
 }
 
+fn count_query_param(q: &Bytes, key: &Bytes) -> Int
+  intent "クエリ文字列中の指定キーの出現回数を数える"
+  requires none
+  ensures none
+  effects none
+{
+  if q.len() == 0 {
+    return 0;
+  }
+  let mut count = 0;
+  let mut start = 0;
+  let mut i = 0;
+  while i <= q.len() {
+    let current = q.get(i).unwrap_or(0);
+    if i == q.len() || current == 38 {
+      let mut split = start;
+      while split < i && q.get(split).unwrap_or(0) != 61 {
+        split = split + 1;
+      }
+      let k = q.slice(start, split).unwrap_or(Bytes.new());
+      if k == key {
+        count = count + 1;
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return count;
+}
+
+fn has_duplicate_query_keys(q: &Bytes) -> Bool
+  intent "クエリ文字列中に重複するキーが存在するか検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if q.len() == 0 {
+    return false;
+  }
+  let mut start = 0;
+  let mut i = 0;
+  while i <= q.len() {
+    let current = q.get(i).unwrap_or(0);
+    if i == q.len() || current == 38 {
+      let mut split = start;
+      while split < i && q.get(split).unwrap_or(0) != 61 {
+        split = split + 1;
+      }
+      let k = q.slice(start, split).unwrap_or(Bytes.new());
+      if count_query_param(&q, &k) > 1 {
+        return true;
+      }
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 fn extract_query_param(q: &Bytes, key: &Bytes) -> Option<Bytes>
   intent "クエリ文字列から指定キーのバイト列を抽出する"
   requires none
@@ -187,6 +246,9 @@ fn handle_items_post(req: &HttpRequest) -> HttpResponse
   effects clock, env, net.client, random, task.spawn, task.suspend
 {
   let q = req.query();
+  if has_duplicate_query_keys(&q) {
+    return HttpResponse.new(400, "duplicate query key".as_bytes());
+  }
   let id_opt = extract_query_param(&q, &"id".as_bytes());
   let name_opt = extract_query_param(&q, &"name".as_bytes());
   match id_opt {
@@ -275,6 +337,9 @@ fn handle_items_get(req: &HttpRequest) -> HttpResponse
   effects clock, env, net.client, random, task.spawn, task.suspend
 {
   let q = req.query();
+  if has_duplicate_query_keys(&q) {
+    return HttpResponse.new(400, "duplicate query key".as_bytes());
+  }
   let id_opt = extract_query_param(&q, &"id".as_bytes());
   match id_opt {
     Some(id_bytes) => {

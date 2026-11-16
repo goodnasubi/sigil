@@ -366,6 +366,29 @@ fn service_06_live_integration() {
     );
     assert_eq!(code, 400, "桁あふれ POST id は 400: {res}");
 
+    // 6d. 入力検証（重複クエリキー: id重複 POST /items?id=42&id=43&name=test）: 400
+    let (code, res) = send_http(
+        srv_port,
+        &format!(
+            "POST /items?id=42&id=43&name=test HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"
+        ),
+    );
+    assert_eq!(code, 400, "重複 id クエリキー POST は 400: {res}");
+
+    // 6e. 入力検証（重複クエリキー: name重複 POST /items?id=42&name=first&name=second）: 400
+    let (code, res) = send_http(
+        srv_port,
+        &format!("POST /items?id=42&name=first&name=second HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"),
+    );
+    assert_eq!(code, 400, "重複 name クエリキー POST は 400: {res}");
+
+    // 6f. 入力検証（重複クエリキー: id重複 GET /items?id=42&id=43）: 400
+    let (code, res) = send_http(
+        srv_port,
+        &format!("GET /items?id=42&id=43 HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"),
+    );
+    assert_eq!(code, 400, "重複 id クエリキー GET は 400: {res}");
+
     // 7. 正常書き込み: POST /items?id=42&name=sigil_box_42
     let (code, res) = send_http(
         srv_port,

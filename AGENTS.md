@@ -65,7 +65,7 @@ Agent-Env: cloud
 
 - `Agent:` は必須。値は `claude` / `gemini` / `muse` / `codex` / `antigravity`（agy の `Agent:` は `antigravity`。それ以外はブランチ名の `<agent>` と同じ）。
 - `Agent-Model:` は必須。自分が動いているモデルの識別名を、その実行環境で名乗っている名前のまま書く（例: `claude-sonnet-5-5-medium`、`gemini-4-argon-medium`、`gpt-oss-120b-medium`）。正確な識別名が分からないときは、判明している最も具体的な名前を書く。
-- `Agent-Env:` は必須。値は `local-windows` / `cloud`。
+- `Agent-Env:` は必須。値は `local-windows` / `cloud` / `cloud-shell`。
 - トレーラーは本文と空行 1 行をあけ、末尾にまとめる。
 - 人間の手作業コミットには付けない（`Agent:` が無いコミット = 人間）。
 - 他のエージェントから引き継いで追加コミットする場合は、そのコミットを書いたエージェント自身の名前を書く。
@@ -131,7 +131,7 @@ cargo test --test <変更範囲のテスト>
 - 承認・レビュー結果のコメントには、レビューしたエージェント名と系統（例: agy（Gemini 系統）／Codex Cloud（OpenAI 系統）／Claude（Anthropic 系統））を明記する。全員が同じアカウントで投稿するため、明記がないと別系統の承認かを後から確かめられない。
 - 仕様に影響するか迷う PR も、「判断の手順」に従って判断する。
 - PR の説明に、仕様の差分を `sigil spec` の出力で貼る。
-- PR の説明に、実行した環境（`local-windows` / `cloud`）を書く。
+- PR の説明に、実行した環境（`local-windows` / `cloud` / `cloud-shell`）を書く。
 - マージ順: 契約変更 → ADR → 実装 → サンプル・テスト。
 
 ## ADR

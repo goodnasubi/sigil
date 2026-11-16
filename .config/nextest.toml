@@ -1,0 +1,71 @@
+# cargo-nextest の設定（Issue #562 項目4）。
+#
+# profile.gate は PR の関門ジョブ用の「速いテスト」。全量ジョブ（マージキューと main）は
+# 既定のプロファイルで全テストを実行するので、ここに無いテストも検査から落ちない。
+#
+# 線引きの基準: ネイティブの実行ファイルを作らない（tests/common の `mod common` を使わない）
+# 統合テストと、src の単体テスト。ネイティブ突き合わせを含むテストは全量側に置く。
+# 除外している重いテスト: depth_limit（fuzz.yml が release で長時間実行する）、ct_measure（#[ignore]）、
+# eval_yield_livelock_193。新しい統合テストは、この一覧に足すまで全量側だけで走る（落ちる側ではなく外れる側に倒す）。
+# 関門ジョブの所要時間が約5分に収まらなくなったら、CI の nextest の実行時間を見てこの一覧を調整する。
+[profile.gate]
+default-filter = """
+  kind(lib)
+   | kind(bin)
+   | binary(atomic_share_190)
+   | binary(binary_io_registration_461)
+   | binary(bitwise_ops)
+   | binary(borrow_pair_names)
+   | binary(borrow_pairs)
+   | binary(borrows)
+   | binary(check)
+   | binary(check_snapshot)
+   | binary(closures)
+   | binary(core_sigil_test)
+   | binary(ct_rules)
+   | binary(effects)
+   | binary(errors)
+   | binary(eval_task_exec_4_2d)
+   | binary(examples_bytes_2_5)
+   | binary(examples_concurrency_4_2g)
+   | binary(examples_enums)
+   | binary(examples_parse)
+   | binary(examples_traits_2_4)
+   | binary(fmt)
+   | binary(fn_types_2_4d)
+   | binary(fn_types_2_4d_check)
+   | binary(fs_read_limit)
+   | binary(globals)
+   | binary(globals_ownership)
+   | binary(globals_rules)
+   | binary(lockguard_access_188)
+   | binary(lsp_carryover_173)
+   | binary(m2_completion)
+   | binary(m3_prep)
+   | binary(m5_verify)
+   | binary(m6_check_json)
+   | binary(m6_lsp)
+   | binary(modules_2a)
+   | binary(modules_2b)
+   | binary(modules_2d)
+   | binary(modules_limits)
+   | binary(moves)
+   | binary(native_report_429)
+   | binary(properties_syntax_4_2b)
+   | binary(raw_ops_check)
+   | binary(raw_syscall_table)
+   | binary(refs)
+   | binary(request_isolation_4_2f)
+   | binary(safe_read)
+   | binary(spec)
+   | binary(spec_globals_3_4e)
+   | binary(stdlib)
+   | binary(sync_issues_script)
+   | binary(task_api_effects_4_2c)
+   | binary(task_traits_4_2a)
+   | binary(test_env_virtual_clock_4_2e)
+   | binary(trust_base)
+   | binary(trust_base_ci_199)
+   | binary(trust_base_file)
+   | binary(web_shutdown_483)
+"""

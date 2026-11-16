@@ -384,6 +384,31 @@ fn service_06_live_integration() {
     assert_eq!(code, 200, "GET /items 成功: {res}");
     assert!(res.contains("sigil_box_42"), "GET /items body: {res}");
 
+    // 8b. URL 復号を伴う書き込み・読み出し（ADR 0033 補足A H1: %20・+・UTF-8の1回復号）: POST /items?id=43&name=hello%20world+sigil
+    let (code, res) = send_http(
+        srv_port,
+        &format!(
+            "POST /items?id=43&name=hello%20world+sigil HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"
+        ),
+    );
+    assert_eq!(code, 200, "POST /items (URL復号対象) 成功: {res}");
+    assert!(res.contains("stored"), "POST /items body: {res}");
+
+    // 8c. URL 復号値の読み出し確認（hello world sigil として保存されていること）
+    let (code, res) = send_http(
+        srv_port,
+        &format!("GET /items?id=43 HTTP/1.1\r\nHost: localhost\r\n{auth_header}\r\n"),
+    );
+    assert_eq!(code, 200, "GET /items (URL復号確認) 成功: {res}");
+    assert!(
+        res.contains("hello world sigil"),
+        "GET /items body に復号された 'hello world sigil' が含まれること: {res}"
+    );
+    assert!(
+        !res.contains("hello%20world"),
+        "GET /items body に生の 'hello%20world' が含まれないこと: {res}"
+    );
+
     // 9. 存在しないアイテム: GET /items?id=999
     let (code, res) = send_http(
         srv_port,

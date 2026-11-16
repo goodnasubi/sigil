@@ -45,6 +45,59 @@ fn parse_positive_int(b: &Bytes) -> Option<Int>
   return Some(acc);
 }
 
+fn hex_digit(b: Int) -> Int
+  intent "16進数文字を数値に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  if b >= 48 && b <= 57 {
+    return b - 48;
+  }
+  if b >= 65 && b <= 70 {
+    return b - 55;
+  }
+  if b >= 97 && b <= 102 {
+    return b - 87;
+  }
+  return -1;
+}
+
+fn decode_query_value(data: &Bytes) -> Option<String>
+  intent "クエリ値の百分率符号化（+は空白）を解き、UTF-8文字列に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  let mut i = 0;
+  while i < data.len() {
+    let mut b = data.get(i).unwrap_or(0);
+    if b == 37 {
+      if i + 2 >= data.len() {
+        return None;
+      }
+      let hi = hex_digit(data.get(i + 1).unwrap_or(0));
+      let lo = hex_digit(data.get(i + 2).unwrap_or(0));
+      if hi < 0 || lo < 0 {
+        return None;
+      }
+      b = hi * 16 + lo;
+      i = i + 2;
+    } else {
+      if b == 43 {
+        b = 32;
+      }
+    }
+    if b == 0 {
+      return None;
+    }
+    out.push(b);
+    i = i + 1;
+  }
+  return out.to_string_utf8().ok();
+}
+
 fn extract_query_param(q: &Bytes, key: &Bytes) -> Option<Bytes>
   intent "クエリ文字列から指定キーのバイト列を抽出する"
   requires none
@@ -144,29 +197,35 @@ fn handle_items_post(req: &HttpRequest) -> HttpResponse
             Some(id) => {
               match name_opt {
                 Some(name_bytes) => {
-                  let name = name_bytes.to_string_utf8().unwrap_or("");
-                  if name.as_bytes().len() == 0 {
-                    return HttpResponse.new(400, "empty name".as_bytes());
-                  }
+                  match decode_query_value(&name_bytes) {
+                    Some(name) => {
+                      if name.as_bytes().len() == 0 {
+                        return HttpResponse.new(400, "empty name".as_bytes());
+                      }
 
-                  match pg_config_from_env() {
-                    Ok(cfg) => {
-                      let connect_limits = pg.default_connect_limits();
-                      let query_limits = pg.default_query_limits();
-                      match pg.connect(cfg, &connect_limits) {
-                        Ok(c) => {
-                          let mut conn = c;
-                          let mut params = List.new();
-                          match pg.param(23, Some(PgValue.Integer(id))) {
-                            Ok(param_id) => {
-                              match pg.param(25, Some(PgValue.Text(name))) {
-                                Ok(param_name) => {
-                                  params.push(param_id);
-                                  params.push(param_name);
-                                  return match conn.query(&"INSERT INTO items (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2;", &params, &query_limits) {
-                                    Ok(_) => HttpResponse.new(200, "stored".as_bytes()),
-                                    Err(_) => HttpResponse.new(500, "database query error".as_bytes()),
-                                  };
+                      match pg_config_from_env() {
+                        Ok(cfg) => {
+                          let connect_limits = pg.default_connect_limits();
+                          let query_limits = pg.default_query_limits();
+                          match pg.connect(cfg, &connect_limits) {
+                            Ok(c) => {
+                              let mut conn = c;
+                              let mut params = List.new();
+                              match pg.param(23, Some(PgValue.Integer(id))) {
+                                Ok(param_id) => {
+                                  match pg.param(25, Some(PgValue.Text(name))) {
+                                    Ok(param_name) => {
+                                      params.push(param_id);
+                                      params.push(param_name);
+                                      return match conn.query(&"INSERT INTO items (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2;", &params, &query_limits) {
+                                        Ok(_) => HttpResponse.new(200, "stored".as_bytes()),
+                                        Err(_) => HttpResponse.new(500, "database query error".as_bytes()),
+                                      };
+                                    }
+                                    Err(_) => {
+                                      return HttpResponse.new(500, "param error".as_bytes());
+                                    }
+                                  }
                                 }
                                 Err(_) => {
                                   return HttpResponse.new(500, "param error".as_bytes());
@@ -174,17 +233,17 @@ fn handle_items_post(req: &HttpRequest) -> HttpResponse
                               }
                             }
                             Err(_) => {
-                              return HttpResponse.new(500, "param error".as_bytes());
+                              return HttpResponse.new(500, "database connection error".as_bytes());
                             }
                           }
                         }
                         Err(_) => {
-                          return HttpResponse.new(500, "database connection error".as_bytes());
+                          return HttpResponse.new(500, "config error".as_bytes());
                         }
                       }
                     }
-                    Err(_) => {
-                      return HttpResponse.new(500, "config error".as_bytes());
+                    None => {
+                      return HttpResponse.new(400, "invalid name encoding".as_bytes());
                     }
                   }
                 }

@@ -4,33 +4,131 @@ on:
   push:
     branches: [main]
   pull_request:
+  # マージキュー（Issue #562 項目4）。キューが作る合体コミットに対して全量ジョブ（test）を実行する。
+  merge_group:
 
 permissions:
   contents: read
+
+# 古い実行の自動キャンセル（Issue #562 項目2）。Pull Request の実行だけを、同じ PR の新しい push で打ち切る。
+# main への push とマージキュー（merge_group）の実行は、キャンセルしない（マージ後の確認とキューの進行を止めないため）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  # 変更検出（Issue #562 項目1）。コードの変更があるかを出力 code に返す。
+  # 方針: ワークフロー自体は止めず（on: の paths は使わない）、後段のジョブを if: で切り替える。
+  # フェイルセーフ: 出力 code は最初に true にしておき、「コードの変更が無い」と確定したときだけ false に上書きする。
+  # 検出のどこかが失敗しても、このジョブ自体が失敗しても、後段は実行側に倒れる。
+  # main への push では検出しない（常に全量を実行する）。
+  changes:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: コードの変更を検出
+        id: detect
+        env:
+          # pull_request は PR の base、merge_group はキューの base（グループ全体の差分）を基準にする。
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          set -eu
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only --no-renames "$BASE_SHA" HEAD)"
+          echo "変更されたファイル:"
+          echo "$changed"
+          # コード扱いするパス。ci.yml の変更では ci.yml の全ジョブを実行する（postgres.yml は postgres ジョブだけ）。
+          if printf '%s\n' "$changed" | grep -Eq '^(src/|tests/|examples/|scripts/|tools/|\.config/)|^Cargo\.(toml|lock)$|(^|/)build\.rs$|^\.github/workflows/ci\.yml$'; then
+            echo "コードの変更あり: テストを実行する"
+          else
+            echo "コードの変更なし: テストをスキップする"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 関門ジョブ（Issue #562 項目4）。Pull Request で実行する軽い検査: 信頼基盤の差分・fmt・clippy・速いテスト。
+  # 速いテストの範囲は .config/nextest.toml の profile.gate。全量は test ジョブ（マージキューと main）。
+  # コードの変更が無い PR（docs のみなど）ではジョブごとスキップされ、必須チェックでは成功扱いになる。
+  gate:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # 信頼基盤の差分の検出（ADR 0018 判断 1 の T3・判断 2 の S2。検出は scripts/trust-base-diff.sh）。
       # 既定は印のみ（失敗にしない）。失敗にするときは SIGIL_TRUST_BASE_MODE を fail にする（切替えはここだけ）。
       - name: 信頼基盤の差分
-        if: github.event_name == 'pull_request'
         run: scripts/trust-base-diff.sh "$BASE_SHA"
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           SIGIL_TRUST_BASE_MODE: mark
 
       - name: Rust stable
+        id: rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
           rustc --version
+          echo "rustc=$(rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: ネイティブ出力の前提
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc libc6-dev
+
+      # ビルドのキャッシュ（Issue #562 項目3）。キーは postgres.yml と共通で、main の全量ジョブが保存したものを復元する。
+      # 復元に失敗しても（ミス・不整合）そのままビルドする。保存は main の実行だけが行う。
+      - uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo-nextest の導入
+        uses: taiki-e/install-action@7c48f0a661edab95fdc666d1526d9ef945205245 # nextest
+        with:
+          tool: nextest@0.9.151
+
+      - name: test（速いテストだけ。全量はマージキューで実行する）
+        run: cargo nextest run --profile gate --no-fail-fast
+
+  # 全量ジョブ。マージキューと main への push で実行する（Pull Request ではスキップ＝必須チェックでは成功扱い）。
+  # ジョブ名 test は、必須チェック名を変えずに済むよう現行のまま維持する。
+  # マージキューではグループ全体の差分にコードの変更が無ければスキップする（検出に失敗したら実行する）。
+  test:
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Rust stable
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustc --version
+          echo "rustc=$(rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
 
       # ネイティブ出力のリンクに cc と glibc の静的ライブラリ(libc.a)が要る。
       - name: ネイティブ出力の前提
@@ -38,15 +136,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc libc6-dev
 
-      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+      # ビルドのキャッシュ（Issue #562 項目3）。キーは gate ジョブ・postgres.yml と共通（OS・CPU・rustc の版・Cargo.lock）。
+      # 復元に失敗してもそのままビルドする。保存は main への push の実行だけが行い、PR とキューのキャッシュで main のキャッシュを汚さない。
+      - name: キャッシュの復元
+        id: cache
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-
 
       - name: fmt
         run: cargo fmt --check
@@ -80,3 +182,14 @@ jobs:
           docker --version
           cargo test --test m5_native -- --ignored runs_in_scratch_container
           cargo test --test image_docker_474 -- --ignored
+
+      # main への push のときだけ保存する。同じキーが既にあれば保存されない（Cargo.lock かツールチェーンが変わると新しいキーになる）。
+      - name: キャッシュの保存
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}

@@ -4,9 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # マージキュー（Issue #562 項目4）。postgres ジョブはキューでも実行する。
+  merge_group:
 
 permissions:
   contents: read
+
+# 古い実行の自動キャンセル（Issue #562 項目2）。Pull Request の実行だけをキャンセルし、
+# main への push とマージキュー（merge_group）の実行は打ち切らない。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,25 +22,65 @@ env:
   POSTGRES_IMAGE: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
 
 jobs:
+  # 変更検出（Issue #562 項目1）。ci.yml の changes と同じ方式・同じフェイルセーフ。
+  # 出力 code は最初に true にしておき、コードの変更が無いと確定したときだけ false にする。
+  # コード扱いするパスは ci.yml と同じで、ワークフローは postgres.yml の変更で postgres ジョブを実行する。
+  changes:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: コードの変更を検出
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          set -eu
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          changed="$(git diff --name-only --no-renames "$BASE_SHA" HEAD)"
+          echo "変更されたファイル:"
+          echo "$changed"
+          if printf '%s\n' "$changed" | grep -Eq '^(src/|tests/|examples/|scripts/|tools/|\.config/)|^Cargo\.(toml|lock)$|(^|/)build\.rs$|^\.github/workflows/postgres\.yml$'; then
+            echo "コードの変更あり: postgres ジョブを実行する"
+          else
+            echo "コードの変更なし: postgres ジョブをスキップする"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   postgres:
+    needs: changes
+    # PR とマージキューではコードの変更があるときだけ。main への push（changes はスキップ）は常に実行する。
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Rust stable
+        id: rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustc --version
+          echo "rustc=$(rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+      # ビルドのキャッシュ（Issue #562 項目3）。ci.yml の全量ジョブが main で保存したキャッシュと同じキーで復元する
+      # （OS・CPU・rustc の版・Cargo.lock）。このジョブは保存しない（対象テスト3本だけの target で ci 側の完全なキャッシュを置き換えないため）。
+      # 復元に失敗してもそのままビルドする。
+      - uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: postgres-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-
 
       # 依存取得・ビルド・pull は隔離網の外で完了させる。
       - name: PostgreSQL と試験実行ファイルの準備

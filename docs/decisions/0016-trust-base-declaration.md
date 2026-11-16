@@ -362,5 +362,34 @@ ADR 0007 の「基本の型」の性質（`Sendable`・`Shareable`）を、検�
 - 決定 3 の許可は、ビルドの呼び出しを AI が書き換えれば効かない。P1 の範囲を決める ADR で、許可の運用（所有者の決定）と、一覧の置き場所（パッケージの設定ファイルに移すか）を決める。許可の運用は [ADR 0018](0018-p1-scope.md) の判断 1・2（T3・S2）で決まった。
 - 前提の文の正しさは、処理系では確かめられない。人間のレビューで補う（決定 6）。
 - 次を計測する。
-  - P1 の完了時に、`unchecked` の関数の数と、原始操作の呼び出しの数を数える。信頼基盤が最小に保たれているかを、ADR 0005 の方針に照らして確かめる。（段階 3 の完了時の数は、上の「段階 3 完了時の見直し記録」に書いた。）
+  - P1 の完了時に、`unchecked` の関数の数と、原始操作の呼び出しの数を数える。信頼基盤が最小に保たれているかを、ADR 0005 の方針に照らして確かめる。（段階 3 の完了時の数は、上の「段階 3 完了時の見直し記録」に書いた。P1 完了時の数は、下の「P1 完了時の計測記録」に書いた。）
   - 前提の文のうち、後で誤りが見つかったものの数。
+
+### P1 完了時の計測記録（PR 7-1。2026-11-16）
+
+- **経緯**: ADR 0018 の段階 7-1（P1 の完了）において、`src/stdlib/*.sigil` の全埋め込みモジュールを対象に、信頼基盤の最終的な規模を計測した。
+- **計測結果**:
+
+| 項目 | 段階 3 完了時（PR 3-7e） | P1 完了時（PR 7-1） | 差分 |
+|---|---|---|---|
+| `trust base` の埋め込みモジュール | 8 | 14 | +6 |
+| `unchecked` の関数（関数の節の数。式の区間は 0） | 85 | 168 | +83 |
+| 原始操作の呼び出し（`raw.<名>(` の出現。コメント行を除く） | 554 | 836 | +282 |
+| 原始操作の表（`RAW_OPS`）の行 | 15 | 22 | +7 |
+
+- **モジュールごとの内訳（P1 完了時）**:
+  - `trust base` の埋め込みモジュール（14 モジュール）:
+    - `unchecked` の関数（計 168）: `os_io.sigil` 27、`core_bytes.sigil` 25、`os_alloc.sigil` 22、`os_net.sigil` 22、`core_string.sigil` 21、`os_sched.sigil` 16、`os_fs.sigil` 10、`core_list.sigil` 8、`core_path.sigil` 5、`os_thread.sigil` 5、`os_env.sigil` 3、`os_console.sigil` 2、`os_clock.sigil` 1、`os_random.sigil` 1。
+    - 原始操作の呼び出し（計 836）: `os_alloc.sigil` 163、`core_bytes.sigil` 143、`core_string.sigil` 117、`os_net.sigil` 94、`os_fs.sigil` 70、`core_list.sigil` 54、`os_sched.sigil` 47、`os_io.sigil` 42、`os_thread.sigil` 36、`core_path.sigil` 30、`os_env.sigil` 19、`os_random.sigil` 8、`os_clock.sigil` 7、`os_console.sigil` 6。
+  - `trust none` の埋め込みモジュール（9 モジュール）:
+    - `std.core.float`・`std.core.int`・`std.crypto`・`std.http`・`std.http.limits`・`std.json`・`std.pg`・`std.pg_scram`・`std.web` はすべて `trust none` であり、`unchecked` の関数を持たない。
+- **原始操作ごとの呼び出し内訳（計 836）**:
+  - `offset` 215、`load_i64` 83、`store_i64` 73、`syscall` 60、`load_addr` 54、`load_u8` 52、`addr_to_int` 49、`alloc` 48、`free` 44、`addr_null` 38、`int_to_addr` 37、`store_u8` 21、`store_addr` 18、`copy` 15、`io_wait_fd` 7、`atomic_swap_i64` 6、`set` 5、`atomic_load_i64` 4、`atomic_cas_i64` 3、`atomic_store_i64` 3、`atomic_add_i64` 1。
+- **原始操作の表（`RAW_OPS`。計 22 行）**:
+  - 段階 3 完了時の 15 行に加え、並行処理（`atomic_*` 6 行）および I/O 多重化（`io_wait_fd` 1 行）が追加された。
+  - 効果を宣言に委ねるのは `raw.syscall` の 1 行のみ。`io_wait_fd` は `task.suspend`、他の 20 行は `none` である。
+- **分析**:
+  - 段階 4〜6 で並行スケジューラ（`os_sched`, `os_thread`）、非同期 I/O・ソケット（`os_io`, `os_net`）、OS 壁時計（`os_clock`）、乱数（`os_random`）という OS 最小境界が入り、信頼基盤の関数は 85 から 168 へ増加した。
+  - 一方で、HTTP/1.1 プロトコル（`std.http`）、Web ルーター・認証（`std.web`）、JSON パーサ（`std.json`）、PostgreSQL クライアントおよび SCRAM 認証（`std.pg`, `std.pg_scram`）、暗号部品（`std.crypto`）という大規模な上位スタックは、すべて `trust none`（検査を一切外さない純粋な Sigil コード）として実現された。
+  - これにより、信頼基盤を最小の OS 境界と核のメモリ操作のみに限定するという ADR 0005 の基本方針が P1 全体を通じて達成された。
+  - 数え方: `unchecked` の節は `^\s*unchecked "` の行、原始操作は `raw\.[a-z_0-9]+\(` の出現（`//` で始まる行を除く）。`src/stdlib/core_sigil.rs` は数えない。

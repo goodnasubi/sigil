@@ -502,6 +502,23 @@ P1 の完了は、次をすべて満たすことである。各段階の ADR は
 | 評価器と実行ファイルの突き合わせが続いている | `native-report.sh`。件数の上限と下限は、事例が増えた理由を確かめて直す |
 | 追跡項目の記録 | 決定 8 の表の各行が、記録先の ADR に書かれている |
 
+### P1 完了条件の達成記録（段階 7-1、2026-11-16、Issue #541）
+
+P1（段階 7-1）の完了にあたり、上記の完了条件 10 項目の達成状況を記録する。
+
+| 条件 | 状況 | 根拠・テスト・達成内容 |
+|---|---|---|
+| 1. サンプルのサービス（`examples/06-service`） | **完了** | `examples/06-service/main.sigil` を実装。HTTP/1.1 サーバー（`std.http`）、篩型（`ItemId`）による入力検証、PostgreSQL（`std.pg`）への読み書き、HMAC-SHA256 Bearer トークン認証（`std.web`）を統合。自動テスト `tests/service_06_integration.rs` により、コンテナで PostgreSQL（`postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3`）を起動し、未認証・不正トークン・不正入力の拒否、正常読み書き、契約違反時の 500 応答と後続継続を CI で検証 |
+| 2. イメージの道具の出力と digest 一致 | **完了** | `tools/image`（ADR 0035、PR #470・#477・#480・#495）。同一 ELF から生成した OCI アーカイブの digest（layer, config, manifest）および tar バイト列が完全一致。CI（`tests/image_docker_474.rs`）で `docker load`、`docker inspect`（非 root `65532:65532`）、`docker run` の成功を確認済み |
+| 3. 出力に Rust のコードを含めない | **完了** | 段階 3-7d（PR #337、commit `5560f21`）で `runtime/` ディレクトリを完全に削除。ネイティブ実行ファイルは Cranelift と Sigil の標準ライブラリ（`src/stdlib/*.sigil`）のみで構成され、シンボルに `sigil_rt_` および Rust 標準ライブラリのシンボルを含まない（`tests/m5_native.rs` 等） |
+| 4. 出力に glibc を含めない（判断 7） | **完了** | `src/native.rs` において `cc -nostdlib -static -no-pie` でリンク（ADR 0025・0030）。エントリポイント `_start`、システムコール（`raw.syscall`）、スレッド作成（`clone` システムコール、`std.os.thread`）をすべて Sigil 自身で実装し、glibc と一切リンクしない |
+| 5. ADR 0007 の 11 の条件（P1-a・P1-b） | **完了** | ADR 0007「決定 6」の 11 条件（＋条件 12）のすべての列について、評価器（P1-a）およびネイティブ（P1-b）の実装・テストが完了（`tests/native_tasks_5_2d.rs`, `tests/native_stop_5_2g.rs`, `tests/examples_concurrency_native_5_2h.rs`, `tests/task_roots_6_3d.rs`, `tests/net_6_3e.rs` 等） |
+| 6. 契約違反の要求が 500 で終わり、他の要求は継続 | **完了** | 決定 7。`http.conn` の状態管理と `http.abort_conn` により、ハンドラ内の契約違反（事前条件違反等）で接続が中断しても、当該接続のみが 500 で閉じられ、他の接続および待ち受けは継続して処理される。`tests/http_server_6_3a.rs`, `tests/task_roots_6_3d.rs`, `tests/service_06_integration.rs`（`/fault` と後続の `/health`）で実証 |
+| 7. 文字列・パスが解放される | **完了** | 決定 5。`std.core.string` および `std.core.path` は所有型の破棄によりヒープ領域を自動解放する（`tests/m3_drop_limits.rs`, `tests/str_35b.rs`, `tests/path_35d.rs` 等） |
+| 8. インタプリタがなく、SIR 検証器が全事例で動作 | **完了** | 決定 4。PR 1-5 で旧インタプリタを削除完了。すべてのプログラムは SIR（`src/ir.rs`）へ lower され、評価器（`src/ir_eval.rs`）またはネイティブコード生成（`src/codegen/`）で実行される。SIR 検証器（`src/verify.rs`）が動作 |
+| 9. 評価器と実行ファイルの突き合わせ継続 | **完了** | `scripts/native-report.sh` を CI で毎回実行。全事例で評価器とネイティブの実行結果を突合し、飛ばし上限（`SIGIL_NATIVE_MAX_SKIP=9`）および最小突き合わせ件数（`SIGIL_NATIVE_MIN_CHECKED=800`）を維持 |
+| 10. 追跡項目の記録 | **完了** | 決定 8 の表の全項目について、記録先の ADR（ADR 0015: M5 計測、ADR 0032 補足 B-3: 停止の印の費用、ADR 0016: 段階 3 見直し記録および P1 完了時計測記録）への記録を完了 |
+
 ## 実装の手順
 
 決定 3 の表のとおり。次に始めるのは、段階 0 と段階 1 である。

@@ -45,7 +45,7 @@ jobs:
           changed="$(git diff --name-only --no-renames "$BASE_SHA" HEAD)"
           echo "変更されたファイル:"
           echo "$changed"
-          if printf '%s\n' "$changed" | grep -Eq '^(src/|tests/|examples/|scripts/|\.config/)|^Cargo\.(toml|lock)$|(^|/)build\.rs$|^\.github/workflows/postgres\.yml$'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(src/|tests/|examples/|scripts/|tools/|\.config/)|^Cargo\.(toml|lock)$|(^|/)build\.rs$|^\.github/workflows/postgres\.yml$'; then
             echo "コードの変更あり: postgres ジョブを実行する"
           else
             echo "コードの変更なし: postgres ジョブをスキップする"

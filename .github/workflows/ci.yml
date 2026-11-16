@@ -47,7 +47,7 @@ jobs:
           echo "変更されたファイル:"
           echo "$changed"
           # コード扱いするパス。ci.yml の変更では ci.yml の全ジョブを実行する（postgres.yml は postgres ジョブだけ）。
-          if printf '%s\n' "$changed" | grep -Eq '^(src/|tests/|examples/|scripts/|\.config/)|^Cargo\.(toml|lock)$|(^|/)build\.rs$|^\.github/workflows/ci\.yml$'; then
+          if printf '%s\n' "$changed" | grep -Eq '^(src/|tests/|examples/|scripts/|tools/|\.config/)|^Cargo\.(toml|lock)$|(^|/)build\.rs$|^\.github/workflows/ci\.yml$'; then
             echo "コードの変更あり: テストを実行する"
           else
             echo "コードの変更なし: テストをスキップする"

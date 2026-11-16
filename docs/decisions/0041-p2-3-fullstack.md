@@ -18,7 +18,7 @@
 | 通信プロトコル | 同一オリジン HTTP/1.1 の型付き要求応答（POST/GET）。JSON・篩型・上限による境界検証 | 初版から双方向 WebSocket・汎用 RPC・SSR・hydration を必須にすると範囲が過大になり検証が困難になる |
 | 静的資産配信 | P1 のネイティブ出力（`std.http`／`std.web`）が HTML／JS をパストラバーサル防止・安全ヘッダ付きで同一オリジン配信 | 外部サーバー（Nginx 等）や Node.js 配信を前提にすると配布単位が単一コンテナで完結せず P1 成果物を生かせない |
 | 安全境界 | 受信データは一切信頼せず入口でサイズ・深さ・型・篩型を検査。不正・認証失敗・上限超過は固定エラーで即時拒否。サーバー秘密を配信物から排除 | クライアント側の Sigil UI 検証を信用してサーバー検証を省略すると境界防御が崩れる。診断なしの TCP 切断のみでは原因調査ができない |
-| UI との接続 | UI の `update` は純粋に保ち、非同期 HTTP 要求は明示的な効果呼び出しから完了時に結果イベント `E` を UI ループへ送る | `view` 内で直接非同期待機を行うと純粋関数と再描画の規律が崩れる。大域可変変数によるポーリングは効果と所有権を追えなくする |
+| UI との接続 | UI の `update` は純粋に保ち、クライアントプログラムの効果フック（`effect`）から明示的に非同期 HTTP 要求（`client.fetch`／`client.fetch_auth`）を発行し、完了時に結果イベント `E` を UI ループへ送る | `view` 内で直接非同期待機を行うと純粋関数と再描画の規律が崩れる。大域可変変数によるポーリングは効果と所有権を追えなくする |
 
 正式判定の確率は設計の正しさの証明ではない。採用理由は、既存 ADR の型・効果・所有権の規律を維持し、ブラウザ配信物への秘密漏洩を防ぎ、単一コンテナで検証可能な最小のフルスタックを成立させることにある。
 
@@ -128,23 +128,47 @@ struct Endpoint<Req, Resp> {
 | 区分 | 初版に含むもの |
 |---|---|
 | 宣言 | `module`・`targets`（`browser`／`server`／`bare`）・`use`・公開範囲、関数仕様四節、構造体・列挙型・組、総称型／総称関数、篩型、トレイトと静的解決 |
-| クライアント通信型 | `Endpoint<Req, Resp>`、`HttpMethod`、`ClientError`（`NetworkError`／`StatusError(Int)`／`DecodeError` を含む閉じた列挙型） |
+| クライアント通信型 | `Endpoint<Req, Resp>`、`HttpMethod`、`ClientError`（`NetworkError`／`StatusError(Int)`／`DecodeError`／`InvalidToken` を含む閉じた列挙型） |
 | サーバー通信型 | `Route`、`Router`、`HttpRequest`、`HttpResponse`、`AppError`、`AuthIdentity`（ADR 0033 / 0037 準拠） |
-| UI 統合 | [ADR 0040](0040-p2-2-ui-model.md) の全 UI 型（`UiNode`, `UiAttr`, `UiTag`, `UiRoot`, `UiMount`, `UiProgram` 等） |
+| UI 統合 | [ADR 0040](0040-p2-2-ui-model.md) の全 UI 型（`UiNode`, `UiAttr`, `UiTag`, `UiRoot`, `UiMount`, `UiProgram` 等）、フルスタック用クライアントプログラム `ClientProgram<M, E>` |
 | 効果 | ブラウザ: `none`, `console`, `dom`, `net.client`。サーバー: `net.server`, `fs.*`, `env`, `clock`, `task.*`, `crypto.*`, `db` |
 
 ### 標準操作の許可一覧
 
 #### クライアント側（`std.web.client`、関数の公開名前空間は `client`）
 
-ブラウザ側での非同期 HTTP 要求は、UI の宣言的更新モデルを崩さないよう、明示的なディスパッチとして提供する。
+ブラウザ側での非同期 HTTP 要求は、UI の宣言的更新モデルを崩さないよう、純粋な `UiProgram` と効果実行フックを統合した `ClientProgram` および明示的なディスパッチとして提供する。
 
 | 操作 | シグネチャ | 効果・条件 |
 |---|---|---|
-| 型付き要求 | `client.fetch<Req, Resp, E>(endpoint: &Endpoint<Req, Resp>, req: Req, to_event: fn(Result<Resp, ClientError>) -> E) -> Unit` | `net.client`。非同期要求を発行し、完了時に生成したイベント `E` を所有されたマウントのイベントキューへ非同期に投入する |
+| 型付き要求 | `client.fetch<Req, Resp, E>(endpoint: &Endpoint<Req, Resp>, req: Req, to_event: fn(Result<Resp, ClientError>) -> E) -> Unit` | `net.client`。非同期公開要求を発行し、完了時に生成したイベント `E` を所有されたマウントのイベントキューへ非同期に投入する |
+| 認証付き要求 | `client.fetch_auth<Req, Resp, E>(endpoint: &Endpoint<Req, Resp>, token: &String, req: Req, to_event: fn(Result<Resp, ClientError>) -> E) -> Unit` | `net.client`。`Authorization: Bearer <token>` ヘッダを付与して非同期要求を発行し、完了時に生成したイベント `E` をイベントキューへ投入する。空トークンや不正形式は通信前に `ClientError.InvalidToken` として即時還元 |
 | エンドポイント構築 | `client.endpoint<Req, Resp>(path: String, method: HttpMethod) -> Endpoint<Req, Resp>` | `none`。パスとメソッドを束ねる |
+| クライアント起動 | `client.mount<M, E>(root: UiRoot, model: M, program: ClientProgram<M, E>) -> Result<UiMount, UiError>` | `dom`。UI プログラムと効果フックを接続して実行を開始する |
 
-`to_event` 関数は `fn(...) -> E effects none` であり、結果を UI のイベント型 `E` に変換する純粋な写像とする。`update` 関数自体は純粋なままとし、副作用（要求発行）は明示的な効果呼び出し文として分離する。
+##### クライアント側 UI 実行モデルと接続点
+
+ADR 0040 の `UiProgram.update`（`effects none`、戻り値 `Unit`）の純粋性を損なわずに、UI 操作から非同期通信（`net.client`）を開始するため、UI 定義と効果フックを束ねる構造体 `ClientProgram<M, E>` を定義する。
+
+```sigil
+struct ClientProgram<M, E> {
+  program: UiProgram<M, E>,
+  effect: fn(&M, E) -> Unit effects net.client, console,
+}
+```
+
+1. **イベント駆動の実行サイクル**:
+   - UI 操作（ボタンクリックやフォーム送信）または通信完了通知によりイベント `event: E` が発生する。
+   - **更新段階（純粋）**: `program.program.update(&mut model, event)`（`effects none`）を実行し、モデル状態を更新する。
+   - **描画段階（純粋）**: `program.program.view(&model)`（`effects none`）により仮想木を構築し、DOM 差分を同期反映する。
+   - **効果段階（副作用実行）**: 更新後の最新状態 `&model` と発生イベント `event` を引数に `program.effect(&model, event)`（`effects net.client, console`）を実行する。
+2. **明示的な通信要求の発行**:
+   - `effect` 関数内の分岐（`match event` 等）において、明示的な効果呼び出し文として `client.fetch` または `client.fetch_auth` を呼び出す。
+   - 認証が必要なエンドポイント（サーバー側の `server.handle_auth`）に対しては、モデル内に保持された認証トークン `&model.token` を渡して `client.fetch_auth` を呼び出す。これにより [ADR 0037](0037-p1-authentication.md) が要求する `Authorization: Bearer <token>` ヘッダが確実に付与される。
+3. **通信結果の UI 還元**:
+   - `to_event` 関数（`fn(Result<Resp, ClientError>) -> E effects none`）は結果を UI イベント型 `E` へ変換する純粋関数である。
+   - 通信が完了（または通信エラー・401 等の HTTP エラーが発生）すると、`to_event` が実行され、生成されたイベント `E` がマウントのキューへ非同期に投入されて次の実行サイクルが開始される。
+   - 通信結果イベントに対する `effect` は何もしない（空文）ため、効果ループは安全に停止する。
 
 #### サーバー側（`std.web.server`、関数の公開名前空間は `server`）
 
@@ -197,12 +221,12 @@ sigil build --target fullstack
 [ADR 0038](0038-p2-scope.md) 決定 1 に定められた検証基準に基づき、P2-3 の実装完了を次の項目で確かめる。
 
 1. **正常系の疎通**:
-   - Sigil UI（フォーム入力またはボタン）の操作から型付き要求を発行。
-   - P1 コンテナ内のネイティブサーバーが要求を受信し、境界検証を経てハンドラを実行。
+   - Sigil UI（フォーム入力またはボタン）の操作から、`ClientProgram.effect` を経由して型付き要求（公開要求 `client.fetch` または Bearer 認証付き要求 `client.fetch_auth`）を発行。
+   - P1 コンテナ内のネイティブサーバーが要求を受信し、境界検証（Bearer トークン検証含む）を経てハンドラを実行。
    - 型付き応答がブラウザへ返り、UI の `update` を経て画面が正しく更新されること。
 2. **境界防御と拒否の検証**:
    - 不正な入力（型不一致、篩型の違反）を含む要求が、400 Bad Request または 422 Unprocessable Content で拒否されること。
-   - 認証失敗（無効な Bearer トークン、期限切れ、異なる audience）の要求が、401 Unauthorized で拒否され、秘密や詳細が漏洩しないこと。
+   - 認証失敗（無効な Bearer トークン、期限切れ、異なる audience、トークン欠落）の要求が、401 Unauthorized で拒否され、秘密や詳細が漏洩しないこと。
    - 上限超過（サイズ超過、ネスト超過）が、413 Payload Too Large または 400 Bad Request で拒否されること。
 3. **秘密混入防止の検証**:
    - 生成された `dist/client/app.mjs` および静的資産ファイルを自動走査し、サーバー専用コード、DB 接続文字列、HMAC 署名鍵などの秘密情報が一切含まれていないことを自動テストで確認すること。

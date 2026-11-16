@@ -23,42 +23,44 @@
 
 新しい JSX 構文・効果カテゴリは加えない。`targets browser`、既存の関数の仕様四節・構造体・列挙型・総称型・篩型、リテラル・一覧・`match`・借用・局所代入・関数値・`move` クロージャを用いる。構文・型・標準操作の核は ADR 0039 決定 1 の許可一覧をそのまま含める（数値／Bool／String／Bytes／List／Option／Result／組／利用者型、契約、標準の文字列・一覧操作、console）。以下だけを追加する。
 
-`std.ui` は browser 専用の標準モジュールとし、公開名は `ui`。`Root` と `Mount` は複製・比較・共有・送信できない所有資源、`Node<E>` と `Attr<E>` は所有された宣言値とする。`Tag`・`InputKind`・`UiError` は閉じた列挙型、`Url` は検査済みの不透明な所有文字列。`E` は借用・関数・ホスト資源を含まないイベントの型とする。`M` も借用・ホスト資源を含まない所有型とし、コールバックをモデルに格納しない。関数値を型引数に直接入れない既存規則を維持する。
+`std.ui` は browser 専用の標準モジュールとし、関数の公開名前空間は `ui`。`UiRoot` と `UiMount` は複製・比較・共有・送信できない所有資源、`UiNode<E>` と `UiAttr<E>` は所有された宣言値とする。`UiTag`・`UiInputKind`・`UiError` は閉じた列挙型、`UiUrl` は検査済みの不透明な所有文字列。`E` は借用・関数・ホスト資源を含まないイベントの型とする。`M` も借用・ホスト資源を含まない所有型とし、コールバックをモデルに格納しない。関数値を型引数に直接入れない既存規則を維持する。
+
+型名は `Ui` 接頭辞付きの修飾しない名前に統一する（`UiError` もこの規則に含む）。[ADR 0021](0021-module-unit-and-visibility.md) 決定 3 と [ADR 0022](0022-type-identity-traits-and-function-types.md) 決定 1 のソース表記を維持し、一般的な型名と利用者型の衝突を減らす。列挙型の変種は `UiTag.Div`、標準関数は `ui.text` の形で書く。修飾した型名を認める構文は追加せず、ADR 0021／0022 の改訂は行わない。
 
 保存する関数は、既存の関数型をフィールドに置く規則（[ADR 0022](0022-type-identity-traits-and-function-types.md) 決定 3）で次の入れ物に収める。
 
 ```sigil
-struct Program<M, E> {
-  view: fn(&M) -> Node<E> effects none,
+struct UiProgram<M, E> {
+  view: fn(&M) -> UiNode<E> effects none,
   update: fn(&mut M, E) -> Unit effects none,
 }
-struct InputMap<E> {
+struct UiInputMap<E> {
   event: fn(String) -> E effects none,
 }
-struct CheckMap<E> {
+struct UiCheckMap<E> {
   event: fn(Bool) -> E effects none,
 }
 ```
 
-これらは `std.ui` 内の宣言の形であり、利用者は `ui.Program` 等で参照する。`Node`／`Attr` の内部表現は公開しない。借用の捕捉は禁止、保存する `move` クロージャの捕捉値は既存どおり Sendable・Shareable で不変、関数値自体は複製しない。API の対応一覧は次で閉じる。表の型引数・借用は通常の Sigil のもの、`none` は効果なしを表す。
+これらは `std.ui` 内の宣言の形であり、利用者も `UiProgram` 等の修飾しない型名で参照する。`UiNode`／`UiAttr` の内部表現は公開しない。借用の捕捉は禁止、保存する `move` クロージャの捕捉値は既存どおり Sendable・Shareable で不変、関数値自体は複製しない。API の対応一覧は次で閉じる。表の型引数・借用は通常の Sigil のもの、`none` は効果なしを表す。
 
 | 操作 | シグネチャ | 効果・条件 |
 |---|---|---|
-| テキスト | `ui.text<E>(value: String) -> Node<E>` | none。HTML として解釈しない |
+| テキスト | `ui.text<E>(value: String) -> UiNode<E>` | none。HTML として解釈しない |
 | 表示への変換 | `ui.display<T: Displayable>(value: &T) -> String` | none。console と同じ標準表示 |
-| 要素 | `ui.element<E>(tag: Tag, attrs: List<Attr<E>>, children: List<Node<E>>) -> Node<E>` | none。属性と子の適合は描画前に検査 |
-| 一覧 | `ui.fragment<E>(children: List<Node<E>>) -> Node<E>` | none。List の `map` やループで作る。key／差分 API は加えない |
-| 通常属性 | `ui.id<E>(String)`、`ui.class_name<E>(String)`、`ui.title<E>(String)`、`ui.label_for<E>(String)`、`ui.name<E>(String)`、`ui.placeholder<E>(String)` | すべて `-> Attr<E>`、none |
-| 型付き属性 | `ui.disabled<E>(Bool)`、`ui.checked<E>(Bool)`、`ui.required<E>(Bool)`、`ui.value<E>(String)`、`ui.input_kind<E>(InputKind)`、`ui.href<E>(Url)` | すべて `-> Attr<E>`、none |
-| クリック／送信 | `ui.on_click<E>(event: E)`、`ui.on_submit<E>(event: E)` | `-> Attr<E>`、none。`E: Copyable`、発火ごとにイベントを複製 |
-| 入力／チェック | `ui.on_input<E>(map: InputMap<E>)`、`ui.on_check<E>(map: CheckMap<E>)` | `-> Attr<E>`、none。保存した変換関数の上限は none |
-| URL の検査 | `ui.url(value: String) -> Result<Url, UiError>` | none。許可規則は決定 4 |
-| 描画開始 | `ui.mount<M,E>(root: Root, model: M, program: Program<M,E>) -> Result<Mount, UiError>` | dom。成功なら root・model・program を所有、失敗なら消費した値を破棄 |
-| 明示終了 | `ui.unmount(mount: Mount) -> Unit` | dom。登録解除して所有値を破棄 |
+| 要素 | `ui.element<E>(tag: UiTag, attrs: List<UiAttr<E>>, children: List<UiNode<E>>) -> UiNode<E>` | none。属性と子の適合は描画前に検査 |
+| 一覧 | `ui.fragment<E>(children: List<UiNode<E>>) -> UiNode<E>` | none。List の `map` やループで作る。key／差分 API は加えない |
+| 通常属性 | `ui.id<E>(String)`、`ui.class_name<E>(String)`、`ui.title<E>(String)`、`ui.label_for<E>(String)`、`ui.name<E>(String)`、`ui.placeholder<E>(String)` | すべて `-> UiAttr<E>`、none |
+| 型付き属性 | `ui.disabled<E>(Bool)`、`ui.checked<E>(Bool)`、`ui.required<E>(Bool)`、`ui.value<E>(String)`、`ui.input_kind<E>(UiInputKind)`、`ui.href<E>(UiUrl)` | すべて `-> UiAttr<E>`、none |
+| クリック／送信 | `ui.on_click<E>(event: E)`、`ui.on_submit<E>(event: E)` | `-> UiAttr<E>`、none。`E: Copyable`、発火ごとにイベントを複製 |
+| 入力／チェック | `ui.on_input<E>(map: UiInputMap<E>)`、`ui.on_check<E>(map: UiCheckMap<E>)` | `-> UiAttr<E>`、none。保存した変換関数の上限は none |
+| URL の検査 | `ui.url(value: String) -> Result<UiUrl, UiError>` | none。許可規則は決定 4 |
+| 描画開始 | `ui.mount<M,E>(root: UiRoot, model: M, program: UiProgram<M,E>) -> Result<UiMount, UiError>` | dom。成功なら root・model・program を所有、失敗なら消費した値を破棄 |
+| 明示終了 | `ui.unmount(mount: UiMount) -> Unit` | dom。登録解除して所有値を破棄 |
 
 引数名を省略した表の単一型引数は `value` を引数名とする。`ui` の全操作は通常どおり intent・requires・ensures・effects を持つ標準操作として登録し、上記は簡略シグネチャである。新しい構文や標準 API は本 PR には実装しない。
 
-`Tag` の腕は `Div, Span, P, H1, H2, Ul, Ol, Li, Button, Label, Input, Textarea, Form, A`、`InputKind` は `Text, Password, Checkbox, Submit, Button`。`UiError` は `InvalidTree, InvalidUrl, LimitExceeded, HostFailure`。任意タグ・任意属性・SVG・custom elements・生の DOM ノード・ファイル入力・contenteditable は未対応。セレクターで任意 DOM を取得する API も設けない。
+`UiTag` の腕は `Div, Span, P, H1, H2, Ul, Ol, Li, Button, Label, Input, Textarea, Form, A`、`UiInputKind` は `Text, Password, Checkbox, Submit, Button`。`UiError` は `InvalidTree, InvalidUrl, LimitExceeded, HostFailure`。任意タグ・任意属性・SVG・custom elements・生の DOM ノード・ファイル入力・contenteditable は未対応。セレクターで任意 DOM を取得する API も設けない。
 
 ## 決定 2: 純粋な view と明示的な更新
 
@@ -72,15 +74,15 @@ module counter
 struct Model { count: Int }
 enum Event { Increment }
 
-fn view(model: &Model) -> ui.Node<Event>
+fn view(model: &Model) -> UiNode<Event>
   intent "現在値と加算ボタンを表示する"
   requires none
   ensures none
   effects none
 {
-  return ui.element(ui.Tag.Div, [], [
+  return ui.element(UiTag.Div, [], [
     ui.text(ui.display(&model.count)),
-    ui.element(ui.Tag.Button, [ui.on_click(Event.Increment)], [ui.text("増やす")]),
+    ui.element(UiTag.Button, [ui.on_click(Event.Increment)], [ui.text("増やす")]),
   ]);
 }
 
@@ -95,13 +97,13 @@ fn update(model: &mut Model, event: Event) -> Unit
   }
 }
 
-fn main(root: ui.Root) -> Result<ui.Mount, ui.UiError>
+fn main(root: UiRoot) -> Result<UiMount, UiError>
   intent "所有された描画領域にカウンターを開始する"
   requires none
   ensures none
   effects dom
 {
-  return ui.mount(root, Model { count: 0 }, ui.Program { view: view, update: update });
+  return ui.mount(root, Model { count: 0 }, UiProgram { view: view, update: update });
 }
 ```
 
@@ -113,7 +115,7 @@ fn main(root: ui.Root) -> Result<ui.Mount, ui.UiError>
 
 ## 決定 3: イベントの寿命・再描画・破棄
 
-`Mount` が model・program・現行の木・イベント変換関数と捕捉値・DOM 登録を一意に所有する。DOM Event、target、JS の関数、借用は Sigil に渡さない。input の現在値を妥当性検査した String、checkbox を Bool にコピーする。クリックと submit は保存した E の複製を渡す。submit は常に `preventDefault` し、ブラウザの暗黙のフォーム送信を起こさない。on_click は Button、on_submit は Form、on_input は Input(Text/Password)／Textarea、on_check は Input(Checkbox) にだけ許可する。
+`UiMount` が model・program・現行の木・イベント変換関数と捕捉値・DOM 登録を一意に所有する。DOM Event、target、JS の関数、借用は Sigil に渡さない。input の現在値を妥当性検査した String、checkbox を Bool にコピーする。クリックと submit は保存した E の複製を渡す。submit は常に `preventDefault` し、ブラウザの暗黙のフォーム送信を起こさない。on_click は Button、on_submit は Form、on_input は Input(Text/Password)／Textarea、on_check は Input(Checkbox) にだけ許可する。
 
 初版は差分描画・key による同一性を保証しない。木を前順に描画し、更新時は古い登録を解除して root の子を置換する。入力中の操作を成立させるため、フォーカスと選択範囲は root 内の一意な `id` と適合する入力型が新旧で一致するときだけ復元する。value／checked は model から毎回設定し、入力直後に model へ反映する。IME の composition 中は中間 input を配送せず、compositionend の確定値を一回配送し、同じ確定を続く input で二重配送しない。マウント外のフォーカスを変更しない。
 
@@ -121,7 +123,7 @@ fn main(root: ui.Root) -> Result<ui.Mount, ui.UiError>
 
 新しい木を検査してから DOM を変更する。重複 id／不適合属性／上限超過は `InvalidTree`／`LimitExceeded`。初回は Result の Err、イベント中は停止として controller に記録する。update／view の契約違反・算術停止も停止とし、更新済み model をロールバックして継続しない。DOM 例外で一部反映した場合も、イベント登録をすべて解除して root を空にし、停止させる。最初の失敗を cleanup の二次失敗で上書きしない。
 
-`unmount` と controller の dispose は登録解除→DOM の切り離し→現行木と捕捉値・program・model の破棄→Root の権利解放を行う。通常のスコープ終了でも Mount の組み込み破棄で同じ cleanup を実行する。DOM を取り除く資源破棄には `dom` が必要で、暗黙 Drop の効果も呼び出し側に伝播させ完全一致検査する（メモリ解放自体に効果は加えない）。この契約を表すため必要な SIR の変更は実装前に別の契約変更 PR とする。
+`unmount` と controller の dispose は登録解除→DOM の切り離し→現行木と捕捉値・program・model の破棄→UiRoot の権利解放を行う。通常のスコープ終了でも UiMount の組み込み破棄で同じ cleanup を実行する。DOM を取り除く資源破棄には `dom` が必要で、暗黙 Drop の効果も呼び出し側に伝播させ完全一致検査する（メモリ解放自体に効果は加えない）。この契約を表すため必要な SIR の変更は実装前に別の契約変更 PR とする。
 
 所有値の Move／Drop／cleanup、部分移動・逆局所順・欄順・異常停止と `--trace-drops` は ADR 0039 決定 3 を維持する。GC／FinalizationRegistry に登録解除や捕捉値の破棄時点を委ねない。切り離された古いノードの通知・二重 dispose は無害で、破棄を二重実行しない。タブ強制終了／ホストのメモリ枯渇による cleanup 非保証は通常停止と区別する。
 
@@ -141,17 +143,17 @@ fn main(root: ui.Root) -> Result<ui.Mount, ui.UiError>
 
 Int は P2-1 と同じ i64 BigInt、検査算術・添字変換を維持する。Float は binary64 Number、NaN／±inf／-0 を維持し、表示は標準 Displayable、入力との変換を DOM／JS の暗黙の Number 変換に任せない。文字列 ABI も ADR 0039 決定 2 を維持し、妥当な UTF-16（Unicode スカラー列）、正規化なし、len はスカラー数、UTF-8 は厳格変換とする。DOM からの孤立サロゲートは置換せず境界失敗にする。補助平面・結合文字・改行をそのまま表示する。
 
-初版のマウント上限は木の深さ 256、Node 数 10000、各要素の属性数 32、単一文字列の UTF-8 サイズ 1 MiB、木全体の文字列合計 8 MiB、URL 4096 UTF-8 bytes とする。検査・描画・破棄は深さに応じた明示スタックを使い、JS スタックへの依存を避ける。DOM の選択範囲の UTF-16 添字は JS ホスト内の不透明な値で、Sigil の String.len／Int と混同しない。入力取り込みも割り当て前にサイズを検査する。
+初版のマウント上限は木の深さ 256、UiNode 数 10000、各要素の属性数 32、単一文字列の UTF-8 サイズ 1 MiB、木全体の文字列合計 8 MiB、URL 4096 UTF-8 bytes とする。検査・描画・破棄は深さに応じた明示スタックを使い、JS スタックへの依存を避ける。DOM の選択範囲の UTF-16 添字は JS ホスト内の不透明な値で、Sigil の String.len／Int と混同しない。入力取り込みも割り当て前にサイズを検査する。
 
 ## 決定 6: ホスト呼び出し・CLI・診断
 
-P2-1 の通常の `invoke(args, host)` と値 ABI を維持し、Root／Mount／Node／関数値をその汎用境界で受け渡さない。UI 用だけ明示モードを追加する。
+P2-1 の通常の `invoke(args, host)` と値 ABI を維持し、UiRoot／UiMount／UiNode／関数値をその汎用境界で受け渡さない。UI 用だけ明示モードを追加する。
 
 ```text
 sigil build --emit js --ui [--root <根>] [--trace-drops] <ファイル> <関数> -o <出力.mjs>
 ```
 
-`--ui` の入口は `fn(ui.Root) -> Result<ui.Mount, ui.UiError>`、effects dom の一つに限定し、引数の型・戻り値・効果を生成前に検査する。生成した module は `mount(rootElement, host)` を export し、一つの空の Element を Root として入口へ渡す。生成モジュールは document を暗黙取得せず、rootElement の ownerDocument だけを使う。rootElement は既存のマウントと重複せず、接続済み・同じ realm・空であることを検査する。html／head／body を root にしない。root の範囲外を変更する権利は渡さない。
+`--ui` の入口は `fn(UiRoot) -> Result<UiMount, UiError>`、effects dom の一つに限定し、引数の型・戻り値・効果を生成前に検査する。生成した module は `mount(rootElement, host)` を export し、一つの空の Element を UiRoot として入口へ渡す。生成モジュールは document を暗黙取得せず、rootElement の ownerDocument だけを使う。rootElement は既存のマウントと重複せず、接続済み・同じ realm・空であることを検査する。html／head／body を root にしない。root の範囲外を変更する権利は渡さない。
 
 戻りは同期 `{ok:true, controller}` または `{ok:false, failure}`。controller は JS 側の `dispose()` と `status()` のみを公開し、Sigil の値を外へ漏らさない。status は running／disposed／failed とコピーした failure 情報、dispose は冪等で同期の結果を返す。失敗の kind は P2-1 の entry／stop／host／internal を維持し、ui の Result の Err は kind=entry と UiError を含める。イベント中の失敗は status に保存し、新しいイベントを拒否する。イベントを任意 JS から注入する API は設けない。
 
@@ -159,7 +161,7 @@ DOM ホスト呼び出しは生成した閉じたアダプター内の createEle
 
 通常の --emit js は P2-1 のまま、--emit native と既定 native、--root の解決も維持。native の --ui、未知・重複・矛盾したオプション、不正な入口は終了 1、成功は 0。`sigil run` をブラウザ起動コマンドに変えない。HTML/CSS 自動生成・配信 CLI は足さない。
 
-通常の型・所有権・効果検査と SIR 検証後、生成前に入口・callback・契約・cleanup の依存閉包を走査する。未対応の型／操作／効果は位置・依存元・出力先 js を含めて診断し、部分成果物を残さず既存出力も上書きしない。Shared／Cell・通信・待機、サーバー専用操作、未対応イベントと任意属性をダミー値や別出力への fallback で補わない。Node の意味検査は描画前、静的に不正と判定できるものは生成前に診断する。
+通常の型・所有権・効果検査と SIR 検証後、生成前に入口・callback・契約・cleanup の依存閉包を走査する。未対応の型／操作／効果は位置・依存元・出力先 js を含めて診断し、部分成果物を残さず既存出力も上書きしない。Shared／Cell・通信・待機、サーバー専用操作、未対応イベントと任意属性をダミー値や別出力への fallback で補わない。UiNode の意味検査は描画前、静的に不正と判定できるものは生成前に診断する。
 
 ## 決定 7: P2-2 の完了の確かめ方
 
@@ -375,6 +377,53 @@ Chromium／Firefox／WebKit で最低対応版を記録し、同じ三例を Nod
   "usage": {
     "input_tokens": 9091,
     "output_tokens": 153
+  }
+}
+```
+
+## 型名のレビュー対応と正式判定（2026-11-17 JST）
+
+[PR #558 のレビュー指摘](https://github.com/goodnasubi/sigil/pull/558#issuecomment-6923565701) に対し、型名を `Ui` 接頭辞付きの修飾なし名へ統一する案 (a) を採用した。理由は決定 1 のとおり。typesafe-ai（jev-1.13.0）は `prefixed_unqualified` を選び、確率 0.99、confidence 0.98。判定は正しさの証明ではない。Gemini Decisions は使用していない。
+
+上の初回・最終案の入力と応答は、その時点の実記録として変更していない。そこに残る旧型名・修飾名は現行の決定ではなく、型名の決定・表・例は本対応後の本文を参照する。
+
+### 型名判断の入力
+
+```json
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様だけをレビューする言語。書いたものから意味が一つに決まること、既存ADRの整合性、今回の範囲を優先する。所有者はPR #558のhead 73232c89へのレビュー要修正1点だけを対象ブランチで直し、新規PRとマージを行わず、範囲外は報告するよう指定した。対象差分はADR0040と索引一行。ADR0021決定3は名前を一つずつ取り込むU1を採用し、修飾はType.method/列挙変種との区別が難しいとしてU2/U3を却下。ADR0022決定1は型の同一性をモジュールと名前の組にするI2を採用するが、ソースは修飾しない型名のみ、別名と修飾構文は追加しない。既存標準型はHttpResponse/PgConn/AppRequestのように接頭辞を使う。ADR0040はstd.uiの型をNode/Attr/Tag/InputKind/Url/Root/Mount/Program/InputMap/CheckMap/UiErrorとし、例ではui.Nodeやui.Tag.Div等を使っており矛盾する。レビューは(a)型をUi接頭辞付きの修飾なし名に統一して例と表を直す、または(b)修飾型名を認める別判断としてADR0021/0022改訂を明示する、のどちらかを求めた。UI APIの関数ui.text等は標準の名前空間付き関数として維持できる。一般的なNode等と利用者型の衝突は接頭辞で減らせる。修飾構文を足す案は名前解決・構文の設計判断を広げる。既存の正式判定入力/応答は歴史的記録として保持し今回の判断入力/応答を追記する。",
+  "questions": {
+    "TypeNames": {
+      "type": "choice",
+      "criteria": {
+        "prefixed_unqualified": "(a) UiNode/UiAttr/UiTag/UiInputKind/UiUrl/UiRoot/UiMount/UiProgram/UiInputMap/UiCheckMap/UiErrorへ統一し、決定・表・例を修正する。既存ADRのソース表記を維持し、ui.*関数はそのまま。",
+        "qualified_revision": "(b) ui.Node等の修飾型名を認めるためADR0021/0022の改訂を別の判断として明示する。構文と名前解決の新設を伴う。"
+      }
+    }
+  }
+}
+```
+
+### 型名判断の応答
+
+```json
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "TypeNames": {
+      "type": "choice",
+      "choice": "prefixed_unqualified",
+      "confidence": 0.98,
+      "probabilities": {
+        "prefixed_unqualified": 0.99,
+        "qualified_revision": 0.01
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 1025,
+    "output_tokens": 41
   }
 }
 ```

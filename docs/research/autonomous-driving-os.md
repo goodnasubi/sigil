@@ -152,7 +152,7 @@ Linux は PREEMPT_RT により firm real-time 相当の用途が広がったが�
 
 ### 4.3 fault tolerance と冗長化
 
-Level 3 以上では driver の fallback が期待できないため、system 側が故障時に安全を保つ（fail-operational に近い要求）場面が増える。代表的な手段は次である。
+Level 3 と Level 4 以上では、fallback の責任の置き場が異なる。Level 3 は、介入要求や故障への応答を担う fallback-ready user の存在を前提とする（SAE J3016）。system は引き継ぎが成立するまでの間、安全を保ち続けなければならない。一方、人の介入を期待せず system 自身が fallback を担うのは Level 4/5 で、この場合は fail-operational に近い要求が全面に出る。引き継ぎ条件を前提にできるか、自動 fallback が必須かで、冗長化の要求も変わる。代表的な手段は次である。
 
 - **冗長な計算経路**: NVIDIA Hyperion の dual SoC 構成のように、同じ入力を 2 系統で処理し、異常時に切り替える。ASIL 分解（ASIL decomposition）の考え方で、冗長な低 ASIL 要素の組み合わせにより高 ASIL を達成する設計も ISO 26262 の枠内にある。
 - **safety monitor / plausibility check**: AI の推論結果を、単純で検証可能な rule-based な検査で監視する dual-channel 構成（Green Hills の提案等）。複雑な stack 全体を認証する代わりに、監視側を小さく認証可能に保つ。

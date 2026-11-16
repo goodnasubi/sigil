@@ -137,9 +137,9 @@ Linux の安全用途への広がり方は、業界を問わず次の 3 形に�
 
 1. **隔離型**: hypervisor / separation kernel の guest として Linux を閉じ込め、安全機能は外の partition に置く（自動車の Halos 構成、robot の Halos for Robotics）。
 2. **監視型**: Linux の外に高信頼の monitor を置き、Linux の異常を検出して安全状態へ移す（EB corbos Linux の外部監視、産業の virtual safety controller の二重化 encoding）。
-3. **限定型（SEooC）**: 構成と hardware を固定した Linux distribution を Safety Element out of Context として認証する（Red Hat In-Vehicle Operating System の ASIL B。Linux Foundation の ELISA project がこの道の process と tool を整備している）。
+3. **限定・認証型（SEooC）**: 構成と hardware を固定した Linux distribution を Safety Element out of Context として認証する（Red Hat In-Vehicle Operating System の ASIL B。Linux Foundation の ELISA project がこの道の process と tool を整備している）。この形では、認証済みの Linux kernel 自体が memory・実行時間等の分離を担い、安全機能はその kernel 上で動く。
 
-いずれの形でも、**Linux 自体が安全を担うのではなく、安全は Linux の外側の小さな層が担う**。この「外側の小さな層」こそ、Sigil のような言語が入るべき場所の定義になっている。
+ただし 3 の認証型は、1・2 と構造が異なる。隔離型と監視型では安全を Linux の外側の小さな層が担うのに対し、認証型では認証済みの Linux 自体が分離を担い、安全機能はその上で動く。SEooC は「安全責務を外部の monitor へ移す」構成を意味しない。したがって Sigil の入るべき場所は「Linux の外側」だけではない。外側の小さな層に加えて、認証済み Linux の上で動く安全アプリケーションも適用先になり得る。いずれの場合も共通するのは、入るべき層が小さく検証可能でなければならないという点である。
 
 ### 4.3 認証は process と証跡の商品である
 

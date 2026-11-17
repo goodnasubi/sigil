@@ -409,7 +409,7 @@ impl<'a> L<'a> {
         if self
             .types
             .iter()
-            .any(|t| crate::stdlib::NET_FD_TYPES.contains(&t.name.as_str()))
+            .any(|t| crate::stdlib::FD_TYPES.contains(&t.name.as_str()))
         {
             if let Some(&d) = self.fns.get(crate::stdlib::embedded::NET_CLOSE_FN) {
                 self.instance(d, HashMap::new(), vec![]);
@@ -466,7 +466,7 @@ impl<'a> L<'a> {
     pub(super) fn owns_fd(&self, t: &ir::Ty, seen: &mut Vec<usize>) -> bool {
         match t {
             ir::Ty::Adt(id) => {
-                if crate::stdlib::NET_FD_TYPES.contains(&self.types[*id].name.as_str()) {
+                if crate::stdlib::FD_TYPES.contains(&self.types[*id].name.as_str()) {
                     return true;
                 }
                 if seen.contains(id) {
@@ -723,6 +723,15 @@ impl<'a> L<'a> {
                     v("NotFound", vec![ir::Ty::Path]),
                     v("PermissionDenied", vec![ir::Ty::Path]),
                     v("Other", vec![ir::Ty::Path]),
+                    v("AlreadyExists", vec![ir::Ty::Path]),
+                    v("DirectoryNotEmpty", vec![ir::Ty::Path]),
+                    v("Busy", vec![ir::Ty::Path]),
+                    v("InvalidInput", vec![ir::Ty::Path]),
+                    v("LimitExceeded", vec![ir::Ty::Path]),
+                    v("NotSameFileSystem", vec![ir::Ty::Path]),
+                    v("IsADirectory", vec![ir::Ty::Path]),
+                    v("NotADirectory", vec![ir::Ty::Path]),
+                    v("InvalidPath", vec![ir::Ty::Path]),
                 ],
             },
             "BinaryIoError" => {

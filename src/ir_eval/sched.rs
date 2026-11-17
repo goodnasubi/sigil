@@ -370,6 +370,20 @@ impl Sched {
         self.locks.len() - 1
     }
 
+    /// 終了時に保持している全ハンドル・値を明示的に破棄する（chunks 管理表の破棄前にクリーンアップする）。
+    pub(super) fn clear_handles(&mut self) {
+        self.tasks.clear();
+        self.ready.clear();
+        self.scopes.clear();
+        self.chans.clear();
+        self.locks.clear();
+        self.roots.clear();
+        self.results.clear();
+        self.groups.clear();
+        self.started.clear();
+        self.io_waiters.clear();
+    }
+
     /// 生きている枠の数。
     pub(super) fn live_frames(&self) -> usize {
         self.live

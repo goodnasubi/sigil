@@ -4,6 +4,7 @@ use crate::shared_path as spath;
 use crate::shared_text::{self as stext};
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::value::{
@@ -812,15 +813,29 @@ impl<'p> M<'p> {
                 let path = self.text_of(locals, &args[0]);
                 let max = self.read_int(locals, &args[1]);
                 let result = bio::validate(&path, max).and_then(|cap| match &self.fs_bytes {
-                    Some(files) => match self
-                        .fs_bytes_written
-                        .get(&*path)
-                        .or_else(|| files.get(&*path))
-                    {
-                        Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
-                        Some(_) => Err(bio::Error::TooLarge),
-                        None => Err(bio::Error::Io(std::io::ErrorKind::NotFound.into())),
-                    },
+                    Some(files) => {
+                        let p_clean = path.trim_start_matches('/');
+                        if self.fs_bytes_deleted.contains(&*path)
+                            || self.fs_bytes_deleted.contains(p_clean)
+                            || self.fs_bytes_deleted.contains(&format!("/{}", p_clean))
+                        {
+                            Err(bio::Error::Io(std::io::ErrorKind::NotFound.into()))
+                        } else {
+                            match self
+                                .fs_bytes_written
+                                .get(&*path)
+                                .or_else(|| self.fs_bytes_written.get(p_clean))
+                                .or_else(|| self.fs_bytes_written.get(&format!("/{}", p_clean)))
+                                .or_else(|| files.get(&*path))
+                                .or_else(|| files.get(p_clean))
+                                .or_else(|| files.get(&format!("/{}", p_clean)))
+                            {
+                                Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
+                                Some(_) => Err(bio::Error::TooLarge),
+                                None => Err(bio::Error::Io(std::io::ErrorKind::NotFound.into())),
+                            }
+                        }
+                    }
                     None => bio::read(&path, cap),
                 });
                 match result {
@@ -844,6 +859,11 @@ impl<'p> M<'p> {
                         }
                         match &self.fs_bytes {
                             Some(_) => {
+                                let p_clean = path.trim_start_matches('/');
+                                self.fs_bytes_deleted.remove(&*path);
+                                self.fs_bytes_deleted.remove(p_clean);
+                                self.fs_bytes_deleted.remove(&format!("/{}", p_clean));
+                                self.record_fs_parent_dirs(&path);
                                 self.fs_bytes_written
                                     .insert(path.to_string(), bytes.clone());
                                 Ok(())
@@ -1182,6 +1202,18 @@ impl<'p> M<'p> {
                             }
                         }
                     }
+                } else if (self.fs.is_some() || self.fs_bytes.is_some())
+                    && matches!(
+                        n,
+                        SYS_OPENAT
+                            | SYS_MKDIRAT
+                            | SYS_NEWFSTATAT
+                            | SYS_UNLINKAT
+                            | SYS_GETDENTS64
+                            | SYS_FLOCK
+                    )
+                {
+                    self.eval_fs_double_syscall(n, [a0, a1, a2, a3, a4, a5])
                 } else {
                     issue_syscall(n, [a0, a1, a2, a3, a4, a5])
                 };
@@ -1495,6 +1527,43 @@ impl<'p> M<'p> {
             SYS_OPENAT | SYS_UNLINKAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
             }
+            SYS_MKDIRAT => {
+                if a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall mkdirat: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                self.check_path(addr_of(a[1], "path")?, loc)?;
+            }
+            SYS_GETDENTS64 => {
+                if a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall getdents64: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                if a[2] < 0 || a[2] > 65536 {
+                    return Err(self
+                        .syscall_stop(loc, "raw.syscall getdents64: count は 0 以上 65536 以下"));
+                }
+                if a[2] > 0 {
+                    let dirp = addr_of(a[1], "dirp")?;
+                    self.check_raw_access(dirp, a[2] as usize, loc)?;
+                }
+            }
+            SYS_FLOCK => {
+                if a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall flock: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                let allowed_ops = LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN;
+                if a[1] & !allowed_ops != 0 || (a[1] & (LOCK_SH | LOCK_EX | LOCK_UN) == 0) {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall flock: operation は LOCK_SH/LOCK_EX/LOCK_NB/LOCK_UN の組み合わせのみ許可",
+                    ));
+                }
+            }
             SYS_FSTAT => {
                 self.check_raw_access(addr_of(a[1], "statbuf")?, STAT_SIZE, loc)?;
             }
@@ -1580,6 +1649,249 @@ impl<'p> M<'p> {
             _ => "".into(),
         })
     }
+
+    /// NUL 終端アドレスから String を読む。
+    fn path_string(&self, addr: usize) -> String {
+        let mut p = addr;
+        let mut bytes = Vec::new();
+        while unsafe { *(p as *const u8) } != 0 {
+            bytes.push(unsafe { *(p as *const u8) });
+            p += 1;
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn is_mock_file(&self, p: &str) -> bool {
+        let p_clean = p.trim_start_matches('/');
+        let in_fs = self.fs.as_ref().is_some_and(|files| {
+            files.contains_key(p)
+                || files.contains_key(p_clean)
+                || files.contains_key(&format!("/{}", p_clean))
+        });
+        let in_written = self.fs_bytes_written.contains_key(p)
+            || self.fs_bytes_written.contains_key(p_clean)
+            || self.fs_bytes_written.contains_key(&format!("/{}", p_clean));
+        let in_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
+            files.contains_key(p)
+                || files.contains_key(p_clean)
+                || files.contains_key(&format!("/{}", p_clean))
+        });
+        let is_deleted = self.fs_bytes_deleted.contains(p)
+            || self.fs_bytes_deleted.contains(p_clean)
+            || self.fs_bytes_deleted.contains(&format!("/{}", p_clean));
+        in_fs || (in_written && !is_deleted) || (in_bytes && !is_deleted)
+    }
+
+    pub(super) fn record_fs_parent_dirs(&mut self, path: &str) {
+        let clean = path.trim_matches('/');
+        let mut cur = clean;
+        while let Some(parent) = std::path::Path::new(cur).parent() {
+            let p_str = parent.to_str().unwrap_or("");
+            if p_str.is_empty() {
+                break;
+            }
+            self.fs_dirs.insert(p_str.to_string());
+            self.fs_dirs.insert(format!("/{}", p_str));
+            cur = p_str;
+        }
+    }
+
+    fn is_mock_dir(&self, p: &str) -> bool {
+        let p_clean = p.trim_matches('/');
+        if p_clean.is_empty() {
+            return true;
+        }
+        if self.fs_dirs.contains(p_clean) || self.fs_dirs.contains(&format!("/{}", p_clean)) {
+            return true;
+        }
+        let prefix = format!("{}/", p_clean);
+        let in_fs = self.fs.as_ref().is_some_and(|files| {
+            files
+                .keys()
+                .any(|k| k.trim_matches('/').starts_with(&prefix))
+        });
+        let in_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
+            files.keys().any(|k| {
+                let k_clean = k.trim_matches('/');
+                k_clean.starts_with(&prefix)
+                    && !self.fs_bytes_deleted.contains(k)
+                    && !self.fs_bytes_deleted.contains(k_clean)
+            })
+        });
+        let in_written = self.fs_bytes_written.keys().any(|k| {
+            let k_clean = k.trim_matches('/');
+            k_clean.starts_with(&prefix)
+                && !self.fs_bytes_deleted.contains(k)
+                && !self.fs_bytes_deleted.contains(k_clean)
+        });
+        let in_dirs = self.fs_dirs.iter().any(|d| {
+            let d_clean = d.trim_matches('/');
+            d_clean != p_clean && d_clean.starts_with(&prefix)
+        });
+        in_fs || in_bytes || in_written || in_dirs
+    }
+
+    /// テスト差し替え（fs_files / fs_bytes）下の疑似システムコール処理（ADR 0049 決定 5）。
+    /// 未対応操作は fail-closed（-95: EOPNOTSUPP）で拒否する。
+    fn eval_fs_double_syscall(&mut self, n: i64, a: [i64; 6]) -> i64 {
+        match n {
+            SYS_UNLINKAT => {
+                let p = self.path_string(a[1] as usize);
+                let p_clean = p.trim_matches('/');
+                if a[2] == 512 {
+                    if self.is_mock_file(&p) {
+                        -20 // ENOTDIR: ファイルを rmdir しようとした
+                    } else if !self.is_mock_dir(&p) {
+                        -2 // ENOENT: ディレクトリが存在しない
+                    } else {
+                        let prefix = format!("{}/", p_clean);
+                        let mut has_children = false;
+                        if let Some(files) = &self.fs {
+                            has_children |= files
+                                .keys()
+                                .any(|k| k.trim_matches('/').starts_with(&prefix));
+                        }
+                        if let Some(files) = &self.fs_bytes {
+                            has_children |= files.keys().any(|k| {
+                                let k_clean = k.trim_matches('/');
+                                k_clean.starts_with(&prefix)
+                                    && !self.fs_bytes_deleted.contains(k)
+                                    && !self.fs_bytes_deleted.contains(k_clean)
+                            });
+                        }
+                        has_children |= self.fs_bytes_written.keys().any(|k| {
+                            let k_clean = k.trim_matches('/');
+                            k_clean.starts_with(&prefix)
+                                && !self.fs_bytes_deleted.contains(k)
+                                && !self.fs_bytes_deleted.contains(k_clean)
+                        });
+                        has_children |= self.fs_dirs.iter().any(|d| {
+                            let d_clean = d.trim_matches('/');
+                            d_clean != p_clean && d_clean.starts_with(&prefix)
+                        });
+                        if has_children {
+                            -39 // ENOTEMPTY
+                        } else {
+                            self.fs_dirs.remove(p_clean);
+                            self.fs_dirs.remove(&format!("/{}", p_clean));
+                            0
+                        }
+                    }
+                } else {
+                    let mut removed = false;
+                    if let Some(files) = &mut self.fs {
+                        removed |= files.remove(&p).is_some()
+                            || files.remove(p_clean).is_some()
+                            || files.remove(&format!("/{}", p_clean)).is_some();
+                    }
+                    let had_written = self.fs_bytes_written.remove(&p).is_some()
+                        || self.fs_bytes_written.remove(p_clean).is_some()
+                        || self
+                            .fs_bytes_written
+                            .remove(&format!("/{}", p_clean))
+                            .is_some();
+                    let in_initial_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
+                        files.contains_key(&p)
+                            || files.contains_key(p_clean)
+                            || files.contains_key(&format!("/{}", p_clean))
+                    });
+                    let already_deleted = self.fs_bytes_deleted.contains(&p)
+                        || self.fs_bytes_deleted.contains(p_clean)
+                        || self.fs_bytes_deleted.contains(&format!("/{}", p_clean));
+                    let had_bytes = (had_written || in_initial_bytes) && !already_deleted;
+                    if had_bytes {
+                        self.fs_bytes_deleted.insert(p.clone());
+                        self.fs_bytes_deleted.insert(p_clean.to_string());
+                        self.fs_bytes_deleted.insert(format!("/{}", p_clean));
+                    }
+                    removed |= had_bytes;
+                    if removed {
+                        0
+                    } else if self.fs.is_some() || self.fs_bytes.is_some() {
+                        -2 // ENOENT: 差し替え下でファイルが存在しない
+                    } else {
+                        // どちらも設定されていない場合は fail-closed
+                        -95 // EOPNOTSUPP
+                    }
+                }
+            }
+            SYS_MKDIRAT => {
+                let p = self.path_string(a[1] as usize);
+                let p_clean = p.trim_matches('/');
+                if self.is_mock_file(&p) || self.is_mock_dir(&p) {
+                    -17 // EEXIST: 既にファイルまたはディレクトリが存在する
+                } else {
+                    if let Some(parent) = std::path::Path::new(p_clean).parent() {
+                        let parent_str = parent.to_str().unwrap_or("");
+                        if !parent_str.is_empty() && !self.is_mock_dir(parent_str) {
+                            return -2; // ENOENT: 親ディレクトリが存在しない
+                        }
+                    }
+                    self.fs_dirs.insert(p_clean.to_string());
+                    self.fs_dirs.insert(format!("/{}", p_clean));
+                    0
+                }
+            }
+            SYS_NEWFSTATAT => {
+                let p = self.path_string(a[1] as usize);
+                let p_clean = p.trim_start_matches('/');
+                let statbuf = a[2] as usize as *mut u8;
+                let mut found_len = None;
+                if let Some(files) = &self.fs {
+                    if let Some(s) = files
+                        .get(&p)
+                        .or_else(|| files.get(p_clean))
+                        .or_else(|| files.get(&format!("/{}", p_clean)))
+                    {
+                        found_len = Some(s.len() as i64);
+                    }
+                }
+                let is_deleted = self.fs_bytes_deleted.contains(&p)
+                    || self.fs_bytes_deleted.contains(p_clean)
+                    || self.fs_bytes_deleted.contains(&format!("/{}", p_clean));
+                if found_len.is_none() && !is_deleted {
+                    if let Some(b) = self
+                        .fs_bytes_written
+                        .get(&p)
+                        .or_else(|| self.fs_bytes_written.get(p_clean))
+                        .or_else(|| self.fs_bytes_written.get(&format!("/{}", p_clean)))
+                    {
+                        found_len = Some(b.len() as i64);
+                    } else if let Some(files) = &self.fs_bytes {
+                        if let Some(b) = files
+                            .get(&p)
+                            .or_else(|| files.get(p_clean))
+                            .or_else(|| files.get(&format!("/{}", p_clean)))
+                        {
+                            found_len = Some(b.len() as i64);
+                        }
+                    }
+                }
+
+                if let Some(len) = found_len {
+                    unsafe {
+                        std::ptr::write_bytes(statbuf, 0, STAT_SIZE);
+                        *(statbuf.add(24) as *mut i64) = 32768 | 0o644;
+                        *(statbuf.add(48) as *mut i64) = len;
+                    }
+                    0
+                } else if self.is_mock_dir(&p) {
+                    unsafe {
+                        std::ptr::write_bytes(statbuf, 0, STAT_SIZE);
+                        *(statbuf.add(24) as *mut i64) = 16384 | 0o755;
+                        *(statbuf.add(48) as *mut i64) = 4096;
+                    }
+                    0
+                } else {
+                    -2 // ENOENT
+                }
+            }
+            // ADR 0049 決定 5: 差し替え下でシミュレーション不可能な操作（OFD ロック、生 fd 露出、生ディレクトリエントリ）は
+            // 暗黙の偽装を行わず fail-closed（-95: EOPNOTSUPP）で明示的に拒否する。
+            SYS_FLOCK | SYS_OPENAT | SYS_GETDENTS64 => -95,
+            _ => -95,
+        }
+    }
 }
 
 /// システムコールを発行する（`raw.syscall` の実体。引数の検証は呼び出し側が済ませる）。Linux x86-64 以外では -1。
@@ -1609,10 +1921,59 @@ fn issue_syscall(n: i64, a: [i64; 6]) -> i64 {
     ret
 }
 
-/// fd を閉じる（`close(2)`。失敗は捨てる）。fd を所有する値（`TcpListener`・`TcpStream`）の破棄からだけ呼ぶ
-/// （`value::close_owned_fd`。ADR 0031 決定 3-1）。`close` は許可表にある番号で、番地を取らない。
+/// fd を閉じる（`close(2)`。失敗は捨てる）。fd を所有する値（`TcpListener`・`TcpStream`・`File`・`Dir`）の破棄からだけ呼ぶ
+/// （`value::close_owned_fd`。ADR 0031 決定 3-1、ADR 0049 決定 1-1）。`close` は許可表にある番号で、番地を取らない。
 pub(super) fn close_fd(fd: i64) {
-    let _ = issue_syscall(SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
+    if fd >= 0 {
+        let _ = issue_syscall(SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
+    }
+}
+
+thread_local! {
+    static ACTIVE_CHUNKS: std::cell::Cell<*mut BTreeMap<usize, Chunk>> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+pub(super) struct ChunksScope {
+    prev: *mut BTreeMap<usize, Chunk>,
+}
+
+impl ChunksScope {
+    pub(super) fn enter(chunks: &mut BTreeMap<usize, Chunk>) -> Self {
+        let prev = ACTIVE_CHUNKS.with(|c| {
+            let old = c.get();
+            c.set(chunks as *mut _);
+            old
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for ChunksScope {
+    fn drop(&mut self) {
+        ACTIVE_CHUNKS.with(|c| c.set(self.prev));
+    }
+}
+
+/// Dir ハンドルの破棄で列挙バッファを解放する（value::close_owned_fd、ADR 0049 決定 1-1）。
+pub(super) fn free_dir_buf(addr: usize) {
+    if addr == 0 {
+        return;
+    }
+    ACTIVE_CHUNKS.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            unsafe {
+                if let Some(chunk) = (*ptr).remove(&addr) {
+                    if chunk.origin == Origin::Alloc {
+                        let layout =
+                            std::alloc::Layout::from_size_align_unchecked(chunk.size, chunk.align);
+                        std::alloc::dealloc(addr as *mut u8, layout);
+                    }
+                }
+            }
+        }
+    });
 }
 
 const PAGE: usize = 4096;
@@ -1627,9 +1988,16 @@ const SYS_RT_SIGPROCMASK: i64 = 14;
 const SYS_SIGNALFD4: i64 = 289;
 const SHUTDOWN_MASK: u64 = (1 << (15 - 1)) | (1 << (2 - 1));
 const SYS_EXIT_GROUP: i64 = 231;
+const SYS_FLOCK: i64 = 73;
+const SYS_GETDENTS64: i64 = 217;
 const SYS_OPENAT: i64 = 257;
+const SYS_MKDIRAT: i64 = 258;
 const SYS_NEWFSTATAT: i64 = 262;
 const SYS_UNLINKAT: i64 = 263;
+const LOCK_SH: i64 = 1;
+const LOCK_EX: i64 = 2;
+const LOCK_NB: i64 = 4;
+const LOCK_UN: i64 = 8;
 const SYS_SOCKET: i64 = 41;
 const SYS_CONNECT: i64 = 42;
 const SYS_GETSOCKOPT: i64 = 55;

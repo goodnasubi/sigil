@@ -260,12 +260,17 @@ impl Ck {
                 {
                     Some(false)
                 }
-                // fd を所有する型（ADR 0031 決定 3-1）。ハンドラのタスクへ移せる（`Sendable`）が、複数のタスクが
+                // fd を所有する型（ADR 0031 決定 3-1、ADR 0049 決定 1-1）。ハンドラのタスクへ移せる（`Sendable`）が、複数のタスクが
                 // 同じ接続を同時に読み書きできない（`Shareable` でない）。複製・比較・表示も持たない。
                 Some(TypeDef::Opaque(_))
                     if matches!(
                         n.as_str(),
-                        "ShutdownSignal" | "TcpListener" | "TcpStream" | "TcpClient"
+                        "ShutdownSignal"
+                            | "TcpListener"
+                            | "TcpStream"
+                            | "TcpClient"
+                            | "File"
+                            | "Dir"
                     ) =>
                 {
                     Some(p == Prop::Sendable)
@@ -289,6 +294,8 @@ impl Ck {
                             | "PgParam"
                             | "PgColumn"
                             | "PgResult"
+                            | "OpenOptions"
+                            | "DirEntry"
                     ) =>
                 {
                     Some(matches!(p, Prop::Sendable | Prop::Shareable))

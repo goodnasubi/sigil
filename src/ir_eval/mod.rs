@@ -18,7 +18,7 @@ use crate::exec::{Arg, Failure, Options, Outcome, RunError, Stop, StopKind};
 use crate::ir::*;
 use crate::shared_args::arg_name;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use value::{
@@ -56,14 +56,14 @@ struct M<'p> {
     fs: Option<BTreeMap<String, String>>,
     fs_bytes: Option<&'p BTreeMap<String, Vec<u8>>>,
     fs_bytes_written: BTreeMap<String, Vec<u8>>,
+    fs_bytes_deleted: BTreeSet<String>,
+    fs_dirs: BTreeSet<String>,
     env: Option<BTreeMap<String, String>>,
     canon: Vec<usize>,
     opt: usize,
     res: usize,
     io: usize,
     binary_io: usize,
-    /// 確保済みチャンクの境界情報（番地 -> 塊。由来タグ付き。ADR 0025 補足 A-3）
-    chunks: BTreeMap<usize, Chunk>,
     sch: sched::Sched,
     /// 次に積む枠が範囲の本体なら、その範囲の番号。
     pending_scope: Option<usize>,
@@ -71,6 +71,9 @@ struct M<'p> {
     globals: Vec<Slot>,
     /// 壁時計取得のテスト用の差し替え（ADR 0037 段階 6-6a）。
     wall_clock: Option<Result<i64, i64>>,
+    /// 確保済みチャンクの境界情報（番地 -> 塊。由来タグ付き。ADR 0025 補足 A-3）。
+    /// スケジューラ内の全ハンドル（Lock 等）や大域変数が破棄された後に解放されるよう末尾に置く。
+    chunks: BTreeMap<usize, Chunk>,
 }
 
 impl<'p> M<'p> {
@@ -437,6 +440,8 @@ fn execute_roots(
         fs: opts.fs_files.clone(),
         fs_bytes: opts.fs_bytes.as_ref(),
         fs_bytes_written: BTreeMap::new(),
+        fs_bytes_deleted: BTreeSet::new(),
+        fs_dirs: BTreeSet::new(),
         env: opts.env_vars.clone(),
         wall_clock: opts.wall_clock,
         opt: find("Option"),
@@ -449,6 +454,17 @@ fn execute_roots(
         pending_scope: None,
         globals: vec![],
     };
+    if let Some(files) = &opts.fs_files {
+        for k in files.keys() {
+            m.record_fs_parent_dirs(k);
+        }
+    }
+    if let Some(files) = &opts.fs_bytes {
+        for k in files.keys() {
+            m.record_fs_parent_dirs(k);
+        }
+    }
+    let _chunks_scope = call::ChunksScope::enter(&mut m.chunks);
     m.globals = program
         .globals
         .iter()
@@ -536,6 +552,9 @@ fn execute_roots(
             m.chunks.len()
         );
     }
+    m.globals.clear();
+    m.sch.clear_handles();
+    drop(_chunks_scope);
     drop(m);
     let drops = DROP_LOG.with(|l| l.borrow_mut().take()).unwrap_or_default();
     match res {

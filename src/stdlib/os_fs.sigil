@@ -354,3 +354,1292 @@ pub fn write_bytes(pp: Addr, pl: Int, dp: Addr, dl: Int, max: Int, kind: Addr) -
   }
   return 1;
 }
+
+// =========================================================================
+// fs 境界の実装 A「資源・名前・排他」（ADR 0049 決定 1・2・4）
+// =========================================================================
+
+fn unit()
+  intent "Unit の値を作る"
+  requires none
+  ensures none
+  effects none
+{
+}
+
+fn classify_io(r: Int, p: &Path) -> IoError
+  intent "負の errno（-r）を IoError（NotFound/PermissionDenied/AlreadyExists/DirectoryNotEmpty等）にする"
+  requires none
+  ensures none
+  effects none
+{
+  if r == -2 {
+    return IoError.NotFound(p.clone());
+  }
+  if r == -13 || r == -1 || r == -40 {
+    return IoError.PermissionDenied(p.clone());
+  }
+  if r == -17 {
+    return IoError.AlreadyExists(p.clone());
+  }
+  if r == -39 {
+    return IoError.DirectoryNotEmpty(p.clone());
+  }
+  if r == -11 {
+    return IoError.Busy(p.clone());
+  }
+  if r == -21 {
+    return IoError.IsADirectory(p.clone());
+  }
+  if r == -20 {
+    return IoError.NotADirectory(p.clone());
+  }
+  if r == -22 {
+    return IoError.InvalidInput(p.clone());
+  }
+  if r == -18 {
+    return IoError.NotSameFileSystem(p.clone());
+  }
+  if r == -27 || r == -28 || r == -75 || r == -122 {
+    return IoError.LimitExceeded(p.clone());
+  }
+  return IoError.Other(p.clone());
+}
+
+fn check_component_stat(current_fd: Int, sub_buf: Addr, err: Int) -> Int
+  intent "中間構成要素の openat 失敗時、symlink なら -40 (ELOOP: PermissionDenied) に分類する"
+  requires none
+  ensures none
+  effects fs
+  unchecked "newfstatat(262) で AT_SYMLINK_NOFOLLOW(256) を指定して st_mode を確認する"
+{
+  if err == -20 {
+    let stat_buf = raw.alloc(144, 8);
+    let mut st = -4;
+    while st == -4 {
+      st = raw.syscall(262, current_fd, raw.addr_to_int(sub_buf), raw.addr_to_int(stat_buf), 256, 0, 0);
+    }
+    if st >= 0 {
+      let mode = raw.load_i64(raw.offset(stat_buf, 24)) & 61440;
+      raw.free(stat_buf, 144, 8);
+      if mode == 40960 {
+        return -40;
+      }
+    } else {
+      raw.free(stat_buf, 144, 8);
+    }
+  }
+  return err;
+}
+
+fn validate_path(p: &Path) -> Result<Bytes, IoError>
+  intent "パスの長さと NUL を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let b = p.as_bytes();
+  let len = b.len();
+  if len == 0 || len > 4096 {
+    return Err(IoError.InvalidPath(p.clone()));
+  }
+  let mut i = 0;
+  while i < len {
+    if b.get(i).unwrap_or(0) == 0 {
+      return Err(IoError.InvalidPath(p.clone()));
+    }
+    i = i + 1;
+  }
+  return Ok(b);
+}
+
+fn validate_subpath(p: &Path) -> Result<Bytes, IoError>
+  intent "相対パスの安全性（空・NUL・絶対パス・.. 脱出の拒否）を検査する"
+  requires none
+  ensures none
+  effects none
+{
+  let b = p.as_bytes();
+  let len = b.len();
+  if len == 0 || len > 4096 {
+    return Err(IoError.InvalidPath(p.clone()));
+  }
+  if b.get(0).unwrap_or(0) == 47 {
+    return Err(IoError.InvalidPath(p.clone()));
+  }
+  let mut bad = false;
+  let mut i = 0;
+  let mut comp_start = 0;
+  while i <= len {
+    let mut c = 47;
+    if i < len {
+      c = b.get(i).unwrap_or(0);
+    }
+    if c == 0 {
+      bad = true;
+    }
+    if c == 47 {
+      let comp_len = i - comp_start;
+      if comp_len == 2 {
+        let c0 = b.get(comp_start).unwrap_or(0);
+        let c1 = b.get(comp_start + 1).unwrap_or(0);
+        if c0 == 46 {
+          if c1 == 46 {
+            bad = true;
+          }
+        }
+      }
+      comp_start = i + 1;
+    }
+    i = i + 1;
+  }
+  if bad {
+    return Err(IoError.InvalidPath(p.clone()));
+  }
+  return Ok(b);
+}
+
+fn c_path_buf(b: &Bytes) -> Addr
+  intent "Bytes から NUL 終端の生バッファを割り当ててコピーする"
+  requires none
+  ensures none
+  effects none
+  unchecked "b の長さに +1 したバッファを確保し、NUL 終端する"
+{
+  let len = b.len();
+  let buf = raw.alloc(len + 1, 1);
+  let mut i = 0;
+  while i < len {
+    raw.store_u8(raw.offset(buf, i), b.get(i).unwrap_or(0));
+    i = i + 1;
+  }
+  raw.store_u8(raw.offset(buf, len), 0);
+  return buf;
+}
+
+pub struct File {
+  fd: Int,
+  file_path: Path,
+}
+
+impl File {
+  pub fn try_lock_exclusive(self: &File) -> Result<Bool, IoError>
+    intent "非ブロッキング排他ロック（LOCK_EX|LOCK_NB）を取得する。成功は Ok(true)、競合中は Ok(false)"
+    requires none
+    ensures none
+    effects fs
+    unchecked "flock(73) を LOCK_EX|LOCK_NB で発行する"
+  {
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(73, self.fd, 6, 0, 0, 0, 0);
+    }
+    if r == 0 {
+      return Ok(true);
+    }
+    if r == -11 {
+      return Ok(false);
+    }
+    return Err(classify_io(r, &self.file_path));
+  }
+
+  pub fn try_lock_shared(self: &File) -> Result<Bool, IoError>
+    intent "非ブロッキング共有ロック（LOCK_SH|LOCK_NB）を取得する。成功は Ok(true)、競合中は Ok(false)"
+    requires none
+    ensures none
+    effects fs
+    unchecked "flock(73) を LOCK_SH|LOCK_NB で発行する"
+  {
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(73, self.fd, 5, 0, 0, 0, 0);
+    }
+    if r == 0 {
+      return Ok(true);
+    }
+    if r == -11 {
+      return Ok(false);
+    }
+    return Err(classify_io(r, &self.file_path));
+  }
+
+  pub fn unlock(self: &File) -> Result<Unit, IoError>
+    intent "ロックを明示的に解除する（LOCK_UN）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "flock(73) を LOCK_UN で発行する"
+  {
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(73, self.fd, 8, 0, 0, 0, 0);
+    }
+    if r < 0 {
+      return Err(classify_io(r, &self.file_path));
+    }
+    return Ok(unit());
+  }
+
+  pub fn close(self: File) -> Result<Unit, IoError>
+    intent "ファイルを明示的に閉じる。破棄フックでの二重 close を防止する"
+    requires none
+    ensures none
+    effects fs
+    unchecked "close(3) を発行する"
+  {
+    if self.fd < 0 {
+      return Ok(unit());
+    }
+    let r = raw.syscall(3, self.fd, 0, 0, 0, 0, 0);
+    let mut f = self;
+    f.fd = -1;
+    if r < 0 {
+      return Err(classify_io(r, &f.file_path));
+    }
+    return Ok(unit());
+  }
+}
+
+pub struct DirEntry {
+  ent_name: String,
+  ent_is_dir: Bool,
+  ent_is_file: Bool,
+  ent_is_symlink: Bool,
+}
+
+impl DirEntry {
+  pub fn name(self: &DirEntry) -> String
+    intent "エントリの名前を返す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.ent_name.clone();
+  }
+
+  pub fn is_dir(self: &DirEntry) -> Bool
+    intent "エントリがディレクトリか判定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.ent_is_dir;
+  }
+
+  pub fn is_file(self: &DirEntry) -> Bool
+    intent "エントリが通常ファイルか判定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.ent_is_file;
+  }
+
+  pub fn is_symlink(self: &DirEntry) -> Bool
+    intent "エントリがシンボリックリンクか判定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.ent_is_symlink;
+  }
+}
+
+pub struct OpenOptions {
+  opt_read: Bool,
+  opt_write: Bool,
+  opt_create: Bool,
+  opt_create_new: Bool,
+  opt_truncate: Bool,
+  opt_append: Bool,
+  opt_follow_symlinks: Bool,
+}
+
+impl OpenOptions {
+  pub fn new() -> OpenOptions
+    intent "既定のオープン設定（読み取りのみ、symlink追従なし）を作る"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: true,
+      opt_write: false,
+      opt_create: false,
+      opt_create_new: false,
+      opt_truncate: false,
+      opt_append: false,
+      opt_follow_symlinks: false,
+    };
+  }
+
+  pub fn read(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "読み取り可否を設定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: val,
+      opt_write: self.opt_write,
+      opt_create: self.opt_create,
+      opt_create_new: self.opt_create_new,
+      opt_truncate: self.opt_truncate,
+      opt_append: self.opt_append,
+      opt_follow_symlinks: self.opt_follow_symlinks,
+    };
+  }
+
+  pub fn write(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "書き込み可否を設定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: self.opt_read,
+      opt_write: val,
+      opt_create: self.opt_create,
+      opt_create_new: self.opt_create_new,
+      opt_truncate: self.opt_truncate,
+      opt_append: self.opt_append,
+      opt_follow_symlinks: self.opt_follow_symlinks,
+    };
+  }
+
+  pub fn create(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "ファイル作成を設定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: self.opt_read,
+      opt_write: self.opt_write,
+      opt_create: val,
+      opt_create_new: self.opt_create_new,
+      opt_truncate: self.opt_truncate,
+      opt_append: self.opt_append,
+      opt_follow_symlinks: self.opt_follow_symlinks,
+    };
+  }
+
+  pub fn create_new(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "排他的ファイル作成を設定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: self.opt_read,
+      opt_write: self.opt_write,
+      opt_create: self.opt_create,
+      opt_create_new: val,
+      opt_truncate: self.opt_truncate,
+      opt_append: self.opt_append,
+      opt_follow_symlinks: self.opt_follow_symlinks,
+    };
+  }
+
+  pub fn truncate(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "切り詰めを設定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: self.opt_read,
+      opt_write: self.opt_write,
+      opt_create: self.opt_create,
+      opt_create_new: self.opt_create_new,
+      opt_truncate: val,
+      opt_append: self.opt_append,
+      opt_follow_symlinks: self.opt_follow_symlinks,
+    };
+  }
+
+  pub fn append(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "末尾追記を設定する"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: self.opt_read,
+      opt_write: self.opt_write,
+      opt_create: self.opt_create,
+      opt_create_new: self.opt_create_new,
+      opt_truncate: self.opt_truncate,
+      opt_append: val,
+      opt_follow_symlinks: self.opt_follow_symlinks,
+    };
+  }
+
+  pub fn follow_symlinks(self: OpenOptions, val: Bool) -> OpenOptions
+    intent "symlink 追従可否を設定する（既定: false）"
+    requires none
+    ensures none
+    effects none
+  {
+    return OpenOptions {
+      opt_read: self.opt_read,
+      opt_write: self.opt_write,
+      opt_create: self.opt_create,
+      opt_create_new: self.opt_create_new,
+      opt_truncate: self.opt_truncate,
+      opt_append: self.opt_append,
+      opt_follow_symlinks: val,
+    };
+  }
+
+  pub fn open(self: &OpenOptions, p: &Path) -> Result<File, IoError>
+    intent "設定に従ってファイルを開く（symlink 追従無効時は中間 symlink も拒否）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "構成要素ごとに O_NOFOLLOW で解決し、中間 symlink を拒否してファイルを開く"
+  {
+    match validate_path(&p) {
+      Err(e) => { return Err(e); }
+      Ok(b) => {
+        let flags = compute_open_flags(&self);
+        if self.opt_follow_symlinks {
+          let buf = c_path_buf(&b);
+          let mut fd = -4;
+          while fd == -4 {
+            fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
+          }
+          raw.free(buf, b.len() + 1, 1);
+          if fd < 0 {
+            return Err(classify_io(fd, &p));
+          }
+          return Ok(File { fd: fd, file_path: p.clone() });
+        }
+
+        let len = b.len();
+        let mut last_slash = -1;
+        let mut i = 0;
+        while i < len {
+          if b.get(i).unwrap_or(0) == 47 {
+            last_slash = i;
+          }
+          i = i + 1;
+        }
+
+        if last_slash < 0 {
+          let buf = c_path_buf(&b);
+          let mut fd = -4;
+          while fd == -4 {
+            fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
+          }
+          raw.free(buf, b.len() + 1, 1);
+          if fd < 0 {
+            return Err(classify_io(fd, &p));
+          }
+          return Ok(File { fd: fd, file_path: p.clone() });
+        }
+
+        let is_abs = b.get(0).unwrap_or(0) == 47;
+        let mut current_fd = -100;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if is_abs {
+          let root_buf = raw.alloc(2, 1);
+          raw.store_u8(root_buf, 47);
+          raw.store_u8(raw.offset(root_buf, 1), 0);
+          let mut root_fd = -4;
+          while root_fd == -4 {
+            // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), 2818048, 0, 0, 0);
+          }
+          raw.free(root_buf, 2, 1);
+          if root_fd < 0 {
+            return Err(classify_io(root_fd, &p));
+          }
+          current_fd = root_fd;
+          owned_fd = root_fd;
+        }
+
+        let mut comp_start = 0;
+        let mut j = 0;
+        while j <= last_slash {
+          if !keep_going {
+            j = last_slash + 1;
+          } else {
+            if b.get(j).unwrap_or(0) == 47 {
+              let comp_len = j - comp_start;
+              if comp_len == 2 {
+                if b.get(comp_start).unwrap_or(0) == 46 {
+                  if b.get(comp_start + 1).unwrap_or(0) == 46 {
+                    err_code = -22;
+                    keep_going = false;
+                  }
+                }
+              }
+              if keep_going {
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
+                  }
+                  if next_fd < 0 {
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
+                    keep_going = false;
+                  } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                }
+              }
+              comp_start = j + 1;
+            }
+            j = j + 1;
+          }
+        }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &p));
+        }
+
+        let leaf_start = last_slash + 1;
+        let leaf_len = len - leaf_start;
+        if leaf_len == 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(IoError.IsADirectory(p.clone()));
+        }
+
+        let leaf_buf = raw.alloc(leaf_len + 1, 1);
+        let mut m = 0;
+        while m < leaf_len {
+          raw.store_u8(raw.offset(leaf_buf, m), b.get(leaf_start + m).unwrap_or(0));
+          m = m + 1;
+        }
+        raw.store_u8(raw.offset(leaf_buf, leaf_len), 0);
+
+        let mut fd = -4;
+        while fd == -4 {
+          fd = raw.syscall(257, current_fd, raw.addr_to_int(leaf_buf), flags, 438, 0, 0);
+        }
+        raw.free(leaf_buf, leaf_len + 1, 1);
+        if owned_fd >= 0 {
+          raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+        }
+
+        if fd < 0 {
+          return Err(classify_io(fd, &p));
+        }
+        return Ok(File { fd: fd, file_path: p.clone() });
+      }
+    }
+  }
+}
+
+pub fn open_options() -> OpenOptions
+  intent "既定の OpenOptions を作る"
+  requires none
+  ensures none
+  effects none
+{
+  return OpenOptions.new();
+}
+
+fn compute_open_flags(opts: &OpenOptions) -> Int
+  intent "OpenOptions から openat(2) のフラグを計算する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut f = 524288;
+  if !opts.opt_follow_symlinks {
+    f = f + 131072;
+  }
+  if opts.opt_read && opts.opt_write {
+    f = f + 2;
+  } else {
+    if opts.opt_write {
+      f = f + 1;
+    }
+  }
+  if opts.opt_create_new {
+    f = f + 192;
+  } else {
+    if opts.opt_create {
+      f = f + 64;
+    }
+  }
+  if opts.opt_truncate {
+    f = f + 512;
+  }
+  if opts.opt_append {
+    f = f + 1024;
+  }
+  return f;
+}
+
+pub struct Dir {
+  fd: Int,
+  dir_path: Path,
+  buf: Addr,
+}
+
+impl Dir {
+  pub fn open(p: &Path) -> Result<Dir, IoError>
+    intent "ディレクトリを開いて Dir ハンドルを得る（中間および末尾の symlink 追従は拒否）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "各構成要素を O_NOFOLLOW で順次解決し、中間 symlink を拒否して Dir を開く"
+  {
+    match validate_path(&p) {
+      Err(e) => { return Err(e); }
+      Ok(b) => {
+        let len = b.len();
+        let is_abs = b.get(0).unwrap_or(0) == 47;
+        let mut current_fd = -100;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if is_abs {
+          let mut root_has_more = false;
+          let mut r_check = 1;
+          while r_check < len {
+            if b.get(r_check).unwrap_or(0) != 47 {
+              root_has_more = true;
+            }
+            r_check = r_check + 1;
+          }
+          let mut root_flags = 720896;
+          if root_has_more {
+            root_flags = 2818048;
+          }
+          let root_buf = raw.alloc(2, 1);
+          raw.store_u8(root_buf, 47);
+          raw.store_u8(raw.offset(root_buf, 1), 0);
+          let mut root_fd = -4;
+          while root_fd == -4 {
+            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), root_flags, 0, 0, 0);
+          }
+          raw.free(root_buf, 2, 1);
+          if root_fd < 0 {
+            return Err(classify_io(root_fd, &p));
+          }
+          current_fd = root_fd;
+          owned_fd = root_fd;
+        }
+
+        let mut comp_start = 0;
+        let mut i = 0;
+        while i <= len {
+          if !keep_going {
+            i = len + 1;
+          } else {
+            let mut is_sep = false;
+            if i == len {
+              is_sep = true;
+            } else {
+              if b.get(i).unwrap_or(0) == 47 {
+                is_sep = true;
+              }
+            }
+            if is_sep {
+              let comp_len = i - comp_start;
+              if comp_len == 2 {
+                if b.get(comp_start).unwrap_or(0) == 46 {
+                  if b.get(comp_start + 1).unwrap_or(0) == 46 {
+                    err_code = -22;
+                    keep_going = false;
+                  }
+                }
+              }
+              if keep_going {
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  let mut has_more = false;
+                  let mut p_check = i + 1;
+                  while p_check < len {
+                    if b.get(p_check).unwrap_or(0) != 47 {
+                      has_more = true;
+                    }
+                    p_check = p_check + 1;
+                  }
+                  let mut comp_flags = 720896;
+                  if has_more {
+                    comp_flags = 2818048;
+                  }
+
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), comp_flags, 0, 0, 0);
+                  }
+                  if next_fd < 0 {
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
+                    keep_going = false;
+                  } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                }
+              }
+              comp_start = i + 1;
+            }
+            i = i + 1;
+          }
+        }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &p));
+        }
+
+        if current_fd < 0 {
+          return Err(IoError.InvalidPath(p.clone()));
+        }
+
+        let dir_buf = raw.alloc(4112, 8);
+        raw.store_i64(dir_buf, 0);
+        raw.store_i64(raw.offset(dir_buf, 8), 0);
+        return Ok(Dir { fd: current_fd, dir_path: p.clone(), buf: dir_buf });
+      }
+    }
+  }
+
+  pub fn open_file(self: &Dir, subpath: &Path, options: &OpenOptions) -> Result<File, IoError>
+    intent "ディレクトリ起点の相対パスでファイルを開く（中間 symlink および .. 脱出は拒否）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "各ディレクトリ構成要素を O_NOFOLLOW で解決し、一時バッファおよび中間 fd を解放する"
+  {
+    match validate_subpath(&subpath) {
+      Err(e) => { return Err(e); }
+      Ok(b) => {
+        let len = b.len();
+        let mut last_slash = -1;
+        let mut i = 0;
+        while i < len {
+          if b.get(i).unwrap_or(0) == 47 {
+            last_slash = i;
+          }
+          i = i + 1;
+        }
+
+        let mut current_fd = self.fd;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if last_slash >= 0 {
+          let mut comp_start = 0;
+          let mut j = 0;
+          while j <= last_slash {
+            if !keep_going {
+              j = last_slash + 1;
+            } else {
+              if b.get(j).unwrap_or(0) == 47 {
+                let comp_len = j - comp_start;
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
+                  }
+                  if next_fd < 0 {
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
+                    keep_going = false;
+                  } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                }
+                comp_start = j + 1;
+              }
+              j = j + 1;
+            }
+          }
+        }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &subpath));
+        }
+
+        let leaf_start = last_slash + 1;
+        let leaf_len = len - leaf_start;
+        let leaf_buf = raw.alloc(leaf_len + 1, 1);
+        let mut m = 0;
+        while m < leaf_len {
+          raw.store_u8(raw.offset(leaf_buf, m), b.get(leaf_start + m).unwrap_or(0));
+          m = m + 1;
+        }
+        raw.store_u8(raw.offset(leaf_buf, leaf_len), 0);
+
+        let flags = compute_open_flags(&options);
+        let mut fd = -4;
+        while fd == -4 {
+          fd = raw.syscall(257, current_fd, raw.addr_to_int(leaf_buf), flags, 438, 0, 0);
+        }
+        raw.free(leaf_buf, leaf_len + 1, 1);
+        if owned_fd >= 0 {
+          raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+        }
+
+        if fd < 0 {
+          return Err(classify_io(fd, &subpath));
+        }
+        let name_str = b.to_string_utf8().unwrap_or("");
+        let full_path = self.dir_path.join(&name_str);
+        return Ok(File { fd: fd, file_path: full_path });
+      }
+    }
+  }
+
+  pub fn create_file(self: &Dir, subpath: &Path) -> Result<File, IoError>
+    intent "ディレクトリ起点で排他的にファイルを作成する"
+    requires none
+    ensures none
+    effects fs
+  {
+    let opts = OpenOptions.new().read(true).write(true).create_new(true);
+    return self.open_file(&subpath, &opts);
+  }
+
+  pub fn remove_file(self: &Dir, subpath: &Path) -> Result<Unit, IoError>
+    intent "ディレクトリ起点の相対パスでファイルを削除する（中間 symlink は拒否）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "各ディレクトリ構成要素を O_NOFOLLOW で解決し、unlinkat(263) でファイルを削除し、中間 fd を解放する"
+  {
+    match validate_subpath(&subpath) {
+      Err(e) => { return Err(e); }
+      Ok(b) => {
+        let len = b.len();
+        let mut last_slash = -1;
+        let mut i = 0;
+        while i < len {
+          if b.get(i).unwrap_or(0) == 47 {
+            last_slash = i;
+          }
+          i = i + 1;
+        }
+
+        let mut current_fd = self.fd;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if last_slash >= 0 {
+          let mut comp_start = 0;
+          let mut j = 0;
+          while j <= last_slash {
+            if !keep_going {
+              j = last_slash + 1;
+            } else {
+              if b.get(j).unwrap_or(0) == 47 {
+                let comp_len = j - comp_start;
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
+                  }
+                  if next_fd < 0 {
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
+                    keep_going = false;
+                  } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                }
+                comp_start = j + 1;
+              }
+              j = j + 1;
+            }
+          }
+        }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &subpath));
+        }
+
+        let leaf_start = last_slash + 1;
+        let leaf_len = len - leaf_start;
+        let leaf_buf = raw.alloc(leaf_len + 1, 1);
+        let mut m = 0;
+        while m < leaf_len {
+          raw.store_u8(raw.offset(leaf_buf, m), b.get(leaf_start + m).unwrap_or(0));
+          m = m + 1;
+        }
+        raw.store_u8(raw.offset(leaf_buf, leaf_len), 0);
+
+        let mut r = -4;
+        while r == -4 {
+          r = raw.syscall(263, current_fd, raw.addr_to_int(leaf_buf), 0, 0, 0, 0);
+        }
+        raw.free(leaf_buf, leaf_len + 1, 1);
+        if owned_fd >= 0 {
+          raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+        }
+
+        if r < 0 {
+          return Err(classify_io(r, &subpath));
+        }
+        return Ok(unit());
+      }
+    }
+  }
+
+  pub fn read_entries(self: &Dir, max_entries: Int) -> Result<List<DirEntry>, IoError>
+    intent "ディレクトリのエントリを最大 max_entries 件（上限 1024）列挙する"
+    requires none
+    ensures none
+    effects fs
+    unchecked "getdents64(217) でディレクトリエントリを読み取り、d_type が DT_UNKNOWN の場合は newfstatat(262) で種別を補完し、未返却エントリをバッファに保持して次回へ持ち越す"
+  {
+    let mut limit = max_entries;
+    if limit < 0 {
+      return Err(IoError.InvalidInput(self.dir_path.clone()));
+    }
+    if limit > 1024 {
+      limit = 1024;
+    }
+    let mut out = List.new();
+    let buf_cap = 4096;
+    let mut buf_len = raw.load_i64(self.buf);
+    let mut off = raw.load_i64(raw.offset(self.buf, 8));
+    let data_buf = raw.offset(self.buf, 16);
+
+    let mut more = true;
+    while more && out.len() < limit {
+      if off < buf_len {
+        let rec_lo = raw.load_u8(raw.offset(data_buf, off + 16));
+        let rec_hi = raw.load_u8(raw.offset(data_buf, off + 17));
+        let reclen = rec_lo + rec_hi * 256;
+        if reclen <= 19 || off + reclen > buf_len {
+          off = buf_len;
+        } else {
+          let d_type = raw.load_u8(raw.offset(data_buf, off + 18));
+          let mut name_bytes = Bytes.new();
+          let mut p = off + 19;
+          let end_p = off + reclen;
+          let mut reading_name = true;
+          while p < end_p && reading_name {
+            let c = raw.load_u8(raw.offset(data_buf, p));
+            if c == 0 {
+              reading_name = false;
+            } else {
+              name_bytes.push(c);
+              p = p + 1;
+            }
+          }
+          match name_bytes.to_string_utf8() {
+            Err(_) => {
+              raw.store_i64(self.buf, buf_len);
+              raw.store_i64(raw.offset(self.buf, 8), off);
+              return Err(IoError.InvalidPath(self.dir_path.clone()));
+            }
+            Ok(name_str) => {
+              if name_str != "" && name_str != "." && name_str != ".." {
+                let mut is_d = (d_type == 4);
+                let mut is_f = (d_type == 8);
+                let mut is_lnk = (d_type == 10);
+                if d_type == 0 {
+                  let stat_buf = raw.alloc(144, 8);
+                  let mut st = -4;
+                  let name_addr = raw.addr_to_int(raw.offset(data_buf, off + 19));
+                  while st == -4 {
+                    st = raw.syscall(262, self.fd, name_addr, raw.addr_to_int(stat_buf), 256, 0, 0);
+                  }
+                  if st >= 0 {
+                    let mode = raw.load_i64(raw.offset(stat_buf, 24)) & 61440;
+                    is_d = (mode == 16384);
+                    is_f = (mode == 32768);
+                    is_lnk = (mode == 40960);
+                  }
+                  raw.free(stat_buf, 144, 8);
+                }
+                out.push(DirEntry {
+                  ent_name: name_str,
+                  ent_is_dir: is_d,
+                  ent_is_file: is_f,
+                  ent_is_symlink: is_lnk,
+                });
+              }
+            }
+          }
+          off = off + reclen;
+        }
+      } else {
+        let mut n = -4;
+        while n == -4 {
+          n = raw.syscall(217, self.fd, raw.addr_to_int(data_buf), buf_cap, 0, 0, 0);
+        }
+        if n <= 0 {
+          more = false;
+          if n < 0 {
+            raw.store_i64(self.buf, 0);
+            raw.store_i64(raw.offset(self.buf, 8), 0);
+            return Err(classify_io(n, &self.dir_path));
+          }
+        } else {
+          buf_len = n;
+          off = 0;
+        }
+      }
+    }
+    raw.store_i64(self.buf, buf_len);
+    raw.store_i64(raw.offset(self.buf, 8), off);
+    return Ok(out);
+  }
+
+  pub fn close(self: Dir) -> Result<Unit, IoError>
+    intent "ディレクトリハンドルを明示的に閉じる。破棄フックでの二重 close を防止する"
+    requires none
+    ensures none
+    effects fs
+    unchecked "close(3) を発行し、fd を無効化する（バッファ解放は drop フックが行う）"
+  {
+    if self.fd < 0 {
+      return Ok(unit());
+    }
+    let r = raw.syscall(3, self.fd, 0, 0, 0, 0, 0);
+    let mut d = self;
+    d.fd = -1;
+    if r < 0 {
+      return Err(classify_io(r, &d.dir_path));
+    }
+    return Ok(unit());
+  }
+}
+
+pub fn open_dir(p: &Path) -> Result<Dir, IoError>
+  intent "ディレクトリを開いて Dir ハンドルを得る"
+  requires none
+  ensures none
+  effects fs
+{
+  return Dir.open(&p);
+}
+
+pub fn create_dir(p: &Path) -> Result<Unit, IoError>
+  intent "ディレクトリを作成する（既定モード 0o777）"
+  requires none
+  ensures none
+  effects fs
+  unchecked "mkdirat(258) でディレクトリを作成し、一時バッファを解放する"
+{
+  match validate_path(&p) {
+    Err(e) => { return Err(e); }
+    Ok(b) => {
+      let buf = c_path_buf(&b);
+      let mut r = -4;
+      while r == -4 {
+        r = raw.syscall(258, -100, raw.addr_to_int(buf), 511, 0, 0, 0);
+      }
+      raw.free(buf, b.len() + 1, 1);
+      if r < 0 {
+        return Err(classify_io(r, &p));
+      }
+      return Ok(unit());
+    }
+  }
+}
+
+pub fn create_dir_all(p: &Path) -> Result<Unit, IoError>
+  intent "ディレクトリとその親を再帰的に作成する"
+  requires none
+  ensures none
+  effects fs
+  unchecked "mkdirat(258) および newfstatat(262) で再帰作成し、一時バッファを解放する"
+{
+  match validate_path(&p) {
+    Err(e) => { return Err(e); }
+    Ok(b) => {
+      let len = b.len();
+      let stat_buf = raw.alloc(144, 8);
+      let mut i = 1;
+      let mut err_code = 0;
+      let mut keep_going = true;
+      while i <= len {
+        if !keep_going {
+          i = len + 1;
+        } else {
+          let mut is_sep = false;
+          if i == len {
+            is_sep = true;
+          } else {
+            if b.get(i).unwrap_or(0) == 47 {
+              is_sep = true;
+            }
+          }
+          if is_sep {
+            let mut do_create = false;
+            if i > 1 {
+              do_create = true;
+            } else {
+              if b.get(0).unwrap_or(0) != 47 {
+                do_create = true;
+              }
+            }
+            if do_create {
+              let sub_buf = raw.alloc(i + 1, 1);
+              let mut j = 0;
+              while j < i {
+                raw.store_u8(raw.offset(sub_buf, j), b.get(j).unwrap_or(0));
+                j = j + 1;
+              }
+              raw.store_u8(raw.offset(sub_buf, i), 0);
+
+              let mut r = -4;
+              while r == -4 {
+                r = raw.syscall(258, -100, raw.addr_to_int(sub_buf), 511, 0, 0, 0);
+              }
+              if r < 0 {
+                if r != -17 {
+                  err_code = r;
+                  keep_going = false;
+                }
+              }
+              if keep_going {
+                if r == -17 {
+                  let mut st = -4;
+                  while st == -4 {
+                    st = raw.syscall(262, -100, raw.addr_to_int(sub_buf), raw.addr_to_int(stat_buf), 0, 0, 0);
+                  }
+                  if st < 0 {
+                    err_code = st;
+                    keep_going = false;
+                  } else {
+                    let mode = raw.load_i64(raw.offset(stat_buf, 24)) & 61440;
+                    if mode != 16384 {
+                      err_code = -17;
+                      keep_going = false;
+                    }
+                  }
+                }
+              }
+              raw.free(sub_buf, i + 1, 1);
+            }
+          }
+          i = i + 1;
+        }
+      }
+      raw.free(stat_buf, 144, 8);
+      if err_code != 0 {
+        return Err(classify_io(err_code, &p));
+      }
+      return Ok(unit());
+    }
+  }
+}
+
+pub fn remove_dir(p: &Path) -> Result<Unit, IoError>
+  intent "ディレクトリを削除する（空でない場合は失敗）"
+  requires none
+  ensures none
+  effects fs
+  unchecked "unlinkat(263) に AT_REMOVEDIR でディレクトリを削除し、一時バッファを解放する"
+{
+  match validate_path(&p) {
+    Err(e) => { return Err(e); }
+    Ok(b) => {
+      let buf = c_path_buf(&b);
+      let mut r = -4;
+      while r == -4 {
+        r = raw.syscall(263, -100, raw.addr_to_int(buf), 512, 0, 0, 0);
+      }
+      raw.free(buf, b.len() + 1, 1);
+      if r < 0 {
+        return Err(classify_io(r, &p));
+      }
+      return Ok(unit());
+    }
+  }
+}
+
+pub fn remove_file(p: &Path) -> Result<Unit, IoError>
+  intent "ファイルを削除する"
+  requires none
+  ensures none
+  effects fs
+  unchecked "unlinkat(263) でファイルを削除し、一時バッファを解放する"
+{
+  match validate_path(&p) {
+    Err(e) => { return Err(e); }
+    Ok(b) => {
+      let buf = c_path_buf(&b);
+      let mut r = -4;
+      while r == -4 {
+        r = raw.syscall(263, -100, raw.addr_to_int(buf), 0, 0, 0, 0);
+      }
+      raw.free(buf, b.len() + 1, 1);
+      if r < 0 {
+        return Err(classify_io(r, &p));
+      }
+      return Ok(unit());
+    }
+  }
+}

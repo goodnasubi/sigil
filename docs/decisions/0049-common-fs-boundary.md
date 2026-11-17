@@ -29,7 +29,8 @@ ADR 0044 決定 4 および ADR 0045 に従い、仕様の基準とするコミ�
 |---|---|---|
 | ハンドルと資源管理 | 所有権を持つ `File` / `Dir` 型による明示的 close + 自動 drop クリーンアップ。生の fd 整数を公開 API に露出しない | 生の fd をそのまま露出すると double close、fd 再利用競合（ABA）、リークの温床になる |
 | プロセス間排他ロック | `flock(2)`（`SYS_flock`）によるオープンファイル記述（OFD）単位の排他・共有ロック | 従来の POSIX レコードロック（`fcntl` `F_SETLK`）は、同一プロセス内の任意 fd の close で全ロックが暗黙解除される致命的欠点があり、複数ハンドル並行時に破綻する。OFD ロック（`F_OFD_SETLK`）は構造体と syscall が複雑で Linux 固有。`flock` は枯れており単純・堅牢 |
-| 追記と位置指定 I/O | `pread`/`pwrite`（`SYS_pread64`/`SYS_pwrite64`）による無シーク位置指定読み書き、および `O_APPEND` による単一 write ごとの末尾追記保証 | シーク（`lseek`）による位置移動は並行タスク間でレースを起こす。`O_APPEND` はカーネルが各 write の書き込み位置を原子的末尾に決定するが、複数回 write の論理レコード全体の原子性は保証しない |
+| パス制約と symlink 拒否 | 専用ディレクトリ起点（`Dir`）の相対内部名操作、`..` 脱出拒否、`O_NOFOLLOW` による構成要素の symlink 追従拒否（ADR 0045:109 要件） | NUL 検査や長さ制限だけでは、既存 DB の再オープン時に `../` や中間 symlink による専用ディレクトリ脱出・意図しないファイル破壊を防げない |
+| 追記と位置指定 I/O | `pread`/`pwrite`（`SYS_pread64`/`SYS_pwrite64`）による無シーク位置指定読み書き、および `O_APPEND` による末尾追記保証。**append ハンドルでの `write_at`/`write_all_at` は明示拒否** | シーク（`lseek`）は並行レースを起こす。Linux では `O_APPEND` の fd に対して `pwrite64` を呼ぶと offset を無視して末尾へ追記するため、同一ハンドルでの混用を許すとページ更新が追記化してデータ破壊を招く |
 | 持続性と名前変更 | ファイル／ディレクトリの明示的 `fsync`（`SYS_fsync`）、同一 FS 内の原子的置換 `renameat` | `close` 成功は持続性の証明にならない。親ディレクトリの `fsync` がなければ新規作成・削除・rename の永続性は保証されない。異 FS 間の rename は暗黙コピーせず明示拒否（`EXDEV`）する |
 | テスト差し替え（`--fs-double`） | パス写像を尊重し、実ファイルに対する安全な委譲または未対応操作の明示的拒否（fail-closed） | 差し替え下で同期やロックを暗黙に成功偽装すると、クラッシュ復旧や永続性の誤った信頼を生む |
 | エラー分類と効果 | 構造化された `IoErrorKind`、既存 `effects fs` の適用。新効果・新 raw 名は追加しない | 信頼基盤を最小化し（ADR 0005）、既存の検査系と互換性を維持する |
@@ -53,7 +54,7 @@ ADR 0044 決定 4 および ADR 0045 に従い、仕様の基準とするコミ�
 
 生 fd の整数値（Int）は公開 `std.fs` の API に露出しない。利用者が不正な整数を渡して別リソースを操作したり、二重 close を引き起こす危険を型安全に排除する。
 
-### 1.2 ファイルのオープンと排他的作成
+### 1.2 ファイルのオープン、排他的作成、パス制約と symlink 拒否
 
 ファイルオープンは `OpenOptions` ビルダー経由で行う。
 
@@ -65,10 +66,27 @@ ADR 0044 決定 4 および ADR 0045 に従い、仕様の基準とするコミ�
 | `create_new(true)` | 排他的作成（存在すれば失敗） | `O_CREAT | O_EXCL` |
 | `truncate(true)` | 既存ファイルを切り詰め | `O_TRUNC` |
 | `append(true)` | 常に末尾追記 | `O_APPEND` |
+| `follow_symlinks(false)` | symlink 追従の拒否（既定: false） | `O_NOFOLLOW`（`0o400000`） |
 
 - **必須規則**: すべての `open` は内部で必ず `O_CLOEXEC`（`0o2000000`）を付与する。子プロセスへの記述子リークを防止する。
 - **排他的作成（`create_new`）**: 一時ファイルや WAL の作成時に必須とし、既に同名ファイルが存在する場合は `AlreadyExists`（`EEXIST`）で失敗する。TOCTOU（Time-of-Check to Time-of-Use）のレースを防止する。
 - **作成時モード**: 既定は `0o666`（プロセスの umask でマスクされる）。Git 等で実行ビットが必要な場合のため、明示的に作成モード（`mode: Int`）を指定可能とする。
+
+#### パス制約と symlink 拒否（ADR 0045:109 要件）
+
+データベースディレクトリ配下のファイルを安全に読み書きするため、以下のパス制約と symlink 拒否規則を強制する。
+
+1. **ルート固定の相対操作（`Dir` 起点）**:
+   - `Dir` ハンドルを起点とする相対操作 API を提供する:
+     - `Dir::open_file(&self, subpath: &Path, options: &OpenOptions) -> Result<File, IoError>`
+     - `Dir::create_file(&self, subpath: &Path) -> Result<File, IoError>`
+     - `Dir::remove_file(&self, subpath: &Path) -> Result<(), IoError>`
+   - `subpath` は単一ファイル名またはディレクトリ内部の相対パスでなければならない。
+   - 先頭が `/` の絶対パス、空パス、NUL バイトを含むパス、および `..`（親ディレクトリ参照）を含むパスは、いかなる場合も `InvalidPath` で即座に拒否し、許可された専用ディレクトリ外への脱出を防止する。
+2. **シンボリックリンクの拒否**:
+   - `OpenOptions::follow_symlinks` の既定値を `false`（安全側）とする。
+   - `follow_symlinks(false)` の場合、内部で `O_NOFOLLOW` を指定し、対象ファイルがシンボリックリンクであれば `PermissionDenied` または `InvalidPath`（errno `ELOOP` = -40）で拒否する。
+   - `create_new` だけでなく、既存 DB ファイルを再オープンする際の中間構成要素や対象ファイルの symlink によるすり替えも拒否する。内部で `openat` を使用し、専用ディレクトリ外の実体を指す symlink の追従を遮断する。
 
 ### 1.3 並行性と fd 再利用（ABA 対策）
 
@@ -124,6 +142,15 @@ B+tree ページのランダム読み書きのため、カーネルのファイ�
 - **保証**: ファイルポインタ（seek offset）を変更しない。同一 `File` または同一ファイル記述に対して、シーク競合なしに安全に呼び出せる。
 - **限界**: `offset < 0` や `offset + len > 2^63 - 1` は `LimitExceeded` または `InvalidPath` で拒否する。ディスク満杯（`ENOSPC`）やクォータ超過（`EDQUOT`）は部分書き込みの後にエラーとなる場合があり、ロールバックまたはトランザクション中止を要する。
 
+#### append ハンドルでの write_at / write_all_at の明示的拒否
+
+- **契約**: `append(true)`（`O_APPEND`）を指定して開かれた `File` ハンドルに対して `write_at` または `write_all_at` を呼び出した場合、**必ず即座にエラー（`IoErrorKind::InvalidInput`）を返して拒否する**。
+- **背景（Linux の pwrite 挙動）**: Linux において `O_APPEND` フラグを持つオープンファイル記述に対して `pwrite64(2)` を発行すると、システムコールに渡された `offset` 引数は完全に無視され、常にカーネルによりファイル末尾への追記として書き込まれる。これを許容すると、データベースの特定ページ更新（例: オフセット 8192 への書込み）のつもりが末尾への意図しない追記として成功し、サイレントなデータ破損を引き起こす。
+- **オープンファイル記述の分離**:
+  - 位置指定書込み（ページ I/O）と末尾追記（WAL 追記）を同一プロセスで行う場合、同一のオープンファイル記述（同一の `File` ハンドル）を共有してはならない。
+  - アプリケーションは、追記用ハンドル（`append(true)`、`write_at` 不可）と、位置指定書込み用ハンドル（`append(false)`, `write(true)`、`write_at` 専用）を**別個のオープンファイル記述として独立して開かなければならない**（または ADR 0045 のとおり WAL ファイルと DB ページファイルを物理的に別ファイルとして管理する）。
+  - なお、`append(true)` ハンドルに対する位置指定「読み取り」（`read_at`）は、オフセットが正常に適用され追記も発生しないため許可される。
+
 ### 3.2 追記（`O_APPEND`）
 
 WAL（Write-Ahead Log）の連続追記のため、オープン時に `append(true)` を指定したハンドルによる書き込みを提供する。
@@ -148,6 +175,7 @@ WAL（Write-Ahead Log）の連続追記のため、オープン時に `append(tr
 - 再帰作成: `fs.create_dir_all(path: &Path) -> Result<(), IoError>`。
 - 削除: `fs.remove_dir(path: &Path) -> Result<(), IoError>`（`SYS_unlinkat` + `AT_REMOVEDIR`）。空でない場合は `DirectoryNotEmpty`（`ENOTEMPTY`）。
 - ファイル削除: `fs.remove_file(path: &Path) -> Result<(), IoError>`（`SYS_unlinkat`、フラグ 0）。
+- ルート固定相対操作: `Dir::open_file`、`Dir::create_file`、`Dir::remove_file`（決定 1.2）。
 - 上限付き列挙: `Dir::read_entries(&self, max_entries: Int) -> Result<Vec<DirEntry>, IoError>`（`SYS_getdents64` = 217）。無制限のメモリ確保を防止するため、1 呼び出しあたりの取得件数に上限（既定 1024 件）を課す。
 
 ### 4.2 同期（`fsync`）と持続性の契約
@@ -200,15 +228,16 @@ OS の errno を以下の構造化エラーに分類し、未分類の errno は
 | 腕（Kind） | 主な errno | 発生条件 |
 |---|---|---|
 | `NotFound` | `ENOENT` | パスが存在しない |
-| `PermissionDenied` | `EACCES`, `EPERM` | 権限不足 |
+| `PermissionDenied` | `EACCES`, `EPERM`, `ELOOP` | 権限不足、symlink 追従拒否（`follow_symlinks(false)` 下での symlink 遭遇） |
 | `AlreadyExists` | `EEXIST` | `create_new` や排他作成で既に存在 |
 | `Busy` | `EWOULDBLOCK`, `EAGAIN` | 非ブロッキングロックで競合中 |
+| `InvalidInput` | `EINVAL` | `append(true)` ハンドルに対する `write_at`/`write_all_at` 呼び出し、不正引数 |
 | `LimitExceeded` | `EFBIG`, `EOVERFLOW`, `ENOSPC`, `EDQUOT` | サイズ上限超過、容量不足 |
 | `NotSameFileSystem` | `EXDEV` | クロスデバイス rename |
 | `IsADirectory` | `EISDIR` | ファイル操作をディレクトリに対して実行 |
 | `NotADirectory` | `ENOTDIR` | ディレクトリ操作をファイルに対して実行 |
 | `DirectoryNotEmpty` | `ENOTEMPTY` | 空でないディレクトリを削除しようとした |
-| `InvalidPath` | `EINVAL` | パスに NUL を含む、不正なエンコーディング |
+| `InvalidPath` | `EINVAL` | パスに NUL を含む、`..` による脱出、相対操作での絶対パス混入、不正エンコーディング |
 | `Other(Int)` | その他 | 上記以外の OS errno |
 
 ### 6.2 境界の上限値
@@ -261,13 +290,17 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 ### Issue A: 資源・名前・排他（fs A）
 - **範囲**:
   - `File` / `Dir` ハンドルの定義、単一所有権、明示的 `close`、Drop 時自動クローズ。
-  - `OpenOptions` によるファイルオープン、`O_CLOEXEC`、`create_new`（排他的作成）。
+  - `OpenOptions` によるファイルオープン、`O_CLOEXEC`、`create_new`（排他的作成）、`follow_symlinks(false)`（`O_NOFOLLOW`）。
+  - `Dir` ハンドルによるルート固定相対オープン（`Dir::open_file` 等）。
+  - パス検証（NUL 拒否、`..` 拒否、絶対パス拒否、symlink 拒否）。
   - `flock(2)` による非ブロッキング排他／共有ロック（`try_lock_exclusive`, `try_lock_shared`, `unlock`）。
   - ディレクトリ作成（`create_dir`）、削除（`remove_dir`, `remove_file`）、上限付き列挙（`read_entries`）。
 - **依存**: 本 ADR（ADR 0049）のマージ。
 - **完了条件**:
   - ハンドルのライフサイクルが正しく機能し、fd リークがないこと。
   - 既存ファイルに対する `create_new` が `AlreadyExists` で失敗すること。
+  - 専用ディレクトリ配下の操作において `..` による親ディレクトリへの脱出試行が `InvalidPath` で確実に拒否されること。
+  - 末尾および構成要素がシンボリックリンクであるファイル／ディレクトリを開こうとした際に、リンクを追従せず明示的に拒否（`PermissionDenied` / `InvalidPath`）されること（ADR 0045:109 要件の検証）。
   - プロセス間ロックが正しく排他され、競合時に `Busy` が返ること。
   - ディレクトリ操作が上限内で動作すること。
   - ネイティブと SIR 評価器で全テストが一致して成功すること。
@@ -276,12 +309,14 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 - **範囲**:
   - 位置指定読み書き `read_at` / `write_at`（`SYS_pread64` / `SYS_pwrite64`）、完全充足ループ（`read_exact_at`, `write_all_at`）。
   - `append(true)` による `O_APPEND` 追記モード。
+  - **`append(true)` ハンドルに対する `write_at`/`write_all_at` の拒否契約（`InvalidInput`）**。
   - `EINTR` の自動再試行、Short I/O の処理、EOF 判定。
   - オフセットおよび長さの境界値・オーバーフロー検査。
 - **依存**: Issue A（ハンドルとオープン基盤）。
 - **完了条件**:
   - 8192 バイト境界でのランダムな位置指定読み書きがシークなしに正しく行えること。
   - `append` モードで複数書き込みが常にファイル末尾へ追記されること。
+  - `append(true)` で開かれた `File` ハンドルに対して `write_at` または `write_all_at` を呼び出した際、書込みを実行せず即座にエラー（`InvalidInput`）を返すこと（Linux の `pwrite64` による誤追記防止の検証）。
   - `EINTR` および Short I/O 注入試験でデータ欠損なく完了すること。
   - ネイティブと SIR 評価器で挙動が一致すること。
 
@@ -309,7 +344,8 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 | TOCTOU レース（ファイル作成時の割込み） | `O_CREAT | O_EXCL` による排他的作成を強制し、検査と作成の隙間を排除する |
 | 他プロセス close によるロック消失 | POSIX `fcntl` を排除し、OFD 単位で保持される `flock(2)` を採用する |
 | 電源断・クラッシュによるメタデータ消失 | ファイル自身の `fsync` に加え、親ディレクトリの明示的 `fsync` を契約として要求する |
-| パストラバーサル・NUL 注入攻撃 | パス内の NUL バイト検出時に `InvalidPath` で拒否。最大長制限（4096B）を適用する |
+| パストラバーサル・symlink・ディレクトリ外アクセス | `Dir::open_file` によるルート固定相対オープン、`..` および絶対パスの構文的拒否、`O_NOFOLLOW` によるシンボリックリンク追従拒否により、専用ディレクトリ外へのアクセスおよび中間 symlink によるすり替え破壊を遮断する（ADR 0045:109 要件） |
+| append と位置指定の混同によるページ破壊 | `append(true)` ハンドルでの `write_at` 呼出しを境界で即座に拒否し、`O_APPEND` を共有しない別個のオープンファイル記述を強制する |
 | 同一 OS 権限の悪意ある他プロセス | 同一 UID による直接的ストレージ破壊は OS 境界外。専用実行ユーザーとパーミッション設定に依存する |
 
 ---
@@ -327,7 +363,7 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 ```json
 {
   "model": "jev-1.13.0",
-  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。ADR0005の信頼基盤最小化、ADR0016のADR先行、ADR0044のP4範囲（単一ノードDB核、所有者作成別repo実装、外部公開しない方針）、ADR0045のP4-1核（直列実行serializable、固定8192byteページ、全ページredo WAL、no-steal、fsync後commit ack、順序0 fs境界ADR先行、fs A〜C揃うまで永続DB完成扱いにしない）、Issue576結論（ファイル6不足を公開std.fs拡張かつ既存std.os.fs信頼基盤拡張とし、圧縮/SHA1は純Sigil trust noneで別扱い）を守る。所有者指示: Issue584の共通fs境界ADR0049と索引のみ、実装/新規Issue/マージ禁止。版取得方法はpinned_source（完全SHA 4867dc61190c4e2e6953adb25240ea178603c0ed + Cargo.lock固定ビルド）。案: 公開APIは所有権を持つFile/Dirハンドル型（明示close+drop自動クリーンアップ、生fd非露出）。ロックはflock(2)を採用し、同一プロセスの任意fd closeで暗黙解除されるPOSIX fcntlを禁止しOFD寿命に結合。追記はO_APPENDによるwriteごとの末尾アトミック位置決定（レコード全体の原子性は保証せず）、位置指定IOはpread/pwriteでシーク競合排除。持続性はclose成功を信用せず明示fsyncと親ディレクトリfsyncを要求。renameは同一FSアトミック置換としEXDEVは明示拒否。--fs-doubleは実ファイル委譲と未対応操作明示拒否(fail-closed)。エラーはIoErrorKind、効果は既存effects fsに割当て新raw名追加なし。後続はfs A(資源/名前/排他)→B(ページIO/追記)→C(同期/原子的置換)に分割。",
+  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。ADR0005の信頼基盤最小化、ADR0016のADR先行、ADR0044のP4範囲（単一ノードDB核、所有者作成別repo実装、外部公開しない方針）、ADR0045のP4-1核（直列実行serializable、固定8192byteページ、全ページredo WAL、no-steal、fsync後commit ack、順序0 fs境界ADR先行、fs A〜C揃うまで永続DB完成扱いにしない、ADR0045:109の相対内部名/symlink拒否要件）、Issue576結論（ファイル6不足を公開std.fs拡張かつ既存std.os.fs信頼基盤拡張とし、圧縮/SHA1は純Sigil trust noneで別扱い）を守る。所有者指示: Issue584の共通fs境界ADR0049と索引のみ、実装/新規Issue/マージ禁止。版取得方法はpinned_source（完全SHA 4867dc61190c4e2e6953adb25240ea178603c0ed + Cargo.lock固定ビルド）。案: 公開APIは所有権を持つFile/Dirハンドル型（明示close+drop自動クリーンアップ、生fd非露出）。Dir起点のルート固定相対操作と..拒否、O_NOFOLLOWによるsymlink追従拒否（ADR0045:109要件）。ロックはflock(2)を採用し、同一プロセスの任意fd closeで暗黙解除されるPOSIX fcntlを禁止しOFD寿命に結合。追記はO_APPENDによるwriteごとの末尾アトミック位置決定（レコード全体の原子性は保証せず）、位置指定IOはpread/pwriteでシーク競合排除し、Linuxのpwrite追記化による誤書込み防止のためappendハンドルでのwrite_atを明示拒否。持続性はclose成功を信用せず明示fsyncと親ディレクトリfsyncを要求。renameは同一FSアトミック置換としEXDEVは明示拒否。--fs-doubleは実ファイル委譲と未対応操作明示拒否(fail-closed)。エラーはIoErrorKind、効果は既存effects fsに割当て新raw名追加なし。後続はfs A(資源/名前/排他/symlink拒否)→B(ページIO/追記/write_at排他)→C(同期/原子的置換)に分割。",
   "questions": {
     "lock_mechanism": {
       "type": "choice",
@@ -340,9 +376,17 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
     "io_and_durability": {
       "type": "choice",
       "criteria": {
-        "pread_pwrite_strict_sync": "pread/pwriteによる位置指定IO+O_APPEND+明示fsync/親dir同期+同一FSアトミックrename",
+        "pread_pwrite_strict_sync": "pread/pwrite位置指定IO+O_APPEND+appendハンドルでのwrite_at明示拒否+明示fsync/親dir同期+同一FSアトミックrename",
         "seek_based": "シーク(lseek)と通常のread/writeに依存し同期はcloseに委ねる",
         "fake_sync": "同期要求をノーオペレーション(no-op)として扱う"
+      }
+    },
+    "path_and_symlinks": {
+      "type": "choice",
+      "criteria": {
+        "strict_root_relative_no_symlinks": "Dir起点ルート固定相対操作、..拒否、O_NOFOLLOWによるsymlink拒否を境界契約とする",
+        "allow_arbitrary_paths": "任意絶対パスや..脱出、symlink追従を許容する",
+        "path_only_no_symlink_check": "パス構文検査のみ行いsymlink検査は行わない"
       }
     },
     "split_plan": {

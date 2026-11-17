@@ -837,15 +837,16 @@ fn compute_open_flags(opts: &OpenOptions) -> Int
 pub struct Dir {
   fd: Int,
   dir_path: Path,
+  buf: Addr,
 }
 
 impl Dir {
   pub fn open(p: &Path) -> Result<Dir, IoError>
-    intent "ディレクトリを開いて Dir ハンドルを得る"
+    intent "ディレクトリを開いて Dir ハンドルを得る（symlink 追従は拒否）"
     requires none
     ensures none
     effects fs
-    unchecked "openat(257) でディレクトリを開き、一時バッファを解放する"
+    unchecked "openat(257) で O_NOFOLLOW を指定してディレクトリを開き、一時バッファを解放する"
   {
     match validate_path(&p) {
       Err(e) => { return Err(e); }
@@ -853,13 +854,17 @@ impl Dir {
         let buf = c_path_buf(&b);
         let mut fd = -4;
         while fd == -4 {
-          fd = raw.syscall(257, -100, raw.addr_to_int(buf), 589824, 0, 0, 0);
+          // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+          fd = raw.syscall(257, -100, raw.addr_to_int(buf), 720896, 0, 0, 0);
         }
         raw.free(buf, b.len() + 1, 1);
         if fd < 0 {
           return Err(classify_io(fd, &p));
         }
-        return Ok(Dir { fd: fd, dir_path: p.clone() });
+        let dir_buf = raw.alloc(4112, 8);
+        raw.store_i64(dir_buf, 0);
+        raw.store_i64(raw.offset(dir_buf, 8), 0);
+        return Ok(Dir { fd: fd, dir_path: p.clone(), buf: dir_buf });
       }
     }
   }
@@ -1085,7 +1090,7 @@ impl Dir {
     requires none
     ensures none
     effects fs
-    unchecked "getdents64(217) でディレクトリエントリを読み取り、4096バイトの生バッファを走査して解放する"
+    unchecked "getdents64(217) でディレクトリエントリを読み取り、未返却エントリをバッファに保持して次回へ持ち越す"
   {
     let mut limit = max_entries;
     if limit < 0 {
@@ -1096,60 +1101,67 @@ impl Dir {
     }
     let mut out = List.new();
     let buf_cap = 4096;
-    let buf = raw.alloc(buf_cap, 8);
+    let mut buf_len = raw.load_i64(self.buf);
+    let mut off = raw.load_i64(raw.offset(self.buf, 8));
+    let data_buf = raw.offset(self.buf, 16);
+
     let mut more = true;
     while more && out.len() < limit {
-      let mut n = -4;
-      while n == -4 {
-        n = raw.syscall(217, self.fd, raw.addr_to_int(buf), buf_cap, 0, 0, 0);
-      }
-      if n <= 0 {
-        more = false;
-        if n < 0 {
-          raw.free(buf, buf_cap, 8);
-          return Err(classify_io(n, &self.dir_path));
+      if off < buf_len {
+        let rec_lo = raw.load_u8(raw.offset(data_buf, off + 16));
+        let rec_hi = raw.load_u8(raw.offset(data_buf, off + 17));
+        let reclen = rec_lo + rec_hi * 256;
+        if reclen <= 19 || off + reclen > buf_len {
+          off = buf_len;
+        } else {
+          let d_type = raw.load_u8(raw.offset(data_buf, off + 18));
+          let mut name_bytes = Bytes.new();
+          let mut p = off + 19;
+          let end_p = off + reclen;
+          let mut reading_name = true;
+          while p < end_p && reading_name {
+            let c = raw.load_u8(raw.offset(data_buf, p));
+            if c == 0 {
+              reading_name = false;
+            } else {
+              name_bytes.push(c);
+              p = p + 1;
+            }
+          }
+          let name_str = name_bytes.to_string_utf8().unwrap_or("");
+          if name_str != "" && name_str != "." && name_str != ".." {
+            let is_d = (d_type == 4);
+            let is_f = (d_type == 8);
+            let is_lnk = (d_type == 10);
+            out.push(DirEntry {
+              ent_name: name_str,
+              ent_is_dir: is_d,
+              ent_is_file: is_f,
+              ent_is_symlink: is_lnk,
+            });
+          }
+          off = off + reclen;
         }
       } else {
-        let mut off = 0;
-        while off < n && out.len() < limit {
-          let rec_lo = raw.load_u8(raw.offset(buf, off + 16));
-          let rec_hi = raw.load_u8(raw.offset(buf, off + 17));
-          let reclen = rec_lo + rec_hi * 256;
-          if reclen <= 19 || off + reclen > n {
-            off = n;
-          } else {
-            let d_type = raw.load_u8(raw.offset(buf, off + 18));
-            let mut name_bytes = Bytes.new();
-            let mut p = off + 19;
-            let end_p = off + reclen;
-            let mut reading_name = true;
-            while p < end_p && reading_name {
-              let c = raw.load_u8(raw.offset(buf, p));
-              if c == 0 {
-                reading_name = false;
-              } else {
-                name_bytes.push(c);
-                p = p + 1;
-              }
-            }
-            let name_str = name_bytes.to_string_utf8().unwrap_or("");
-            if name_str != "" && name_str != "." && name_str != ".." {
-              let is_d = (d_type == 4);
-              let is_f = (d_type == 8);
-              let is_lnk = (d_type == 10);
-              out.push(DirEntry {
-                ent_name: name_str,
-                ent_is_dir: is_d,
-                ent_is_file: is_f,
-                ent_is_symlink: is_lnk,
-              });
-            }
-            off = off + reclen;
+        let mut n = -4;
+        while n == -4 {
+          n = raw.syscall(217, self.fd, raw.addr_to_int(data_buf), buf_cap, 0, 0, 0);
+        }
+        if n <= 0 {
+          more = false;
+          if n < 0 {
+            raw.store_i64(self.buf, 0);
+            raw.store_i64(raw.offset(self.buf, 8), 0);
+            return Err(classify_io(n, &self.dir_path));
           }
+        } else {
+          buf_len = n;
+          off = 0;
         }
       }
     }
-    raw.free(buf, buf_cap, 8);
+    raw.store_i64(self.buf, buf_len);
+    raw.store_i64(raw.offset(self.buf, 8), off);
     return Ok(out);
   }
 
@@ -1158,8 +1170,9 @@ impl Dir {
     requires none
     ensures none
     effects fs
-    unchecked "close(3) を発行する"
+    unchecked "バッファを解放し close(3) を発行する"
   {
+    raw.free(self.buf, 4112, 8);
     if self.fd < 0 {
       return Ok(unit());
     }

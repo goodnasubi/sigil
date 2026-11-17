@@ -1659,6 +1659,62 @@ impl<'p> M<'p> {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    fn is_mock_file(&self, p: &str) -> bool {
+        let p_clean = p.trim_start_matches('/');
+        let in_fs = self.fs.as_ref().is_some_and(|files| {
+            files.contains_key(p)
+                || files.contains_key(p_clean)
+                || files.contains_key(&format!("/{}", p_clean))
+        });
+        let in_written = self.fs_bytes_written.contains_key(p)
+            || self.fs_bytes_written.contains_key(p_clean)
+            || self.fs_bytes_written.contains_key(&format!("/{}", p_clean));
+        let in_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
+            files.contains_key(p)
+                || files.contains_key(p_clean)
+                || files.contains_key(&format!("/{}", p_clean))
+        });
+        let is_deleted = self.fs_bytes_deleted.contains(p)
+            || self.fs_bytes_deleted.contains(p_clean)
+            || self.fs_bytes_deleted.contains(&format!("/{}", p_clean));
+        in_fs || (in_written && !is_deleted) || (in_bytes && !is_deleted)
+    }
+
+    fn is_mock_dir(&self, p: &str) -> bool {
+        let p_clean = p.trim_start_matches('/');
+        if p_clean.is_empty() {
+            return true;
+        }
+        if self.fs_dirs.contains(p_clean) || self.fs_dirs.contains(&format!("/{}", p_clean)) {
+            return true;
+        }
+        let prefix = format!("{}/", p_clean);
+        let in_fs = self.fs.as_ref().is_some_and(|files| {
+            files
+                .keys()
+                .any(|k| k.trim_start_matches('/').starts_with(&prefix))
+        });
+        let in_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
+            files.keys().any(|k| {
+                let k_clean = k.trim_start_matches('/');
+                k_clean.starts_with(&prefix)
+                    && !self.fs_bytes_deleted.contains(k)
+                    && !self.fs_bytes_deleted.contains(k_clean)
+            })
+        });
+        let in_written = self.fs_bytes_written.keys().any(|k| {
+            let k_clean = k.trim_start_matches('/');
+            k_clean.starts_with(&prefix)
+                && !self.fs_bytes_deleted.contains(k)
+                && !self.fs_bytes_deleted.contains(k_clean)
+        });
+        let in_dirs = self.fs_dirs.iter().any(|d| {
+            let d_clean = d.trim_start_matches('/');
+            d_clean != p_clean && d_clean.starts_with(&prefix)
+        });
+        in_fs || in_bytes || in_written || in_dirs
+    }
+
     /// テスト差し替え（fs_files / fs_bytes）下の疑似システムコール処理（ADR 0049 決定 5）。
     /// 未対応操作は fail-closed（-95: EOPNOTSUPP）で拒否する。
     fn eval_fs_double_syscall(&mut self, n: i64, a: [i64; 6]) -> i64 {
@@ -1667,23 +1723,43 @@ impl<'p> M<'p> {
                 let p = self.path_string(a[1] as usize);
                 let p_clean = p.trim_start_matches('/');
                 if a[2] == 512 {
-                    // ディレクトリ削除: 配下にファイルが存在すれば ENOTEMPTY (-39)
-                    let prefix = format!("{}/", p_clean);
-                    let mut has_children = false;
-                    if let Some(files) = &self.fs {
-                        has_children |= files
-                            .keys()
-                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
-                    }
-                    if let Some(files) = &self.fs_bytes {
-                        has_children |= files
-                            .keys()
-                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
-                    }
-                    if has_children {
-                        -39 // ENOTEMPTY
+                    if self.is_mock_file(&p) {
+                        -20 // ENOTDIR: ファイルを rmdir しようとした
+                    } else if !self.is_mock_dir(&p) {
+                        -2 // ENOENT: ディレクトリが存在しない
                     } else {
-                        0
+                        let prefix = format!("{}/", p_clean);
+                        let mut has_children = false;
+                        if let Some(files) = &self.fs {
+                            has_children |= files
+                                .keys()
+                                .any(|k| k.trim_start_matches('/').starts_with(&prefix));
+                        }
+                        if let Some(files) = &self.fs_bytes {
+                            has_children |= files.keys().any(|k| {
+                                let k_clean = k.trim_start_matches('/');
+                                k_clean.starts_with(&prefix)
+                                    && !self.fs_bytes_deleted.contains(k)
+                                    && !self.fs_bytes_deleted.contains(k_clean)
+                            });
+                        }
+                        has_children |= self.fs_bytes_written.keys().any(|k| {
+                            let k_clean = k.trim_start_matches('/');
+                            k_clean.starts_with(&prefix)
+                                && !self.fs_bytes_deleted.contains(k)
+                                && !self.fs_bytes_deleted.contains(k_clean)
+                        });
+                        has_children |= self.fs_dirs.iter().any(|d| {
+                            let d_clean = d.trim_start_matches('/');
+                            d_clean != p_clean && d_clean.starts_with(&prefix)
+                        });
+                        if has_children {
+                            -39 // ENOTEMPTY
+                        } else {
+                            self.fs_dirs.remove(p_clean);
+                            self.fs_dirs.remove(&format!("/{}", p_clean));
+                            0
+                        }
                     }
                 } else {
                     let mut removed = false;
@@ -1724,8 +1800,21 @@ impl<'p> M<'p> {
                 }
             }
             SYS_MKDIRAT => {
-                // ディレクトリ作成: メモリ内モックでは暗黙に成功
-                0
+                let p = self.path_string(a[1] as usize);
+                let p_clean = p.trim_start_matches('/');
+                if self.is_mock_file(&p) || self.is_mock_dir(&p) {
+                    -17 // EEXIST: 既にファイルまたはディレクトリが存在する
+                } else {
+                    if let Some(parent) = std::path::Path::new(p_clean).parent() {
+                        let parent_str = parent.to_str().unwrap_or("");
+                        if !parent_str.is_empty() && !self.is_mock_dir(parent_str) {
+                            return -2; // ENOENT: 親ディレクトリが存在しない
+                        }
+                    }
+                    self.fs_dirs.insert(p_clean.to_string());
+                    self.fs_dirs.insert(format!("/{}", p_clean));
+                    0
+                }
             }
             SYS_NEWFSTATAT => {
                 let p = self.path_string(a[1] as usize);
@@ -1770,28 +1859,15 @@ impl<'p> M<'p> {
                         *(statbuf.add(48) as *mut i64) = len;
                     }
                     0
+                } else if self.is_mock_dir(&p) {
+                    unsafe {
+                        std::ptr::write_bytes(statbuf, 0, STAT_SIZE);
+                        *(statbuf.add(24) as *mut i64) = 16384 | 0o755;
+                        *(statbuf.add(48) as *mut i64) = 4096;
+                    }
+                    0
                 } else {
-                    let prefix = format!("{}/", p_clean);
-                    let mut is_dir = false;
-                    if let Some(files) = &self.fs {
-                        is_dir |= files
-                            .keys()
-                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
-                    }
-                    if let Some(files) = &self.fs_bytes {
-                        is_dir |= files
-                            .keys()
-                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
-                    }
-                    if is_dir {
-                        unsafe {
-                            std::ptr::write_bytes(statbuf, 0, STAT_SIZE);
-                            *(statbuf.add(24) as *mut i64) = 16384 | 0o755;
-                        }
-                        0
-                    } else {
-                        -2 // ENOENT
-                    }
+                    -2 // ENOENT
                 }
             }
             // ADR 0049 決定 5: 差し替え下でシミュレーション不可能な操作（OFD ロック、生 fd 露出、生ディレクトリエントリ）は

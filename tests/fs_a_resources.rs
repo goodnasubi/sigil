@@ -502,3 +502,162 @@ fn fs_bytes_double_isolation_remove_after_write() {
         .value;
     assert_eq!(res, "\"ok\"");
 }
+
+#[cfg(unix)]
+#[test]
+fn dir_open_rejects_symlink() {
+    let base = scratch_dir("dir_symlink");
+    let real_dir = base.join("real");
+    let sym_dir = base.join("link_to_real");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::os::unix::fs::symlink(&real_dir, &sym_dir).unwrap();
+
+    let sig = "t(sym_path: String) -> String";
+    let body = r#"
+        let sp = Path.new(&sym_path);
+        match fs.open_dir(&sp) {
+            Ok(d) => {
+                let _ = d.close();
+                return "err_dir_symlink_allowed";
+            }
+            Err(e) => {
+                match e {
+                    IoError.NotADirectory(_) => {}
+                    IoError.PermissionDenied(_) => {}
+                    _ => { return "err_unexpected_error_kind"; }
+                }
+            }
+        }
+        return "ok";
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&sym_dir)]);
+    assert_eq!(res, "\"ok\"");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn read_entries_carries_over_unreturned_records() {
+    let base = scratch_dir("read_entries_carry_over");
+    std::fs::write(base.join("a.txt"), "a").unwrap();
+    std::fs::write(base.join("b.txt"), "b").unwrap();
+
+    let sig = "t(dir_path: String) -> String";
+    let body = r#"
+        let bp = Path.new(&dir_path);
+        match fs.open_dir(&bp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(d) => {
+                let mut first_name = "";
+                match d.read_entries(1) {
+                    Err(_) => { return "err_read_1"; }
+                    Ok(es1) => {
+                        if es1.len() != 1 {
+                            return "err_len_not_1_first";
+                        }
+                        match es1.get(0) {
+                            None => { return "err_none_1"; }
+                            Some(e) => {
+                                first_name = e.name();
+                            }
+                        }
+                    }
+                }
+
+                let mut second_name = "";
+                match d.read_entries(1) {
+                    Err(_) => { return "err_read_2"; }
+                    Ok(es2) => {
+                        if es2.len() != 1 {
+                            return "err_len_not_1_second";
+                        }
+                        match es2.get(0) {
+                            None => { return "err_none_2"; }
+                            Some(e) => {
+                                second_name = e.name();
+                            }
+                        }
+                    }
+                }
+
+                let _ = d.close();
+
+                if first_name == "" || second_name == "" {
+                    return "err_empty_name";
+                }
+                if first_name == second_name {
+                    return "err_duplicate_entry";
+                }
+                return "ok";
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&base)]);
+    assert_eq!(res, "\"ok\"");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn fs_double_mkdirat_checks_existence_and_kind() {
+    use std::collections::BTreeMap;
+    let mut files = BTreeMap::new();
+    let file_key = "/v/existing_file.txt".to_string();
+    files.insert(file_key.clone(), "content".to_string());
+    let opts = Options {
+        fs_files: Some(files),
+        ..Options::default()
+    };
+
+    let sig = "t(fp: String) -> String";
+    let body = r#"
+        let p_file = Path.new(&fp);
+
+        // 1. 既存ファイルと同名パスへの create_dir は AlreadyExists
+        match fs.create_dir(&p_file) {
+            Ok(_) => { return "err_create_over_file_succeeded"; }
+            Err(e) => {
+                match e {
+                    IoError.AlreadyExists(_) => {}
+                    _ => { return "err_not_already_exists_for_file"; }
+                }
+            }
+        }
+
+        // 2. 新規ディレクトリの作成と二重作成の AlreadyExists 拒否
+        let p_new_dir = Path.new(&"/v/new_dir");
+        match fs.create_dir(&p_new_dir) {
+            Err(_) => { return "err_create_dir"; }
+            Ok(_) => {}
+        }
+        match fs.create_dir(&p_new_dir) {
+            Ok(_) => { return "err_duplicate_create_dir_succeeded"; }
+            Err(e) => {
+                match e {
+                    IoError.AlreadyExists(_) => {}
+                    _ => { return "err_not_already_exists_for_dir"; }
+                }
+            }
+        }
+
+        // 3. 親が存在しないパスへの作成は NotFound
+        let p_no_parent = Path.new(&"/nonexistent_parent/sub");
+        match fs.create_dir(&p_no_parent) {
+            Ok(_) => { return "err_create_without_parent_succeeded"; }
+            Err(e) => {
+                match e {
+                    IoError.NotFound(_) => {}
+                    _ => { return "err_not_not_found"; }
+                }
+            }
+        }
+
+        return "ok";
+    "#;
+
+    let src = format!("{HEAD}{}", f(sig, "fs", body));
+    let res = sigil::ir_eval::run_with(&src, "t", &[Arg::Str(file_key)], &opts)
+        .unwrap()
+        .value;
+    assert_eq!(res, "\"ok\"");
+}

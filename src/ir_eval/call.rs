@@ -1807,6 +1807,20 @@ impl<'p> M<'p> {
                         if has_children {
                             -39 // ENOTEMPTY
                         } else {
+                            // ハンドルのために影へ置いた実ディレクトリも、実ディレクトリとして消す。
+                            // 子（ファイルでもディレクトリでも）が残っていれば ENOTEMPTY、消えていれば何もしない。
+                            if let Some(root) = self.fs_shadow.root() {
+                                let comps = super::shadow::split(&p).unwrap_or_default();
+                                if !comps.is_empty() {
+                                    match std::fs::remove_dir(root.join(comps.join("/"))) {
+                                        Ok(()) => {}
+                                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                        Err(e) => {
+                                            return -(e.raw_os_error().unwrap_or(5) as i64);
+                                        }
+                                    }
+                                }
+                            }
                             self.fs_dirs.remove(p_clean);
                             self.fs_dirs.remove(&format!("/{}", p_clean));
                             0
@@ -2085,9 +2099,17 @@ impl<'p> M<'p> {
                 }
             }
         }
-        let real = root.join(comps.join("/"));
+        let mut real = root.join(comps.join("/"));
+        // 末尾の `/` と `/.` は「ディレクトリでなければならない」という制約。正規化で捨てずに、実パスに `/` として残し、
+        // 通常ファイルに対しては本物の `openat` が ENOTDIR を返すようにする（ネイティブと同じ結果）。
+        let dir_required = super::shadow::requires_dir(&path);
+        if dir_required {
+            let mut os = real.into_os_string();
+            os.push("/");
+            real = std::path::PathBuf::from(os);
+        }
         let fd = self.shadow_syscall_path(SYS_OPENAT, &real, [a[2], a[3]]);
-        if fd >= 0 && a[2] & O_DIRECTORY == 0 {
+        if fd >= 0 && a[2] & O_DIRECTORY == 0 && !dir_required {
             self.fs_shadow.mark(comps.join("/"));
         }
         fd

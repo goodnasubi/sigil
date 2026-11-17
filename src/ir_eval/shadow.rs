@@ -72,7 +72,11 @@ impl Shadow {
     }
 
     /// 仮のパスが影の実ファイルに置かれていれば、その実際のパス。
+    /// 末尾が `/` や `/.` のパス（ディレクトリでなければならない）は、通常ファイルを指すものとして扱わない。
     pub(super) fn path_of(&self, virt: &str) -> Option<PathBuf> {
+        if requires_dir(virt) {
+            return None;
+        }
         let root = self.root.as_ref()?;
         let comps = split(virt)?;
         let key = comps.join("/");
@@ -86,6 +90,12 @@ impl Drop for Shadow {
             let _ = std::fs::remove_dir_all(r);
         }
     }
+}
+
+/// パスの末尾が「ディレクトリでなければならない」形（`/` で終わる、`.` や `/.` で終わる）か。
+/// 構成要素に分けると捨てられる情報なので、別に調べて保つ。
+pub(super) fn requires_dir(path: &str) -> bool {
+    path.ends_with('/') || path == "." || path.ends_with("/.")
 }
 
 /// 仮のパスを構成要素に分ける。空と `.` は捨てる。`..` と NUL を含むものは `None`（影の根の外へ出さない）。
@@ -112,6 +122,17 @@ mod tests {
         assert_eq!(split("/").unwrap(), Vec::<String>::new());
         assert!(split("/a/../b").is_none());
         assert!(split("..").is_none());
+    }
+
+    #[test]
+    fn requires_dir_keeps_trailing_directory_syntax() {
+        assert!(requires_dir("/v/data.txt/"));
+        assert!(requires_dir("/v/data.txt/."));
+        assert!(requires_dir("."));
+        assert!(requires_dir("/"));
+        assert!(!requires_dir("/v/data.txt"));
+        assert!(!requires_dir("/v/.hidden"));
+        assert!(!requires_dir("/v/a.b"));
     }
 
     #[test]

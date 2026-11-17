@@ -339,6 +339,97 @@ fn dir_relative_remove_file_resolves_the_directory_fd_match_native() {
     assert_eq!(res, "\"ok\"");
 }
 
+#[test]
+fn remove_dir_reflects_to_the_shadow_directory_match_native() {
+    // ハンドルで開いた（影の実ディレクトリを作った）ディレクトリを消すと、以後は開けず、中に作ることもできない。
+    let body = r#"
+        let dir = Path.new(&dir_path);
+        let child = dir.join(&"new.txt");
+        match fs.create_dir(&dir) {
+            Err(_) => { return "err_create_dir"; }
+            Ok(_) => {}
+        }
+        match fs.open_dir(&dir) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(d) => { let _ = d.close(); }
+        }
+        match fs.remove_dir(&dir) {
+            Err(_) => { return "err_remove_dir"; }
+            Ok(_) => {}
+        }
+        match fs.open_dir(&dir) {
+            Ok(_) => { return "err_open_removed_dir"; }
+            Err(e) => {
+                match e {
+                    IoError.NotFound(_) => {}
+                    _ => { return "err_open_removed_not_not_found"; }
+                }
+            }
+        }
+        let cn = fs.open_options().create_new(true).write(true);
+        match cn.open(&child) {
+            Ok(_) => { return "err_create_in_removed_dir"; }
+            Err(e) => {
+                match e {
+                    IoError.NotFound(_) => {}
+                    _ => { return "err_create_not_not_found"; }
+                }
+            }
+        }
+        return "ok";
+    "#;
+    let res = run(
+        &[("/v/data.txt", "hello")],
+        "t(dir_path: String) -> String",
+        body,
+        &[Arg::Str("/dd".into())],
+    );
+    assert_eq!(res, "\"ok\"");
+}
+
+#[test]
+fn trailing_slash_and_dot_keep_the_directory_requirement_match_native() {
+    // 通常ファイルへの `data.txt/` と `data.txt/.` は、ネイティブと同じく NotADirectory（正規化で制約を捨てない）。
+    let body = r#"
+        let ro = fs.open_options().read(true).follow_symlinks(true);
+        match ro.open(&Path.new(&with_slash)) {
+            Ok(_) => { return "err_open_with_slash"; }
+            Err(e) => {
+                match e {
+                    IoError.NotADirectory(_) => {}
+                    _ => { return "err_slash_not_not_a_directory"; }
+                }
+            }
+        }
+        match ro.open(&Path.new(&with_dot)) {
+            Ok(_) => { return "err_open_with_dot"; }
+            Err(e) => {
+                match e {
+                    IoError.NotADirectory(_) => {}
+                    _ => { return "err_dot_not_not_a_directory"; }
+                }
+            }
+        }
+        // 末尾の制約が無ければ、同じファイルは開ける。
+        match ro.open(&Path.new(&plain)) {
+            Err(_) => { return "err_open_plain"; }
+            Ok(f) => { let _ = f.close(); }
+        }
+        return "ok";
+    "#;
+    let res = run(
+        &[("/v/data.txt", "hello")],
+        "t(with_slash: String, with_dot: String, plain: String) -> String",
+        body,
+        &[
+            Arg::Str("/v/data.txt/".into()),
+            Arg::Str("/v/data.txt/.".into()),
+            Arg::Str("/v/data.txt".into()),
+        ],
+    );
+    assert_eq!(res, "\"ok\"");
+}
+
 /// 親の仮ディレクトリが無い仮のパスへの作成は NotFound。評価器だけの確認（ネイティブの試験の枠組みは、表にない絶対パスの親を実際に作ってしまう）。
 #[test]
 fn create_without_virtual_parent_is_not_found_under_fs_double() {

@@ -1,4 +1,4 @@
-//! テスト差し替え（`--fs-double`、`Options::fs_files`／`fs_bytes`）下の「影の実ファイル層」（ADR 0049 決定 5・補足 B、Issue #590）。
+//! テスト差し替え（`--fs-double`、`Options::fs_files`／`fs_bytes`）下の「影の実ファイル層」（ADR 0049 決定 5 と 5.1、Issue #590）。
 //!
 //! 差し替えの表（パス → 内容）は評価器の内部の状態で、実 OS のファイルディスクリプタを持たない。
 //! fs A のハンドル（`OpenOptions.open`、`Dir.open_file`、`File` の排他ロック）は fd を要るので、
@@ -55,6 +55,16 @@ impl Shadow {
         if !key.is_empty() {
             self.files.insert(key);
         }
+    }
+
+    /// `prefix`（末尾に `/` を付けたキー）の下に、実在する影の実ファイルがあるか。
+    pub(super) fn has_file_under(&self, prefix: &str) -> bool {
+        let Some(root) = &self.root else {
+            return false;
+        };
+        self.files
+            .iter()
+            .any(|k| k.starts_with(prefix) && root.join(k).exists())
     }
 
     pub(super) fn is_marked(&self, key: &str) -> bool {

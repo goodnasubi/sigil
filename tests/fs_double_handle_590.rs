@@ -240,6 +240,105 @@ fn remove_file_after_handle_open_is_a_real_unlink() {
     assert_eq!(res, "\"ok\"");
 }
 
+#[test]
+fn rmdir_sees_shadow_deletions_and_shadow_created_files_match_native() {
+    let body = r#"
+        let vp = Path.new(&data);
+        let dir = Path.new(&dir_path);
+        let fresh = Path.new(&fresh_path);
+        // 表にあるファイルを開いて閉じ、消すと、親は空になって rmdir できる（影の有無で結果が変わらない）。
+        let ro = fs.open_options().read(true);
+        match ro.open(&vp) {
+            Err(_) => { return "err_open"; }
+            Ok(f) => { let _ = f.close(); }
+        }
+        match fs.remove_file(&vp) {
+            Err(_) => { return "err_remove"; }
+            Ok(_) => {}
+        }
+        // ハンドルで作った（表に無い）ファイルも子として数えられ、rmdir は DirectoryNotEmpty。
+        let cn = fs.open_options().create_new(true).write(true);
+        match cn.open(&fresh) {
+            Err(_) => { return "err_create_fresh"; }
+            Ok(f) => { let _ = f.close(); }
+        }
+        match fs.remove_dir(&dir) {
+            Ok(_) => { return "err_rmdir_with_shadow_child"; }
+            Err(e) => {
+                match e {
+                    IoError.DirectoryNotEmpty(_) => {}
+                    _ => { return "err_rmdir_not_not_empty"; }
+                }
+            }
+        }
+        match fs.remove_file(&fresh) {
+            Err(_) => { return "err_remove_fresh"; }
+            Ok(_) => {}
+        }
+        match fs.remove_dir(&dir) {
+            Err(_) => { return "err_rmdir_empty"; }
+            Ok(_) => {}
+        }
+        return "ok";
+    "#;
+    let res = run(
+        &[("/v/data.txt", "hello")],
+        "t(data: String, dir_path: String, fresh_path: String) -> String",
+        body,
+        &[
+            Arg::Str("/v/data.txt".into()),
+            Arg::Str("/v".into()),
+            Arg::Str("/v/fresh.txt".into()),
+        ],
+    );
+    assert_eq!(res, "\"ok\"");
+}
+
+#[test]
+fn dir_relative_remove_file_resolves_the_directory_fd_match_native() {
+    let body = r#"
+        let dir = Path.new(&dir_path);
+        let vp = Path.new(&data);
+        match fs.open_dir(&dir) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(d) => {
+                // ディレクトリ fd 基準の相対パス（仮ルートの同名ファイルではなく /v/data.txt）を消す。
+                match d.remove_file(&Path.new(&"data.txt")) {
+                    Err(_) => { return "err_dir_remove_file"; }
+                    Ok(_) => {}
+                }
+                match d.remove_file(&Path.new(&"data.txt")) {
+                    Ok(_) => { return "err_remove_twice"; }
+                    Err(e) => {
+                        match e {
+                            IoError.NotFound(_) => {}
+                            _ => { return "err_twice_not_not_found"; }
+                        }
+                    }
+                }
+                let _ = d.close();
+            }
+        }
+        match fs.read(&vp) {
+            Ok(_) => { return "err_read_after_dir_remove"; }
+            Err(e) => {
+                match e {
+                    IoError.NotFound(_) => {}
+                    _ => { return "err_read_not_not_found"; }
+                }
+            }
+        }
+        return "ok";
+    "#;
+    let res = run(
+        &[("/v/data.txt", "hello"), ("/data.txt", "root-side")],
+        "t(dir_path: String, data: String) -> String",
+        body,
+        &[Arg::Str("/v".into()), Arg::Str("/v/data.txt".into())],
+    );
+    assert_eq!(res, "\"ok\"");
+}
+
 /// 親の仮ディレクトリが無い仮のパスへの作成は NotFound。評価器だけの確認（ネイティブの試験の枠組みは、表にない絶対パスの親を実際に作ってしまう）。
 #[test]
 fn create_without_virtual_parent_is_not_found_under_fs_double() {

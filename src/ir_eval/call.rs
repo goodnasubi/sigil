@@ -1767,7 +1767,10 @@ impl<'p> M<'p> {
     fn eval_fs_double_syscall(&mut self, n: i64, a: [i64; 6]) -> i64 {
         match n {
             SYS_UNLINKAT => {
-                let p = self.path_string(a[1] as usize);
+                let p = match self.double_path(a[0], a[1] as usize) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                };
                 let p_clean = p.trim_matches('/');
                 if a[2] == 512 {
                     if self.is_mock_file(&p) {
@@ -1776,7 +1779,8 @@ impl<'p> M<'p> {
                         -2 // ENOENT: ディレクトリが存在しない
                     } else {
                         let prefix = format!("{}/", p_clean);
-                        let mut has_children = false;
+                        // 影の実ファイル（表に無い、ハンドルで作ったものを含む）も子として数える。
+                        let mut has_children = self.fs_shadow.has_file_under(&prefix);
                         if let Some(files) = &self.fs {
                             has_children |= files
                                 .keys()
@@ -1809,9 +1813,23 @@ impl<'p> M<'p> {
                         }
                     }
                 } else if let Some(sp) = self.fs_shadow.path_of(&p) {
-                    // 影の実ファイル（ハンドルで開いたもの）は、実ファイルとして消す。登録は残し、以後は実ファイルが ENOENT を返す。
+                    // 影の実ファイル（ハンドルで開いたもの）は、実ファイルとして消す。影の登録は残し、以後は実ファイルが ENOENT を返す。
+                    // 表（fs／fs_bytes）の同名の登録も消して、ディレクトリの空判定（rmdir）が影の有無と食い違わないようにする。
                     match std::fs::remove_file(&sp) {
-                        Ok(()) => 0,
+                        Ok(()) => {
+                            if let Some(files) = &mut self.fs {
+                                files.remove(&p);
+                                files.remove(p_clean);
+                                files.remove(&format!("/{}", p_clean));
+                            }
+                            self.fs_bytes_written.remove(&p);
+                            self.fs_bytes_written.remove(p_clean);
+                            self.fs_bytes_written.remove(&format!("/{}", p_clean));
+                            self.fs_bytes_deleted.insert(p.clone());
+                            self.fs_bytes_deleted.insert(p_clean.to_string());
+                            self.fs_bytes_deleted.insert(format!("/{}", p_clean));
+                            0
+                        }
                         Err(e) => -(e.raw_os_error().unwrap_or(5) as i64),
                     }
                 } else {
@@ -1853,7 +1871,10 @@ impl<'p> M<'p> {
                 }
             }
             SYS_MKDIRAT => {
-                let p = self.path_string(a[1] as usize);
+                let p = match self.double_path(a[0], a[1] as usize) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                };
                 let p_clean = p.trim_matches('/');
                 if self.is_mock_file(&p) || self.is_mock_dir(&p) {
                     -17 // EEXIST: 既にファイルまたはディレクトリが存在する
@@ -1870,7 +1891,10 @@ impl<'p> M<'p> {
                 }
             }
             SYS_NEWFSTATAT => {
-                let p = self.path_string(a[1] as usize);
+                let p = match self.double_path(a[0], a[1] as usize) {
+                    Ok(p) => p,
+                    Err(e) => return e,
+                };
                 if let Some(sp) = self.fs_shadow.path_of(&p) {
                     return self.shadow_syscall_path(SYS_NEWFSTATAT, &sp, [a[2], a[3]]);
                 }
@@ -1935,6 +1959,39 @@ impl<'p> M<'p> {
         }
     }
 
+    /// 差し替え下のパス引数を、仮のルートからの絶対パスにする。絶対パスと `AT_FDCWD` 基準はそのまま。
+    /// ディレクトリ fd 基準の相対パスは、fd が影の根の下を指すときだけ、その仮のパスに解決する（それ以外は fail-closed の -95）。
+    fn double_path(&mut self, dirfd: i64, addr: usize) -> Result<String, i64> {
+        let path = self.path_string(addr);
+        if path.starts_with('/') || dirfd == -100 {
+            return Ok(path);
+        }
+        let comps = self.shadow_dir_comps(dirfd)?;
+        let Some(add) = super::shadow::split(&path) else {
+            return Err(-95);
+        };
+        let mut all = comps;
+        all.extend(add);
+        Ok(format!("/{}", all.join("/")))
+    }
+
+    /// 影の根の下のディレクトリ fd が指す、仮のパスの構成要素。
+    fn shadow_dir_comps(&mut self, dirfd: i64) -> Result<Vec<String>, i64> {
+        let Ok(root) = self.fs_shadow.ensure_root() else {
+            return Err(-5);
+        };
+        let Some(dir) = self.shadow_fd_path(dirfd) else {
+            return Err(-95);
+        };
+        let Ok(rel) = dir.strip_prefix(&root) else {
+            return Err(-95); // 影の根の下でない fd は差し替えの外
+        };
+        rel.components()
+            .map(|c| c.as_os_str().to_str().map(String::from))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(-95)
+    }
+
     /// `/proc/self/fd/<fd>` が指す実際のパス（影の根の下か調べるのに使う）。
     fn shadow_fd_path(&self, fd: i64) -> Option<std::path::PathBuf> {
         std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
@@ -1994,7 +2051,7 @@ impl<'p> M<'p> {
         Ok(())
     }
 
-    /// 差し替え下の `openat`（ADR 0049 補足 B）。仮のパスを影の根の下の実パスに写して、本物の `openat` を発行する。
+    /// 差し替え下の `openat`（ADR 0049 決定 5.1）。仮のパスを影の根の下の実パスに写して、本物の `openat` を発行する。
     /// ディレクトリ fd を基準にした相対パスは、fd が影の根の下を指すときだけ通す（それ以外は fail-closed）。
     fn double_openat(&mut self, a: [i64; 6]) -> i64 {
         const O_DIRECTORY: i64 = 65536;
@@ -2009,20 +2066,10 @@ impl<'p> M<'p> {
         let mut comps: Vec<String> = if path.starts_with('/') || a[0] == -100 {
             vec![]
         } else {
-            let Some(dir) = self.shadow_fd_path(a[0]) else {
-                return -95;
-            };
-            let Ok(rel) = dir.strip_prefix(&root) else {
-                return -95; // 影の根の下でない fd は差し替えの外
-            };
-            let Some(v) = rel
-                .components()
-                .map(|c| c.as_os_str().to_str().map(String::from))
-                .collect::<Option<Vec<_>>>()
-            else {
-                return -95;
-            };
-            v
+            match self.shadow_dir_comps(a[0]) {
+                Ok(v) => v,
+                Err(e) => return e,
+            }
         };
         comps.extend(add);
         // 仮の表にあるファイルとディレクトリを、開く前に影へ置く（存在しないものは作らない。O_CREAT は本物の openat が作る）。

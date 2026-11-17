@@ -129,7 +129,14 @@ impl<'a> L<'a> {
             }
             a::Expr::Result => Ok(Operand::Copy(Place::local(0))),
             a::Expr::SelfValue => match self.fb.self_local {
-                Some(l) => Ok(Operand::Copy(Place::local(l))),
+                Some(l) => {
+                    // メソッドの本体の `self` を値で使う（`let mut f = self;` や `consume(self)`）のは、名前の `Name` と同じく移動。
+                    // 検査器は `place_path` で `self` の移動を記録している。常に複写にすると、複写は破棄の記録も fd の close もしない「写し」になり、
+                    // 元の `self` が元のまま関数の終わりで破棄される（`File::close` の後に同じ fd がもう一度 close される。Issue #595）。
+                    // 契約・篩型の中の `self`（読むだけ）は、検査器が移動を記録しないので、従来どおり複写になる。
+                    let ty = self.fb.locals[l].ty.clone();
+                    Ok(self.place_op(e, &Place::local(l), &ty))
+                }
                 None => bail("self の場所がない"),
             },
             a::Expr::Old(i) => match self.fb.olds.get(&addr(i)) {

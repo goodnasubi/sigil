@@ -812,7 +812,11 @@ impl<'p> M<'p> {
                 use super::binary_io as bio;
                 let path = self.text_of(locals, &args[0]);
                 let max = self.read_int(locals, &args[1]);
+                let shadowed = self.fs_shadow.path_of(&path);
                 let result = bio::validate(&path, max).and_then(|cap| match &self.fs_bytes {
+                    _ if shadowed.is_some() => {
+                        bio::read(&shadowed.as_ref().unwrap().to_string_lossy(), cap)
+                    }
                     Some(files) => {
                         let p_clean = path.trim_start_matches('/');
                         if self.fs_bytes_deleted.contains(&*path)
@@ -848,6 +852,7 @@ impl<'p> M<'p> {
                 let path = self.text_of(locals, &args[0]);
                 let max = self.read_int(locals, &args[2]);
                 let (slot, field) = self.view(locals, &args[1]);
+                let shadowed = self.fs_shadow.path_of(&path);
                 let result = bio::validate(&path, max).and_then(|cap| {
                     with_val(&slot, &field, |v| {
                         let Val::Bytes(bytes) = v else {
@@ -856,6 +861,9 @@ impl<'p> M<'p> {
                         let bytes = bytes.borrow();
                         if bytes.len() > cap {
                             return Err(bio::Error::TooLarge);
+                        }
+                        if let Some(sp) = &shadowed {
+                            return bio::write(&sp.to_string_lossy(), &bytes);
                         }
                         match &self.fs_bytes {
                             Some(_) => {
@@ -879,6 +887,12 @@ impl<'p> M<'p> {
             }
             FsRead => {
                 let path = self.text_of(locals, &args[0]);
+                if let Some(sp) = self.fs_shadow.path_of(&path) {
+                    return match read_file_bounded(&sp.to_string_lossy()) {
+                        Ok(text) => Ok(self.ok(Val::Str(text.into()))),
+                        Err(e) => Ok(self.err(self.io_error(e.kind(), path))),
+                    };
+                }
                 match &self.fs {
                     Some(files) => match files.get(&*path) {
                         Some(text) => self.ok(Val::Str(text.as_str().into())),
@@ -893,6 +907,12 @@ impl<'p> M<'p> {
             FsWrite => {
                 let path = self.text_of(locals, &args[0]);
                 let text = self.text_of(locals, &args[1]);
+                if let Some(sp) = self.fs_shadow.path_of(&path) {
+                    return match std::fs::write(&sp, text.as_bytes()) {
+                        Ok(()) => Ok(self.ok(Val::Unit)),
+                        Err(e) => Ok(self.err(self.io_error(e.kind(), path))),
+                    };
+                }
                 match &mut self.fs {
                     Some(files) => {
                         files.insert(path.to_string(), text.to_string());
@@ -1670,6 +1690,9 @@ impl<'p> M<'p> {
     }
 
     fn is_mock_file(&self, p: &str) -> bool {
+        if let Some(sp) = self.fs_shadow.path_of(p) {
+            return sp.is_file();
+        }
         let p_clean = p.trim_start_matches('/');
         let in_fs = self.fs.as_ref().is_some_and(|files| {
             files.contains_key(p)
@@ -1785,6 +1808,12 @@ impl<'p> M<'p> {
                             0
                         }
                     }
+                } else if let Some(sp) = self.fs_shadow.path_of(&p) {
+                    // 影の実ファイル（ハンドルで開いたもの）は、実ファイルとして消す。登録は残し、以後は実ファイルが ENOENT を返す。
+                    match std::fs::remove_file(&sp) {
+                        Ok(()) => 0,
+                        Err(e) => -(e.raw_os_error().unwrap_or(5) as i64),
+                    }
                 } else {
                     let mut removed = false;
                     if let Some(files) = &mut self.fs {
@@ -1842,6 +1871,9 @@ impl<'p> M<'p> {
             }
             SYS_NEWFSTATAT => {
                 let p = self.path_string(a[1] as usize);
+                if let Some(sp) = self.fs_shadow.path_of(&p) {
+                    return self.shadow_syscall_path(SYS_NEWFSTATAT, &sp, [a[2], a[3]]);
+                }
                 let p_clean = p.trim_start_matches('/');
                 let statbuf = a[2] as usize as *mut u8;
                 let mut found_len = None;
@@ -1896,8 +1928,134 @@ impl<'p> M<'p> {
             }
             // ADR 0049 決定 5: 差し替え下でシミュレーション不可能な操作（OFD ロック、生 fd 露出、生ディレクトリエントリ）は
             // 暗黙の偽装を行わず fail-closed（-95: EOPNOTSUPP）で明示的に拒否する。
-            SYS_FLOCK | SYS_OPENAT | SYS_GETDENTS64 => -95,
+            SYS_OPENAT => self.double_openat(a),
+            SYS_FLOCK => self.double_flock(a),
+            SYS_GETDENTS64 => -95,
             _ => -95,
+        }
+    }
+
+    /// `/proc/self/fd/<fd>` が指す実際のパス（影の根の下か調べるのに使う）。
+    fn shadow_fd_path(&self, fd: i64) -> Option<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/self/fd/{fd}")).ok()
+    }
+
+    /// 影の実ファイルに対してパス引数のシステムコールを発行する（`rest` はパスの後ろの引数 2 つ）。
+    fn shadow_syscall_path(&self, n: i64, real: &std::path::Path, rest: [i64; 2]) -> i64 {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(real.as_os_str().as_bytes()) else {
+            return -22;
+        };
+        // newfstatat(AT_FDCWD, path, statbuf, flags)
+        issue_syscall(n, [-100, c.as_ptr() as i64, rest[0], rest[1], 0, 0])
+    }
+
+    /// 表の内容から、仮のパスの実ファイルを影の根に置く（既に置いてあれば何もしない）。
+    fn shadow_materialize_file(
+        &mut self,
+        comps: &[String],
+        root: &std::path::Path,
+    ) -> std::io::Result<()> {
+        let key = comps.join("/");
+        if self.fs_shadow.is_marked(&key) {
+            return Ok(());
+        }
+        let virt = format!("/{key}");
+        let p_clean = key.as_str();
+        let alt = [virt.as_str(), p_clean];
+        let from_text = self
+            .fs
+            .as_ref()
+            .and_then(|f| alt.iter().find_map(|k| f.get(*k)))
+            .map(|t| t.as_bytes().to_vec());
+        let deleted = alt.iter().any(|k| self.fs_bytes_deleted.contains(*k));
+        let from_bytes = if deleted {
+            None
+        } else {
+            alt.iter()
+                .find_map(|k| self.fs_bytes_written.get(*k))
+                .cloned()
+                .or_else(|| {
+                    self.fs_bytes
+                        .as_ref()
+                        .and_then(|f| alt.iter().find_map(|k| f.get(*k)))
+                        .cloned()
+                })
+        };
+        let Some(content) = from_text.or(from_bytes) else {
+            return Ok(());
+        };
+        let real = root.join(&key);
+        if let Some(parent) = real.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&real, content)?;
+        self.fs_shadow.mark(key);
+        Ok(())
+    }
+
+    /// 差し替え下の `openat`（ADR 0049 補足 B）。仮のパスを影の根の下の実パスに写して、本物の `openat` を発行する。
+    /// ディレクトリ fd を基準にした相対パスは、fd が影の根の下を指すときだけ通す（それ以外は fail-closed）。
+    fn double_openat(&mut self, a: [i64; 6]) -> i64 {
+        const O_DIRECTORY: i64 = 65536;
+        let path = self.path_string(a[1] as usize);
+        let Some(add) = super::shadow::split(&path) else {
+            return -95; // `..` や NUL。影の根の外へ出す可能性のあるパスは解決しない
+        };
+        let Ok(root) = self.fs_shadow.ensure_root() else {
+            return -5; // EIO: 影の根を作れない
+        };
+        // 絶対パスと AT_FDCWD 基準は、影の根（仮のルート）から始める。
+        let mut comps: Vec<String> = if path.starts_with('/') || a[0] == -100 {
+            vec![]
+        } else {
+            let Some(dir) = self.shadow_fd_path(a[0]) else {
+                return -95;
+            };
+            let Ok(rel) = dir.strip_prefix(&root) else {
+                return -95; // 影の根の下でない fd は差し替えの外
+            };
+            let Some(v) = rel
+                .components()
+                .map(|c| c.as_os_str().to_str().map(String::from))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return -95;
+            };
+            v
+        };
+        comps.extend(add);
+        // 仮の表にあるファイルとディレクトリを、開く前に影へ置く（存在しないものは作らない。O_CREAT は本物の openat が作る）。
+        for i in 1..=comps.len() {
+            let key = comps[..i].join("/");
+            if self.is_mock_file(&key) {
+                if let Err(e) = self.shadow_materialize_file(&comps[..i], &root) {
+                    return -(e.raw_os_error().unwrap_or(5) as i64);
+                }
+            } else if self.is_mock_dir(&key) {
+                if let Err(e) = std::fs::create_dir_all(root.join(&key)) {
+                    return -(e.raw_os_error().unwrap_or(5) as i64);
+                }
+            }
+        }
+        let real = root.join(comps.join("/"));
+        let fd = self.shadow_syscall_path(SYS_OPENAT, &real, [a[2], a[3]]);
+        if fd >= 0 && a[2] & O_DIRECTORY == 0 {
+            self.fs_shadow.mark(comps.join("/"));
+        }
+        fd
+    }
+
+    /// 差し替え下の `flock`。影の実ファイルの fd にだけ本物の `flock` を発行し、それ以外は fail-closed（ロックを偽装しない）。
+    fn double_flock(&self, a: [i64; 6]) -> i64 {
+        let under_shadow = match (self.fs_shadow.root(), self.shadow_fd_path(a[0])) {
+            (Some(root), Some(p)) => p.starts_with(root),
+            _ => false,
+        };
+        if under_shadow {
+            issue_syscall(SYS_FLOCK, [a[0], a[1], 0, 0, 0, 0])
+        } else {
+            -95
         }
     }
 }

@@ -379,9 +379,10 @@ fn fs_double_isolation() {
             Ok(_) => { return "err_read_after_remove"; }
             Err(_) => {}
         }
+        // 削除した仮のパスは、ハンドルの open でも NotFound（差し替え下のハンドルは Issue #590、tests/fs_double_handle_590.rs）。
         let opts = fs.open_options().read(true);
         match opts.open(&vp) {
-            Ok(_) => { return "err_open_unsupported"; }
+            Ok(_) => { return "err_open_after_remove"; }
             Err(_) => {}
         }
         return "ok";

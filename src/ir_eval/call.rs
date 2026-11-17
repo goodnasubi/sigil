@@ -1182,6 +1182,18 @@ impl<'p> M<'p> {
                             }
                         }
                     }
+                } else if (self.fs.is_some() || self.fs_bytes.is_some())
+                    && matches!(
+                        n,
+                        SYS_OPENAT
+                            | SYS_MKDIRAT
+                            | SYS_NEWFSTATAT
+                            | SYS_UNLINKAT
+                            | SYS_GETDENTS64
+                            | SYS_FLOCK
+                    )
+                {
+                    self.eval_fs_double_syscall(n, [a0, a1, a2, a3, a4, a5])
                 } else {
                     issue_syscall(n, [a0, a1, a2, a3, a4, a5])
                 };
@@ -1616,6 +1628,144 @@ impl<'p> M<'p> {
             Val::Str(x) | Val::Path(x) => x.clone(),
             _ => "".into(),
         })
+    }
+
+    /// NUL 終端アドレスから String を読む。
+    fn path_string(&self, addr: usize) -> String {
+        let mut p = addr;
+        let mut bytes = Vec::new();
+        while unsafe { *(p as *const u8) } != 0 {
+            bytes.push(unsafe { *(p as *const u8) });
+            p += 1;
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// テスト差し替え（fs_files / fs_bytes）下の疑似システムコール処理（ADR 0049 決定 5）。
+    /// 未対応操作は fail-closed（-95: EOPNOTSUPP）で拒否する。
+    fn eval_fs_double_syscall(&mut self, n: i64, a: [i64; 6]) -> i64 {
+        match n {
+            SYS_UNLINKAT => {
+                let p = self.path_string(a[1] as usize);
+                let p_clean = p.trim_start_matches('/');
+                if a[2] == 512 {
+                    // ディレクトリ削除: 配下にファイルが存在すれば ENOTEMPTY (-39)
+                    let prefix = format!("{}/", p_clean);
+                    let mut has_children = false;
+                    if let Some(files) = &self.fs {
+                        has_children |= files
+                            .keys()
+                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
+                    }
+                    if let Some(files) = &self.fs_bytes {
+                        has_children |= files
+                            .keys()
+                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
+                    }
+                    if has_children {
+                        -39 // ENOTEMPTY
+                    } else {
+                        0
+                    }
+                } else {
+                    let mut removed = false;
+                    if let Some(files) = &mut self.fs {
+                        removed |= files.remove(&p).is_some()
+                            || files.remove(p_clean).is_some()
+                            || files.remove(&format!("/{}", p_clean)).is_some();
+                    }
+                    removed |= self.fs_bytes_written.remove(&p).is_some()
+                        || self.fs_bytes_written.remove(p_clean).is_some()
+                        || self
+                            .fs_bytes_written
+                            .remove(&format!("/{}", p_clean))
+                            .is_some();
+                    if removed {
+                        0
+                    } else if self.fs.is_some() {
+                        -2 // ENOENT: fs_files 差し替え下でファイルが存在しない
+                    } else {
+                        // fs_bytes 等で削除未対応の場合は fail-closed
+                        -95 // EOPNOTSUPP
+                    }
+                }
+            }
+            SYS_MKDIRAT => {
+                // ディレクトリ作成: メモリ内モックでは暗黙に成功
+                0
+            }
+            SYS_NEWFSTATAT => {
+                let p = self.path_string(a[1] as usize);
+                let p_clean = p.trim_start_matches('/');
+                let statbuf = a[2] as usize as *mut u8;
+                let mut found_len = None;
+                if let Some(files) = &self.fs {
+                    if let Some(s) = files
+                        .get(&p)
+                        .or_else(|| files.get(p_clean))
+                        .or_else(|| files.get(&format!("/{}", p_clean)))
+                    {
+                        found_len = Some(s.len() as i64);
+                    }
+                }
+                if found_len.is_none() {
+                    if let Some(files) = &self.fs_bytes {
+                        if let Some(b) = files
+                            .get(&p)
+                            .or_else(|| files.get(p_clean))
+                            .or_else(|| files.get(&format!("/{}", p_clean)))
+                        {
+                            found_len = Some(b.len() as i64);
+                        }
+                    }
+                }
+                if found_len.is_none() {
+                    if let Some(b) = self
+                        .fs_bytes_written
+                        .get(&p)
+                        .or_else(|| self.fs_bytes_written.get(p_clean))
+                        .or_else(|| self.fs_bytes_written.get(&format!("/{}", p_clean)))
+                    {
+                        found_len = Some(b.len() as i64);
+                    }
+                }
+
+                if let Some(len) = found_len {
+                    unsafe {
+                        std::ptr::write_bytes(statbuf, 0, STAT_SIZE);
+                        *(statbuf.add(24) as *mut i64) = 32768 | 0o644;
+                        *(statbuf.add(48) as *mut i64) = len;
+                    }
+                    0
+                } else {
+                    let prefix = format!("{}/", p_clean);
+                    let mut is_dir = false;
+                    if let Some(files) = &self.fs {
+                        is_dir |= files
+                            .keys()
+                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
+                    }
+                    if let Some(files) = &self.fs_bytes {
+                        is_dir |= files
+                            .keys()
+                            .any(|k| k.trim_start_matches('/').starts_with(&prefix));
+                    }
+                    if is_dir {
+                        unsafe {
+                            std::ptr::write_bytes(statbuf, 0, STAT_SIZE);
+                            *(statbuf.add(24) as *mut i64) = 16384 | 0o755;
+                        }
+                        0
+                    } else {
+                        -2 // ENOENT
+                    }
+                }
+            }
+            // ADR 0049 決定 5: 差し替え下でシミュレーション不可能な操作（OFD ロック、生 fd 露出、生ディレクトリエントリ）は
+            // 暗黙の偽装を行わず fail-closed（-95: EOPNOTSUPP）で明示的に拒否する。
+            SYS_FLOCK | SYS_OPENAT | SYS_GETDENTS64 => -95,
+            _ => -95,
+        }
     }
 }
 

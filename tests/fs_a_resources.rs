@@ -312,3 +312,82 @@ fn symlink_rejection_when_not_following() {
     assert_eq!(res, "\"ok\"");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[cfg(unix)]
+#[test]
+fn intermediate_symlink_rejection() {
+    let base = scratch_dir("intermediate_symlink");
+    let outside = scratch_dir("outside");
+    let link_to_outside = base.join("link_dir");
+    std::os::unix::fs::symlink(&outside, &link_to_outside).unwrap();
+
+    let sig = "t(base_dir: String) -> String";
+    let body = r#"
+        let bp = Path.new(&base_dir);
+        match fs.open_dir(&bp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(dir) => {
+                let sub = Path.new(&"link_dir/victim.txt");
+                match dir.create_file(&sub) {
+                    Ok(_) => { return "err_create_through_symlink_allowed"; }
+                    Err(_) => {}
+                }
+
+                let opts = fs.open_options().read(true);
+                match dir.open_file(&sub, &opts) {
+                    Ok(_) => { return "err_open_through_symlink_allowed"; }
+                    Err(_) => {}
+                }
+
+                match dir.remove_file(&sub) {
+                    Ok(_) => { return "err_remove_through_symlink_allowed"; }
+                    Err(_) => {}
+                }
+
+                let _ = dir.close();
+                return "ok";
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&base)]);
+    assert_eq!(res, "\"ok\"");
+    assert!(!outside.join("victim.txt").exists());
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+#[test]
+fn fs_double_isolation() {
+    use std::collections::BTreeMap;
+    let mut files = BTreeMap::new();
+    let key = "/virtual/test.txt".to_string();
+    files.insert(key.clone(), "virtual content".to_string());
+    let opts = Options {
+        fs_files: Some(files),
+        ..Options::default()
+    };
+
+    let sig = "t(virtual_path: String) -> String";
+    let body = r#"
+        let vp = Path.new(&virtual_path);
+        match fs.remove_file(&vp) {
+            Err(_) => { return "err_remove_virtual"; }
+            Ok(_) => {}
+        }
+        match fs.read(&vp) {
+            Ok(_) => { return "err_read_after_remove"; }
+            Err(_) => {}
+        }
+        let opts = fs.open_options().read(true);
+        match opts.open(&vp) {
+            Ok(_) => { return "err_open_unsupported"; }
+            Err(_) => {}
+        }
+        return "ok";
+    "#;
+
+    let src = format!("{HEAD}{}", f(sig, "fs", body));
+    let res = run_with(&src, "t", &[Arg::Str(key)], &opts).unwrap().value;
+    assert_eq!(res, "\"ok\"");
+}

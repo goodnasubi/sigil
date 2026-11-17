@@ -1170,17 +1170,14 @@ impl Dir {
     requires none
     ensures none
     effects fs
-    unchecked "バッファを解放し close(3) を発行する"
+    unchecked "close(3) を発行する（バッファ解放および fd クローズは drop フックが行う）"
   {
-    raw.free(self.buf, 4112, 8);
     if self.fd < 0 {
       return Ok(unit());
     }
     let r = raw.syscall(3, self.fd, 0, 0, 0, 0, 0);
-    let mut d = self;
-    d.fd = -1;
     if r < 0 {
-      return Err(classify_io(r, &d.dir_path));
+      return Err(classify_io(r, &self.dir_path));
     }
     return Ok(unit());
   }

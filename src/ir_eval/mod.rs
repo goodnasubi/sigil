@@ -453,6 +453,17 @@ fn execute_roots(
         pending_scope: None,
         globals: vec![],
     };
+    if let Some(files) = &opts.fs_files {
+        for k in files.keys() {
+            m.record_fs_parent_dirs(k);
+        }
+    }
+    if let Some(files) = &opts.fs_bytes {
+        for k in files.keys() {
+            m.record_fs_parent_dirs(k);
+        }
+    }
+    let _chunks_scope = call::ChunksScope::enter(&mut m.chunks);
     m.globals = program
         .globals
         .iter()

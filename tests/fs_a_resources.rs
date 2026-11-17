@@ -661,3 +661,104 @@ fn fs_double_mkdirat_checks_existence_and_kind() {
         .value;
     assert_eq!(res, "\"ok\"");
 }
+
+#[test]
+fn mock_parent_dir_preserved_after_last_child_deleted() {
+    use std::collections::BTreeMap;
+    let mut files = BTreeMap::new();
+    let file_key = "/v/only_child.txt".to_string();
+    files.insert(file_key.clone(), "/tmp/test.txt".to_string());
+    let opts = Options {
+        fs_files: Some(files),
+        ..Options::default()
+    };
+
+    let sig = "t(path_str: String) -> String";
+    let body = r#"
+        let fp = Path.new(&path_str);
+        let parent_dir = Path.new(&"/v");
+        let next_child = Path.new(&"/v/next.txt");
+
+        // 1. 最初の子ファイルを削除
+        match fs.remove_file(&fp) {
+            Err(_) => { return "err_remove_file"; }
+            Ok(_) => {}
+        }
+
+        // 2. 子が0個になっても親ディレクトリ /v は保持されている（存在確認として重複作成 AlreadyExists）
+        match fs.create_dir(&parent_dir) {
+            Ok(_) => { return "err_parent_dir_recreated"; }
+            Err(e) => {
+                match e {
+                    IoError.AlreadyExists(_) => {}
+                    _ => { return "err_not_already_exists"; }
+                }
+            }
+        }
+
+        // 3. 保持された親 /v 配下に新規ディレクトリを作成可能
+        match fs.create_dir(&next_child) {
+            Err(_) => { return "err_create_child_in_parent"; }
+            Ok(_) => {}
+        }
+
+        // 4. 新規子ディレクトリを削除
+        match fs.remove_dir(&next_child) {
+            Err(_) => { return "err_remove_next_child"; }
+            Ok(_) => {}
+        }
+
+        // 5. 空になった親ディレクトリ /v を明示的 remove_dir で削除
+        match fs.remove_dir(&parent_dir) {
+            Err(_) => { return "err_remove_parent_dir"; }
+            Ok(_) => {}
+        }
+
+        // 6. 削除後は存在しない（NotFound）
+        match fs.remove_dir(&parent_dir) {
+            Ok(_) => { return "err_remove_deleted_parent_succeeded"; }
+            Err(e) => {
+                match e {
+                    IoError.NotFound(_) => {}
+                    _ => { return "err_not_not_found"; }
+                }
+            }
+        }
+
+        return "ok";
+    "#;
+
+    let src = format!("{HEAD}{}", f(sig, "fs", body));
+    let res = sigil::ir_eval::run_with(&src, "t", &[Arg::Str(file_key)], &opts)
+        .unwrap()
+        .value;
+    assert_eq!(res, "\"ok\"");
+}
+
+#[test]
+fn dir_implicit_drop_releases_buffer_without_leak() {
+    let base = scratch_dir("dir_implicit_drop");
+    let test_dir = base.join("subdir");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let sig = "t(dir_path: String) -> String";
+    let body = r#"
+        let dp = Path.new(&dir_path);
+        let mut i = 0;
+        while i < 20 {
+            // open_dir して明示 close せずにスコープを抜ける（暗黙 drop）
+            match fs.open_dir(&dp) {
+                Err(_) => { return "err_open_dir"; }
+                Ok(dir) => {
+                    let _ = dir.read_entries(5);
+                }
+            }
+            i = i + 1;
+        }
+        return "ok";
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&test_dir)]);
+    assert_eq!(res, "\"ok\"");
+    let _ = std::fs::remove_dir_all(&base);
+}

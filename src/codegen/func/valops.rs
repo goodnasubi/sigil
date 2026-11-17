@@ -652,6 +652,20 @@ impl<'a, 'p> Fx<'a, 'p> {
                                     },
                                     |s2| s2.ic(0),
                                 );
+                                if p.types[*id].name == "std.os.fs.Dir" {
+                                    let buf = s.ld(w, 16);
+                                    let non_null = s.b.ins().icmp_imm_s(IntCC::NotEqual, buf, 0);
+                                    s.branch(
+                                        non_null,
+                                        |s2| {
+                                            let sz = s2.ic(4112);
+                                            let al = s2.ic(8);
+                                            s2.rt("raw_free", &[buf, sz, al]);
+                                            s2.ic(0)
+                                        },
+                                        |s2| s2.ic(0),
+                                    );
+                                }
                                 s.ic(0)
                             },
                             |s| s.ic(0),

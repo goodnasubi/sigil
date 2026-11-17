@@ -4,6 +4,7 @@ use crate::shared_path as spath;
 use crate::shared_text::{self as stext};
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::value::{
@@ -862,6 +863,7 @@ impl<'p> M<'p> {
                                 self.fs_bytes_deleted.remove(&*path);
                                 self.fs_bytes_deleted.remove(p_clean);
                                 self.fs_bytes_deleted.remove(&format!("/{}", p_clean));
+                                self.record_fs_parent_dirs(&path);
                                 self.fs_bytes_written
                                     .insert(path.to_string(), bytes.clone());
                                 Ok(())
@@ -1680,8 +1682,22 @@ impl<'p> M<'p> {
         in_fs || (in_written && !is_deleted) || (in_bytes && !is_deleted)
     }
 
+    pub(super) fn record_fs_parent_dirs(&mut self, path: &str) {
+        let clean = path.trim_matches('/');
+        let mut cur = clean;
+        while let Some(parent) = std::path::Path::new(cur).parent() {
+            let p_str = parent.to_str().unwrap_or("");
+            if p_str.is_empty() {
+                break;
+            }
+            self.fs_dirs.insert(p_str.to_string());
+            self.fs_dirs.insert(format!("/{}", p_str));
+            cur = p_str;
+        }
+    }
+
     fn is_mock_dir(&self, p: &str) -> bool {
-        let p_clean = p.trim_start_matches('/');
+        let p_clean = p.trim_matches('/');
         if p_clean.is_empty() {
             return true;
         }
@@ -1692,24 +1708,24 @@ impl<'p> M<'p> {
         let in_fs = self.fs.as_ref().is_some_and(|files| {
             files
                 .keys()
-                .any(|k| k.trim_start_matches('/').starts_with(&prefix))
+                .any(|k| k.trim_matches('/').starts_with(&prefix))
         });
         let in_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
             files.keys().any(|k| {
-                let k_clean = k.trim_start_matches('/');
+                let k_clean = k.trim_matches('/');
                 k_clean.starts_with(&prefix)
                     && !self.fs_bytes_deleted.contains(k)
                     && !self.fs_bytes_deleted.contains(k_clean)
             })
         });
         let in_written = self.fs_bytes_written.keys().any(|k| {
-            let k_clean = k.trim_start_matches('/');
+            let k_clean = k.trim_matches('/');
             k_clean.starts_with(&prefix)
                 && !self.fs_bytes_deleted.contains(k)
                 && !self.fs_bytes_deleted.contains(k_clean)
         });
         let in_dirs = self.fs_dirs.iter().any(|d| {
-            let d_clean = d.trim_start_matches('/');
+            let d_clean = d.trim_matches('/');
             d_clean != p_clean && d_clean.starts_with(&prefix)
         });
         in_fs || in_bytes || in_written || in_dirs
@@ -1721,7 +1737,7 @@ impl<'p> M<'p> {
         match n {
             SYS_UNLINKAT => {
                 let p = self.path_string(a[1] as usize);
-                let p_clean = p.trim_start_matches('/');
+                let p_clean = p.trim_matches('/');
                 if a[2] == 512 {
                     if self.is_mock_file(&p) {
                         -20 // ENOTDIR: ファイルを rmdir しようとした
@@ -1733,24 +1749,24 @@ impl<'p> M<'p> {
                         if let Some(files) = &self.fs {
                             has_children |= files
                                 .keys()
-                                .any(|k| k.trim_start_matches('/').starts_with(&prefix));
+                                .any(|k| k.trim_matches('/').starts_with(&prefix));
                         }
                         if let Some(files) = &self.fs_bytes {
                             has_children |= files.keys().any(|k| {
-                                let k_clean = k.trim_start_matches('/');
+                                let k_clean = k.trim_matches('/');
                                 k_clean.starts_with(&prefix)
                                     && !self.fs_bytes_deleted.contains(k)
                                     && !self.fs_bytes_deleted.contains(k_clean)
                             });
                         }
                         has_children |= self.fs_bytes_written.keys().any(|k| {
-                            let k_clean = k.trim_start_matches('/');
+                            let k_clean = k.trim_matches('/');
                             k_clean.starts_with(&prefix)
                                 && !self.fs_bytes_deleted.contains(k)
                                 && !self.fs_bytes_deleted.contains(k_clean)
                         });
                         has_children |= self.fs_dirs.iter().any(|d| {
-                            let d_clean = d.trim_start_matches('/');
+                            let d_clean = d.trim_matches('/');
                             d_clean != p_clean && d_clean.starts_with(&prefix)
                         });
                         if has_children {
@@ -1801,7 +1817,7 @@ impl<'p> M<'p> {
             }
             SYS_MKDIRAT => {
                 let p = self.path_string(a[1] as usize);
-                let p_clean = p.trim_start_matches('/');
+                let p_clean = p.trim_matches('/');
                 if self.is_mock_file(&p) || self.is_mock_dir(&p) {
                     -17 // EEXIST: 既にファイルまたはディレクトリが存在する
                 } else {
@@ -1911,6 +1927,53 @@ pub(super) fn close_fd(fd: i64) {
     if fd >= 0 {
         let _ = issue_syscall(SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
     }
+}
+
+thread_local! {
+    static ACTIVE_CHUNKS: std::cell::Cell<*mut BTreeMap<usize, Chunk>> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+pub(super) struct ChunksScope {
+    prev: *mut BTreeMap<usize, Chunk>,
+}
+
+impl ChunksScope {
+    pub(super) fn enter(chunks: &mut BTreeMap<usize, Chunk>) -> Self {
+        let prev = ACTIVE_CHUNKS.with(|c| {
+            let old = c.get();
+            c.set(chunks as *mut _);
+            old
+        });
+        Self { prev }
+    }
+}
+
+impl Drop for ChunksScope {
+    fn drop(&mut self) {
+        ACTIVE_CHUNKS.with(|c| c.set(self.prev));
+    }
+}
+
+/// Dir ハンドルの破棄で列挙バッファを解放する（value::close_owned_fd、ADR 0049 決定 1-1）。
+pub(super) fn free_dir_buf(addr: usize) {
+    if addr == 0 {
+        return;
+    }
+    ACTIVE_CHUNKS.with(|cell| {
+        let ptr = cell.get();
+        if !ptr.is_null() {
+            unsafe {
+                if let Some(chunk) = (*ptr).remove(&addr) {
+                    if chunk.origin == Origin::Alloc {
+                        let layout =
+                            std::alloc::Layout::from_size_align_unchecked(chunk.size, chunk.align);
+                        std::alloc::dealloc(addr as *mut u8, layout);
+                    }
+                }
+            }
+        }
+    });
 }
 
 const PAGE: usize = 4096;

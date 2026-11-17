@@ -125,17 +125,23 @@ thread_local! {
     pub(super) static TYPES: RefCell<Rc<Vec<TypeDef>>> = RefCell::new(Rc::new(vec![]));
     /// fd を所有する型（`std.os.net` の `TcpListener` 等、`std.os.fs` の `File`・`Dir`）の型番号。無いプログラムでは `usize::MAX`。
     pub(super) static FD_TYPES: StdCell<[usize; 8]> = const { StdCell::new([usize::MAX; 8]) };
+    pub(super) static DIR_TYPE: StdCell<usize> = const { StdCell::new(usize::MAX) };
 }
 
 /// 実行するプログラムの、fd を所有する型の番号を記録する（値の破棄で `close` するため）。
 pub(super) fn set_fd_types(types: &[TypeDef]) {
     let mut ids = [usize::MAX; 8];
+    let mut dir_id = usize::MAX;
     for (slot, name) in ids.iter_mut().zip(crate::stdlib::FD_TYPES) {
         if let Some(i) = types.iter().position(|t| t.name == *name) {
             *slot = i;
+            if *name == "std.os.fs.Dir" {
+                dir_id = i;
+            }
         }
     }
     FD_TYPES.with(|c| c.set(ids));
+    DIR_TYPE.with(|c| c.set(dir_id));
 }
 
 /// fd を所有する値（`TcpListener`・`TcpStream`・`TcpClient`・`File`・`Dir`）の破棄で、fd を 1 回閉じる（ADR 0031 決定 3-1、ADR 0049 決定 1-1。失敗は捨てる）。
@@ -157,6 +163,14 @@ fn close_owned_fd(a: &Agg) {
     };
     if *fd >= 0 {
         super::call::close_fd(*fd);
+    }
+    let dir_t = DIR_TYPE.try_with(|c| c.get()).unwrap_or(usize::MAX);
+    if t == dir_t {
+        if let Some(Val::Addr(buf)) = a.f.get(2) {
+            if *buf != 0 {
+                super::call::free_dir_buf(*buf);
+            }
+        }
     }
 }
 

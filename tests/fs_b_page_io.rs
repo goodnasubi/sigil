@@ -142,35 +142,80 @@ fn eof_short_read_and_bounds_preserve_buffer() {
     );
 }
 
-#[test]
-fn fs_double_handles_stay_fail_closed() {
-    let src = source(
-        r#"
+/// 差し替え（Issue #590）下でも、ハンドルの open と位置指定の読み書きが実ファイルに対して通る。
+/// `fs_files` の表は、評価器とネイティブ（表を実ファイルに置いたもの）の結果まで突き合わせる。
+const DOUBLE_PAGES: &str = r#"
       let p = Path.new(&path);
-      let opts = fs.open_options().read(true).append(true);
-      match opts.open(&p) { Err(IoError.Other(_)) => { return 0; } _ => { return 1; } }
-    "#,
-    );
-    for bytes in [false, true] {
-        let mut opts = Options::default();
-        if bytes {
-            opts.fs_bytes = Some(std::collections::BTreeMap::from([(
-                "/virtual/pages".into(),
-                vec![1],
-            )]));
-        } else {
-            opts.fs_files = Some(std::collections::BTreeMap::from([(
-                "/virtual/pages".into(),
-                "a".into(),
-            )]));
+      let rw = fs.open_options().read(true).write(true);
+      match rw.open(&p) {
+        Err(_) => { return 1; }
+        Ok(handle) => {
+          let f = handle;
+          let patch = "XY".as_bytes();
+          match f.write_all_at(&patch, 2) { Err(_) => { return 2; } Ok(_) => {} }
+          let mut buf = "......".as_bytes();
+          match f.read_exact_at(&mut buf, 0) { Err(_) => { return 3; } Ok(_) => {} }
+          if buf != "abXYef".as_bytes() { return 4; }
+          let mut tail = "..".as_bytes();
+          match f.read_at(&mut tail, 6) { Err(_) => { return 5; } Ok(n) => { if n != 0 { return 6; } } }
+          let _ = f.close();
         }
-        assert_eq!(
-            sigil::ir_eval::run_with(&src, "t", &[Arg::Str("/virtual/pages".into())], &opts)
-                .unwrap()
-                .value,
-            "0"
-        );
-    }
+      }
+      // 追記モードの位置指定書き込みは、差し替え下でも InvalidInput（fs B の契約）。
+      let ap = fs.open_options().read(true).append(true);
+      match ap.open(&p) {
+        Err(_) => { return 7; }
+        Ok(handle) => {
+          let f = handle;
+          let patch = "Z".as_bytes();
+          match f.write_at(&patch, 0) { Err(IoError.InvalidInput(_)) => {} _ => { return 8; } }
+          let _ = f.close();
+        }
+      }
+      // ハンドルで書いた内容は、表を引く操作からも見える。
+      match fs.read(&p) { Err(_) => { return 9; } Ok(s) => { if s != "abXYef" { return 10; } } }
+      return 0;
+    "#;
+
+#[test]
+fn fs_double_handles_reach_positioned_io_and_match_native() {
+    let src = source(DOUBLE_PAGES);
+    let opts = Options {
+        fs_files: Some(std::collections::BTreeMap::from([(
+            "/virtual/pages".into(),
+            "abcdef".into(),
+        )])),
+        ..Options::default()
+    };
+    let got = run_with(&src, "t", &[Arg::Str("/virtual/pages".into())], &opts)
+        .unwrap_or_else(|e| panic!("{e}\n{src}"));
+    assert_eq!(got.value, "0");
+}
+
+/// バイナリ用の表（`fs_bytes`）でも、ハンドルの位置指定 I/O が通る（評価器のみ。ネイティブは実ファイルで同じ契約）。
+#[test]
+fn fs_double_bytes_table_handles_reach_positioned_io() {
+    let src = source(
+        &DOUBLE_PAGES
+            .replace("fs.read(&p)", "fs.read_bytes(&p, 64)")
+            .replace(
+                "Ok(s) => { if s != \"abXYef\" { return 10; } }",
+                "Ok(b) => { if b != \"abXYef\".as_bytes() { return 10; } }",
+            ),
+    );
+    let opts = Options {
+        fs_bytes: Some(std::collections::BTreeMap::from([(
+            "/virtual/pages".into(),
+            b"abcdef".to_vec(),
+        )])),
+        ..Options::default()
+    };
+    assert_eq!(
+        sigil::ir_eval::run_with(&src, "t", &[Arg::Str("/virtual/pages".into())], &opts)
+            .unwrap()
+            .value,
+        "0"
+    );
 }
 
 /// 本番 file_io の syscall 発行点だけを差し替える。新 raw や本番注入 API は追加しない。

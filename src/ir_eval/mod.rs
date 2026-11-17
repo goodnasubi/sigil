@@ -11,6 +11,7 @@ mod binary_io;
 mod call;
 mod expr;
 mod sched;
+mod shadow;
 mod value;
 
 use crate::ast::{File, Item, Type};
@@ -58,6 +59,8 @@ struct M<'p> {
     fs_bytes_written: BTreeMap<String, Vec<u8>>,
     fs_bytes_deleted: BTreeSet<String>,
     fs_dirs: BTreeSet<String>,
+    /// 差し替え下のハンドル用の影の実ファイル層（Issue #590、ADR 0049 補足 B）。
+    fs_shadow: shadow::Shadow,
     env: Option<BTreeMap<String, String>>,
     canon: Vec<usize>,
     opt: usize,
@@ -442,6 +445,7 @@ fn execute_roots(
         fs_bytes_written: BTreeMap::new(),
         fs_bytes_deleted: BTreeSet::new(),
         fs_dirs: BTreeSet::new(),
+        fs_shadow: shadow::Shadow::default(),
         env: opts.env_vars.clone(),
         wall_clock: opts.wall_clock,
         opt: find("Option"),

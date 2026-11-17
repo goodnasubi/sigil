@@ -67,3 +67,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0045](0045-p4-1-database-core.md) | P4-1 データベースの核 | 提案（予約: Issue #573、正式判定を ADR 内に記録） |
 | [0046](0046-p4-2-database-server.md) | P4-2 データベースサーバー | 提案（予約: Issue #578） |
 | [0047](0047-p4-3-repository-core.md) | P4-3 リポジトリの核 | 提案（予約: Issue #580、正式判定は未実施・ADR 内に理由と問いを記録） |
+| [0048](0048-p4-4-repository-transfer-and-hosting.md) | P4-4 リポジトリの転送とホスティング | 提案（予約: Issue #582、正式判定を ADR 内に記録） |

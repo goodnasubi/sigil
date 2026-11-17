@@ -207,7 +207,15 @@ pub fn t(path_a: String) -> String
         trace_drops: true,
         ..Options::default()
     };
-    let out = run(src, "t", &[Arg::Str(a.to_string_lossy().into())], &opts);
+    // 閉じていない File の破棄の記録には、実際の fd 番号が残る。その値は処理系のプロセスの状態（並列に走る他の試験が持つ fd など）で変わり、
+    // 別プロセスのネイティブとは一致しない。そこで、評価器だけで、破棄が 1 回で fd が非負であること（実数値は比べない）を確かめる。
+    let out = sigil::ir_eval::run_with(
+        &format!("{HEAD}{src}"),
+        "t",
+        &[Arg::Str(a.to_string_lossy().into())],
+        &opts,
+    )
+    .unwrap_or_else(|e| panic!("{e}\n{src}"));
     assert_eq!(out.value, "\"ok\"");
     let fds = fd_of_logged_drops(&out.drops, "std.os.fs.File");
     assert_eq!(fds.len(), 1, "{:?}", out.drops);

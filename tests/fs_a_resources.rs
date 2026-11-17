@@ -823,3 +823,50 @@ fn open_dir_rejects_intermediate_symlink() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn open_options_rejects_intermediate_symlink() {
+    let base = scratch_dir("open_opts_symlink");
+    let outside = base.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let victim = outside.join("victim");
+    std::fs::write(&victim, b"important data").unwrap();
+
+    let local_base = base.join("base");
+    std::fs::create_dir_all(&local_base).unwrap();
+    let link_path = local_base.join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link_path).unwrap();
+
+    let target_via_link = link_path.join("victim");
+
+    let sig = "t(target_path: String) -> String";
+    let body = r#"
+        let p = Path.new(&target_path);
+        let opts = OpenOptions.new().write(true).truncate(true);
+        match opts.open(&p) {
+            Ok(f) => {
+                let _ = f.close();
+                return "err_truncate_intermediate_symlink_succeeded";
+            }
+            Err(e) => {
+                match e {
+                    IoError.PermissionDenied(_) => { return "ok_rejected_perm"; }
+                    IoError.NotADirectory(_) => { return "ok_rejected_notdir"; }
+                    _ => { return "err_unexpected_error_kind"; }
+                }
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&target_via_link)]);
+    assert!(
+        res == "\"ok_rejected_perm\"" || res == "\"ok_rejected_notdir\"",
+        "expected rejection of intermediate symlink, got {res}"
+    );
+    // 元ファイルが切り詰められていないことを検証
+    let content = std::fs::read(&victim).unwrap();
+    assert_eq!(content, b"important data");
+
+    let _ = std::fs::remove_dir_all(&base);
+}

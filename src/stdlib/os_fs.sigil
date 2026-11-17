@@ -767,22 +767,158 @@ impl OpenOptions {
   }
 
   pub fn open(self: &OpenOptions, p: &Path) -> Result<File, IoError>
-    intent "設定に従ってファイルを開く"
+    intent "設定に従ってファイルを開く（symlink 追従無効時は中間 symlink も拒否）"
     requires none
     ensures none
     effects fs
-    unchecked "openat(257) でファイルを開き、一時バッファを解放する"
+    unchecked "構成要素ごとに O_NOFOLLOW で解決し、中間 symlink を拒否してファイルを開く"
   {
     match validate_path(&p) {
       Err(e) => { return Err(e); }
       Ok(b) => {
         let flags = compute_open_flags(&self);
-        let buf = c_path_buf(&b);
+        if self.opt_follow_symlinks {
+          let buf = c_path_buf(&b);
+          let mut fd = -4;
+          while fd == -4 {
+            fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
+          }
+          raw.free(buf, b.len() + 1, 1);
+          if fd < 0 {
+            return Err(classify_io(fd, &p));
+          }
+          return Ok(File { fd: fd, file_path: p.clone() });
+        }
+
+        let len = b.len();
+        let mut last_slash = -1;
+        let mut i = 0;
+        while i < len {
+          if b.get(i).unwrap_or(0) == 47 {
+            last_slash = i;
+          }
+          i = i + 1;
+        }
+
+        if last_slash < 0 {
+          let buf = c_path_buf(&b);
+          let mut fd = -4;
+          while fd == -4 {
+            fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
+          }
+          raw.free(buf, b.len() + 1, 1);
+          if fd < 0 {
+            return Err(classify_io(fd, &p));
+          }
+          return Ok(File { fd: fd, file_path: p.clone() });
+        }
+
+        let is_abs = b.get(0).unwrap_or(0) == 47;
+        let mut current_fd = -100;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if is_abs {
+          let root_buf = raw.alloc(2, 1);
+          raw.store_u8(root_buf, 47);
+          raw.store_u8(raw.offset(root_buf, 1), 0);
+          let mut root_fd = -4;
+          while root_fd == -4 {
+            // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), 720896, 0, 0, 0);
+          }
+          raw.free(root_buf, 2, 1);
+          if root_fd < 0 {
+            return Err(classify_io(root_fd, &p));
+          }
+          current_fd = root_fd;
+          owned_fd = root_fd;
+        }
+
+        let mut comp_start = 0;
+        let mut j = 0;
+        while j <= last_slash {
+          if !keep_going {
+            j = last_slash + 1;
+          } else {
+            if b.get(j).unwrap_or(0) == 47 {
+              let comp_len = j - comp_start;
+              if comp_len == 2 {
+                if b.get(comp_start).unwrap_or(0) == 46 {
+                  if b.get(comp_start + 1).unwrap_or(0) == 46 {
+                    err_code = -22;
+                    keep_going = false;
+                  }
+                }
+              }
+              if keep_going {
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 720896, 0, 0, 0);
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                  if owned_fd >= 0 {
+                    raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    owned_fd = -1;
+                  }
+                  if next_fd < 0 {
+                    err_code = next_fd;
+                    keep_going = false;
+                  } else {
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                }
+              }
+              comp_start = j + 1;
+            }
+            j = j + 1;
+          }
+        }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &p));
+        }
+
+        let leaf_start = last_slash + 1;
+        let leaf_len = len - leaf_start;
+        if leaf_len == 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(IoError.IsADirectory(p.clone()));
+        }
+
+        let leaf_buf = raw.alloc(leaf_len + 1, 1);
+        let mut m = 0;
+        while m < leaf_len {
+          raw.store_u8(raw.offset(leaf_buf, m), b.get(leaf_start + m).unwrap_or(0));
+          m = m + 1;
+        }
+        raw.store_u8(raw.offset(leaf_buf, leaf_len), 0);
+
         let mut fd = -4;
         while fd == -4 {
-          fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
+          fd = raw.syscall(257, current_fd, raw.addr_to_int(leaf_buf), flags, 438, 0, 0);
         }
-        raw.free(buf, b.len() + 1, 1);
+        raw.free(leaf_buf, leaf_len + 1, 1);
+        if owned_fd >= 0 {
+          raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+        }
+
         if fd < 0 {
           return Err(classify_io(fd, &p));
         }

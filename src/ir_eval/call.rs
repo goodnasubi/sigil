@@ -1495,6 +1495,43 @@ impl<'p> M<'p> {
             SYS_OPENAT | SYS_UNLINKAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
             }
+            SYS_MKDIRAT => {
+                if a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall mkdirat: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                self.check_path(addr_of(a[1], "path")?, loc)?;
+            }
+            SYS_GETDENTS64 => {
+                if a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall getdents64: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                if a[2] < 0 || a[2] > 65536 {
+                    return Err(self
+                        .syscall_stop(loc, "raw.syscall getdents64: count は 0 以上 65536 以下"));
+                }
+                if a[2] > 0 {
+                    let dirp = addr_of(a[1], "dirp")?;
+                    self.check_raw_access(dirp, a[2] as usize, loc)?;
+                }
+            }
+            SYS_FLOCK => {
+                if a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall flock: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                let allowed_ops = LOCK_SH | LOCK_EX | LOCK_NB | LOCK_UN;
+                if a[1] & !allowed_ops != 0 || (a[1] & (LOCK_SH | LOCK_EX | LOCK_UN) == 0) {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall flock: operation は LOCK_SH/LOCK_EX/LOCK_NB/LOCK_UN の組み合わせのみ許可",
+                    ));
+                }
+            }
             SYS_FSTAT => {
                 self.check_raw_access(addr_of(a[1], "statbuf")?, STAT_SIZE, loc)?;
             }
@@ -1609,10 +1646,12 @@ fn issue_syscall(n: i64, a: [i64; 6]) -> i64 {
     ret
 }
 
-/// fd を閉じる（`close(2)`。失敗は捨てる）。fd を所有する値（`TcpListener`・`TcpStream`）の破棄からだけ呼ぶ
-/// （`value::close_owned_fd`。ADR 0031 決定 3-1）。`close` は許可表にある番号で、番地を取らない。
+/// fd を閉じる（`close(2)`。失敗は捨てる）。fd を所有する値（`TcpListener`・`TcpStream`・`File`・`Dir`）の破棄からだけ呼ぶ
+/// （`value::close_owned_fd`。ADR 0031 決定 3-1、ADR 0049 決定 1-1）。`close` は許可表にある番号で、番地を取らない。
 pub(super) fn close_fd(fd: i64) {
-    let _ = issue_syscall(SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
+    if fd >= 0 {
+        let _ = issue_syscall(SYS_CLOSE, [fd, 0, 0, 0, 0, 0]);
+    }
 }
 
 const PAGE: usize = 4096;
@@ -1627,9 +1666,16 @@ const SYS_RT_SIGPROCMASK: i64 = 14;
 const SYS_SIGNALFD4: i64 = 289;
 const SHUTDOWN_MASK: u64 = (1 << (15 - 1)) | (1 << (2 - 1));
 const SYS_EXIT_GROUP: i64 = 231;
+const SYS_FLOCK: i64 = 73;
+const SYS_GETDENTS64: i64 = 217;
 const SYS_OPENAT: i64 = 257;
+const SYS_MKDIRAT: i64 = 258;
 const SYS_NEWFSTATAT: i64 = 262;
 const SYS_UNLINKAT: i64 = 263;
+const LOCK_SH: i64 = 1;
+const LOCK_EX: i64 = 2;
+const LOCK_NB: i64 = 4;
+const LOCK_UN: i64 = 8;
 const SYS_SOCKET: i64 = 41;
 const SYS_CONNECT: i64 = 42;
 const SYS_GETSOCKOPT: i64 = 55;

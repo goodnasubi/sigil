@@ -642,7 +642,16 @@ impl<'a, 'p> Fx<'a, 'p> {
                             owner,
                             |s| {
                                 let fd = s.ld(w, 0);
-                                s.rt("net_close", &[fd]);
+                                let valid =
+                                    s.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, fd, 0);
+                                s.branch(
+                                    valid,
+                                    |s2| {
+                                        s2.rt("net_close", &[fd]);
+                                        s2.ic(0)
+                                    },
+                                    |s2| s2.ic(0),
+                                );
                                 s.ic(0)
                             },
                             |s| s.ic(0),
@@ -880,7 +889,7 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 }
 
-/// fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`）か。破棄で `close(2)` を呼ぶ。
+/// fd を所有する型（`std.os.net` の `TcpListener`・`TcpStream`、`std.os.fs` の `File`・`Dir`）か。破棄で `close(2)` を呼ぶ。
 fn owns_fd(def: &crate::ir::TypeDef) -> bool {
-    crate::stdlib::NET_FD_TYPES.contains(&def.name.as_str())
+    crate::stdlib::FD_TYPES.contains(&def.name.as_str())
 }

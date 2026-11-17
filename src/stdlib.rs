@@ -44,6 +44,10 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("Path", 0, Layer::Os),
     ("IoError", 0, Layer::Os),
     ("BinaryIoError", 0, Layer::Os),
+    ("File", 0, Layer::Os),
+    ("Dir", 0, Layer::Os),
+    ("OpenOptions", 0, Layer::Os),
+    ("DirEntry", 0, Layer::Os),
     ("ParseError", 0, Layer::Core),
     ("Shared", 1, Layer::Core),
     ("Cell", 1, Layer::Core),
@@ -194,14 +198,17 @@ pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
 
 /// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ。
 pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
-/// `std.os.net` が実体を持つ、fd を所有する型（結合後の名前）。値の破棄で `close(2)` を 1 回呼ぶ
+/// fd を所有する型（結合後の名前。`std.os.net` と `std.os.fs`）。値の破棄で `close(2)` を 1 回呼ぶ
 /// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
-pub const NET_FD_TYPES: &[&str] = &[
+pub const FD_TYPES: &[&str] = &[
     "std.os.net.TcpListener",
     "std.os.net.ShutdownSignal",
     "std.os.net.TcpStream",
     "std.os.net.TcpClient",
+    "std.os.fs.File",
+    "std.os.fs.Dir",
 ];
+pub const NET_FD_TYPES: &[&str] = FD_TYPES;
 /// `HttpError` の腕（ADR 0032 決定 2-2）。並びは `std.http` の宣言と同じ（単体テストで固定する）。
 pub const HTTP_ERROR_ARMS: &[&str] = &[
     "BadRequest",
@@ -488,6 +495,43 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "fs",
         "write_bytes(p: &Path, data: &Bytes, max: Int) -> Result<Unit, BinaryIoError>",
         "fs.write",
+    ),
+    // ディレクトリとファイル操作（ADR 0049 決定 1・4）。実体は `std.os.fs`。
+    (
+        Layer::Os,
+        "fs",
+        "create_dir(p: &Path) -> Result<Unit, IoError>",
+        "fs",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "create_dir_all(p: &Path) -> Result<Unit, IoError>",
+        "fs",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "remove_dir(p: &Path) -> Result<Unit, IoError>",
+        "fs",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "remove_file(p: &Path) -> Result<Unit, IoError>",
+        "fs",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "open_options() -> OpenOptions",
+        "none",
+    ),
+    (
+        Layer::Os,
+        "fs",
+        "open_dir(p: &Path) -> Result<Dir, IoError>",
+        "fs",
     ),
     // TCP の待ち受け（ADR 0031 決定 3-2、PR 6-3e）。実体は `std.os.net.listen`（lower が名前で結ぶ）。
     (
@@ -882,6 +926,55 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("join(self: &Path, name: &String) -> Path", "none"),
             ("file_name(self: &Path) -> Option<String>", "none"),
             ("parent(self: &Path) -> Option<Path>", "none"),
+            ("as_bytes(self: &Path) -> Bytes", "none"),
+        ],
+    ),
+    // ファイルシステム境界（ADR 0049 決定 1・2・4）。実体は `std.os.fs` の `impl`。
+    (
+        Layer::Os,
+        "File",
+        &[
+            ("try_lock_exclusive(self: &File) -> Result<Bool, IoError>", "fs"),
+            ("try_lock_shared(self: &File) -> Result<Bool, IoError>", "fs"),
+            ("unlock(self: &File) -> Result<Unit, IoError>", "fs"),
+            ("close(self: File) -> Result<Unit, IoError>", "fs"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "Dir",
+        &[
+            ("open(p: &Path) -> Result<Dir, IoError>", "fs"),
+            ("open_file(self: &Dir, subpath: &Path, options: &OpenOptions) -> Result<File, IoError>", "fs"),
+            ("create_file(self: &Dir, subpath: &Path) -> Result<File, IoError>", "fs"),
+            ("remove_file(self: &Dir, subpath: &Path) -> Result<Unit, IoError>", "fs"),
+            ("read_entries(self: &Dir, max_entries: Int) -> Result<List<DirEntry>, IoError>", "fs"),
+            ("close(self: Dir) -> Result<Unit, IoError>", "fs"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "OpenOptions",
+        &[
+            ("new() -> OpenOptions", "none"),
+            ("read(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("write(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("create(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("create_new(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("truncate(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("append(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("follow_symlinks(self: OpenOptions, val: Bool) -> OpenOptions", "none"),
+            ("open(self: &OpenOptions, p: &Path) -> Result<File, IoError>", "fs"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "DirEntry",
+        &[
+            ("name(self: &DirEntry) -> String", "none"),
+            ("is_dir(self: &DirEntry) -> Bool", "none"),
+            ("is_file(self: &DirEntry) -> Bool", "none"),
+            ("is_symlink(self: &DirEntry) -> Bool", "none"),
         ],
     ),
     // TCP のソケットの操作（ADR 0031 決定 3-2、PR 6-3e）。実体は `std.os.net` の `impl`。
@@ -1245,14 +1338,48 @@ mod tests {
             "fs.write",
             "fs.read_bytes",
             "fs.write_bytes",
+            "fs.create_dir",
+            "fs.create_dir_all",
+            "fs.remove_dir",
+            "fs.remove_file",
+            "fs.open_options",
+            "fs.open_dir",
             "Path",
             "Path.new",
             "Path.is_empty",
             "Path.join",
             "Path.file_name",
             "Path.parent",
+            "Path.as_bytes",
             "IoError",
             "BinaryIoError",
+            "File",
+            "File.try_lock_exclusive",
+            "File.try_lock_shared",
+            "File.unlock",
+            "File.close",
+            "Dir",
+            "Dir.open",
+            "Dir.open_file",
+            "Dir.create_file",
+            "Dir.remove_file",
+            "Dir.read_entries",
+            "Dir.close",
+            "OpenOptions",
+            "OpenOptions.new",
+            "OpenOptions.read",
+            "OpenOptions.write",
+            "OpenOptions.create",
+            "OpenOptions.create_new",
+            "OpenOptions.truncate",
+            "OpenOptions.append",
+            "OpenOptions.follow_symlinks",
+            "OpenOptions.open",
+            "DirEntry",
+            "DirEntry.name",
+            "DirEntry.is_dir",
+            "DirEntry.is_file",
+            "DirEntry.is_symlink",
             // ADR 0031 決定 3（PR 6-3e）。
             "net.listen",
             "net.shutdown_signal",
@@ -1591,6 +1718,10 @@ mod tests {
                         | "Path"
                         | "IoError"
                         | "BinaryIoError"
+                        | "File"
+                        | "Dir"
+                        | "OpenOptions"
+                        | "DirEntry"
                         | "ShutdownSignal"
                         | "TcpListener"
                         | "TcpStream"

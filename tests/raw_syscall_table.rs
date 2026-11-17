@@ -373,3 +373,37 @@ fn clock_gettime_realtime_restrictions_and_execution() {
     );
     assert_eq!(r.unwrap(), "1");
 }
+
+#[test]
+fn flock_operation_and_unused_args_checked() {
+    // 未使用引数非ゼロは拒否
+    stops("  return raw.syscall(73, 0, 2, 1, 0, 0, 0);", "flock");
+    // 不正な operation（16 など定義外のフラグ）
+    stops("  return raw.syscall(73, 0, 16, 0, 0, 0, 0);", "flock");
+    // 不正な operation（LOCK_NB だけ等、SH/EX/UN を含まない）
+    stops("  return raw.syscall(73, 0, 4, 0, 0, 0, 0);", "flock");
+    // 正常実行（無効 fd = -1 への LOCK_EX|LOCK_NB は EBADF = -9 を返す）
+    let r = run("  return raw.syscall(73, -1, 6, 0, 0, 0, 0);");
+    assert_eq!(r.unwrap(), "-9");
+}
+
+#[test]
+fn mkdirat_path_and_unused_args_checked() {
+    // 未使用引数非ゼロは拒否
+    stops("  let p = raw.alloc(8, 1);\n  raw.store_u8(p, 0);\n  let r = raw.syscall(258, -100, raw.addr_to_int(p), 511, 1, 0, 0);\n  raw.free(p, 8, 1);\n  return r;", "mkdirat");
+    // パス領域外アクセス・NUL終端なしは拒否
+    stops("  let p = raw.alloc(4, 1);\n  raw.store_u8(p, 65);\n  raw.store_u8(raw.offset(p, 1), 66);\n  raw.store_u8(raw.offset(p, 2), 67);\n  raw.store_u8(raw.offset(p, 3), 68);\n  let r = raw.syscall(258, -100, raw.addr_to_int(p), 511, 0, 0, 0);\n  raw.free(p, 4, 1);\n  return r;", "パスが NUL 終端されていない");
+}
+
+#[test]
+fn getdents64_buffer_and_args_checked() {
+    // 未使用引数非ゼロは拒否
+    stops("  let p = raw.alloc(64, 8);\n  let r = raw.syscall(217, 0, raw.addr_to_int(p), 64, 1, 0, 0);\n  raw.free(p, 64, 8);\n  return r;", "getdents64");
+    // count 負数は拒否
+    stops("  let p = raw.alloc(64, 8);\n  let r = raw.syscall(217, 0, raw.addr_to_int(p), -1, 0, 0, 0);\n  raw.free(p, 64, 8);\n  return r;", "getdents64");
+    // count 範囲外（バッファサイズより大きい）
+    stops("  let p = raw.alloc(32, 8);\n  let r = raw.syscall(217, 0, raw.addr_to_int(p), 64, 0, 0, 0);\n  raw.free(p, 32, 8);\n  return r;", "範囲外");
+    // 正常実行（無効 fd = -1 への呼び出しは EBADF = -9 を返す）
+    let r = run("  let p = raw.alloc(64, 8);\n  let r = raw.syscall(217, -1, raw.addr_to_int(p), 64, 0, 0, 0);\n  raw.free(p, 64, 8);\n  return r;");
+    assert_eq!(r.unwrap(), "-9");
+}

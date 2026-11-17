@@ -756,6 +756,25 @@ impl<'a> L<'a> {
                     };
                     return self.user_call(decl, &r.targs, ops, ret);
                 }
+                // fs のディレクトリ・ファイル操作（ADR 0049 決定 1・4）も Sigil 実装を評価器・ネイティブで共用する。
+                if let Some(f) = r.name.strip_prefix("fs.") {
+                    if matches!(
+                        f,
+                        "create_dir"
+                            | "create_dir_all"
+                            | "remove_dir"
+                            | "remove_file"
+                            | "open_options"
+                            | "open_dir"
+                    ) {
+                        self.core_only = false;
+                        let full = format!("{}.{f}", crate::stdlib::embedded::FS_MODULE);
+                        let Some(&decl) = self.fns.get(full.as_str()) else {
+                            return bail(format!("{} の実体（std.os.fs）が結ばれていない", r.name));
+                        };
+                        return self.user_call(decl, &r.targs, ops, ret);
+                    }
+                }
                 let b = match r.name.as_str() {
                     "console.log" => {
                         self.core_only = false;
@@ -1054,7 +1073,7 @@ impl<'a> L<'a> {
             ("String", "trim") => (StrTrim, false),
             ("String", "lines") => (StrLines, false),
             ("String", "parse_int") => (StrParseInt, false),
-            ("String", "as_bytes") => (StrAsBytes, false),
+            ("String", "as_bytes") | ("Path", "as_bytes") => (StrAsBytes, false),
             ("Int", "rotl") => (IntRotl, false),
             ("Int", "rotr") => (IntRotr, false),
             ("Int", "rotr32") => (IntRotr32, false),

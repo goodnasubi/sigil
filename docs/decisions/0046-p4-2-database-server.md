@@ -224,11 +224,11 @@ P4-2 データベースサーバーの実装完了判定には、以下のすべ
    - P1 の `std.pg` クライアントおよび接続プール（`PgPool`）を用い、本サーバーへ接続して動作を検証する。既存試験に含まれる機能のうち、初版対応範囲と未対応機能の境界に基づき、差し替え対象の試験範囲を以下のように明確に区分する：
      - **そのまま差し替えて全件パスを必須とする試験**:
        - 接続・SCRAM-SHA-256 認証（`tests/pg_startup_473.rs`, `tests/pg_scram_473.rs`）
-       - 単一文クエリ・パラメータバインド・トランザクション制御・構文エラー回復（`tests/pg_query_492.rs` のうち NOT NULL 値を用いるシナリオ、`tests/pg_integration_6_5g.rs`）
+       - 単一文クエリ・パラメータバインド・トランザクション制御・構文エラー回復（`tests/pg_query_492.rs` のうち NOT NULL 値を用いるシナリオ）
        - 接続プール（`PgPool`）の借出、明示返却、`DISCARD ALL` および `SET bytea_output = 'hex'` による清掃・再利用、容量制限、破棄（`tests/pg_pool_499.rs`、`src/stdlib/pg.sigil:1604-1607` の返却シーケンス）
-     - **未対応機能を含む既存試験（`tests/pg_live_510.rs` 等）の扱いと差し替え範囲**:
-       - 実 PostgreSQL 向け live 試験（`tests/pg_live_510.rs`）には、本サーバー初版で未対応と定めた機能（NULL 値パラメータ `params.push(pg.param(25, None)?)`、システム関数 `SELECT pg_backend_pid()`、セッション照会 `SHOW application_name` / `SHOW bytea_output`）が含まれている。
-       - これら未対応機能を含むクエリ列をそのまま実行することは求めず、本サーバーの初版対応範囲（NOT NULL、4型、基本 DDL/DML/DQL/TX、`DISCARD ALL`, `SET`）に適合させた差し替え検証シナリオ（初版対応スイート）を作成し、それが正常にパスすることを完了条件とする。
+     - **未対応機能を含む既存試験（`tests/pg_live_510.rs`, `tests/pg_integration_6_5g.rs` 等）の扱いと差し替え範囲**:
+       - 既存の統合試験（`tests/pg_integration_6_5g.rs`）および実 PostgreSQL 向け live 試験（`tests/pg_live_510.rs`）には、本サーバー初版で未対応と定めた機能（NULL 値パラメータ `params.push(pg.param(25, None)?)`、システム関数 `SELECT pg_backend_pid()`、セッション照会 `SHOW application_name` / `SHOW bytea_output`）が含まれている（`tests/pg_integration_6_5g.rs:288-291` では NULL パラメータを含むクエリの成功を必須検査している）。
+       - これら未対応機能を含むクエリ列をそのまま実行することは求めず、本サーバーの初版対応範囲（NOT NULL、4型、基本 DDL/DML/DQL/TX、`DISCARD ALL`, `SET`）に適合させた差し替え検証シナリオ（初版対応スイート。`pg_integration_6_5g.rs` については NULL を NOT NULL 値に置き換えた統合シナリオ）を作成し、それが正常にパスすることを完了条件とする。
        - 既存試験で使われている上記未対応機能（NULL パラメータ、`pg_backend_pid()`、`SHOW` 等）が投入された場合は、検証項目 3（未対応機能の安全性検証）に基づき、サーバーがクラッシュや誤動作を起こさず安全に明示的エラー（`FeatureNotSupported` / SQLSTATE 0A000 / 42601 等）を返し、接続が健全に保護されることを検証する。
 2. **PostgreSQL 公式イメージとの差分比較試験（Differential Testing）**:
    - CI 上の PostgreSQL（公式イメージ）と本サーバーの双方に対して、同一の SQL 文列（DDL、INSERT、UPDATE、DELETE、SELECT、INNER JOIN、集約、ORDER BY、LIMIT、BEGIN/COMMIT/ROLLBACK）を投入する。

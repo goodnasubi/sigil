@@ -943,3 +943,76 @@ fn read_entries_rejects_invalid_utf8_entry() {
     assert_eq!(res, "\"ok_invalid_path\"");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn read_entries_distinguishes_file_dir_symlink() {
+    let base = scratch_dir("distinguish_entry_types");
+    let test_dir = base.join("dir");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let file_path = test_dir.join("regular.txt");
+    std::fs::write(&file_path, b"hello").unwrap();
+
+    let sub_dir = test_dir.join("sub");
+    std::fs::create_dir_all(&sub_dir).unwrap();
+
+    #[cfg(unix)]
+    {
+        let sym_path = test_dir.join("link_to_file");
+        std::os::unix::fs::symlink(&file_path, &sym_path).unwrap();
+    }
+
+    let sig = "t(dir_path: String) -> String";
+    let body = r#"
+        let dp = Path.new(&dir_path);
+        match fs.open_dir(&dp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(dir) => {
+                match dir.read_entries(10) {
+                    Err(_) => { return "err_read_entries"; }
+                    Ok(entries) => {
+                        let mut found_file = false;
+                        let mut found_dir = false;
+                        let mut found_link = false;
+                        let mut i = 0;
+                        while i < entries.len() {
+                            match entries.get(i) {
+                                None => {}
+                                Some(e) => {
+                                    let n = e.name();
+                                    if n == "regular.txt" {
+                                        if !e.is_file() || e.is_dir() || e.is_symlink() {
+                                            return "err_regular_flags";
+                                        }
+                                        found_file = true;
+                                    }
+                                    if n == "sub" {
+                                        if e.is_file() || !e.is_dir() || e.is_symlink() {
+                                            return "err_dir_flags";
+                                        }
+                                        found_dir = true;
+                                    }
+                                    if n == "link_to_file" {
+                                        if e.is_file() || e.is_dir() || !e.is_symlink() {
+                                            return "err_link_flags";
+                                        }
+                                        found_link = true;
+                                    }
+                                }
+                            }
+                            i = i + 1;
+                        }
+                        if !found_file || !found_dir || !found_link {
+                            return "err_missing_entries";
+                        }
+                        return "ok_types_verified";
+                    }
+                }
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&test_dir)]);
+    assert_eq!(res, "\"ok_types_verified\"");
+    let _ = std::fs::remove_dir_all(&base);
+}

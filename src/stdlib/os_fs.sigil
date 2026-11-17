@@ -1357,7 +1357,7 @@ impl Dir {
     requires none
     ensures none
     effects fs
-    unchecked "getdents64(217) でディレクトリエントリを読み取り、未返却エントリをバッファに保持して次回へ持ち越す"
+    unchecked "getdents64(217) でディレクトリエントリを読み取り、d_type が DT_UNKNOWN の場合は newfstatat(262) で種別を補完し、未返却エントリをバッファに保持して次回へ持ち越す"
   {
     let mut limit = max_entries;
     if limit < 0 {
@@ -1403,9 +1403,24 @@ impl Dir {
             }
             Ok(name_str) => {
               if name_str != "" && name_str != "." && name_str != ".." {
-                let is_d = (d_type == 4);
-                let is_f = (d_type == 8);
-                let is_lnk = (d_type == 10);
+                let mut is_d = (d_type == 4);
+                let mut is_f = (d_type == 8);
+                let mut is_lnk = (d_type == 10);
+                if d_type == 0 {
+                  let stat_buf = raw.alloc(144, 8);
+                  let mut st = -4;
+                  let name_addr = raw.addr_to_int(raw.offset(data_buf, off + 19));
+                  while st == -4 {
+                    st = raw.syscall(262, self.fd, name_addr, raw.addr_to_int(stat_buf), 256, 0, 0);
+                  }
+                  if st >= 0 {
+                    let mode = raw.load_i64(raw.offset(stat_buf, 24)) & 61440;
+                    is_d = (mode == 16384);
+                    is_f = (mode == 32768);
+                    is_lnk = (mode == 40960);
+                  }
+                  raw.free(stat_buf, 144, 8);
+                }
                 out.push(DirEntry {
                   ent_name: name_str,
                   ent_is_dir: is_d,

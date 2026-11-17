@@ -124,10 +124,16 @@ fn eof_short_read_and_bounds_preserve_buffer() {
         let mut empty = Bytes.new();
         match f.read_exact_at(&mut empty, 9223372036854775807) { Err(_) => { return 10; } Ok(_) => {} }
         match f.write_all_at(&empty, 9223372036854775807) { Err(_) => { return 11; } Ok(_) => {} }
-        match f.read_at(&mut empty, -1) { Err(IoError.LimitExceeded(_)) => {} _ => { return 12; } }
-        match f.write_at(&data, -1) { Err(IoError.LimitExceeded(_)) => {} _ => { return 13; } }
+        match f.read_at(&mut empty, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 12; } }
+        match f.write_at(&data, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 13; } }
         match f.write_all_at(&data, 9223372036854775806) { Err(IoError.LimitExceeded(_)) => {} _ => { return 14; } }
         match f.read_exact_at(&mut buf, 9223372036854775804) { Err(IoError.LimitExceeded(_)) => {} _ => { return 15; } }
+        match f.read_exact_at(&mut empty, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 16; } }
+        match f.write_all_at(&empty, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 17; } }
+        match f.read_at(&mut buf, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 18; } }
+        match f.read_exact_at(&mut buf, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 19; } }
+        match f.write_at(&empty, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 20; } }
+        match f.write_all_at(&data, -1) { Err(IoError.InvalidInput(_)) => {} _ => { return 21; } }
         let _ = f.close();
       }
     }

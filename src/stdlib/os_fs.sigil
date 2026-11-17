@@ -573,6 +573,7 @@ impl File {
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
   {
     let len = buf.len();
+    if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(0); }
     let staging = raw.alloc(len, 1);
@@ -595,6 +596,7 @@ impl File {
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
   {
     let len = buf.len();
+    if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(unit()); }
     let staging = raw.alloc(len, 1);
@@ -631,6 +633,7 @@ impl File {
   {
     if self.append_mode { return Err(IoError.InvalidInput(self.file_path.clone())); }
     let len = buf.len();
+    if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(0); }
     let staging = raw.alloc(len, 1);
@@ -654,6 +657,7 @@ impl File {
   {
     if self.append_mode { return Err(IoError.InvalidInput(self.file_path.clone())); }
     let len = buf.len();
+    if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(unit()); }
     let staging = raw.alloc(len, 1);

@@ -70,6 +70,23 @@ SQL パーサーおよび実行エンジンは、純 Sigil（`trust none`）で�
 | TX | `COMMIT` | 対応 | トランザクションのコミット |
 | TX | `ROLLBACK` | 対応 | トランザクションのロールバック |
 | TX | `SAVEPOINT` / 隔離レベル指定 | **未対応** | 明示的エラー（隔離レベルは SERIALIZABLE 固定） |
+| セッション | `DISCARD ALL` | 対応 | セッション状態（準備された文・ポータル、一時設定）の初期化。完了タグ `"DISCARD ALL"`、ReadyForQuery `'I'`。`PgPool` 返却時の清掃（`src/stdlib/pg.sigil:1604-1605`）に必須 |
+| セッション | `SET <param> = <value>` | 対応（限定） | `SET bytea_output = 'hex'`（`PgPool` 返却時の清掃、`src/stdlib/pg.sigil:1606-1607`）および基本セッション変数設定を受容。完了タグ `"SET"`、ReadyForQuery `'I'`。未対応パラメータは安全に既定値維持または明示エラー |
+| セッション | `SHOW <param>` | **未対応** | 明示的エラー（`FeatureNotSupported`）。`pg_live_510` 等の確認用文。初版は未対応とし、試験差し替え範囲を限定（後述） |
+| セッション | `DISCARD PLANS` / `TEMP` / `SEQUENCES` / `RESET ALL` | **未対応** | 明示的エラー（`FeatureNotSupported`） |
+
+### セッション管理と接続プール清掃における状態初期化
+
+P1 の接続プール（`PgPool`）は、接続返却時に `DISCARD ALL` と `SET bytea_output = 'hex'` を順次実行し、それぞれの成功タグを確認してから接続をプールへ再利用する（`src/stdlib/pg.sigil:1604-1607`）。本サーバーはこれに対応するため、以下の状態初期化を保証する：
+
+1. **`DISCARD ALL` による状態初期化**:
+   - 該当接続セッションが保持する準備されたステートメント（Parse 済み）およびポータル（Bind 済み）をすべて破棄・解放する。
+   - セッション設定パラメータを初期状態（接続直後の既定値）に初期化する。
+   - アイドル状態（トランザクション外）であることを確認し、完了タグ `"DISCARD ALL"` および `ReadyForQuery`（ステータス `'I'`）を返却する。未コミットのトランザクションが残っている場合は暗黙ロールバックしてアイドル状態へ復帰する。
+2. **`SET bytea_output = 'hex'` の受容**:
+   - バイナリ出力形式を 16 進表記（`hex`）に設定する（初版のサーバー内部既定値と同一）。
+   - 完了タグ `"SET"` および `ReadyForQuery`（ステータス `'I'`）を返却する。
+   - その他の `SET` 文（`application_name` 等）については、セッション識別情報として受容して完了タグ `"SET"` を返すか、未対応パラメータの場合は明示的エラーとする（未対応機能の扱い規則に従う）。
 
 ### データ型
 
@@ -84,6 +101,7 @@ P4-1（ADR 0045）および P1 クライアント（ADR 0034）の型体系と�
 | `NULL` | — | **未対応** | 初版の P4-1 核が NULL 未対応のため、初版では NULL 値の格納・NULL 許容列・`IS NULL` 句は未対応 |
 
 浮動小数点（`FLOAT`, `DOUBLE PRECISION`）、日付時刻（`TIMESTAMP`, `DATE`）、`NUMERIC`/`DECIMAL`、`JSON`/`JSONB`、配列型、外部キー制約、CHECK 制約は初版で**未対応**とし、対応表に明記して将来の ADR に持ち越す。
+また、システム情報関数（`pg_backend_pid()`、`version()`、`current_database()` 等）やテーブル非依存の関数呼び出し、セッション変数照会（`SHOW`）も初版では**未対応**とし、後述の通り既存試験からの差し替え範囲を整理する。
 
 ---
 
@@ -127,7 +145,7 @@ P4-1（ADR 0045）および P1 クライアント（ADR 0034）の型体系と�
 | `NoData` | S -> C | `'n'` | 対応 | 行を返さない文（INSERT, UPDATE, DELETE, DDL）に対する返答 |
 | `Execute` | C -> S | `'E'` | 対応 | ポータルの実行、最大行数の制御 |
 | `DataRow` | S -> C | `'D'` | 対応 | 行データの返答（テキスト形式、format code 0） |
-| `CommandComplete` | S -> C | `'C'` | 対応 | 完了タグ（`"SELECT <n>"`, `"INSERT 0 <n>"`, `"UPDATE <n>"`, `"DELETE <n>"`, `"CREATE TABLE"` 等）の返答 |
+| `CommandComplete` | S -> C | `'C'` | 対応 | 完了タグ（`"SELECT <n>"`, `"INSERT 0 <n>"`, `"UPDATE <n>"`, `"DELETE <n>"`, `"CREATE TABLE"`, `"DISCARD ALL"`, `"SET"` 等）の返答 |
 | `EmptyQueryResponse` | S -> C | `'I'` | 対応 | 空クエリに対する返答 |
 | `Sync` | C -> S | `'S'` | 対応 | 拡張クエリパイプラインの区切り。現在のトランザクション状態に応じて `ReadyForQuery` を送信 |
 | `Close` | C -> S | `'C'` | 対応 | ステートメントまたはポータルの解放 |
@@ -202,8 +220,16 @@ P4-1 のストレージ上限（ページ数 2^24、表数・索引数各 1024�
 
 P4-2 データベースサーバーの実装完了判定には、以下のすべてを満たすことを必要とする。
 
-1. **P1 クライアント（ADR 0034）との結合試験**:
-   - P1 の `std.pg` クライアントおよび接続プール（`PgPool`）を用い、既存の `pg_*` 試験（単一文、パラメータ付きクエリ、トランザクション、制約違反、接続プール借出/返却/清掃）の接続先を本サーバーに差し替えて、全試験が正常にパスすること。
+1. **P1 クライアント（ADR 0034）との結合試験と差し替え対象の試験範囲**:
+   - P1 の `std.pg` クライアントおよび接続プール（`PgPool`）を用い、本サーバーへ接続して動作を検証する。既存試験に含まれる機能のうち、初版対応範囲と未対応機能の境界に基づき、差し替え対象の試験範囲を以下のように明確に区分する：
+     - **そのまま差し替えて全件パスを必須とする試験**:
+       - 接続・SCRAM-SHA-256 認証（`tests/pg_startup_473.rs`, `tests/pg_scram_473.rs`）
+       - 単一文クエリ・パラメータバインド・トランザクション制御・構文エラー回復（`tests/pg_query_492.rs` のうち NOT NULL 値を用いるシナリオ、`tests/pg_integration_6_5g.rs`）
+       - 接続プール（`PgPool`）の借出、明示返却、`DISCARD ALL` および `SET bytea_output = 'hex'` による清掃・再利用、容量制限、破棄（`tests/pg_pool_499.rs`、`src/stdlib/pg.sigil:1604-1607` の返却シーケンス）
+     - **未対応機能を含む既存試験（`tests/pg_live_510.rs` 等）の扱いと差し替え範囲**:
+       - 実 PostgreSQL 向け live 試験（`tests/pg_live_510.rs`）には、本サーバー初版で未対応と定めた機能（NULL 値パラメータ `params.push(pg.param(25, None)?)`、システム関数 `SELECT pg_backend_pid()`、セッション照会 `SHOW application_name` / `SHOW bytea_output`）が含まれている。
+       - これら未対応機能を含むクエリ列をそのまま実行することは求めず、本サーバーの初版対応範囲（NOT NULL、4型、基本 DDL/DML/DQL/TX、`DISCARD ALL`, `SET`）に適合させた差し替え検証シナリオ（初版対応スイート）を作成し、それが正常にパスすることを完了条件とする。
+       - 既存試験で使われている上記未対応機能（NULL パラメータ、`pg_backend_pid()`、`SHOW` 等）が投入された場合は、検証項目 3（未対応機能の安全性検証）に基づき、サーバーがクラッシュや誤動作を起こさず安全に明示的エラー（`FeatureNotSupported` / SQLSTATE 0A000 / 42601 等）を返し、接続が健全に保護されることを検証する。
 2. **PostgreSQL 公式イメージとの差分比較試験（Differential Testing）**:
    - CI 上の PostgreSQL（公式イメージ）と本サーバーの双方に対して、同一の SQL 文列（DDL、INSERT、UPDATE、DELETE、SELECT、INNER JOIN、集約、ORDER BY、LIMIT、BEGIN/COMMIT/ROLLBACK）を投入する。
    - 返却される行データ、列情報（RowDescription）、完了タグ（CommandComplete）、および制約違反や構文エラー時のエラー種別（SQLSTATE）が一致することを検証する。
@@ -232,7 +258,7 @@ P4-2 データベースサーバーの実装完了判定には、以下のすべ
 ```json
 {
   "model": "jev-1.13.0",
-  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。ADR0005段階表、ADR0016のADR先行、ADR0044のP4範囲（単一ノード関係DB、PostgreSQL通信方式v3部分集合、SCRAM-SHA-256のみ、平文通信、仕様sigil/実装別repo、所有者がrepo作成、外部公開しない方針）、ADR0045のP4-1核（直列実行serializable、固定8192byteページ、B+tree、全ページredo WAL、no-steal、i64/bool/text/bytes、NULL未対応、主キー必須）、ADR0034（PGクライアントの拡張クエリ・SCRAM整合）を守る。所有者指示: Issue578のP4-2個別ADR0046と索引のみ、実装/新規Issue/マージ禁止。版取得方法はpinned_source（完全SHA+Cargo.lock固定ビルド）。案: SQLはDDL(CREATE/DROP TABLE/INDEX)、DML(INSERT/UPDATE/DELETE)、DQL(SELECT, 単一INNER JOIN, GROUP BY集約, ORDER BY, LIMIT)、TX(BEGIN/COMMIT/ROLLBACK)の部分集合とし、サブクエリや外部結合等は明示的未対応。通信はPG v3の拡張クエリ(Parse/Bind/Describe/Execute/Sync)と単一文Simple Query、認証はSCRAM-SHA-256のみ。接続は最大64、同時実行はP4-1核の直列実行キューへ委託しserializable維持。未対応機能は暗黙縮退せず明示エラー。完了条件はP1クライアント/プール試験差し替えパス、CI公式PostgreSQLとの差分比較、プロトコルファジング、両実行経路一致。",
+  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。ADR0005段階表、ADR0016のADR先行、ADR0044のP4範囲（単一ノード関係DB、PostgreSQL通信方式v3部分集合、SCRAM-SHA-256のみ、平文通信、仕様sigil/実装別repo、所有者がrepo作成、外部公開しない方針）、ADR0045のP4-1核（直列実行serializable、固定8192byteページ、B+tree、全ページredo WAL、no-steal、i64/bool/text/bytes、NULL未対応、主キー必須）、ADR0034（PGクライアントの拡張クエリ・SCRAM整合）を守る。所有者指示: Issue578のP4-2個別ADR0046と索引のみ、実装/新規Issue/マージ禁止。版取得方法はpinned_source（完全SHA+Cargo.lock固定ビルド）。案: SQLはDDL(CREATE/DROP TABLE/INDEX)、DML(INSERT/UPDATE/DELETE)、DQL(SELECT, 単一INNER JOIN, GROUP BY集約, ORDER BY, LIMIT)、TX(BEGIN/COMMIT/ROLLBACK)、PgPool返却清掃に必要なセッション管理(DISCARD ALL, SET bytea_output='hex')の部分集合とし、SHOWやシステム関数・サブクエリや外部結合等は明示的未対応。通信はPG v3の拡張クエリ(Parse/Bind/Describe/Execute/Sync)と単一文Simple Query、認証はSCRAM-SHA-256のみ。接続は最大64、同時実行はP4-1核の直列実行キューへ委託しserializable維持。未対応機能は暗黙縮退せず明示エラー。完了条件はP1クライアント/プール試験差し替えパス(未対応機能は適合スイート化)、CI公式PostgreSQLとの差分比較、プロトコルファジング、両実行経路一致。",
   "questions": {
     "sql_scope": {
       "type": "choice",

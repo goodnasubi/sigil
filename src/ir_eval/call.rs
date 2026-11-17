@@ -812,15 +812,29 @@ impl<'p> M<'p> {
                 let path = self.text_of(locals, &args[0]);
                 let max = self.read_int(locals, &args[1]);
                 let result = bio::validate(&path, max).and_then(|cap| match &self.fs_bytes {
-                    Some(files) => match self
-                        .fs_bytes_written
-                        .get(&*path)
-                        .or_else(|| files.get(&*path))
-                    {
-                        Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
-                        Some(_) => Err(bio::Error::TooLarge),
-                        None => Err(bio::Error::Io(std::io::ErrorKind::NotFound.into())),
-                    },
+                    Some(files) => {
+                        let p_clean = path.trim_start_matches('/');
+                        if self.fs_bytes_deleted.contains(&*path)
+                            || self.fs_bytes_deleted.contains(p_clean)
+                            || self.fs_bytes_deleted.contains(&format!("/{}", p_clean))
+                        {
+                            Err(bio::Error::Io(std::io::ErrorKind::NotFound.into()))
+                        } else {
+                            match self
+                                .fs_bytes_written
+                                .get(&*path)
+                                .or_else(|| self.fs_bytes_written.get(p_clean))
+                                .or_else(|| self.fs_bytes_written.get(&format!("/{}", p_clean)))
+                                .or_else(|| files.get(&*path))
+                                .or_else(|| files.get(p_clean))
+                                .or_else(|| files.get(&format!("/{}", p_clean)))
+                            {
+                                Some(bytes) if bytes.len() <= cap => Ok(bytes.clone()),
+                                Some(_) => Err(bio::Error::TooLarge),
+                                None => Err(bio::Error::Io(std::io::ErrorKind::NotFound.into())),
+                            }
+                        }
+                    }
                     None => bio::read(&path, cap),
                 });
                 match result {
@@ -844,6 +858,10 @@ impl<'p> M<'p> {
                         }
                         match &self.fs_bytes {
                             Some(_) => {
+                                let p_clean = path.trim_start_matches('/');
+                                self.fs_bytes_deleted.remove(&*path);
+                                self.fs_bytes_deleted.remove(p_clean);
+                                self.fs_bytes_deleted.remove(&format!("/{}", p_clean));
                                 self.fs_bytes_written
                                     .insert(path.to_string(), bytes.clone());
                                 Ok(())
@@ -1674,18 +1692,33 @@ impl<'p> M<'p> {
                             || files.remove(p_clean).is_some()
                             || files.remove(&format!("/{}", p_clean)).is_some();
                     }
-                    removed |= self.fs_bytes_written.remove(&p).is_some()
+                    let had_written = self.fs_bytes_written.remove(&p).is_some()
                         || self.fs_bytes_written.remove(p_clean).is_some()
                         || self
                             .fs_bytes_written
                             .remove(&format!("/{}", p_clean))
                             .is_some();
+                    let in_initial_bytes = self.fs_bytes.as_ref().is_some_and(|files| {
+                        files.contains_key(&p)
+                            || files.contains_key(p_clean)
+                            || files.contains_key(&format!("/{}", p_clean))
+                    });
+                    let already_deleted = self.fs_bytes_deleted.contains(&p)
+                        || self.fs_bytes_deleted.contains(p_clean)
+                        || self.fs_bytes_deleted.contains(&format!("/{}", p_clean));
+                    let had_bytes = (had_written || in_initial_bytes) && !already_deleted;
+                    if had_bytes {
+                        self.fs_bytes_deleted.insert(p.clone());
+                        self.fs_bytes_deleted.insert(p_clean.to_string());
+                        self.fs_bytes_deleted.insert(format!("/{}", p_clean));
+                    }
+                    removed |= had_bytes;
                     if removed {
                         0
-                    } else if self.fs.is_some() {
-                        -2 // ENOENT: fs_files 差し替え下でファイルが存在しない
+                    } else if self.fs.is_some() || self.fs_bytes.is_some() {
+                        -2 // ENOENT: 差し替え下でファイルが存在しない
                     } else {
-                        // fs_bytes 等で削除未対応の場合は fail-closed
+                        // どちらも設定されていない場合は fail-closed
                         -95 // EOPNOTSUPP
                     }
                 }
@@ -1708,18 +1741,10 @@ impl<'p> M<'p> {
                         found_len = Some(s.len() as i64);
                     }
                 }
-                if found_len.is_none() {
-                    if let Some(files) = &self.fs_bytes {
-                        if let Some(b) = files
-                            .get(&p)
-                            .or_else(|| files.get(p_clean))
-                            .or_else(|| files.get(&format!("/{}", p_clean)))
-                        {
-                            found_len = Some(b.len() as i64);
-                        }
-                    }
-                }
-                if found_len.is_none() {
+                let is_deleted = self.fs_bytes_deleted.contains(&p)
+                    || self.fs_bytes_deleted.contains(p_clean)
+                    || self.fs_bytes_deleted.contains(&format!("/{}", p_clean));
+                if found_len.is_none() && !is_deleted {
                     if let Some(b) = self
                         .fs_bytes_written
                         .get(&p)
@@ -1727,6 +1752,14 @@ impl<'p> M<'p> {
                         .or_else(|| self.fs_bytes_written.get(&format!("/{}", p_clean)))
                     {
                         found_len = Some(b.len() as i64);
+                    } else if let Some(files) = &self.fs_bytes {
+                        if let Some(b) = files
+                            .get(&p)
+                            .or_else(|| files.get(p_clean))
+                            .or_else(|| files.get(&format!("/{}", p_clean)))
+                        {
+                            found_len = Some(b.len() as i64);
+                        }
                     }
                 }
 

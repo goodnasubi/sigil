@@ -73,7 +73,7 @@ impl Ck {
                 ],
             },
         );
-        // `IoError` の列挙（NotFound/PermissionDenied/Other）。実体は `std.os.fs` の宣言。
+        // `IoError` の列挙（ADR 0049 決定 1.2・4.1・6.1）。実体は `std.os.fs` の宣言。
         self.types.insert(
             "IoError".into(),
             TypeDef::Enum {
@@ -85,6 +85,36 @@ impl Ck {
                         vec![Ty::Named("Path".into(), vec![])],
                     ),
                     ("Other".into(), vec![Ty::Named("Path".into(), vec![])]),
+                    (
+                        "AlreadyExists".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    (
+                        "DirectoryNotEmpty".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    ("Busy".into(), vec![Ty::Named("Path".into(), vec![])]),
+                    (
+                        "InvalidInput".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    (
+                        "LimitExceeded".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    (
+                        "NotSameFileSystem".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    (
+                        "IsADirectory".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    (
+                        "NotADirectory".into(),
+                        vec![Ty::Named("Path".into(), vec![])],
+                    ),
+                    ("InvalidPath".into(), vec![Ty::Named("Path".into(), vec![])]),
                 ],
             },
         );

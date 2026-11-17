@@ -18,7 +18,7 @@ use crate::exec::{Arg, Failure, Options, Outcome, RunError, Stop, StopKind};
 use crate::ir::*;
 use crate::shared_args::arg_name;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use value::{
@@ -56,6 +56,7 @@ struct M<'p> {
     fs: Option<BTreeMap<String, String>>,
     fs_bytes: Option<&'p BTreeMap<String, Vec<u8>>>,
     fs_bytes_written: BTreeMap<String, Vec<u8>>,
+    fs_bytes_deleted: BTreeSet<String>,
     env: Option<BTreeMap<String, String>>,
     canon: Vec<usize>,
     opt: usize,
@@ -437,6 +438,7 @@ fn execute_roots(
         fs: opts.fs_files.clone(),
         fs_bytes: opts.fs_bytes.as_ref(),
         fs_bytes_written: BTreeMap::new(),
+        fs_bytes_deleted: BTreeSet::new(),
         env: opts.env_vars.clone(),
         wall_clock: opts.wall_clock,
         opt: find("Option"),

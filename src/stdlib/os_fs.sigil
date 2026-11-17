@@ -368,7 +368,7 @@ fn unit()
 }
 
 fn classify_io(r: Int, p: &Path) -> IoError
-  intent "負の errno（-r）を IoError（NotFound/PermissionDenied/Other）にする"
+  intent "負の errno（-r）を IoError（NotFound/PermissionDenied/AlreadyExists/DirectoryNotEmpty等）にする"
   requires none
   ensures none
   effects none
@@ -378,6 +378,30 @@ fn classify_io(r: Int, p: &Path) -> IoError
   }
   if r == -13 || r == -1 || r == -40 {
     return IoError.PermissionDenied(p.clone());
+  }
+  if r == -17 {
+    return IoError.AlreadyExists(p.clone());
+  }
+  if r == -39 {
+    return IoError.DirectoryNotEmpty(p.clone());
+  }
+  if r == -11 {
+    return IoError.Busy(p.clone());
+  }
+  if r == -21 {
+    return IoError.IsADirectory(p.clone());
+  }
+  if r == -20 {
+    return IoError.NotADirectory(p.clone());
+  }
+  if r == -22 {
+    return IoError.InvalidInput(p.clone());
+  }
+  if r == -18 {
+    return IoError.NotSameFileSystem(p.clone());
+  }
+  if r == -27 || r == -28 || r == -75 || r == -122 {
+    return IoError.LimitExceeded(p.clone());
   }
   return IoError.Other(p.clone());
 }
@@ -391,12 +415,12 @@ fn validate_path(p: &Path) -> Result<Bytes, IoError>
   let b = p.as_bytes();
   let len = b.len();
   if len == 0 || len > 4096 {
-    return Err(IoError.Other(p.clone()));
+    return Err(IoError.InvalidPath(p.clone()));
   }
   let mut i = 0;
   while i < len {
     if b.get(i).unwrap_or(0) == 0 {
-      return Err(IoError.Other(p.clone()));
+      return Err(IoError.InvalidPath(p.clone()));
     }
     i = i + 1;
   }
@@ -412,10 +436,10 @@ fn validate_subpath(p: &Path) -> Result<Bytes, IoError>
   let b = p.as_bytes();
   let len = b.len();
   if len == 0 || len > 4096 {
-    return Err(IoError.Other(p.clone()));
+    return Err(IoError.InvalidPath(p.clone()));
   }
   if b.get(0).unwrap_or(0) == 47 {
-    return Err(IoError.Other(p.clone()));
+    return Err(IoError.InvalidPath(p.clone()));
   }
   let mut bad = false;
   let mut i = 0;
@@ -444,7 +468,7 @@ fn validate_subpath(p: &Path) -> Result<Bytes, IoError>
     i = i + 1;
   }
   if bad {
-    return Err(IoError.Other(p.clone()));
+    return Err(IoError.InvalidPath(p.clone()));
   }
   return Ok(b);
 }
@@ -1065,7 +1089,7 @@ impl Dir {
   {
     let mut limit = max_entries;
     if limit < 0 {
-      return Err(IoError.Other(self.dir_path.clone()));
+      return Err(IoError.InvalidInput(self.dir_path.clone()));
     }
     if limit > 1024 {
       limit = 1024;

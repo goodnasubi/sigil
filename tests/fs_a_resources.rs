@@ -391,3 +391,114 @@ fn fs_double_isolation() {
     let res = run_with(&src, "t", &[Arg::Str(key)], &opts).unwrap().value;
     assert_eq!(res, "\"ok\"");
 }
+
+#[test]
+fn structured_io_error_classification() {
+    let base = scratch_dir("structured_errors");
+    let test_dir = base.join("nonempty_dir");
+    std::fs::create_dir_all(&test_dir).unwrap();
+    let test_file = test_dir.join("existing.txt");
+    std::fs::write(&test_file, "initial").unwrap();
+
+    let sig = "t(dir_path: String, file_path: String) -> String";
+    let body = r#"
+        let dp = Path.new(&dir_path);
+        let fp = Path.new(&file_path);
+
+        // 1. 既存ファイルに対する create_new は IoError.AlreadyExists
+        let opts = fs.open_options().create_new(true).write(true);
+        match opts.open(&fp) {
+            Ok(_) => { return "err_already_exists_opened"; }
+            Err(e) => {
+                match e {
+                    IoError.AlreadyExists(_) => {}
+                    _ => { return "err_not_already_exists"; }
+                }
+            }
+        }
+
+        // 2. 子ファイルが存在するディレクトリに対する remove_dir は IoError.DirectoryNotEmpty
+        match fs.remove_dir(&dp) {
+            Ok(_) => { return "err_remove_nonempty_succeeded"; }
+            Err(e) => {
+                match e {
+                    IoError.DirectoryNotEmpty(_) => {}
+                    _ => { return "err_not_directory_not_empty"; }
+                }
+            }
+        }
+
+        // 3. 不正パス（.. 脱出）は IoError.InvalidPath
+        match fs.open_dir(&dp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(dir) => {
+                let bad = Path.new(&"../escape.txt");
+                match dir.create_file(&bad) {
+                    Ok(_) => { return "err_escape_created"; }
+                    Err(e) => {
+                        match e {
+                            IoError.InvalidPath(_) => {}
+                            _ => { return "err_not_invalid_path"; }
+                        }
+                    }
+                }
+                let _ = dir.close();
+            }
+        }
+
+        return "ok";
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&test_dir), p(&test_file)]);
+    assert_eq!(res, "\"ok\"");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn fs_bytes_double_isolation_remove_after_write() {
+    use std::collections::BTreeMap;
+    let mut files = BTreeMap::new();
+    let key = "/virtual/binary.dat".to_string();
+    files.insert(key.clone(), vec![1, 2, 3, 4]);
+    let opts = Options {
+        fs_bytes: Some(files),
+        ..Options::default()
+    };
+
+    let sig = "t(path_str: String) -> String";
+    let body = r#"
+        let p = Path.new(&path_str);
+        // 1. 初期 bytes を上書き
+        let updated = Bytes.new();
+        match fs.write_bytes(&p, &updated, 100) {
+            Err(_) => { return "err_write_bytes"; }
+            Ok(_) => {}
+        }
+
+        // 2. fs.remove_file で削除
+        match fs.remove_file(&p) {
+            Err(_) => { return "err_remove_file"; }
+            Ok(_) => {}
+        }
+
+        // 3. 削除後に fs.read_bytes しても元の fs_bytes が復活せず NotFound になること
+        match fs.read_bytes(&p, 100) {
+            Ok(_) => { return "err_read_bytes_succeeded_after_remove"; }
+            Err(_) => {}
+        }
+
+        // 4. 再度 remove_file すると NotFound で失敗すること
+        match fs.remove_file(&p) {
+            Ok(_) => { return "err_second_remove_succeeded"; }
+            Err(_) => {}
+        }
+
+        return "ok";
+    "#;
+
+    let src = format!("{HEAD}{}", f(sig, "fs", body));
+    let res = sigil::ir_eval::run_with(&src, "t", &[Arg::Str(key)], &opts)
+        .unwrap()
+        .value;
+    assert_eq!(res, "\"ok\"");
+}

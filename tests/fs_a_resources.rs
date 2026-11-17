@@ -762,3 +762,26 @@ fn dir_implicit_drop_releases_buffer_without_leak() {
     assert_eq!(res, "\"ok\"");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn dir_held_in_shared_lock_survives_until_eval_completion() {
+    let base = scratch_dir("dir_held_lock");
+    let test_dir = base.join("subdir");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    let sig = "t(dir_path: String) -> String";
+    let body = r#"
+        let dp = Path.new(&dir_path);
+        match fs.open_dir(&dp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(dir) => {
+                let lk = Lock.new(dir);
+                return "ok";
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&test_dir)]);
+    assert_eq!(res, "\"ok\"");
+    let _ = std::fs::remove_dir_all(&base);
+}

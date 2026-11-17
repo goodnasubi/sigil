@@ -1166,18 +1166,20 @@ impl Dir {
   }
 
   pub fn close(self: Dir) -> Result<Unit, IoError>
-    intent "ディレクトリハンドルを明示的に閉じる"
+    intent "ディレクトリハンドルを明示的に閉じる。破棄フックでの二重 close を防止する"
     requires none
     ensures none
     effects fs
-    unchecked "close(3) を発行する（バッファ解放および fd クローズは drop フックが行う）"
+    unchecked "close(3) を発行し、fd を無効化する（バッファ解放は drop フックが行う）"
   {
     if self.fd < 0 {
       return Ok(unit());
     }
     let r = raw.syscall(3, self.fd, 0, 0, 0, 0, 0);
+    let mut d = self;
+    d.fd = -1;
     if r < 0 {
-      return Err(classify_io(r, &self.dir_path));
+      return Err(classify_io(r, &d.dir_path));
     }
     return Ok(unit());
   }

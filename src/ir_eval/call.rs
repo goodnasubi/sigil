@@ -1337,8 +1337,16 @@ impl<'p> M<'p> {
                 .map_err(|_| self.syscall_stop(loc, &format!("raw.syscall: {what} が負の番地")))
         };
         match n {
-            SYS_READ | SYS_WRITE => {
-                let name = if n == SYS_READ { "read" } else { "write" };
+            SYS_READ | SYS_WRITE | SYS_PREAD64 | SYS_PWRITE64 => {
+                let name = match n {
+                    SYS_READ => "read",
+                    SYS_WRITE => "write",
+                    SYS_PREAD64 => "pread64",
+                    _ => "pwrite64",
+                };
+                if matches!(n, SYS_PREAD64 | SYS_PWRITE64) && a[3] < 0 {
+                    return Err(self.syscall_stop(loc, &format!("raw.syscall {name}: offset >= 0")));
+                }
                 if a[2] < 0 {
                     return Err(self.syscall_stop(loc, &format!("raw.syscall {name}: count >= 0")));
                 }
@@ -1985,6 +1993,8 @@ const SYS_FSTAT: i64 = 5;
 const SYS_MMAP: i64 = 9;
 const SYS_MUNMAP: i64 = 11;
 const SYS_RT_SIGPROCMASK: i64 = 14;
+const SYS_PREAD64: i64 = 17;
+const SYS_PWRITE64: i64 = 18;
 const SYS_SIGNALFD4: i64 = 289;
 const SHUTDOWN_MASK: u64 = (1 << (15 - 1)) | (1 << (2 - 1));
 const SYS_EXIT_GROUP: i64 = 231;

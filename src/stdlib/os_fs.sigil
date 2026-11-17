@@ -517,12 +517,224 @@ fn c_path_buf(b: &Bytes) -> Addr
   return buf;
 }
 
+fn check_io_range(len: Int, offset: Int) -> Bool
+  intent "単一 I/O は64MiB以内、offsetと終端は符号付き64ビット以内で加算前に検査する"
+  requires none
+  ensures none
+  effects none
+{
+  if len < 0 || len > 67108864 || offset < 0 {
+    return false;
+  }
+  return offset <= 9223372036854775807 - len;
+}
+
+fn file_io(fd: Int, buf: Addr, len: Int, offset: Int, reading: Bool, positioned: Bool, complete: Bool) -> Int
+  intent "EINTRを同位置で再試行し、完全充足時は残量だけ進める。EOF/進捗なしは失敗"
+  requires none
+  ensures none
+  effects fs
+  unchecked "bufは呼出し元がlenで確保し完了まで保持する生存領域。len<=64MiB、offset>=0、offset+len<=Int最大は検査済み。0<=done<=len、残量だけIOする。EINTRでdoneを変えず、正の戻り値だけ進める。ゼロ長では番地を読まない。所有権を保持・解放しない"
+{
+  let mut done = 0;
+  while done < len {
+    let mut op = 1;
+    if reading { op = 0; }
+    if positioned { op = op + 17; }
+    let mut at = 0;
+    if positioned { at = offset + done; }
+    let r = raw.syscall(op, fd, raw.addr_to_int(raw.offset(buf, done)), len - done, at, 0, 0);
+    if r != -4 {
+      if r < 0 { return r; }
+      if r > len - done { return -5; }
+      if r == 0 {
+        if complete { return -5; }
+        return done;
+      }
+      done = done + r;
+      if !complete { return done; }
+    }
+  }
+  return done;
+}
+
 pub struct File {
   fd: Int,
   file_path: Path,
+  append_mode: Bool,
 }
 
 impl File {
+  pub fn read_at(self: &File, buf: &mut Bytes, offset: Int) -> Result<Int, IoError>
+    intent "位置指定読み込み。実際の処理長を返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
+  {
+    let len = buf.len();
+    if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(0); }
+    let staging = raw.alloc(len, 1);
+    let io_status = file_io(self.fd, staging, len, offset, true, true, false);
+    let mut i = 0;
+    while i < io_status {
+      let _ = buf.set(i, raw.load_u8(raw.offset(staging, i)));
+      i = i + 1;
+    }
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(io_status);
+  }
+
+  pub fn read_exact_at(self: &File, buf: &mut Bytes, offset: Int) -> Result<Unit, IoError>
+    intent "位置指定読み込み。完全充足しEOF/進捗なしをOtherで返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
+  {
+    let len = buf.len();
+    if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(unit()); }
+    let staging = raw.alloc(len, 1);
+    let mut done = 0;
+    let mut io_status = 0;
+    let mut running = true;
+    while done < len && running {
+      let r = file_io(self.fd, staging, len - done, offset + done, true, true, false);
+      if r <= 0 {
+        io_status = r;
+        if r == 0 { io_status = -5; }
+        running = false;
+      } else {
+        let mut i = 0;
+        while i < r {
+          let _ = buf.set(done + i, raw.load_u8(raw.offset(staging, i)));
+          i = i + 1;
+        }
+        done = done + r;
+        io_status = done;
+      }
+    }
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(unit());
+  }
+
+  pub fn write_at(self: &File, buf: &Bytes, offset: Int) -> Result<Int, IoError>
+    intent "位置指定書き込み。実際の処理長を返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
+  {
+    if self.append_mode { return Err(IoError.InvalidInput(self.file_path.clone())); }
+    let len = buf.len();
+    if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(0); }
+    let staging = raw.alloc(len, 1);
+    let mut i = 0;
+    while i < len {
+      raw.store_u8(raw.offset(staging, i), buf.get(i).unwrap_or(0));
+      i = i + 1;
+    }
+    let io_status = file_io(self.fd, staging, len, offset, false, true, false);
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(io_status);
+  }
+
+  pub fn write_all_at(self: &File, buf: &Bytes, offset: Int) -> Result<Unit, IoError>
+    intent "位置指定書き込み。完全充足しEOF/進捗なしをOtherで返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
+  {
+    if self.append_mode { return Err(IoError.InvalidInput(self.file_path.clone())); }
+    let len = buf.len();
+    if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(unit()); }
+    let staging = raw.alloc(len, 1);
+    let mut i = 0;
+    while i < len {
+      raw.store_u8(raw.offset(staging, i), buf.get(i).unwrap_or(0));
+      i = i + 1;
+    }
+    let io_status = file_io(self.fd, staging, len, offset, false, true, true);
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(unit());
+  }
+
+  pub fn read(self: &mut File, buf: &mut Bytes) -> Result<Int, IoError>
+    intent "ストリーム読み込み。実際の処理長を返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
+  {
+    let len = buf.len();
+    if !check_io_range(len, 0) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(0); }
+    let staging = raw.alloc(len, 1);
+    let io_status = file_io(self.fd, staging, len, 0, true, false, false);
+    let mut i = 0;
+    while i < io_status {
+      let _ = buf.set(i, raw.load_u8(raw.offset(staging, i)));
+      i = i + 1;
+    }
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(io_status);
+  }
+
+  pub fn write(self: &mut File, buf: &Bytes) -> Result<Int, IoError>
+    intent "ストリーム書き込み。実際の処理長を返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
+  {
+    let len = buf.len();
+    if !check_io_range(len, 0) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(0); }
+    let staging = raw.alloc(len, 1);
+    let mut i = 0;
+    while i < len {
+      raw.store_u8(raw.offset(staging, i), buf.get(i).unwrap_or(0));
+      i = i + 1;
+    }
+    let io_status = file_io(self.fd, staging, len, 0, false, false, false);
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(io_status);
+  }
+
+  pub fn write_all(self: &mut File, buf: &Bytes) -> Result<Unit, IoError>
+    intent "ストリーム書き込み。完全充足しEOF/進捗なしをOtherで返す"
+    requires none
+    ensures none
+    effects fs
+    unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
+  {
+    let len = buf.len();
+    if !check_io_range(len, 0) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
+    if len == 0 { return Ok(unit()); }
+    let staging = raw.alloc(len, 1);
+    let mut i = 0;
+    while i < len {
+      raw.store_u8(raw.offset(staging, i), buf.get(i).unwrap_or(0));
+      i = i + 1;
+    }
+    let io_status = file_io(self.fd, staging, len, 0, false, false, true);
+    raw.free(staging, len, 1);
+    if io_status < 0 { return Err(classify_io(io_status, &self.file_path)); }
+    return Ok(unit());
+  }
+
+
   pub fn try_lock_exclusive(self: &File) -> Result<Bool, IoError>
     intent "非ブロッキング排他ロック（LOCK_EX|LOCK_NB）を取得する。成功は Ok(true)、競合中は Ok(false)"
     requires none
@@ -813,7 +1025,7 @@ impl OpenOptions {
           if fd < 0 {
             return Err(classify_io(fd, &p));
           }
-          return Ok(File { fd: fd, file_path: p.clone() });
+          return Ok(File { fd: fd, file_path: p.clone(), append_mode: self.opt_append });
         }
 
         let len = b.len();
@@ -836,7 +1048,7 @@ impl OpenOptions {
           if fd < 0 {
             return Err(classify_io(fd, &p));
           }
-          return Ok(File { fd: fd, file_path: p.clone() });
+          return Ok(File { fd: fd, file_path: p.clone(), append_mode: self.opt_append });
         }
 
         let is_abs = b.get(0).unwrap_or(0) == 47;
@@ -948,7 +1160,7 @@ impl OpenOptions {
         if fd < 0 {
           return Err(classify_io(fd, &p));
         }
-        return Ok(File { fd: fd, file_path: p.clone() });
+        return Ok(File { fd: fd, file_path: p.clone(), append_mode: self.opt_append });
       }
     }
   }
@@ -973,10 +1185,10 @@ fn compute_open_flags(opts: &OpenOptions) -> Int
   if !opts.opt_follow_symlinks {
     f = f + 131072;
   }
-  if opts.opt_read && opts.opt_write {
+  if opts.opt_read && (opts.opt_write || opts.opt_append) {
     f = f + 2;
   } else {
-    if opts.opt_write {
+    if opts.opt_write || opts.opt_append {
       f = f + 1;
     }
   }
@@ -1236,7 +1448,7 @@ impl Dir {
         }
         let name_str = b.to_string_utf8().unwrap_or("");
         let full_path = self.dir_path.join(&name_str);
-        return Ok(File { fd: fd, file_path: full_path });
+        return Ok(File { fd: fd, file_path: full_path, append_mode: options.opt_append });
       }
     }
   }

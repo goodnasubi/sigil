@@ -934,6 +934,13 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         Layer::Os,
         "File",
         &[
+            ("read_at(self: &File, buf: &mut Bytes, offset: Int) -> Result<Int, IoError>", "fs"),
+            ("read_exact_at(self: &File, buf: &mut Bytes, offset: Int) -> Result<Unit, IoError>", "fs"),
+            ("write_at(self: &File, buf: &Bytes, offset: Int) -> Result<Int, IoError>", "fs"),
+            ("write_all_at(self: &File, buf: &Bytes, offset: Int) -> Result<Unit, IoError>", "fs"),
+            ("read(self: &mut File, buf: &mut Bytes) -> Result<Int, IoError>", "fs"),
+            ("write(self: &mut File, buf: &Bytes) -> Result<Int, IoError>", "fs"),
+            ("write_all(self: &mut File, buf: &Bytes) -> Result<Unit, IoError>", "fs"),
             ("try_lock_exclusive(self: &File) -> Result<Bool, IoError>", "fs"),
             ("try_lock_shared(self: &File) -> Result<Bool, IoError>", "fs"),
             ("unlock(self: &File) -> Result<Unit, IoError>", "fs"),

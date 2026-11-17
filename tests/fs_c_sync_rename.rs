@@ -366,6 +366,53 @@ fn publish_protocol_is_all_or_nothing_at_every_boundary() {
     }
 }
 
+/// 差し替え下でも、ハンドルで開いた仮のファイル／ディレクトリ（影の実体）には、本物の同期が通る（偽装なし）。
+/// 評価器とネイティブの結果まで一致する。
+#[test]
+fn sync_through_fs_double_handles_matches_native() {
+    let _serial = serial();
+    let body = r#"
+        let vp = Path.new(&data);
+        let dp = Path.new(&dir_path);
+        let rw = fs.open_options().write(true);
+        match rw.open(&vp) {
+            Err(_) => { return "err_open"; }
+            Ok(f) => {
+                match f.sync_all() { Err(_) => { return "err_sync_all"; } Ok(_) => {} }
+                match f.sync_data() { Err(_) => { return "err_sync_data"; } Ok(_) => {} }
+                let _ = f.close();
+            }
+        }
+        match fs.open_dir(&dp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(d) => {
+                match d.sync() { Err(_) => { return "err_dir_sync"; } Ok(_) => {} }
+                let _ = d.close();
+            }
+        }
+        return "ok";
+    "#;
+    let mut files = std::collections::BTreeMap::new();
+    files.insert("/v/data.txt".to_string(), "hello".to_string());
+    let opts = Options {
+        fs_files: Some(files),
+        ..Options::default()
+    };
+    let src = format!(
+        "{HEAD}{}",
+        f("t(data: String, dir_path: String) -> String", body)
+    );
+    let res = run_with(
+        &src,
+        "t",
+        &[Arg::Str("/v/data.txt".into()), Arg::Str("/v".into())],
+        &opts,
+    )
+    .unwrap_or_else(|e| panic!("{e}\n{src}"))
+    .value;
+    assert_eq!(res, "\"ok\"");
+}
+
 /// 差し替え（`--fs-double`）下の rename は、実ファイルシステムも表も触らず、明示的に拒否される（IoError.Other）。
 /// 仮のパスが偶然実在するパスと同じでも、本物の renameat を発行しない。
 #[test]

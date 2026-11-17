@@ -1789,10 +1789,19 @@ impl<'p> M<'p> {
     /// 未対応操作は fail-closed（-95: EOPNOTSUPP）で拒否する。
     fn eval_fs_double_syscall(&mut self, n: i64, a: [i64; 6]) -> i64 {
         match n {
-            // ADR 0049 決定 5: 差し替えの表は fd も永続媒体も持たないので、同期を成功と偽らない。
+            // ADR 0049 決定 5: 差し替えの表は永続媒体を持たないので、同期を成功と偽らない。
+            // 影の実ファイル／実ディレクトリ（ハンドルで開いたもの。決定 5.1）の fd にだけ、本物の fsync／fdatasync を発行する。
+            // それ以外の fd は fail-closed（EOPNOTSUPP → IoError.Other）。
+            SYS_FSYNC | SYS_FDATASYNC => {
+                if self.is_shadow_fd(a[0]) {
+                    issue_syscall(n, [a[0], 0, 0, 0, 0, 0])
+                } else {
+                    -95
+                }
+            }
             // 差し替えのパスの rename は、表と実ファイルシステムのどちらの原子性も保証できないので明示的に拒否する
             // （実ファイルシステムのパスを仮のパスとして誤って rename しないために、本物の renameat も発行しない）。
-            SYS_FSYNC | SYS_FDATASYNC | SYS_RENAMEAT => -95, // EOPNOTSUPP（IoError.Other）
+            SYS_RENAMEAT => -95, // EOPNOTSUPP（IoError.Other）
             SYS_UNLINKAT => {
                 let p = match self.double_path(a[0], a[1] as usize) {
                     Ok(p) => p,
@@ -2142,13 +2151,17 @@ impl<'p> M<'p> {
         fd
     }
 
-    /// 差し替え下の `flock`。影の実ファイルの fd にだけ本物の `flock` を発行し、それ以外は fail-closed（ロックを偽装しない）。
-    fn double_flock(&self, a: [i64; 6]) -> i64 {
-        let under_shadow = match (self.fs_shadow.root(), self.shadow_fd_path(a[0])) {
+    /// fd が影の根の下の実ファイル／実ディレクトリを指すか。
+    fn is_shadow_fd(&self, fd: i64) -> bool {
+        match (self.fs_shadow.root(), self.shadow_fd_path(fd)) {
             (Some(root), Some(p)) => p.starts_with(root),
             _ => false,
-        };
-        if under_shadow {
+        }
+    }
+
+    /// 差し替え下の `flock`。影の実ファイルの fd にだけ本物の `flock` を発行し、それ以外は fail-closed（ロックを偽装しない）。
+    fn double_flock(&self, a: [i64; 6]) -> i64 {
+        if self.is_shadow_fd(a[0]) {
             issue_syscall(SYS_FLOCK, [a[0], a[1], 0, 0, 0, 0])
         } else {
             -95

@@ -809,7 +809,6 @@ fn open_dir_rejects_intermediate_symlink() {
             Err(e) => {
                 match e {
                     IoError.PermissionDenied(_) => { return "ok_rejected_perm"; }
-                    IoError.NotADirectory(_) => { return "ok_rejected_notdir"; }
                     _ => { return "err_unexpected_error_kind"; }
                 }
             }
@@ -817,10 +816,7 @@ fn open_dir_rejects_intermediate_symlink() {
     "#;
 
     let res = out(sig, "fs", body, &[p(&target_via_link)]);
-    assert!(
-        res == "\"ok_rejected_perm\"" || res == "\"ok_rejected_notdir\"",
-        "expected rejection of intermediate symlink, got {res}"
-    );
+    assert_eq!(res, "\"ok_rejected_perm\"");
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -852,7 +848,6 @@ fn open_options_rejects_intermediate_symlink() {
             Err(e) => {
                 match e {
                     IoError.PermissionDenied(_) => { return "ok_rejected_perm"; }
-                    IoError.NotADirectory(_) => { return "ok_rejected_notdir"; }
                     _ => { return "err_unexpected_error_kind"; }
                 }
             }
@@ -860,10 +855,7 @@ fn open_options_rejects_intermediate_symlink() {
     "#;
 
     let res = out(sig, "fs", body, &[p(&target_via_link)]);
-    assert!(
-        res == "\"ok_rejected_perm\"" || res == "\"ok_rejected_notdir\"",
-        "expected rejection of intermediate symlink, got {res}"
-    );
+    assert_eq!(res, "\"ok_rejected_perm\"");
     // 元ファイルが切り詰められていないことを検証
     let content = std::fs::read(&victim).unwrap();
     assert_eq!(content, b"important data");
@@ -910,4 +902,44 @@ fn open_path_with_search_only_intermediate_dir() {
     let _ = std::fs::remove_dir_all(&base);
 
     assert_eq!(res, "\"ok_opened\"");
+}
+
+#[test]
+fn read_entries_rejects_invalid_utf8_entry() {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
+    let base = scratch_dir("invalid_utf8_entry");
+    let test_dir = base.join("dir");
+    std::fs::create_dir_all(&test_dir).unwrap();
+
+    #[cfg(unix)]
+    {
+        let invalid_name = std::ffi::OsStr::from_bytes(&[0xff]);
+        let invalid_path = test_dir.join(invalid_name);
+        std::fs::write(&invalid_path, b"content").unwrap();
+    }
+
+    let sig = "t(dir_path: String) -> String";
+    let body = r#"
+        let dp = Path.new(&dir_path);
+        match fs.open_dir(&dp) {
+            Err(_) => { return "err_open_dir"; }
+            Ok(dir) => {
+                match dir.read_entries(10) {
+                    Ok(_) => { return "err_read_entries_succeeded_silent_drop"; }
+                    Err(e) => {
+                        match e {
+                            IoError.InvalidPath(_) => { return "ok_invalid_path"; }
+                            _ => { return "err_unexpected_error_kind"; }
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&test_dir)]);
+    assert_eq!(res, "\"ok_invalid_path\"");
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -406,6 +406,32 @@ fn classify_io(r: Int, p: &Path) -> IoError
   return IoError.Other(p.clone());
 }
 
+fn check_component_stat(current_fd: Int, sub_buf: Addr, err: Int) -> Int
+  intent "中間構成要素の openat 失敗時、symlink なら -40 (ELOOP: PermissionDenied) に分類する"
+  requires none
+  ensures none
+  effects fs
+  unchecked "newfstatat(262) で AT_SYMLINK_NOFOLLOW(256) を指定して st_mode を確認する"
+{
+  if err == -20 {
+    let stat_buf = raw.alloc(144, 8);
+    let mut st = -4;
+    while st == -4 {
+      st = raw.syscall(262, current_fd, raw.addr_to_int(sub_buf), raw.addr_to_int(stat_buf), 256, 0, 0);
+    }
+    if st >= 0 {
+      let mode = raw.load_i64(raw.offset(stat_buf, 24)) & 61440;
+      raw.free(stat_buf, 144, 8);
+      if mode == 40960 {
+        return -40;
+      }
+    } else {
+      raw.free(stat_buf, 144, 8);
+    }
+  }
+  return err;
+}
+
 fn validate_path(p: &Path) -> Result<Bytes, IoError>
   intent "パスの長さと NUL を検査する"
   requires none
@@ -867,18 +893,17 @@ impl OpenOptions {
                   while next_fd == -4 {
                     next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
                   }
-                  raw.free(sub_buf, comp_len + 1, 1);
-                  if owned_fd >= 0 {
-                    raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
-                    owned_fd = -1;
-                  }
                   if next_fd < 0 {
-                    err_code = next_fd;
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
                     keep_going = false;
                   } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
                     current_fd = next_fd;
                     owned_fd = next_fd;
                   }
+                  raw.free(sub_buf, comp_len + 1, 1);
                 }
               }
               comp_start = j + 1;
@@ -1074,18 +1099,17 @@ impl Dir {
                   while next_fd == -4 {
                     next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), comp_flags, 0, 0, 0);
                   }
-                  raw.free(sub_buf, comp_len + 1, 1);
-                  if owned_fd >= 0 {
-                    raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
-                    owned_fd = -1;
-                  }
                   if next_fd < 0 {
-                    err_code = next_fd;
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
                     keep_going = false;
                   } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
                     current_fd = next_fd;
                     owned_fd = next_fd;
                   }
+                  raw.free(sub_buf, comp_len + 1, 1);
                 }
               }
               comp_start = i + 1;
@@ -1161,18 +1185,17 @@ impl Dir {
                   while next_fd == -4 {
                     next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
                   }
-                  raw.free(sub_buf, comp_len + 1, 1);
-                  if owned_fd >= 0 {
-                    raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
-                    owned_fd = -1;
-                  }
                   if next_fd < 0 {
-                    err_code = next_fd;
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
                     keep_going = false;
                   } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
                     current_fd = next_fd;
                     owned_fd = next_fd;
                   }
+                  raw.free(sub_buf, comp_len + 1, 1);
                 }
                 comp_start = j + 1;
               }
@@ -1276,18 +1299,17 @@ impl Dir {
                   while next_fd == -4 {
                     next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
                   }
-                  raw.free(sub_buf, comp_len + 1, 1);
-                  if owned_fd >= 0 {
-                    raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
-                    owned_fd = -1;
-                  }
                   if next_fd < 0 {
-                    err_code = next_fd;
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
                     keep_going = false;
                   } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
                     current_fd = next_fd;
                     owned_fd = next_fd;
                   }
+                  raw.free(sub_buf, comp_len + 1, 1);
                 }
                 comp_start = j + 1;
               }
@@ -1373,17 +1395,25 @@ impl Dir {
               p = p + 1;
             }
           }
-          let name_str = name_bytes.to_string_utf8().unwrap_or("");
-          if name_str != "" && name_str != "." && name_str != ".." {
-            let is_d = (d_type == 4);
-            let is_f = (d_type == 8);
-            let is_lnk = (d_type == 10);
-            out.push(DirEntry {
-              ent_name: name_str,
-              ent_is_dir: is_d,
-              ent_is_file: is_f,
-              ent_is_symlink: is_lnk,
-            });
+          match name_bytes.to_string_utf8() {
+            Err(_) => {
+              raw.store_i64(self.buf, buf_len);
+              raw.store_i64(raw.offset(self.buf, 8), off);
+              return Err(IoError.InvalidPath(self.dir_path.clone()));
+            }
+            Ok(name_str) => {
+              if name_str != "" && name_str != "." && name_str != ".." {
+                let is_d = (d_type == 4);
+                let is_f = (d_type == 8);
+                let is_lnk = (d_type == 10);
+                out.push(DirEntry {
+                  ent_name: name_str,
+                  ent_is_dir: is_d,
+                  ent_is_file: is_f,
+                  ent_is_symlink: is_lnk,
+                });
+              }
+            }
           }
           off = off + reclen;
         }

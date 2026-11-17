@@ -1231,6 +1231,9 @@ impl<'p> M<'p> {
                             | SYS_UNLINKAT
                             | SYS_GETDENTS64
                             | SYS_FLOCK
+                            | SYS_FSYNC
+                            | SYS_FDATASYNC
+                            | SYS_RENAMEAT
                     )
                 {
                     self.eval_fs_double_syscall(n, [a0, a1, a2, a3, a4, a5])
@@ -1555,6 +1558,26 @@ impl<'p> M<'p> {
             SYS_OPENAT | SYS_UNLINKAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
             }
+            // 同期（ADR 0049 決定 4.2）。fd だけを取り、番地を取らない。未使用の引数は 0 のみ許可。
+            SYS_FSYNC | SYS_FDATASYNC => {
+                if a[1] != 0 || a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall fsync/fdatasync: 未使用の引数は 0 のみ許可",
+                    ));
+                }
+            }
+            // 原子的な名前変更（ADR 0049 決定 4.3）。olddirfd・newdirfd とも AT_FDCWD のみ許可し、両方のパスを検査する。
+            SYS_RENAMEAT => {
+                if a[0] != -100 || a[2] != -100 || a[4] != 0 || a[5] != 0 {
+                    return Err(self.syscall_stop(
+                        loc,
+                        "raw.syscall renameat: olddirfd・newdirfd は AT_FDCWD のみ許可（未使用の引数は 0）",
+                    ));
+                }
+                self.check_path(addr_of(a[1], "oldpath")?, loc)?;
+                self.check_path(addr_of(a[3], "newpath")?, loc)?;
+            }
             SYS_MKDIRAT => {
                 if a[3] != 0 || a[4] != 0 || a[5] != 0 {
                     return Err(
@@ -1766,6 +1789,19 @@ impl<'p> M<'p> {
     /// 未対応操作は fail-closed（-95: EOPNOTSUPP）で拒否する。
     fn eval_fs_double_syscall(&mut self, n: i64, a: [i64; 6]) -> i64 {
         match n {
+            // ADR 0049 決定 5: 差し替えの表は永続媒体を持たないので、同期を成功と偽らない。
+            // 影の実ファイル／実ディレクトリ（ハンドルで開いたもの。決定 5.1）の fd にだけ、本物の fsync／fdatasync を発行する。
+            // それ以外の fd は fail-closed（EOPNOTSUPP → IoError.Other）。
+            SYS_FSYNC | SYS_FDATASYNC => {
+                if self.is_shadow_fd(a[0]) {
+                    issue_syscall(n, [a[0], 0, 0, 0, 0, 0])
+                } else {
+                    -95
+                }
+            }
+            // 差し替えのパスの rename は、表と実ファイルシステムのどちらの原子性も保証できないので明示的に拒否する
+            // （実ファイルシステムのパスを仮のパスとして誤って rename しないために、本物の renameat も発行しない）。
+            SYS_RENAMEAT => -95, // EOPNOTSUPP（IoError.Other）
             SYS_UNLINKAT => {
                 let p = match self.double_path(a[0], a[1] as usize) {
                     Ok(p) => p,
@@ -2115,13 +2151,17 @@ impl<'p> M<'p> {
         fd
     }
 
-    /// 差し替え下の `flock`。影の実ファイルの fd にだけ本物の `flock` を発行し、それ以外は fail-closed（ロックを偽装しない）。
-    fn double_flock(&self, a: [i64; 6]) -> i64 {
-        let under_shadow = match (self.fs_shadow.root(), self.shadow_fd_path(a[0])) {
+    /// fd が影の根の下の実ファイル／実ディレクトリを指すか。
+    fn is_shadow_fd(&self, fd: i64) -> bool {
+        match (self.fs_shadow.root(), self.shadow_fd_path(fd)) {
             (Some(root), Some(p)) => p.starts_with(root),
             _ => false,
-        };
-        if under_shadow {
+        }
+    }
+
+    /// 差し替え下の `flock`。影の実ファイルの fd にだけ本物の `flock` を発行し、それ以外は fail-closed（ロックを偽装しない）。
+    fn double_flock(&self, a: [i64; 6]) -> i64 {
+        if self.is_shadow_fd(a[0]) {
             issue_syscall(SYS_FLOCK, [a[0], a[1], 0, 0, 0, 0])
         } else {
             -95
@@ -2226,6 +2266,9 @@ const SYS_SIGNALFD4: i64 = 289;
 const SHUTDOWN_MASK: u64 = (1 << (15 - 1)) | (1 << (2 - 1));
 const SYS_EXIT_GROUP: i64 = 231;
 const SYS_FLOCK: i64 = 73;
+const SYS_FSYNC: i64 = 74;
+const SYS_FDATASYNC: i64 = 75;
+const SYS_RENAMEAT: i64 = 264;
 const SYS_GETDENTS64: i64 = 217;
 const SYS_OPENAT: i64 = 257;
 const SYS_MKDIRAT: i64 = 258;

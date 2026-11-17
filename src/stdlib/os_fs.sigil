@@ -796,6 +796,40 @@ impl File {
     return Ok(unit());
   }
 
+  pub fn sync_all(self: &File) -> Result<Unit, IoError>
+    intent "ファイルのデータとメタデータを永続媒体へ同期する（fsync）。成功するまで持続性を名乗らない（close の成功は持続性ではない。ADR 0049 決定 4.2）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fsync(74) を fd だけで発行する（番地を取らない）。EINTR は再試行する。EIO などの失敗は握りつぶさず Err で返し、呼び出し側は書き込みの成否を不定として扱う"
+  {
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(74, self.fd, 0, 0, 0, 0, 0);
+    }
+    if r < 0 {
+      return Err(classify_io(r, &self.file_path));
+    }
+    return Ok(unit());
+  }
+
+  pub fn sync_data(self: &File) -> Result<Unit, IoError>
+    intent "ファイルのデータを永続媒体へ同期する（fdatasync）。ファイル長が変わる更新ではメタデータも必要な範囲で同期される（ADR 0049 決定 4.2）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fdatasync(75) を fd だけで発行する（番地を取らない）。EINTR は再試行する。失敗は Err で返す"
+  {
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(75, self.fd, 0, 0, 0, 0, 0);
+    }
+    if r < 0 {
+      return Err(classify_io(r, &self.file_path));
+    }
+    return Ok(unit());
+  }
+
   pub fn close(self: File) -> Result<Unit, IoError>
     intent "ファイルを明示的に閉じる。破棄フックでの二重 close を防止する"
     requires none
@@ -1671,6 +1705,23 @@ impl Dir {
     return Ok(out);
   }
 
+  pub fn sync(self: &Dir) -> Result<Unit, IoError>
+    intent "ディレクトリのエントリ（作成・削除・rename）を永続媒体へ同期する（ディレクトリ fd への fsync。ADR 0049 決定 4.2）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fsync(74) をディレクトリの fd だけで発行する（番地を取らない）。EINTR は再試行する。失敗は Err で返す"
+  {
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(74, self.fd, 0, 0, 0, 0, 0);
+    }
+    if r < 0 {
+      return Err(classify_io(r, &self.dir_path));
+    }
+    return Ok(unit());
+  }
+
   pub fn close(self: Dir) -> Result<Unit, IoError>
     intent "ディレクトリハンドルを明示的に閉じる。破棄フックでの二重 close を防止する"
     requires none
@@ -1832,6 +1883,37 @@ pub fn remove_dir(p: &Path) -> Result<Unit, IoError>
         return Err(classify_io(r, &p));
       }
       return Ok(unit());
+    }
+  }
+}
+
+pub fn rename(from: &Path, to: &Path) -> Result<Unit, IoError>
+  intent "同一ファイルシステム内で from を to へ原子的に置換する（renameat）。to が既にあれば欠落区間なしに置き換わる。異なるファイルシステムは NotSameFileSystem で即座に失敗し、コピーして消す代替は行わない（ADR 0049 決定 4.3）"
+  requires none
+  ensures none
+  effects fs
+  unchecked "renameat(264) を olddirfd・newdirfd とも AT_FDCWD(-100) で発行し、NUL 終端の一時バッファ 2 つを確保して必ず解放する。EINTR は再試行する。持続性は置換先の親ディレクトリの sync が成功して初めて確定する（本関数は同期しない）"
+{
+  match validate_path(&from) {
+    Err(e) => { return Err(e); }
+    Ok(fb) => {
+      match validate_path(&to) {
+        Err(e) => { return Err(e); }
+        Ok(tb) => {
+          let fbuf = c_path_buf(&fb);
+          let tbuf = c_path_buf(&tb);
+          let mut r = -4;
+          while r == -4 {
+            r = raw.syscall(264, -100, raw.addr_to_int(fbuf), -100, raw.addr_to_int(tbuf), 0, 0);
+          }
+          raw.free(fbuf, fb.len() + 1, 1);
+          raw.free(tbuf, tb.len() + 1, 1);
+          if r < 0 {
+            return Err(classify_io(r, &from));
+          }
+          return Ok(unit());
+        }
+      }
     }
   }
 }

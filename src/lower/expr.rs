@@ -764,6 +764,7 @@ impl<'a> L<'a> {
                             | "create_dir_all"
                             | "remove_dir"
                             | "remove_file"
+                            | "rename"
                             | "open_options"
                             | "open_dir"
                     ) {

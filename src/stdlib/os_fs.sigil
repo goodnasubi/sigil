@@ -825,8 +825,8 @@ impl OpenOptions {
           raw.store_u8(raw.offset(root_buf, 1), 0);
           let mut root_fd = -4;
           while root_fd == -4 {
-            // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
-            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), 720896, 0, 0, 0);
+            // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), 2818048, 0, 0, 0);
           }
           raw.free(root_buf, 2, 1);
           if root_fd < 0 {
@@ -862,9 +862,10 @@ impl OpenOptions {
                   }
                   raw.store_u8(raw.offset(sub_buf, comp_len), 0);
 
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
                   let mut next_fd = -4;
                   while next_fd == -4 {
-                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 720896, 0, 0, 0);
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
                   }
                   raw.free(sub_buf, comp_len + 1, 1);
                   if owned_fd >= 0 {
@@ -995,13 +996,24 @@ impl Dir {
         let mut keep_going = true;
 
         if is_abs {
+          let mut root_has_more = false;
+          let mut r_check = 1;
+          while r_check < len {
+            if b.get(r_check).unwrap_or(0) != 47 {
+              root_has_more = true;
+            }
+            r_check = r_check + 1;
+          }
+          let mut root_flags = 720896;
+          if root_has_more {
+            root_flags = 2818048;
+          }
           let root_buf = raw.alloc(2, 1);
           raw.store_u8(root_buf, 47);
           raw.store_u8(raw.offset(root_buf, 1), 0);
           let mut root_fd = -4;
           while root_fd == -4 {
-            // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
-            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), 720896, 0, 0, 0);
+            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), root_flags, 0, 0, 0);
           }
           raw.free(root_buf, 2, 1);
           if root_fd < 0 {
@@ -1045,9 +1057,22 @@ impl Dir {
                   }
                   raw.store_u8(raw.offset(sub_buf, comp_len), 0);
 
+                  let mut has_more = false;
+                  let mut p_check = i + 1;
+                  while p_check < len {
+                    if b.get(p_check).unwrap_or(0) != 47 {
+                      has_more = true;
+                    }
+                    p_check = p_check + 1;
+                  }
+                  let mut comp_flags = 720896;
+                  if has_more {
+                    comp_flags = 2818048;
+                  }
+
                   let mut next_fd = -4;
                   while next_fd == -4 {
-                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 720896, 0, 0, 0);
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), comp_flags, 0, 0, 0);
                   }
                   raw.free(sub_buf, comp_len + 1, 1);
                   if owned_fd >= 0 {
@@ -1131,10 +1156,10 @@ impl Dir {
                   }
                   raw.store_u8(raw.offset(sub_buf, comp_len), 0);
 
-                  // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
                   let mut next_fd = -4;
                   while next_fd == -4 {
-                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 720896, 0, 0, 0);
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
                   }
                   raw.free(sub_buf, comp_len + 1, 1);
                   if owned_fd >= 0 {
@@ -1246,9 +1271,10 @@ impl Dir {
                   }
                   raw.store_u8(raw.offset(sub_buf, comp_len), 0);
 
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
                   let mut next_fd = -4;
                   while next_fd == -4 {
-                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 720896, 0, 0, 0);
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
                   }
                   raw.free(sub_buf, comp_len + 1, 1);
                   if owned_fd >= 0 {

@@ -870,3 +870,44 @@ fn open_options_rejects_intermediate_symlink() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn open_path_with_search_only_intermediate_dir() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = scratch_dir("search_only_dir");
+    let inter = base.join("intermediate");
+    std::fs::create_dir_all(&inter).unwrap();
+    let file = inter.join("target.txt");
+    std::fs::write(&file, b"accessible file").unwrap();
+
+    #[cfg(unix)]
+    std::fs::set_permissions(&inter, std::fs::Permissions::from_mode(0o111)).unwrap();
+
+    let sig = "t(target_path: String) -> String";
+    let body = r#"
+        let p = Path.new(&target_path);
+        let opts = OpenOptions.new().read(true);
+        match opts.open(&p) {
+            Ok(f) => {
+                let _ = f.close();
+                return "ok_opened";
+            }
+            Err(e) => {
+                match e {
+                    IoError.PermissionDenied(_) => { return "err_perm_denied"; }
+                    _ => { return "err_other"; }
+                }
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&file)]);
+
+    #[cfg(unix)]
+    let _ = std::fs::set_permissions(&inter, std::fs::Permissions::from_mode(0o777));
+    let _ = std::fs::remove_dir_all(&base);
+
+    assert_eq!(res, "\"ok_opened\"");
+}

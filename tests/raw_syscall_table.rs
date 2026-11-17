@@ -407,3 +407,59 @@ fn getdents64_buffer_and_args_checked() {
     let r = run("  let p = raw.alloc(64, 8);\n  let r = raw.syscall(217, -1, raw.addr_to_int(p), 64, 0, 0, 0);\n  raw.free(p, 64, 8);\n  return r;");
     assert_eq!(r.unwrap(), "-9");
 }
+
+#[test]
+fn fsync_and_fdatasync_take_only_an_fd() {
+    // 不正な fd でも、許可表の検査を通れば EBADF（-9）で返る（停止ではない）。
+    assert_eq!(
+        run("  return raw.syscall(74, 999, 0, 0, 0, 0, 0);").unwrap(),
+        "-9"
+    );
+    assert_eq!(
+        run("  return raw.syscall(75, 999, 0, 0, 0, 0, 0);").unwrap(),
+        "-9"
+    );
+    stops(
+        "  return raw.syscall(74, 999, 1, 0, 0, 0, 0);",
+        "未使用の引数",
+    );
+    stops(
+        "  return raw.syscall(75, 999, 0, 0, 0, 0, 1);",
+        "未使用の引数",
+    );
+}
+
+#[test]
+fn renameat_dirfds_unused_args_and_paths_checked() {
+    let paths = "  let a = raw.alloc(3, 1);\n  raw.store_u8(a, 120);\n  raw.store_u8(raw.offset(a, 1), 49);\n  raw.store_u8(raw.offset(a, 2), 0);\n  let b = raw.alloc(3, 1);\n  raw.store_u8(b, 120);\n  raw.store_u8(raw.offset(b, 1), 50);\n  raw.store_u8(raw.offset(b, 2), 0);\n";
+    // 存在しないパスの名前変更は、検査を通って ENOENT（-2）。
+    let ok = format!(
+        "{paths}  let r = raw.syscall(264, -100, raw.addr_to_int(a), -100, raw.addr_to_int(b), 0, 0);\n  raw.free(a, 3, 1);\n  raw.free(b, 3, 1);\n  return r;"
+    );
+    assert_eq!(run(&ok).unwrap(), "-2");
+    for (args, needle) in [
+        (
+            "3, raw.addr_to_int(a), -100, raw.addr_to_int(b), 0, 0",
+            "AT_FDCWD",
+        ),
+        (
+            "-100, raw.addr_to_int(a), 3, raw.addr_to_int(b), 0, 0",
+            "AT_FDCWD",
+        ),
+        (
+            "-100, raw.addr_to_int(a), -100, raw.addr_to_int(b), 1, 0",
+            "未使用の引数",
+        ),
+        (
+            "-100, raw.addr_to_int(a), -100, raw.addr_to_int(b), 0, 1",
+            "未使用の引数",
+        ),
+        ("-100, 4096, -100, raw.addr_to_int(b), 0, 0", "範囲外"),
+        ("-100, raw.addr_to_int(a), -100, 4096, 0, 0", "範囲外"),
+    ] {
+        stops(
+            &format!("{paths}  return raw.syscall(264, {args});"),
+            needle,
+        );
+    }
+}

@@ -785,3 +785,41 @@ fn dir_held_in_shared_lock_survives_until_eval_completion() {
     assert_eq!(res, "\"ok\"");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn open_dir_rejects_intermediate_symlink() {
+    let base = scratch_dir("open_dir_symlink");
+    let outside = base.join("outside");
+    let outside_db = outside.join("db");
+    std::fs::create_dir_all(&outside_db).unwrap();
+
+    let local_base = base.join("base");
+    std::fs::create_dir_all(&local_base).unwrap();
+    let link_path = local_base.join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link_path).unwrap();
+
+    let target_via_link = link_path.join("db");
+
+    let sig = "t(link_db: String) -> String";
+    let body = r#"
+        let p = Path.new(&link_db);
+        match fs.open_dir(&p) {
+            Ok(_) => { return "err_open_intermediate_symlink_succeeded"; }
+            Err(e) => {
+                match e {
+                    IoError.PermissionDenied(_) => { return "ok_rejected_perm"; }
+                    IoError.NotADirectory(_) => { return "ok_rejected_notdir"; }
+                    _ => { return "err_unexpected_error_kind"; }
+                }
+            }
+        }
+    "#;
+
+    let res = out(sig, "fs", body, &[p(&target_via_link)]);
+    assert!(
+        res == "\"ok_rejected_perm\"" || res == "\"ok_rejected_notdir\"",
+        "expected rejection of intermediate symlink, got {res}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

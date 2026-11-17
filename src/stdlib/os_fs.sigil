@@ -842,29 +842,112 @@ pub struct Dir {
 
 impl Dir {
   pub fn open(p: &Path) -> Result<Dir, IoError>
-    intent "ディレクトリを開いて Dir ハンドルを得る（symlink 追従は拒否）"
+    intent "ディレクトリを開いて Dir ハンドルを得る（中間および末尾の symlink 追従は拒否）"
     requires none
     ensures none
     effects fs
-    unchecked "openat(257) で O_NOFOLLOW を指定してディレクトリを開き、一時バッファを解放する"
+    unchecked "各構成要素を O_NOFOLLOW で順次解決し、中間 symlink を拒否して Dir を開く"
   {
     match validate_path(&p) {
       Err(e) => { return Err(e); }
       Ok(b) => {
-        let buf = c_path_buf(&b);
-        let mut fd = -4;
-        while fd == -4 {
-          // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
-          fd = raw.syscall(257, -100, raw.addr_to_int(buf), 720896, 0, 0, 0);
+        let len = b.len();
+        let is_abs = b.get(0).unwrap_or(0) == 47;
+        let mut current_fd = -100;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if is_abs {
+          let root_buf = raw.alloc(2, 1);
+          raw.store_u8(root_buf, 47);
+          raw.store_u8(raw.offset(root_buf, 1), 0);
+          let mut root_fd = -4;
+          while root_fd == -4 {
+            // 720896 = O_RDONLY (0) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+            root_fd = raw.syscall(257, -100, raw.addr_to_int(root_buf), 720896, 0, 0, 0);
+          }
+          raw.free(root_buf, 2, 1);
+          if root_fd < 0 {
+            return Err(classify_io(root_fd, &p));
+          }
+          current_fd = root_fd;
+          owned_fd = root_fd;
         }
-        raw.free(buf, b.len() + 1, 1);
-        if fd < 0 {
-          return Err(classify_io(fd, &p));
+
+        let mut comp_start = 0;
+        let mut i = 0;
+        while i <= len {
+          if !keep_going {
+            i = len + 1;
+          } else {
+            let mut is_sep = false;
+            if i == len {
+              is_sep = true;
+            } else {
+              if b.get(i).unwrap_or(0) == 47 {
+                is_sep = true;
+              }
+            }
+            if is_sep {
+              let comp_len = i - comp_start;
+              if comp_len == 2 {
+                if b.get(comp_start).unwrap_or(0) == 46 {
+                  if b.get(comp_start + 1).unwrap_or(0) == 46 {
+                    err_code = -22;
+                    keep_going = false;
+                  }
+                }
+              }
+              if keep_going {
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 720896, 0, 0, 0);
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                  if owned_fd >= 0 {
+                    raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    owned_fd = -1;
+                  }
+                  if next_fd < 0 {
+                    err_code = next_fd;
+                    keep_going = false;
+                  } else {
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                }
+              }
+              comp_start = i + 1;
+            }
+            i = i + 1;
+          }
         }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &p));
+        }
+
+        if current_fd < 0 {
+          return Err(IoError.InvalidPath(p.clone()));
+        }
+
         let dir_buf = raw.alloc(4112, 8);
         raw.store_i64(dir_buf, 0);
         raw.store_i64(raw.offset(dir_buf, 8), 0);
-        return Ok(Dir { fd: fd, dir_path: p.clone(), buf: dir_buf });
+        return Ok(Dir { fd: current_fd, dir_path: p.clone(), buf: dir_buf });
       }
     }
   }

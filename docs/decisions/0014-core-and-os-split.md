@@ -98,6 +98,7 @@ ADR 0013 の決定 2 の一覧（効果を持たない部分）はすべて核�
 | 核 | 共有所有 | `Shared<T>`（`new`）・`Cell<T>`（`new`）・`Shared<Cell<T>>`（`get`・`set`、効果 `state`） |
 | OS | 名前空間 `console` | `log<T: Displayable>(x: &T)`（効果 `console`） |
 | OS | 名前空間 `fs` | `read(p: &Path) -> Result<String, IoError>`（`fs.read`）、`write(p: &Path, s: &String) -> Result<Unit, IoError>`（`fs.write`） |
+| OS | 型 `File` のページ I/O・追記（ADR 0049 決定 3） | `read`・`read_at`・`read_exact_at`・`write`・`write_all`・`write_all_at`・`write_at`（効果 `fs`） |
 | OS | 型 `Path` | `new`・`is_empty`・`join`・`file_name`・`parent`（効果 `none`） |
 | OS | 型 `IoError` | 腕 `NotFound`・`PermissionDenied`・`Other`（プログラムからは取り出せない。ADR 0006 の M4 の記録） |
 

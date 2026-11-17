@@ -35,16 +35,19 @@
 | `POST /repos/<id>/git-upload-pack` | `application/x-git-upload-pack-request` を検査し、`application/x-git-upload-pack-result` を返す |
 | `POST /repos/<id>/git-receive-pack` | `application/x-git-receive-pack-request` を検査し、`application/x-git-receive-pack-result` を返す |
 
-上記 service 以外、重複・余分な query、未知の能力・不正な pkt-line・余剰データは拒否する。URL の id は決定 3 の正規形だけを受理し、別名経路や URL の token を認めない。dumb HTTP による objects・refs の直接配信はしない。要求の `Content-Encoding` は identity／未指定のみ。HTTP 圧縮は使わず、すべての広告・結果は `Cache-Control: no-store` とする。
+上記 service 以外、重複・余分な query、未知の能力・不正な pkt-line・余剰データは拒否する。URL の id は決定 3 の正規形だけを受理し、別名経路や URL の token を認めない。dumb HTTP による objects・refs の直接配信はしない。要求の `Content-Encoding` は identity／未指定を受理し、**upload-pack の POST に限り gzip も受理する**。receive-pack の gzip、その他の符号化・多重符号化は415で拒否する。応答の HTTP 圧縮は使わず、すべての広告・結果は `Cache-Control: no-store` とする。
+
+認証・認可後に gzip を上限付きで展開し、**展開後の要求本文は1 MiB、符号化要求本文は2 MiB**を超えない。展開途中にも累計を検査し、上限超過を検出した時点で停止して413を返す。ISIZE の宣言だけを信頼して割り当てない。単一の gzip member のみを受理し、ヘッダ（任意項目・FHCRC を含む）、deflate の終端、trailer の **CRC-32 と ISIZE**、本文の全消費を検証する。破損・打切り・連結 member・余剰データは400で拒否し、全検証が済むまで pkt-line の要求処理を始めない。ADR 0045 の共通圧縮契約に、この gzip フレーム検査と CRC-32 を要求する。zlib の Adler-32 で代用しない。純 Sigil／`trust none`、入力・展開量・メモリ上限、比較・ファジングの規則を継承し、不足する契約・標準 API の実装は別作業とする。
 
 - upload-pack の広告能力は `object-format=sha256`、`symref=HEAD:refs/heads/<default>`（有効な場合）、`side-band-64k`。receive-pack は `object-format=sha256`、`report-status`、`ofs-delta`。実装していない能力を広告しない。空リポジトリの能力広告にはゼロ OID と `capabilities^{}` を使い、存在しない HEAD を生成しない。
+- upload-pack では、注釈付きタグの `refs/tags/<name>` 行の直後に、タグを再帰的に剥いた非 tag オブジェクトの OID と `refs/tags/<name>^{}` の peeled 行を含める。核の型・参照・循環・深さ検査を通す。軽量タグには付けず、receive-pack の広告には peeled 行を出さない。peeled 行は取得用の補助情報であり、実在する参照や新しい取得権限とは扱わない。広告全体（peeled 行を含む）にも応答1 MiBの上限を適用する。
 - pkt-line は 4 桁の hex 長（長さ自身を含む）、`0000` flush を検査する。v0 に無い delimiter・response-end を解釈しない。side-band 要求時は channel 1 の pack、失敗は channel 3、最後に flush。要求されなければ ACK／NAK 後に生 pack を返す。進捗通知は必須にしない。
 - **未対応**: v1／v2 の専用コマンド、SHA-1、SSH、dumb HTTP、thin pack、shallow／deepen、partial clone／filter、任意 OID の取得能力、複数参照 push、atomic push、参照削除、force push、push-options、署名 push、LFS、サブモジュールの再帰取得、hooks。対応表に残し、黙って成功させない。`thin-pack`・`delete-refs`・`atomic` 等は広告しない。
 
 ### clone・fetch
 
 1. read 認可して、そのリポジトリの `refs/heads/*`・`refs/tags/*` と有効な HEAD のスナップショットを広告する。内部参照は公開しない。private の広告と pack に同じ認可を適用する。
-2. `want`（64 桁 OID、初行だけ能力）、flush、`have`・flush／`done` を v0 の基本 ACK／NAK で処理する。multi_ack は広告しない。stateless RPC の各要求で認証・認可をやり直す。want は公開可能な広告参照の先端に限定し、have は存在確認の応答で未公開 OID の情報を漏らさない。
+2. `want`（64 桁 OID、初行だけ能力）、flush、`have`・flush／`done` を v0 の基本 ACK／NAK で処理する。multi_ack は広告しない。stateless RPC の各要求で認証・認可をやり直す。want は公開可能な広告の実参照の先端に限定する（peeled 行だけを根拠にした OID は許可しない）。have は存在確認の応答で未公開 OID の情報を漏らさない。
 3. 初版は共通祖先による pack 削減を必須にせず、want からの完全な到達集合を送ってよい。重複を除き、blob・tree・commit・tag の型・参照・OID を核で検証する。未到達／他リポジトリ／内部参照のオブジェクトを取得できない。
 4. wire 用に pack v2（magic・version・件数・オブジェクト群・SHA-256 trailer）を生成する。初版の送信は非 thin・非 delta、zlib stored ブロックでよい。これは **転送応答専用**であり、0047 のローカル保存に pack 書込み・repack を足すものではない。応答全体が上限内かを送信前に確かめ、超えれば pack を送らず明示的に失敗する。
 5. 本物の Git クライアントは受信検証後にローカル参照を更新する。Sigil 側の clone は核の init と空の宛先を使い、fetch の検証・永続化後に remote-tracking の `refs/remotes/<remote>/*` を CAS 更新する。remote 名は単一の正規な構成要素、refspec は heads から同名追跡先への写像に限定し、任意パス・任意参照の上書きを許さない。clone の checkout は0047の規則に従う。複数の追跡参照の一括原子性は保証せず、各結果を返す。通信失敗を成功扱いにしない。
@@ -61,7 +64,7 @@
 
 ## 決定 2: 固定上限とエラー
 
-既存 `std.web` の HTTP 上限・タイムアウトを緩めない。要求・応答各 1 MiB、符号化要求本文 2 MiB、HTTP 接続数・ヘッダ・時間は [ADR 0032](0032-p1-http-server.md) を継承する。小さいリポジトリを対象とし、大きい Git リポジトリを扱えるとは称さない。
+既存 `std.web` の HTTP 上限・タイムアウトを緩めない。要求本文は gzip 展開後を含め1 MiB、応答は1 MiB、符号化要求本文は2 MiBで、HTTP 接続数・ヘッダ・時間は [ADR 0032](0032-p1-http-server.md) を継承する。小さいリポジトリを対象とし、大きい Git リポジトリを扱えるとは称さない。
 
 | 対象 | 初版の上限 |
 |---|---|
@@ -78,7 +81,7 @@
 
 長さ・加算・offset は割当て前に検査する。グラフ・delta 展開・ハッシュ処理には件数・累計・循環検査と協調中断を置く。30秒の既存ハンドラ制限を維持するが、中断点のない CPU 処理の厳密な実時間保証とは称さない。256 MiB はアプリケーションの管理対象で、HTTP 接続バッファ等を含むプロセス全体の最悪値は実装時に別途測定・記録する。
 
-HTTP 段階は認証失敗401、private の存在秘匿404、認証済み権限不足403、上限超過413、競合409、不正形式400、未対応媒体415とする。private への不明・無権限主体には repo の存在・参照・使用量を返さない。認証必須経路の token 失敗自体は0037の一様な401を維持する。Git 応答開始後は pkt-line `ERR` または receive-pack `ng` で固定理由を返し、応答途中の切断を成功に変換しない。エラーに token・内容・作者情報・内部パスを含めない。
+HTTP 段階は認証失敗401、private の存在秘匿404、認証済み権限不足403、上限超過413、競合409、不正形式400、未対応媒体415とする。read 権限のない認証済み主体が private の repo に来た場合は404、read はあるが write がない主体が push に来た場合は403とする。private への不明・無権限主体には repo の存在・参照・使用量を返さない。認証必須経路の token 失敗自体は0037の一様な401を維持する。Git 応答開始後は pkt-line `ERR` または receive-pack `ng` で固定理由を返し、応答途中の切断を成功に変換しない。エラーに token・内容・作者情報・内部パスを含めない。
 
 ## 決定 3: ホスティング・認証・認可・管理画面
 
@@ -109,7 +112,7 @@ Bearer は外部で発行し、UI は明示入力をページ内メモリにだ�
 | 他 repo／private の参照・隠れた OID の取得、権限競合 | 広告とpackの同一read検査、repo単位ACL、広告先端へのwant限定、他repoオブジェクト共有なし、更新直前再認可。認可済みで進行中の読取りは完了し得る。失効後に既に受け取った内容は回収不能 |
 | token 偽造・盗聴・再使用 | 0037のHMAC・期限・audience・Secret・定数時間照合を再利用。TLSは前段終端で内部網も保護。Basic／query／cookieによる代用なし。個別失効・盗難tokenの期限内再使用は防げない |
 | パス横断・symlink・フック・設定による実行 | 固定rootと正規id、各構成要素検査、裸repoのみ。hook・filter・外部Git／外部プロセスを実行しない。OS同権限の悪意ある主体は保証外 |
-| pack／zlib／delta爆弾、循環、資源枯渇 | staging、割当て前検査、累計展開量・探索・時間・容量・並行数上限、予約、破損は拒否。HTTP上限を黙って拡大しない |
+| gzip要求／pack／zlib／delta爆弾、循環、資源枯渇 | staging、割当て前検査、累計展開量・探索・時間・容量・並行数上限、予約、破損は拒否。HTTP上限を黙って拡大しない |
 | 中断・同時push・応答喪失による破損 | 単一参照、CASとロック、オブジェクト同期先行、参照同期後応答。成否不明を認めてfetch確認。I/O失敗時停止と冪等な復旧 |
 | CSRF・XSS・キャッシュ・ログからの秘密漏れ | Bearerのメモリ保持、同一origin変更API、Origin検査、text表示、no-store、秘密・内容・個人情報をログに出さない。ブラウザ侵害自体は防げない |
 | 保存データ・バックアップ漏洩、削除後残留 | OS権限、バックアップを原本と同じ秘密として扱う。保存暗号化は初版未提供で公開前の所有者判断。GCなしで未到達内容が残り、安全消去と称さない |
@@ -120,16 +123,30 @@ Bearer は外部で発行し、UI は明示入力をページ内メモリにだ�
 
 **本作業の完了は ADR と索引のみの起草 PR 作成**。別系統レビューと CI、マージは後続であり、本作業ではマージしない。P4-4 の実装完了は以下の全てで確かめ、未対応表を残す。
 
-1. 比較相手の本物の Git の版・ビルド／コンテナ検査値を固定し、SHA-256 client から本サーバーへ clone／fetch／push が通る。空repo、初回push、追加commit、branch作成・fast-forward、タグ新規、再clone、既存pack/deltaからの読取り、デフォルトv2要求からのv0フォールバック、`-c protocol.version=0` を含める。認証付きprivateと匿名public-readの両方でOID・参照・内容・モードを比較し、再起動後に `git fsck --strict`／`git log`／`git diff` を通す。Sigil client も本物の Git サーバーおよび本サーバーと突き合わせる。
-2. 無認証・不正／期限切れ／別audience・別主体・読取専用のpush・private一覧・広告・任意OID・他repo取得を拒否する。ACL／可視性変更とpushの競合、CAS競合、非fast-forward、タグ上書き、削除、複数参照、SHA-1、未知能力、thin／shallow等の未対応を負例にし、拒否後の参照不変を確かめる。
-3. 各上限の直下・一致・超過、宣言と実長不一致、overflow、爆弾・循環・深さ、満杯・同時予約・再起動後の再計数を試験する。HTTP側上限にも達する例を含め、応答1MiB超過がHTTP層の曖昧な500になる前にGit操作の失敗として分かり、成功表示が無いことを確認する。メモリ・CPU・時間・並行数を実測し、固定版・装置・件数で両経路の性能を記録する。速度は初版の合否にしない。
+1. 比較相手の本物の Git の版・ビルド／コンテナ検査値を固定し、SHA-256 client から本サーバーへ clone／fetch／push が通る。空repo、初回push、追加commit、branch作成・fast-forward、タグ新規（注釈付き・軽量、upload-pack の peeled 行と receive-pack での不在）、再clone、既存pack/deltaからの読取り、デフォルトv2要求からのv0フォールバック、`-c protocol.version=0` を含める。小さい identity 要求に加え、多数の want／have により実際に `Content-Encoding: gzip` が送られる clone と追加 commit 後の増分 fetch を通し、符号化前後の本文サイズを記録する。認証付きprivateと匿名public-readの両方でOID・参照・内容・モードを比較し、再起動後に `git fsck --strict`／`git log`／`git diff` を通す。Sigil client も本物の Git サーバーおよび本サーバーと突き合わせる。
+2. 無認証・不正／期限切れ／別audience・別主体・読取専用のpush・private一覧・広告・任意OID・peeled 行だけを根拠にした want・他repo取得を拒否する。ACL／可視性変更とpushの競合、CAS競合、非fast-forward、タグ上書き、削除、複数参照、SHA-1、未知能力、thin／shallow等の未対応を負例にし、拒否後の参照不変を確かめる。
+3. 各上限の直下・一致・超過、宣言と実長不一致、overflow、爆弾・循環・深さ、満杯・同時予約・再起動後の再計数を試験する。gzip の展開後1 MiB・符号化2 MiBの境界、CRC-32／ISIZE 不一致、不正ヘッダ／FHCRC、deflate 終端不正、打切り、連結 member、余剰データ、未対応／多重符号化、receive-pack の gzip 拒否を含め、展開途中での上限停止と検証前に要求処理しないことを確かめる。HTTP側上限にも達する例を含め、応答1MiB超過がHTTP層の曖昧な500になる前にGit操作の失敗として分かり、成功表示が無いことを確認する。メモリ・CPU・時間・並行数を実測し、固定版・装置・件数で両経路の性能を記録する。速度は初版の合否にしない。
 4. staging、オブジェクト同期、参照／metadata rename、親同期、応答の前後でkillし、short I/O・ENOSPC・EIO・同期失敗も注入する。永続化順序モデルで未同期書込みの喪失・並べ替えを再現する。成功応答済み参照は必ず残り、未応答は旧／新のどちらかで、欠落オブジェクトや破損ACLによる権限拡大が無い。再復旧・バックアップ／復元・旧版fixtureも検証する。
-5. pkt-line、能力交渉、want/have、参照更新コマンド、pack／delta／zlib、URL／id、metadata／ACLのファジングで、期間・seed・corpus・回帰例を残す。検証省略・同期順逆転・ACL省略を個別に埋めた変異が試験で検出されることを記録する。
+5. pkt-line、能力交渉、want/have、参照更新コマンド、pack／delta／zlib、gzip フレームと展開、URL／id、metadata／ACLのファジングで、期間・seed・corpus・回帰例を残す。検証省略・同期順逆転・ACL省略を個別に埋めた変異が試験で検出されることを記録する。
 6. UIの実ブラウザ試験で権限別の一覧・変更・拒否・上限表示、XSS／Origin不正・GET副作用なし、token非永続化・ログ非漏洩を確認する。ネイティブとSIR評価器で同じ操作列・エラー・上限の結果を比較し、依存fsと認証の信頼差分監査を結び付ける。
 
 後続は、転送codecとwire専用pack出力→upload-pack→隔離受信と単一参照push→metadata／ACLと管理UI→比較・故障注入・ファジングの記録の順で分割する。所有者作成の実装リポジトリ、0047の核、0045共通fsと圧縮の契約・実装が必要。0047の「リモート追跡参照はP4-4」とした部分は決定1で扱う。必要な標準APIの不足は別のIssue／契約ADR→実装として扱い、本PRで追加しない。
 
+## Git の gzip 要求の実測（レビュー対応）
+
+2026-11-17（JST）、Cloud の **Git 2.52.0** を使い、loopback HTTP で要求を採取して gzip を検証・展開し、本物の `git upload-pack --stateless-rpc` へ渡した。SHA-256 bare repo の独立した40ブランチを `-c protocol.version=0` で clone し、各先端に1 commit を追加して fetch した。clone／fetch と取得後の `git fsck --strict` は成功した。
+
+| 操作 | Content-Encoding | 符号化本文 → 展開後本文 | want／have |
+|---|---|---|---|
+| 40参照 clone | gzip | 1700 → 3093 byte | 40／0 |
+| 増分 fetch の3要求 | gzip | 2343 → 4284、2977 → 5468、3296 → 6065 byte | 40／16、40／32、40／40 |
+| 単一 branch の小さい clone | 未指定 | 219 → 219 byte | 1／0 |
+
+実行バイナリの SHA-256 は `git`: `8a2ae22e7898e163330a96319b541f92ed6f90fc87576414f72c5a89aa1dc352`、`git-remote-http`: `4cd7c54f3030073faea51cee9ccb7ba58c6b46d4636674d646604c3e53c10174`。これは Git クライアントの gzip 送信挙動の確認であり、未実装の本サーバーとの接続試験ではない。正確な圧縮開始閾値はこの実測では特定していない。
+
 ## 正式判定の記録
+
+2026-11-16 の所有者指示に従い Gemini Decisions は使っていない。
 
 2026-11-17 **12:33:02 JST**、Codex Cloud（OpenAI 系統）が `POST https://api.typesafe.ai/v1/systemone`、モデル `jev-1.13.0` で1回実行し、HTTP 200 を受信した。対象は上の転送・ホスティング／認可・上限／持続性／検証の3判断点。結果はそれぞれ `bounded_v0`・`explicit_acl`・`bounded_safe` が確率1.00、confidence1.00、他案0.00。判定途中に評価軸を変えた再実行はしていない。認証は環境の `TYPESAFE_API_KEY` をプロセス内だけで使い、値・ヘッダーを記録していない。
 
@@ -212,6 +229,71 @@ Bearer は外部で発行し、UI は明示入力をページ内メモリにだ�
   "usage": {
     "input_tokens": 2365,
     "output_tokens": 130
+  }
+}
+```
+
+</details>
+
+### レビュー対応の追加判定
+
+2026-11-17 **13:01:19 JST**、Codex Cloud（OpenAI 系統）が同じ API・モデルで1回実行し、HTTP 200。対象は gzip 要求の受理と peeled 広告で、`bounded_gzip` と `peeled_upload` がそれぞれ確率0.99／confidence0.98、他案0.01。固定評価軸のまま判定し、起草時の入力・応答は変更していない。gzip 拒否は実測した Git の clone／fetch を妨げるため、上限とフレーム検証を維持して受理する。peeled は upload-pack の補助情報として広告し、実参照に限る want の認可を維持する。確率は正しさや安全の証明ではない。
+
+<details><summary>レビュー対応の typesafe-ai 入力 JSON（秘密情報なし）</summary>
+
+```json
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。最小の信頼基盤、明示的拒否、段階ごとの使える成果物、本物のGitとの比較を優先する。所有者指示: PR583のADR0048だけ修正、実装/索引/他文書変更なし、既存ブランチへpushと日本語報告まで、マージ禁止、Gemini Decisions不使用。既存SHA256 Smart HTTP v0とHTTP要求/応答1MiB・符号化要求2MiBを維持。Claude指摘: identityのみではGitのupload-pack gzip要求を拒否する。Git2.52.0をloopback HTTPと本物のupload-packで実測: 小さいclone219byteはencoding未指定、40参照cloneは展開3093byte/符号化1700byteでgzip、増分fetchは40want/16-40haveで展開4284-6065byte/符号化2343-3296byteでgzip、clone/fetch/fsck成功。案A: upload-pack POSTだけidentity/未指定/gzip単一memberを受理。展開後1MiB、符号化2MiB、展開途中に上限検査し超過413、認可後に展開してCRC32/ISIZE/ヘッダ(任意項目とFHCRC含む)/deflate終端と本文全消費検証後だけpkt-line処理、破損/打切り/連結member/余剰は400、他encodingとreceive-pack gzipは415。ADR0045の純Sigil trust none共通圧縮契約にgzip CRC32とフレーム検査を要求（zlib Adler32代用禁止）、不足APIをこのPRで実装しない。案B: gzip拒否を維持し大きいclone/fetch失敗を未対応とし完成条件を縮小。peeled案: upload-packは注釈付きタグ行の直後に再帰的に剥いた非tag OIDのrefs/tags/name^{}行を広告、lightweightに付けずreceive-packには出さない。wantは実参照先端のみを維持しpeeled行を新参照や任意OID取得権限にしない。状態コードは認証済みread無しprivateは404、read有りwrite無しpushは403。Gemini不使用一文とgzip正負例/広告試験をADRに追記、既存正式判定の原記録は変更せず追加判定を別記する。",
+  "questions": {
+    "request_encoding": {
+      "type": "choice",
+      "criteria": {
+        "bounded_gzip": "案A: upload-pack gzipをCRC32/フレームと上限付きで受理し本物Git比較を維持",
+        "reject_gzip": "案B: gzip拒否を維持し大きいclone/fetchを未対応にする"
+      }
+    },
+    "advertisement": {
+      "type": "choice",
+      "criteria": {
+        "peeled_upload": "upload-packのみ注釈付きタグのpeeled行を含め、receive-packには含めない",
+        "omit_peeled": "両広告からpeeled行を除外する"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details><summary>レビュー対応の typesafe-ai 応答 JSON</summary>
+
+```json
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "request_encoding": {
+      "type": "choice",
+      "choice": "bounded_gzip",
+      "confidence": 0.98,
+      "probabilities": {
+        "bounded_gzip": 0.99,
+        "reject_gzip": 0.01
+      }
+    },
+    "advertisement": {
+      "type": "choice",
+      "choice": "peeled_upload",
+      "confidence": 0.98,
+      "probabilities": {
+        "peeled_upload": 0.99,
+        "omit_peeled": 0.01
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 1169,
+    "output_tokens": 76
   }
 }
 ```

@@ -12,6 +12,8 @@ mod call;
 mod expr;
 mod sched;
 mod shadow;
+#[cfg(test)]
+mod try_cond;
 mod value;
 
 use crate::ast::{File, Item, Type};

@@ -1195,6 +1195,15 @@ impl<'a> L<'a> {
         self.fb.cur = ok;
         let (_, _, fs) = self.variant_of(&ity, if is_option { "Some" } else { "Ok" })?;
         let pt = fs.first().cloned().unwrap_or(ir::Ty::Unit);
-        Ok(self.mv(&tp.downcast(0).field(0), &pt))
+        let val = self.mv(&tp.downcast(0).field(0), &pt);
+        if trivial(&pt) {
+            // 容器は文の終わり（`if`／`while` の分岐の前を含む）に破棄される。
+            // 成功値が容器の内側を指したままだと、破棄後の読み取りになる（#602）。
+            // 破棄の前に、独立した局所（破棄不要）へ取り出す。
+            let v = self.tmp(pt);
+            self.assign(Place::local(v), Rvalue::Use(val));
+            return Ok(Operand::Copy(Place::local(v)));
+        }
+        Ok(val)
     }
 }

@@ -157,6 +157,205 @@ fn parse_ipv4(host: &String) -> Int
   return acc;
 }
 
+fn is_ipv6(host: &String) -> Bool
+  intent "host に ':' が含まれるか調べる"
+  requires none
+  ensures none
+  effects none
+{
+  let b = host.as_bytes();
+  let n = b.len();
+  let mut i = 0;
+  while i < n {
+    if b.get(i).unwrap_or(0) == 58 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+fn parse_groups(b: &Bytes, start: Int, end: Int, temp: Addr) -> Int
+  intent "start から end までのコロン区切り 16 進数グループをパースして temp にビッグエンディアンで書き込む。成功時はグループ数（0〜8）、不正時は -1"
+  requires none
+  ensures none
+  effects none
+  unchecked "temp は少なくとも 16 バイト確保された生メモリ。書き込みは最大 8 グループ（16 バイト）の範囲内に収まる"
+{
+  if start == end {
+    return 0;
+  }
+  let mut i = start;
+  let mut count = 0;
+  let mut cur = 0;
+  let mut digits = 0;
+  while i <= end {
+    let mut c = 58;
+    if i < end {
+      c = b.get(i).unwrap_or(0);
+    }
+    if c == 58 {
+      if digits == 0 || digits > 4 || cur > 65535 || count >= 8 {
+        return -1;
+      }
+      raw.store_u8(raw.offset(temp, count * 2), (cur >> 8) & 255);
+      raw.store_u8(raw.offset(temp, count * 2 + 1), cur & 255);
+      count = count + 1;
+      cur = 0;
+      digits = 0;
+    } else {
+      if digits >= 4 {
+        return -1;
+      }
+      let mut v = -1;
+      if c >= 48 && c <= 57 {
+        v = c - 48;
+      } else if c >= 97 && c <= 102 {
+        v = c - 97 + 10;
+      } else if c >= 65 && c <= 70 {
+        v = c - 65 + 10;
+      } else {
+        return -1;
+      }
+      cur = cur * 16 + v;
+      digits = digits + 1;
+    }
+    i = i + 1;
+  }
+  return count;
+}
+
+fn parse_ipv6(host: &String, out: Addr) -> Bool
+  intent "host（RFC 4291/5952 コロン区切り 16 進表記）をパースし、16 バイトの out にビッグエンディアンで書き込む。成功時は true、失敗時は false"
+  requires none
+  ensures none
+  effects none
+  unchecked "out は少なくとも 16 バイト確保された生メモリ。書き込みは 16 バイトの範囲内に収まる"
+{
+  let b = host.as_bytes();
+  let n = b.len();
+  if n < 2 || n > 39 {
+    return false;
+  }
+  let mut idx = 0;
+  while idx < n {
+    let c = b.get(idx).unwrap_or(0);
+    let is_digit = c >= 48 && c <= 57;
+    let is_lower = c >= 97 && c <= 102;
+    let is_upper = c >= 65 && c <= 70;
+    let is_colon = c == 58;
+    if !is_digit && !is_lower && !is_upper && !is_colon {
+      return false;
+    }
+    idx = idx + 1;
+  }
+  let mut dcol_pos = -1;
+  let mut dcol_count = 0;
+  let mut i = 0;
+  while i < n - 1 {
+    let c0 = b.get(i).unwrap_or(0);
+    let c1 = b.get(i + 1).unwrap_or(0);
+    if c0 == 58 && c1 == 58 {
+      dcol_count = dcol_count + 1;
+      dcol_pos = i;
+      if i + 2 < n {
+        let c2 = b.get(i + 2).unwrap_or(0);
+        if c2 == 58 {
+          return false;
+        }
+      }
+      i = i + 1;
+    }
+    i = i + 1;
+  }
+  if dcol_count > 1 {
+    return false;
+  }
+  let first_c = b.get(0).unwrap_or(0);
+  if first_c == 58 && dcol_pos != 0 {
+    return false;
+  }
+  let last_c = b.get(n - 1).unwrap_or(0);
+  if last_c == 58 && dcol_pos != n - 2 {
+    return false;
+  }
+
+  let left_temp = raw.alloc(16, 8);
+  let right_temp = raw.alloc(16, 8);
+  raw.set(left_temp, 0, 16);
+  raw.set(right_temp, 0, 16);
+
+  if dcol_pos == -1 {
+    let n_left = parse_groups(&b, 0, n, left_temp);
+    if n_left != 8 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
+    let mut j = 0;
+    while j < 16 {
+      raw.store_u8(raw.offset(out, j), raw.load_u8(raw.offset(left_temp, j)));
+      j = j + 1;
+    }
+  } else {
+    let n_left = parse_groups(&b, 0, dcol_pos, left_temp);
+    if n_left < 0 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
+    let n_right = parse_groups(&b, dcol_pos + 2, n, right_temp);
+    if n_right < 0 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
+    if n_left + n_right >= 8 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
+
+    raw.set(out, 0, 16);
+    let mut k = 0;
+    while k < n_left * 2 {
+      raw.store_u8(raw.offset(out, k), raw.load_u8(raw.offset(left_temp, k)));
+      k = k + 1;
+    }
+    let right_offset = (8 - n_right) * 2;
+    k = 0;
+    while k < n_right * 2 {
+      raw.store_u8(raw.offset(out, right_offset + k), raw.load_u8(raw.offset(right_temp, k)));
+      k = k + 1;
+    }
+  }
+
+  raw.free(left_temp, 16, 8);
+  raw.free(right_temp, 16, 8);
+
+  let mut is_v4_mapped = true;
+  let mut m = 0;
+  while m < 10 {
+    let bv = raw.load_u8(raw.offset(out, m));
+    if bv != 0 {
+      is_v4_mapped = false;
+    }
+    m = m + 1;
+  }
+  let b10 = raw.load_u8(raw.offset(out, 10));
+  let b11 = raw.load_u8(raw.offset(out, 11));
+  if b10 != 255 {
+    is_v4_mapped = false;
+  }
+  if b11 != 255 {
+    is_v4_mapped = false;
+  }
+  if is_v4_mapped {
+    return false;
+  }
+  return true;
+}
+
 fn sockaddr(ip: Int, port: Int) -> Addr
   intent "AF_INET の sockaddr_in（16 バイト）を組み立てて返す。呼び出し側が raw.free(a, 16, 8) で返す"
   requires none
@@ -173,6 +372,27 @@ fn sockaddr(ip: Int, port: Int) -> Addr
   raw.store_u8(raw.offset(a, 5), (ip >> 16) & 255);
   raw.store_u8(raw.offset(a, 6), (ip >> 8) & 255);
   raw.store_u8(raw.offset(a, 7), ip & 255);
+  return a;
+}
+
+fn sockaddr6(ip6_addr: Addr, port: Int) -> Addr
+  intent "AF_INET6 の sockaddr_in6（28 バイト）を組み立てて返す。呼び出し側が raw.free(a, 28, 8) で返す"
+  requires none
+  ensures none
+  effects none
+  unchecked "0 <= port <= 65535。確保した 28 バイトの範囲だけに書く（家族 10 は機械の並び、ポートはネットワークの並び、ip6_addr の 16 バイト、残りは 0）"
+{
+  let a = raw.alloc(28, 8);
+  raw.set(a, 0, 28);
+  raw.store_u8(a, 10);
+  raw.store_u8(raw.offset(a, 1), 0);
+  raw.store_u8(raw.offset(a, 2), (port >> 8) & 255);
+  raw.store_u8(raw.offset(a, 3), port & 255);
+  let mut i = 0;
+  while i < 16 {
+    raw.store_u8(raw.offset(a, 8 + i), raw.load_u8(raw.offset(ip6_addr, i)));
+    i = i + 1;
+  }
   return a;
 }
 
@@ -199,13 +419,61 @@ fn setup(fd: Int, ip: Int, port: Int, backlog: Int) -> Int
   return raw.syscall(50, fd, backlog, 0, 0, 0, 0);
 }
 
+fn setup6(fd: Int, sa: Addr, backlog: Int) -> Int
+  intent "IPv6 待ち受けソケットに SO_REUSEADDR と IPV6_V6ONLY を付け、bind して listen する"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。sa は 28 バイトの sockaddr_in6。setsockopt（54）・bind（49）・listen（50）を発行"
+{
+  let one = raw.alloc(8, 8);
+  raw.store_i64(one, 1);
+  let r0 = raw.syscall(54, fd, 1, 2, raw.addr_to_int(one), 4, 0);
+  if r0 < 0 {
+    raw.free(one, 8, 8);
+    return r0;
+  }
+  let r_v6 = raw.syscall(54, fd, 41, 26, raw.addr_to_int(one), 4, 0);
+  raw.free(one, 8, 8);
+  if r_v6 < 0 {
+    return r_v6;
+  }
+  let r1 = raw.syscall(49, fd, raw.addr_to_int(sa), 28, 0, 0, 0);
+  if r1 < 0 {
+    return r1;
+  }
+  return raw.syscall(50, fd, backlog, 0, 0, 0, 0);
+}
+
 pub fn listen(host: &String, port: Int, backlog: Int) -> Result<TcpListener, NetError>
-  intent "host（IPv4 のドット表記）と port で TCP の待ち受けを始める。port が 0 なら空いている番号を選ぶ"
+  intent "host（IPv4 または IPv6 の数値表記）と port で TCP の待ち受けを始める。port が 0 なら空いている番号を選ぶ"
   requires 0 <= port && port <= 65535 && 1 <= backlog && backlog <= 1024
   ensures none
   effects net.server
-  unchecked "socket（41。AF_INET・SOCK_STREAM・SOCK_NONBLOCK・SOCK_CLOEXEC）で得た fd は、すぐ TcpListener に包む。以後の失敗では値の破棄が閉じる（ここで close を呼ばない）"
+  unchecked "socket（41）で得た fd は、すぐ TcpListener に包む。以後の失敗では値の破棄が閉じる（ここで close を呼ばない）"
 {
+  if is_ipv6(&host) {
+    let ip6 = raw.alloc(16, 8);
+    let ok = parse_ipv6(&host, ip6);
+    if !ok {
+      raw.free(ip6, 16, 8);
+      return Err(NetError.Other);
+    }
+    let sa = sockaddr6(ip6, port);
+    raw.free(ip6, 16, 8);
+    let fd = raw.syscall(41, 10, 526337, 0, 0, 0, 0);
+    if fd < 0 {
+      raw.free(sa, 28, 8);
+      return Err(classify(fd));
+    }
+    let l = TcpListener { fd: fd };
+    let r = setup6(l.fd, sa, backlog);
+    raw.free(sa, 28, 8);
+    if r < 0 {
+      return Err(classify(r));
+    }
+    return Ok(l);
+  }
   let ip = parse_ipv4(&host);
   if ip < 0 {
     return Err(NetError.Other);
@@ -227,16 +495,16 @@ fn port_of(fd: Int) -> Int
   requires none
   ensures none
   effects net.server
-  unchecked "fd は呼び出し側が所有する開いたソケット。sockaddr の 16 バイトと長さの語（16 を入れる）は確保した範囲で、戻る前に返す。発行するのは getsockname（51）だけ"
+  unchecked "fd は呼び出し側が所有する開いたソケット。sockaddr の 28 バイトと長さの語（28 を入れる）は確保した範囲で、戻る前に返す。発行するのは getsockname（51）だけ"
 {
-  let sa = raw.alloc(16, 8);
-  raw.set(sa, 0, 16);
+  let sa = raw.alloc(28, 8);
+  raw.set(sa, 0, 28);
   let len = raw.alloc(8, 8);
-  raw.store_i64(len, 16);
+  raw.store_i64(len, 28);
   let r = raw.syscall(51, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);
   let p = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));
   raw.free(len, 8, 8);
-  raw.free(sa, 16, 8);
+  raw.free(sa, 28, 8);
   if r < 0 {
     return 0;
   }
@@ -507,6 +775,16 @@ fn connect_once(fd: Int, ip: Int, port: Int) -> Int
   return r;
 }
 
+fn connect_once6(fd: Int, sa: Addr) -> Int
+  intent "IPv6 非ブロッキング接続を開始する。0 は即時完了、負は errno"
+  requires none
+  ensures none
+  effects net.client
+  unchecked "fd は呼び出し側の TcpClient が所有。sa は 28 バイトの sockaddr_in6。connect（42）だけを発行"
+{
+  return raw.syscall(42, fd, raw.addr_to_int(sa), 28, 0, 0, 0);
+}
+
 fn connect_error(fd: Int) -> Int
   intent "SO_ERROR で接続結果を確認する。0 は成功、負は接続または取得の errno"
   requires none
@@ -536,12 +814,44 @@ fn connect_error(fd: Int) -> Int
 }
 
 pub fn connect(host: &String, port: Int) -> Result<TcpClient, NetError>
-  intent "数値 IPv4 へ非ブロッキング接続する。writable だけを成功とせず SO_ERROR を検査する。DNS と自動再試行は行わない"
+  intent "数値 IPv4 または IPv6 へ非ブロッキング接続する。writable だけを成功とせず SO_ERROR を検査する。DNS と自動再試行は行わない"
   requires 1 <= port && port <= 65535
   ensures none
   effects net.client, task.suspend
-  unchecked "socket（41）は AF_INET・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0。成功 fd は中断前に TcpClient へ包む。失敗・取消・破棄で所有値が一度だけ close し、ここから明示 close は呼ばない。待機が外れてから破棄される"
+  unchecked "socket（41）は AF_INET/AF_INET6・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0。成功 fd は中断前に TcpClient へ包む。失敗・取消・破棄で所有値が一度だけ close し、ここから明示 close は呼ばない。待機が外れてから破棄される"
 {
+  if is_ipv6(&host) {
+    let ip6 = raw.alloc(16, 8);
+    let ok = parse_ipv6(&host, ip6);
+    if !ok {
+      raw.free(ip6, 16, 8);
+      return Err(NetError.Other);
+    }
+    let sa = sockaddr6(ip6, port);
+    raw.free(ip6, 16, 8);
+    let fd = raw.syscall(41, 10, 526337, 0, 0, 0, 0);
+    if fd < 0 {
+      raw.free(sa, 28, 8);
+      return Err(classify(fd));
+    }
+    let c = TcpClient { fd: fd };
+    let r = connect_once6(c.fd, sa);
+    raw.free(sa, 28, 8);
+    if r == 0 {
+      return Ok(c);
+    }
+    if r != -115 && r != -4 {
+      return Err(classify(r));
+    }
+    if raw.io_wait_fd(c.fd, 4) < 0 {
+      return Err(NetError.Other);
+    }
+    let error = connect_error(c.fd);
+    if error != 0 {
+      return Err(classify(error));
+    }
+    return Ok(c);
+  }
   let ip = parse_ipv4(&host);
   if ip < 0 {
     return Err(NetError.Other);

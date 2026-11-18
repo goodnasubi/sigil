@@ -1413,58 +1413,72 @@ impl<'p> M<'p> {
             // ソケット系（ADR 0031 決定 3-4・判断点 D の案 B、PR 6-3e）。`std.os.net` が使う形だけを通す。
             // 番地を渡す引数は、生きた塊の範囲に収まることを確かめる。カーネルが書く長さは、検査した大きさを超えない。
             SYS_SOCKET => {
-                if a[0] != AF_INET
+                if (a[0] != AF_INET && a[0] != AF_INET6)
                     || a[1] != SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
                     || a[2] != 0
                 {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall socket: AF_INET・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0 のみ許可",
+                        "raw.syscall socket: AF_INET/AF_INET6・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0 のみ許可",
                     ));
                 }
             }
             SYS_SETSOCKOPT => {
-                if a[1] != SOL_SOCKET || a[2] != SO_REUSEADDR || a[4] != 4 {
+                let is_reuseaddr = a[1] == SOL_SOCKET && a[2] == SO_REUSEADDR && a[4] == 4;
+                let is_v6only = a[1] == IPPROTO_IPV6 && a[2] == IPV6_V6ONLY && a[4] == 4;
+                if !is_reuseaddr && !is_v6only {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall setsockopt: SOL_SOCKET・SO_REUSEADDR・長さ 4 のみ許可",
+                        "raw.syscall setsockopt: SOL_SOCKET/SO_REUSEADDR または IPPROTO_IPV6/IPV6_V6ONLY（長さ 4）のみ許可",
                     ));
                 }
                 self.check_raw_access(addr_of(a[3], "optval")?, 4, loc)?;
             }
             SYS_BIND | SYS_CONNECT => {
-                if a[2] != SOCKADDR_IN_SIZE as i64 {
+                let sa = addr_of(a[1], "addr")?;
+                if a[2] == SOCKADDR_IN_SIZE as i64 {
+                    self.check_raw_access(sa, SOCKADDR_IN_SIZE, loc)?;
+                    // 家族（先頭の 2 バイト。機械の並び）。
+                    let family =
+                        u16::from_le_bytes([self.peek_u8(sa, loc)?, self.peek_u8(sa + 1, loc)?]);
+                    if i64::from(family) != AF_INET {
+                        return Err(
+                            self.syscall_stop(loc, "raw.syscall bind/connect: AF_INET のみ許可")
+                        );
+                    }
+                } else if a[2] == SOCKADDR_IN6_SIZE as i64 {
+                    self.check_raw_access(sa, SOCKADDR_IN6_SIZE, loc)?;
+                    // 家族（先頭の 2 バイト。機械の並び）。
+                    let family =
+                        u16::from_le_bytes([self.peek_u8(sa, loc)?, self.peek_u8(sa + 1, loc)?]);
+                    if i64::from(family) != AF_INET6 {
+                        return Err(
+                            self.syscall_stop(loc, "raw.syscall bind/connect: AF_INET6 のみ許可")
+                        );
+                    }
+                } else {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall bind/connect: addrlen は 16（sockaddr_in）のみ許可",
+                        "raw.syscall bind/connect: addrlen は 16（sockaddr_in）または 28（sockaddr_in6）のみ許可",
                     ));
-                }
-                let sa = addr_of(a[1], "addr")?;
-                self.check_raw_access(sa, SOCKADDR_IN_SIZE, loc)?;
-                // 家族（先頭の 2 バイト。機械の並び）。
-                let family =
-                    u16::from_le_bytes([self.peek_u8(sa, loc)?, self.peek_u8(sa + 1, loc)?]);
-                if i64::from(family) != AF_INET {
-                    return Err(
-                        self.syscall_stop(loc, "raw.syscall bind/connect: AF_INET のみ許可")
-                    );
                 }
             }
             SYS_LISTEN => {}
             SYS_GETSOCKNAME => {
-                self.check_raw_access(addr_of(a[1], "addr")?, SOCKADDR_IN_SIZE, loc)?;
                 let lp = addr_of(a[2], "addrlen")?;
                 self.check_raw_access(lp, 4, loc)?;
                 let mut lb = [0u8; 4];
                 for (i, b) in lb.iter_mut().enumerate() {
                     *b = self.peek_u8(lp + i, loc)?;
                 }
-                if u32::from_le_bytes(lb) as usize != SOCKADDR_IN_SIZE {
+                let len = u32::from_le_bytes(lb) as usize;
+                if len != SOCKADDR_IN_SIZE && len != SOCKADDR_IN6_SIZE {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall getsockname: *addrlen は 16（検査した領域の大きさ）のみ許可",
+                        "raw.syscall getsockname: *addrlen は 16 または 28（検査した領域の大きさ）のみ許可",
                     ));
                 }
+                self.check_raw_access(addr_of(a[1], "addr")?, len, loc)?;
             }
             SYS_GETSOCKOPT => {
                 if a[1] != SOL_SOCKET || a[2] != SO_ERROR {
@@ -2293,13 +2307,17 @@ const SYS_GETSOCKNAME: i64 = 51;
 const SYS_SETSOCKOPT: i64 = 54;
 const SYS_ACCEPT4: i64 = 288;
 const SOCKADDR_IN_SIZE: usize = 16;
+const SOCKADDR_IN6_SIZE: usize = 28;
 const AF_INET: i64 = 2;
+const AF_INET6: i64 = 10;
 const SOCK_STREAM: i64 = 1;
 const SOCK_NONBLOCK: i64 = 0o4000;
 const SOCK_CLOEXEC: i64 = 0o2000000;
 const SOL_SOCKET: i64 = 1;
 const SO_REUSEADDR: i64 = 2;
 const SO_ERROR: i64 = 4;
+const IPPROTO_IPV6: i64 = 41;
+const IPV6_V6ONLY: i64 = 26;
 const MSG_NOSIGNAL: i64 = 0x4000;
 const SHUT_WR: i64 = 1;
 const PROT_READ: i64 = 1;

@@ -297,44 +297,62 @@ fn parse_ipv6(host: &String, out: Addr) -> Bool
       raw.store_u8(raw.offset(out, j), raw.load_u8(raw.offset(left_temp, j)));
       j = j + 1;
     }
-    raw.free(left_temp, 16, 8);
-    raw.free(right_temp, 16, 8);
-    return true;
-  }
+  } else {
+    let n_left = parse_groups(&b, 0, dcol_pos, left_temp);
+    if n_left < 0 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
+    let n_right = parse_groups(&b, dcol_pos + 2, n, right_temp);
+    if n_right < 0 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
+    if n_left + n_right >= 8 {
+      raw.free(left_temp, 16, 8);
+      raw.free(right_temp, 16, 8);
+      return false;
+    }
 
-  let n_left = parse_groups(&b, 0, dcol_pos, left_temp);
-  if n_left < 0 {
-    raw.free(left_temp, 16, 8);
-    raw.free(right_temp, 16, 8);
-    return false;
-  }
-  let n_right = parse_groups(&b, dcol_pos + 2, n, right_temp);
-  if n_right < 0 {
-    raw.free(left_temp, 16, 8);
-    raw.free(right_temp, 16, 8);
-    return false;
-  }
-  if n_left + n_right >= 8 {
-    raw.free(left_temp, 16, 8);
-    raw.free(right_temp, 16, 8);
-    return false;
-  }
-
-  raw.set(out, 0, 16);
-  let mut k = 0;
-  while k < n_left * 2 {
-    raw.store_u8(raw.offset(out, k), raw.load_u8(raw.offset(left_temp, k)));
-    k = k + 1;
-  }
-  let right_offset = (8 - n_right) * 2;
-  k = 0;
-  while k < n_right * 2 {
-    raw.store_u8(raw.offset(out, right_offset + k), raw.load_u8(raw.offset(right_temp, k)));
-    k = k + 1;
+    raw.set(out, 0, 16);
+    let mut k = 0;
+    while k < n_left * 2 {
+      raw.store_u8(raw.offset(out, k), raw.load_u8(raw.offset(left_temp, k)));
+      k = k + 1;
+    }
+    let right_offset = (8 - n_right) * 2;
+    k = 0;
+    while k < n_right * 2 {
+      raw.store_u8(raw.offset(out, right_offset + k), raw.load_u8(raw.offset(right_temp, k)));
+      k = k + 1;
+    }
   }
 
   raw.free(left_temp, 16, 8);
   raw.free(right_temp, 16, 8);
+
+  let mut is_v4_mapped = true;
+  let mut m = 0;
+  while m < 10 {
+    let bv = raw.load_u8(raw.offset(out, m));
+    if bv != 0 {
+      is_v4_mapped = false;
+    }
+    m = m + 1;
+  }
+  let b10 = raw.load_u8(raw.offset(out, 10));
+  let b11 = raw.load_u8(raw.offset(out, 11));
+  if b10 != 255 {
+    is_v4_mapped = false;
+  }
+  if b11 != 255 {
+    is_v4_mapped = false;
+  }
+  if is_v4_mapped {
+    return false;
+  }
   return true;
 }
 

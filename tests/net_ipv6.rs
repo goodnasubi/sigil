@@ -497,6 +497,8 @@ pub fn main() -> Int
   if !check_invalid("[::1]") { return 0 - 1; }
   // IPv4 射影アドレス
   if !check_invalid("::ffff:127.0.0.1") { return 0 - 2; }
+  if !check_invalid("::ffff:7f00:1") { return 0 - 20; }
+  if !check_invalid("0:0:0:0:0:ffff:7f00:1") { return 0 - 21; }
   // 複数 ::
   if !check_invalid("1::2::3") { return 0 - 3; }
   // 3連続コロン

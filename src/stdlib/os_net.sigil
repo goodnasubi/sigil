@@ -253,11 +253,16 @@ fn parse_ipv6(host: &String, out: Addr) -> Bool
   let mut dcol_count = 0;
   let mut i = 0;
   while i < n - 1 {
-    if b.get(i).unwrap_or(0) == 58 && b.get(i + 1).unwrap_or(0) == 58 {
+    let c0 = b.get(i).unwrap_or(0);
+    let c1 = b.get(i + 1).unwrap_or(0);
+    if c0 == 58 && c1 == 58 {
       dcol_count = dcol_count + 1;
       dcol_pos = i;
-      if i + 2 < n && b.get(i + 2).unwrap_or(0) == 58 {
-        return false;
+      if i + 2 < n {
+        let c2 = b.get(i + 2).unwrap_or(0);
+        if c2 == 58 {
+          return false;
+        }
       }
       i = i + 1;
     }
@@ -266,10 +271,12 @@ fn parse_ipv6(host: &String, out: Addr) -> Bool
   if dcol_count > 1 {
     return false;
   }
-  if b.get(0).unwrap_or(0) == 58 && dcol_pos != 0 {
+  let first_c = b.get(0).unwrap_or(0);
+  if first_c == 58 && dcol_pos != 0 {
     return false;
   }
-  if b.get(n - 1).unwrap_or(0) == 58 && dcol_pos != n - 2 {
+  let last_c = b.get(n - 1).unwrap_or(0);
+  if last_c == 58 && dcol_pos != n - 2 {
     return false;
   }
 

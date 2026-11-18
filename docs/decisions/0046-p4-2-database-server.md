@@ -233,6 +233,9 @@ P4-2 データベースサーバーの実装完了判定には、以下のすべ
 2. **PostgreSQL 公式イメージとの差分比較試験（Differential Testing）**:
    - CI 上の PostgreSQL（公式イメージ）と本サーバーの双方に対して、同一の SQL 文列（DDL、INSERT、UPDATE、DELETE、SELECT、INNER JOIN、集約、ORDER BY、LIMIT、BEGIN/COMMIT/ROLLBACK）を投入する。
    - 返却される行データ、列情報（RowDescription）、完了タグ（CommandComplete）、および制約違反や構文エラー時のエラー種別（SQLSTATE）が一致することを検証する。
+   - **許容する差分（2026-11-19 JST 追記、[Issue #616](https://github.com/goodnasubi/sigil/issues/616)）**: `SUM(bigint)` の列の型 OID は、PostgreSQL が `numeric`（OID 1700）、本サーバーが `int8`（OID 20）で異なる。これは**仕様として許容する差分**である。
+     - 理由: 「データ型」の表のとおり、`BIGINT` は OID 20（`int8`）・Sigil 内部型 `Int`（64 bit 符号付き）に割り当て、`NUMERIC`/`DECIMAL` は初版で未対応としている。`SUM(col)` は `Int` の合計を返すため、列情報の型 OID は 20 になる。範囲外の数値は同表のとおりオーバーフローとして拒否する。
+     - 扱い: 差分比較の検証（sigil-db PR #13）で確認された。値そのものの一致は上の比較が担い、この型 OID の違いだけを許容差分とする。他の型 OID の差は許容差分に含めない。
 3. **未対応機能の安全性検証**:
    - 本 ADR で「未対応」と定めた機能（NULL 値、外部結合、サブクエリ、未対応メッセージ種別等）が投入された際、暗黙の誤動作やクラッシュを起こさず、明示的エラー（`FeatureNotSupported` 等）を返し、セッション状態を安全に維持または終了すること。
 4. **異常系・プロトコルファジング試験**:

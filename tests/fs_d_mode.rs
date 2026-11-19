@@ -391,18 +391,94 @@ fn reject_symlinks_and_parent_traversal() {
     assert_eq!(res, "\"ok\"");
 }
 
+/// 指定されたパスが、Linux の /proc/mounts において読み取り専用（ro）マウント上にあるか判定する。
+/// マウント情報が取得できない、あるいは読み取り専用であることを確認できない場合は false を返す。
+fn is_on_read_only_mount(path: &Path) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(mounts) = std::fs::read_to_string("/proc/mounts") else {
+        return false;
+    };
+
+    let mut best_mount: Option<(PathBuf, Vec<String>, String)> = None;
+
+    for line in mounts.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let mount_point = PathBuf::from(parts[1].replace("\\040", " "));
+        let fs_type = parts[2].to_string();
+        let opts: Vec<String> = parts[3].split(',').map(|s| s.to_string()).collect();
+
+        if canonical.starts_with(&mount_point) {
+            let replace = match &best_mount {
+                None => true,
+                Some((best_mp, _, _)) => {
+                    mount_point.components().count() > best_mp.components().count()
+                }
+            };
+            if replace {
+                best_mount = Some((mount_point, opts, fs_type));
+            }
+        }
+    }
+
+    if let Some((_, opts, fs_type)) = best_mount {
+        let pseudo = matches!(
+            fs_type.as_str(),
+            "proc"
+                | "sysfs"
+                | "devpts"
+                | "cgroup"
+                | "cgroup2"
+                | "pstore"
+                | "bpf"
+                | "debugfs"
+                | "tracefs"
+        );
+        if !pseudo && opts.iter().any(|o| o == "ro") {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// 読み取り専用ファイルシステム上に存在し、かつ symlink ではない安全な通常ファイルを探す。
+/// 見つからない、または対象マウントが読み取り専用であることを確認できない場合は None を返す。
+fn find_read_only_regular_file() -> Option<PathBuf> {
+    let candidates = [
+        "/etc/issue",
+        "/etc/debian_version",
+        "/usr/share/common-licenses/GPL-3",
+        "/usr/share/common-licenses/GPL-2",
+        "/usr/lib/os-release",
+    ];
+
+    for candidate in &candidates {
+        let p = Path::new(candidate);
+        if let Ok(meta) = p.symlink_metadata() {
+            if meta.file_type().is_file() && is_on_read_only_mount(p) {
+                return Some(p.to_path_buf());
+            }
+        }
+    }
+
+    None
+}
+
 /// 読み取り専用ファイルシステム上のファイルに対する set_mode は PermissionDenied（EROFS）。
 #[test]
 fn read_only_fs_permission_denied() {
     let _serial = serial();
-    // /etc/hosts は本 VM 環境で squashfs ro にマウントされている
-    if !Path::new("/etc/hosts").exists() {
+    let Some(target) = find_read_only_regular_file() else {
         return;
-    }
+    };
 
     let body = r#"
-        let path_str = "/etc/hosts";
-        let p = Path.new(&path_str);
+        let p = Path.new(&file_path);
         let ro = fs.open_options().read(true);
         match ro.open(&p) {
             Err(_) => { return "err_open"; }
@@ -423,10 +499,15 @@ fn read_only_fs_permission_denied() {
         return "ok";
     "#;
 
-    let src = format!("{HEAD}{}", f("t() -> String", body));
-    let res = run_with(&src, "t", &[], &Options::default())
-        .unwrap_or_else(|e| panic!("{e}\n{src}"))
-        .value;
+    let src = format!("{HEAD}{}", f("t(file_path: String) -> String", body));
+    let res = run_with(
+        &src,
+        "t",
+        &[Arg::Str(target.to_string_lossy().into_owned())],
+        &Options::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}\n{src}"))
+    .value;
     assert_eq!(res, "\"ok\"");
 }
 

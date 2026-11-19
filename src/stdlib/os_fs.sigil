@@ -376,7 +376,7 @@ fn classify_io(r: Int, p: &Path) -> IoError
   if r == -2 {
     return IoError.NotFound(p.clone());
   }
-  if r == -13 || r == -1 || r == -40 {
+  if r == -13 || r == -1 || r == -40 || r == -30 {
     return IoError.PermissionDenied(p.clone());
   }
   if r == -17 {
@@ -823,6 +823,72 @@ impl File {
     let mut r = -4;
     while r == -4 {
       r = raw.syscall(75, self.fd, 0, 0, 0, 0, 0);
+    }
+    if r < 0 {
+      return Err(classify_io(r, &self.file_path));
+    }
+    return Ok(unit());
+  }
+
+  pub fn mode(self: &File) -> Result<Int, IoError>
+    intent "既存ファイルの権限ビット（0o000〜0o777）を取得する。ディレクトリは IsADirectory、通常ファイル以外は InvalidInput（ADR 0049 決定 7）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fstat(5) を発行し、stat 構造体（144バイト）から st_mode を読み取り解放する"
+  {
+    let stat_buf = raw.alloc(144, 8);
+    let mut st = -4;
+    while st == -4 {
+      st = raw.syscall(5, self.fd, raw.addr_to_int(stat_buf), 0, 0, 0, 0);
+    }
+    if st < 0 {
+      raw.free(stat_buf, 144, 8);
+      return Err(classify_io(st, &self.file_path));
+    }
+    let mode_raw = raw.load_i64(raw.offset(stat_buf, 24));
+    raw.free(stat_buf, 144, 8);
+    let file_type = mode_raw & 61440;
+    if file_type == 16384 {
+      return Err(IoError.IsADirectory(self.file_path.clone()));
+    }
+    if file_type != 32768 {
+      return Err(IoError.InvalidInput(self.file_path.clone()));
+    }
+    return Ok(mode_raw & 511);
+  }
+
+  pub fn set_mode(self: &File, mode: Int) -> Result<Unit, IoError>
+    intent "既存ファイルの権限ビットを設定する。0o000〜0o777 のみ受け付け、ディレクトリは IsADirectory、通常ファイル以外は InvalidInput（ADR 0049 決定 7）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fstat(5) で種別確認後、fchmod(91) を発行する"
+  {
+    if mode < 0 || mode > 511 {
+      return Err(IoError.InvalidInput(self.file_path.clone()));
+    }
+    let stat_buf = raw.alloc(144, 8);
+    let mut st = -4;
+    while st == -4 {
+      st = raw.syscall(5, self.fd, raw.addr_to_int(stat_buf), 0, 0, 0, 0);
+    }
+    if st < 0 {
+      raw.free(stat_buf, 144, 8);
+      return Err(classify_io(st, &self.file_path));
+    }
+    let mode_raw = raw.load_i64(raw.offset(stat_buf, 24));
+    raw.free(stat_buf, 144, 8);
+    let file_type = mode_raw & 61440;
+    if file_type == 16384 {
+      return Err(IoError.IsADirectory(self.file_path.clone()));
+    }
+    if file_type != 32768 {
+      return Err(IoError.InvalidInput(self.file_path.clone()));
+    }
+    let mut r = -4;
+    while r == -4 {
+      r = raw.syscall(91, self.fd, mode, 0, 0, 0, 0);
     }
     if r < 0 {
       return Err(classify_io(r, &self.file_path));
@@ -1598,6 +1664,40 @@ impl Dir {
           return Err(classify_io(r, &subpath));
         }
         return Ok(unit());
+      }
+    }
+  }
+
+  pub fn file_mode(self: &Dir, subpath: &Path) -> Result<Int, IoError>
+    intent "ディレクトリ起点の相対パスでファイルのモードを取得する（ADR 0049 決定 7）"
+    requires none
+    ensures none
+    effects fs
+  {
+    let opts = OpenOptions.new();
+    match self.open_file(&subpath, &opts) {
+      Err(e) => { return Err(e); }
+      Ok(file) => {
+        let res = file.mode();
+        let _ = file.close();
+        return res;
+      }
+    }
+  }
+
+  pub fn set_file_mode(self: &Dir, subpath: &Path, mode: Int) -> Result<Unit, IoError>
+    intent "ディレクトリ起点の相対パスでファイルのモードを設定する（ADR 0049 決定 7）"
+    requires none
+    ensures none
+    effects fs
+  {
+    let opts = OpenOptions.new();
+    match self.open_file(&subpath, &opts) {
+      Err(e) => { return Err(e); }
+      Ok(file) => {
+        let res = file.set_mode(mode);
+        let _ = file.close();
+        return res;
       }
     }
   }

@@ -1,8 +1,8 @@
 # 0049: 共通 fs 境界
 
-- **状態**: 提案（typesafe-ai 正式判定は未実施。起草者の案として明記。末尾に判定用の問いと評価軸を記録。別系統のレビュー前。実装完了を意味しない）
-- **日付**: 2026-11-17（JST）
-- **対象**: [Issue #584](https://github.com/goodnasubi/sigil/issues/584)、レーン E
+- **状態**: 提案（typesafe-ai 正式判定は決定 7 のみ実施済み、それ以外は未実施。起草者の案として明記。末尾に判定用の問いと評価軸を記録。別系統のレビュー前。実装完了を意味しない）
+- **日付**: 2026-11-17（JST）。2026-11-19（JST）に決定 7 を追加（改訂）
+- **対象**: [Issue #584](https://github.com/goodnasubi/sigil/issues/584)、レーン E。改訂: [Issue #623](https://github.com/goodnasubi/sigil/issues/623)（既存ファイルのモードの取得と設定）
 
 ## 背景と前提
 
@@ -33,6 +33,7 @@ ADR 0044 決定 4 および ADR 0045 に従い、仕様の基準とするコミ�
 | 追記と位置指定 I/O | `pread`/`pwrite`（`SYS_pread64`/`SYS_pwrite64`）による無シーク位置指定読み書き、および `O_APPEND` による末尾追記保証。**append ハンドルでの `write_at`/`write_all_at` は明示拒否** | シーク（`lseek`）は並行レースを起こす。Linux では `O_APPEND` の fd に対して `pwrite64` を呼ぶと offset を無視して末尾へ追記するため、同一ハンドルでの混用を許すとページ更新が追記化してデータ破壊を招く |
 | 持続性と名前変更 | ファイル／ディレクトリの明示的 `fsync`（`SYS_fsync`）、同一 FS 内の原子的置換 `renameat` | `close` 成功は持続性の証明にならない。親ディレクトリの `fsync` がなければ新規作成・削除・rename の永続性は保証されない。異 FS 間の rename は暗黙コピーせず明示拒否（`EXDEV`）する |
 | テスト差し替え（`--fs-double`） | パス写像を尊重し、実ファイルに対する安全な委譲または未対応操作の明示的拒否（fail-closed） | 差し替え下で同期やロックを暗黙に成功偽装すると、クラッシュ復旧や永続性の誤った信頼を生む |
+| 既存ファイルのモード（改訂: 決定 7） | `File::mode` / `File::set_mode`（`fstat`・`fchmod`）と `Dir` 起点の同等操作。モードは権限ビット 0o777 の Int、通常ファイルのみ、設定は umask を適用しない | 作成時モードだけでは、umask で落ちた実行ビットの復元と既存ファイルの実行ビット取得ができず、Git の tree モード 100644／100755 を往復できない |
 | エラー分類と効果 | 構造化された `IoErrorKind`、既存 `effects fs` の適用。新効果・新 raw 名は追加しない | 信頼基盤を最小化し（ADR 0005）、既存の検査系と互換性を維持する |
 
 ---
@@ -70,7 +71,7 @@ ADR 0044 決定 4 および ADR 0045 に従い、仕様の基準とするコミ�
 
 - **必須規則**: すべての `open` は内部で必ず `O_CLOEXEC`（`0o2000000`）を付与する。子プロセスへの記述子リークを防止する。
 - **排他的作成（`create_new`）**: 一時ファイルや WAL の作成時に必須とし、既に同名ファイルが存在する場合は `AlreadyExists`（`EEXIST`）で失敗する。TOCTOU（Time-of-Check to Time-of-Use）のレースを防止する。
-- **作成時モード**: 既定は `0o666`（プロセスの umask でマスクされる）。Git 等で実行ビットが必要な場合のため、明示的に作成モード（`mode: Int`）を指定可能とする。
+- **作成時モード**: 既定は `0o666`（プロセスの umask でマスクされる）。Git 等で実行ビットが必要な場合のため、明示的に作成モード（`mode: Int`）を指定可能とする。作成時モードは umask で落ちうるため、確実なモードの設定と既存ファイルのモードの取得は決定 7 で定める。
 
 #### パス制約と symlink 拒否（ADR 0045:109 要件）
 
@@ -243,7 +244,7 @@ OS の errno を以下の構造化エラーに分類し、未分類の errno は
 | 腕（Kind） | 主な errno | 発生条件 |
 |---|---|---|
 | `NotFound` | `ENOENT` | パスが存在しない |
-| `PermissionDenied` | `EACCES`, `EPERM`, `ELOOP` | 権限不足、symlink 追従拒否（`follow_symlinks(false)` 下での symlink 遭遇） |
+| `PermissionDenied` | `EACCES`, `EPERM`, `EROFS`, `ELOOP` | 権限不足、読み取り専用 FS、symlink 追従拒否（`follow_symlinks(false)` 下での symlink 遭遇） |
 | `AlreadyExists` | `EEXIST` | `create_new` や排他作成で既に存在 |
 | `Busy` | `EWOULDBLOCK`, `EAGAIN` | 非ブロッキングロックで競合中 |
 | `InvalidInput` | `EINVAL` | `append(true)` ハンドルに対する `write_at`/`write_all_at` 呼び出し、不正引数 |
@@ -269,8 +270,76 @@ OS の errno を以下の構造化エラーに分類し、未分類の errno は
 
 ### 6.3 効果（Effects）の割当て
 
-- すべてのファイルおよびディレクトリ操作（`open`, `close`, `read`, `write`, `read_at`, `write_at`, `sync`, `lock`, `create_dir`, `remove_dir`, `rename`）は、既存の **`effects fs`** に割り当てる。
+- すべてのファイルおよびディレクトリ操作（`open`, `close`, `read`, `write`, `read_at`, `write_at`, `sync`, `lock`, `mode`, `set_mode`, `create_dir`, `remove_dir`, `rename`）は、既存の **`effects fs`** に割り当てる。
 - 新しい効果カテゴリ（例: `fs.sync`, `fs.lock` 等）は新設しない。既存の言語仕様・効果検査系との完全な整合を維持する。
+
+---
+
+## 決定 7: 既存ファイルのモードの取得と設定（改訂、Issue #623）
+
+ADR 0047 の持ち越し 1（Git の tree モード 100644／100755 の往復）を満たすため、既存ファイルのモード（権限ビット）の取得と設定を共通 fs 境界に加える。置き場所（本 ADR への追記）は 2026-11-19 15:40 JST の typesafe-ai 判定（jev-1.13.0、p=0.96、confidence 0.92）で決定済み。API の形は本節で定め、判定を「正式判定の記録」に追記する。
+
+### 7.1 API
+
+```sigil
+pub fn mode(&self) -> Result<Int, IoError>                              // File
+pub fn set_mode(&self, mode: Int) -> Result<(), IoError>                // File
+pub fn file_mode(&self, subpath: &Path) -> Result<Int, IoError>         // Dir
+pub fn set_file_mode(&self, subpath: &Path, mode: Int) -> Result<(), IoError>  // Dir
+```
+
+- **取得**（`File::mode`）: `SYS_fstat`（5）の `st_mode` を返す。
+- **設定**（`File::set_mode`）: `SYS_fchmod`（91）で指定のビットに設定する。実行ビットの設定・解除を含む。
+- **`Dir` 起点の同等操作**: `Dir::file_mode` / `Dir::set_file_mode` は、`Dir::open_file`（読み取り、`follow_symlinks(false)`、決定 1.2）で開いたハンドルに対する `File::mode` / `File::set_mode` と同じ結果を返す糖衣とする。パス名に対する `chmod`／`stat` は提供しない（パス名を介した検査と変更の隙間、および symlink 追従を避ける）。
+
+### 7.2 モードの表現
+
+- モードは `Int` の**権限ビット（下位 9 ビット、0o000〜0o777）**とする。取得は `st_mode & 0o777` を返し、ファイル種別ビット（`S_IFMT`）は含めない。
+- **設定は 0o000〜0o777 のみ受け付ける**。範囲外（負値、setuid／setgid／sticky を含む 0o7000 側のビット、0o777 超）は `InvalidInput` で、システムコールを発行する前に拒否する。特殊ビットは本境界の用途（DB・Git）に不要で、権限昇格の経路を広げないため扱わない。取得は特殊ビットが立っていても 0o777 でマスクして返す（隠れるが、設定で変更もしない）。
+- 数値リテラルは 8 進（`0o755`）。Git の tree モード表記 100644／100755 は呼び出し側（sigil-git）の規則で、`mode & 0o111 != 0` なら 100755、そうでなければ 100644 とする。復元は 100755 → `set_mode(0o755)`、100644 → `set_mode(0o644)`。本境界は Git の表記を知らない。
+
+### 7.3 umask との関係
+
+- `set_mode` は **umask の影響を受けない**（`fchmod` は指定どおりのビットを設定する）。作成時モード（決定 1.2）は umask でマスクされるため、実行ビットなど確実なモードが要る新規ファイルは、作成後に `set_mode` を呼ぶ。
+- `mode` は umask と無関係に、現在の inode のビットを返す。
+- 往復の保証: `set_mode(m)` が成功した直後の `mode()` は `m` と等しい（他プロセスが同時に変更しない限り）。0o644／0o755 はこの往復で保たれる。
+
+### 7.4 対象の範囲（ディレクトリ・特殊ファイル）
+
+- **通常ファイルのみ**を対象とする。`File::mode` / `File::set_mode` は、先に `fstat` で種別を確かめ、ディレクトリなら `IsADirectory`、それ以外の通常ファイルでないもの（FIFO、デバイス等）なら `InvalidInput` で失敗する（`set_mode` は失敗時にモードを変更しない）。
+- **ディレクトリのモードの取得と設定は、本改訂では扱わない**（`Dir` ハンドルに `mode`／`set_mode` は付けない）。Git の tree はディレクトリのモード（040000）を保存せず、DB 側にも用途が無い。必要になった時点で別の ADR 改訂で扱う。
+
+### 7.5 既存の契約との関係
+
+| 既存の契約 | モード API での扱い |
+|---|---|
+| `Dir` 起点のルート固定相対操作（1.2） | `Dir` 起点の操作は `Dir::open_file` を経由し、同じパス検証を受ける |
+| `..`・絶対パス・NUL の拒否（1.2） | `file_mode`／`set_file_mode` の `subpath` にも同じ規則を適用し、`InvalidPath` で拒否 |
+| symlink 追従拒否（1.2、ADR 0045:109） | 内部の open は `O_NOFOLLOW`。symlink は `PermissionDenied`（`ELOOP`）で拒否し、symlink 先のモードを読み書きしない。symlink 自体のモードは扱わない |
+| 所有権を持つ `File`／`Dir` ハンドル（1.1） | `File` ハンドルのメソッドとして提供し、生 fd を露出しない。`&File` で呼べる（位置指定 I/O と同様にオフセットを変えない） |
+| 構造化 `IoErrorKind`（6.1） | 下記 7.6 |
+| 新効果・新 raw 名の不新設（6.3、信頼基盤） | 既存 `effects fs`。新 `raw.*` は追加せず `raw.syscall` のみ使う |
+| `--fs-double`（決定 5） | 7.7 |
+
+### 7.6 エラー
+
+- `EPERM`（所有者でも特権でもない）・`EACCES`・`EROFS`（読み取り専用ファイルシステム）→ `PermissionDenied`。6.1 の表の `PermissionDenied` に `EROFS` を加える。
+- 7.2 の範囲外モード → `InvalidInput`。ディレクトリ → `IsADirectory`。通常ファイルでない → `InvalidInput`。
+- `Dir` 起点の操作の `NotFound`／`InvalidPath`／`PermissionDenied` は `Dir::open_file` と同じ。
+- 未分類の errno は `Other(Int)`。
+
+### 7.7 信頼基盤・評価器・差し替え
+
+- SIR 評価器の syscall 許可表に次を検査付きで追加する: `SYS_FSTAT`（5）= 有効な fd と、`struct stat`（x86-64 で 144 バイト）以上のバッファポインタの妥当性。`SYS_FCHMOD`（91）= 有効な fd、かつ `mode` が 0o777 以下の非負。
+- `--fs-double`: 影の実ファイルの fd にだけ本物の `fstat`／`fchmod` を発行する。それ以外の fd は `EOPNOTSUPP` で拒否し、成功を偽装しない。`--fs-double` の右辺の元のファイルのモードは変更しない（5.1）。ネイティブと SIR 評価器の結果は一致させる。
+
+### 7.8 範囲外
+
+ディレクトリのモード、所有者・グループの変更（`chown`）、タイムスタンプ、拡張属性、ACL、パス名に対する `chmod`／`stat`、サイズ取得などその他のメタデータ（`stat` 全般）、`umask` の取得・設定は、本改訂では扱わない。ファイルサイズ等の取得が必要になった場合は別の ADR 改訂とする。
+
+### 7.9 実装 Issue（fs D）
+
+fs A の後に、実装 Issue「fs D: 既存ファイルのモード」を起こす（本 ADR のマージ後、別 PR）。範囲は決定 7 の API・評価器許可表・`--fs-double`・ネイティブと SIR の一致試験。**完了条件**: 0o644 と 0o755 の往復、実行ビットの設定と解除、umask 0o077 下でも `set_mode(0o755)` が 0o755 になること、ディレクトリ・範囲外モード・symlink・`..` の拒否、読み取り専用ファイルシステムの `PermissionDenied`、ネイティブと SIR 評価器の一致。
 
 ---
 
@@ -361,6 +430,7 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 | 電源断・クラッシュによるメタデータ消失 | ファイル自身の `fsync` に加え、親ディレクトリの明示的 `fsync` を契約として要求する |
 | パストラバーサル・symlink・ディレクトリ外アクセス | `Dir::open_file` によるルート固定相対オープン、`..` および絶対パスの構文的拒否、`O_NOFOLLOW` によるシンボリックリンク追従拒否により、専用ディレクトリ外へのアクセスおよび中間 symlink によるすり替え破壊を遮断する（ADR 0045:109 要件） |
 | append と位置指定の混同によるページ破壊 | `append(true)` ハンドルでの `write_at` 呼出しを境界で即座に拒否し、`O_APPEND` を共有しない別個のオープンファイル記述を強制する |
+| モード設定による権限の拡大（setuid 等） | `set_mode` は 0o777 のみ受け付け、特殊ビットは拒否する。symlink 先のモードは変更しない（`O_NOFOLLOW`） |
 | 同一 OS 権限の悪意ある他プロセス | 同一 UID による直接的ストレージ破壊は OS 境界外。専用実行ユーザーとパーミッション設定に依存する |
 
 ---
@@ -410,6 +480,64 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
         "three_issues_a_b_c": "ADR確定後、fs A(資源/名前/排他)→B(ページIO/追記)→C(同期/原子的置換)の3Issueに分割しC完了までDB完成にしない",
         "one_big_fs_issue": "すべてのfs実装を単一の巨大Issueで行う",
         "no_split_with_db": "fs分割を行わず別repoのDB実装と同時に実装する"
+      }
+    }
+  }
+}
+```
+
+### 決定 7（改訂）の正式判定
+
+置き場所（ADR 0049 へ追記）は 2026-11-19 15:40 JST の判定（jev-1.13.0、p=0.96、confidence 0.92）で決定済み。API の形に係る判断点は、起草時点（cloud / Claude 環境に `TYPESAFE_API_KEY` が無く未実施）の後、PR #624 上で見張り（goodnasubi）がキー設定済み環境で実施した（typesafe-ai jev-1.13.0、2026-11-19）。入力は下の JSON（`docs/decisions/records/typesafe-adr0049-filemode-input.json` にも保存）。
+
+**結果: 4 問とも採用案（7.1〜7.4）と一致。ADR の修正は不要。**
+
+| 問い | 選ばれた選択肢 | 確率 | confidence |
+|---|---|---|---|
+| `mode_representation` | `perm_bits_0777_only` | 1.0 | 1.0 |
+| `set_mode_umask` | `no_umask_exact_bits` | 1.0 | 1.0 |
+| `api_shape_and_paths` | `handle_methods_via_open_nofollow` | 1.0 | 1.0 |
+| `directory_modes` | `regular_files_only_now` | 1.0 | 1.0 |
+
+応答の JSON 原本は `docs/decisions/records/typesafe-adr0049-filemode-output.json` に保存。
+
+- **評価軸（固定）**: 上の評価軸に加え、ADR 0047 持ち越し 1（Git tree モード 100644／100755 の往復）、Issue #623 の範囲（取得・設定・既存契約との関係）。
+
+```json
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。ADR0005の信頼基盤最小化、ADR0016のADR先行、ADR0044のP4範囲、ADR0049の共通fs境界（Dir起点ルート固定相対操作、..拒否、O_NOFOLLOWによるsymlink拒否、所有権を持つFile/Dir、生fd非露出、構造化IoErrorKind、新効果・新raw名なし、fs-double fail-closed）、ADR0047持ち越し1（Git treeモード100644/100755の往復）を守る。置き場所はADR0049への追記で決定済み。案: File::mode/set_modeをfstat/fchmodで提供し、Dir起点はopen_file(O_NOFOLLOW)経由の糖衣。モードは権限ビット0o777のIntで、設定は0o777超・特殊ビットをInvalidInputで拒否。set_modeはumaskを適用しない。通常ファイルのみ対象でディレクトリのモードは扱わない。pathに対するchmod/statは提供しない。",
+  "questions": {
+    "mode_representation": {
+      "type": "choice",
+      "criteria": {
+        "perm_bits_0777_only": "権限ビット0o777のIntとし、特殊ビットの設定は拒否する",
+        "full_st_mode_with_special": "種別ビットと特殊ビットを含む12ビット以上のst_modeを設定可能とする",
+        "exec_flag_bool_only": "実行ビットの真偽値だけを公開する"
+      }
+    },
+    "set_mode_umask": {
+      "type": "choice",
+      "criteria": {
+        "no_umask_exact_bits": "fchmodで指定どおりに設定しumaskを適用しない",
+        "apply_umask": "設定時にもumaskを適用する",
+        "create_time_mode_only": "作成時モードのみ提供し既存ファイルの設定は提供しない"
+      }
+    },
+    "api_shape_and_paths": {
+      "type": "choice",
+      "criteria": {
+        "handle_methods_via_open_nofollow": "Fileのメソッドとし、Dir起点はopen_file(O_NOFOLLOW)経由の糖衣とする。パス名へのchmod/statは提供しない",
+        "path_chmod_stat": "パス名に対するchmod/statを提供する",
+        "raw_fd_ints": "整数fdを受け取る関数を公開する"
+      }
+    },
+    "directory_modes": {
+      "type": "choice",
+      "criteria": {
+        "regular_files_only_now": "通常ファイルのみ対象とし、ディレクトリのモードは必要になるまで扱わない",
+        "include_directories_now": "Dirハンドルにもmode/set_modeを今回加える",
+        "any_file_type": "FIFO等を含むあらゆる種別を許可する"
       }
     }
   }

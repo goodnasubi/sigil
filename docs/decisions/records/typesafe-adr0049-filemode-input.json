@@ -1,0 +1,38 @@
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸（固定）: SigilはAIが実装し人間が仕様レビューする。ADR0005の信頼基盤最小化、ADR0016のADR先行、ADR0044のP4範囲、ADR0049の共通fs境界（Dir起点ルート固定相対操作、..拒否、O_NOFOLLOWによるsymlink拒否、所有権を持つFile/Dir、生fd非露出、構造化IoErrorKind、新効果・新raw名なし、fs-double fail-closed）、ADR0047持ち越し1（Git treeモード100644/100755の往復）を守る。置き場所はADR0049への追記で決定済み。案: File::mode/set_modeをfstat/fchmodで提供し、Dir起点はopen_file(O_NOFOLLOW)経由の糖衣。モードは権限ビット0o777のIntで、設定は0o777超・特殊ビットをInvalidInputで拒否。set_modeはumaskを適用しない。通常ファイルのみ対象でディレクトリのモードは扱わない。pathに対するchmod/statは提供しない。",
+  "questions": {
+    "mode_representation": {
+      "type": "choice",
+      "criteria": {
+        "perm_bits_0777_only": "権限ビット0o777のIntとし、特殊ビットの設定は拒否する",
+        "full_st_mode_with_special": "種別ビットと特殊ビットを含む12ビット以上のst_modeを設定可能とする",
+        "exec_flag_bool_only": "実行ビットの真偽値だけを公開する"
+      }
+    },
+    "set_mode_umask": {
+      "type": "choice",
+      "criteria": {
+        "no_umask_exact_bits": "fchmodで指定どおりに設定しumaskを適用しない",
+        "apply_umask": "設定時にもumaskを適用する",
+        "create_time_mode_only": "作成時モードのみ提供し既存ファイルの設定は提供しない"
+      }
+    },
+    "api_shape_and_paths": {
+      "type": "choice",
+      "criteria": {
+        "handle_methods_via_open_nofollow": "Fileのメソッドとし、Dir起点はopen_file(O_NOFOLLOW)経由の糖衣とする。パス名へのchmod/statは提供しない",
+        "path_chmod_stat": "パス名に対するchmod/statを提供する",
+        "raw_fd_ints": "整数fdを受け取る関数を公開する"
+      }
+    },
+    "directory_modes": {
+      "type": "choice",
+      "criteria": {
+        "regular_files_only_now": "通常ファイルのみ対象とし、ディレクトリのモードは必要になるまで扱わない",
+        "include_directories_now": "Dirハンドルにもmode/set_modeを今回加える",
+        "any_file_type": "FIFO等を含むあらゆる種別を許可する"
+      }
+    }
+  }
+}

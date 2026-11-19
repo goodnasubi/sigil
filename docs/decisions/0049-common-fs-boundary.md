@@ -1,6 +1,6 @@
 # 0049: 共通 fs 境界
 
-- **状態**: 提案（typesafe-ai 正式判定は未実施（決定 7 の判定も未実施）。起草者の案として明記。末尾に判定用の問いと評価軸を記録。別系統のレビュー前。実装完了を意味しない）
+- **状態**: 提案（typesafe-ai 正式判定は決定 7 のみ実施済み、それ以外は未実施。起草者の案として明記。末尾に判定用の問いと評価軸を記録。別系統のレビュー前。実装完了を意味しない）
 - **日付**: 2026-11-17（JST）。2026-11-19（JST）に決定 7 を追加（改訂）
 - **対象**: [Issue #584](https://github.com/goodnasubi/sigil/issues/584)、レーン E。改訂: [Issue #623](https://github.com/goodnasubi/sigil/issues/623)（既存ファイルのモードの取得と設定）
 
@@ -488,7 +488,18 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 
 ### 決定 7（改訂）の正式判定
 
-置き場所（ADR 0049 へ追記）は 2026-11-19 15:40 JST の判定（jev-1.13.0、p=0.96、confidence 0.92）で決定済み。API の形に係る次の判断点について、本改訂の起草時点では**未実施**である。起草環境（cloud / Claude）に `TYPESAFE_API_KEY` が設定されておらず、通信も許可されていない（AGENTS.md の「キーが無い環境」。起草者による鍵の登録要求は承認されなかった）。採用案（7.1〜7.4）は判定を経ていない起草者の案である。キー設定済み環境（Codex Cloud 等）で下の入力を実行し、入力と応答の JSON を `docs/decisions/records/` に `typesafe-adr0049-filemode-input.json`／`-output.json` として保存し、結果を本節に追記する。判定が採用案と異なる場合は ADR を修正する。
+置き場所（ADR 0049 へ追記）は 2026-11-19 15:40 JST の判定（jev-1.13.0、p=0.96、confidence 0.92）で決定済み。API の形に係る判断点は、起草時点（cloud / Claude 環境に `TYPESAFE_API_KEY` が無く未実施）の後、PR #624 上で見張り（goodnasubi）がキー設定済み環境で実施した（typesafe-ai jev-1.13.0、2026-11-19）。入力は下の JSON（`docs/decisions/records/typesafe-adr0049-filemode-input.json` にも保存）。
+
+**結果: 4 問とも採用案（7.1〜7.4）と一致。ADR の修正は不要。**
+
+| 問い | 選ばれた選択肢 | 確率 | confidence |
+|---|---|---|---|
+| `mode_representation` | `perm_bits_0777_only` | 1.0 | 1.0 |
+| `set_mode_umask` | `no_umask_exact_bits` | 1.0 | 1.0 |
+| `api_shape_and_paths` | `handle_methods_via_open_nofollow` | 1.0 | 1.0 |
+| `directory_modes` | `regular_files_only_now` | 1.0 | 1.0 |
+
+応答の JSON 原本は見張り側の保存場所にある（PR #624 のコメント参照。本リポジトリには、応答の原本を取り込む場合に `typesafe-adr0049-filemode-output.json` として追加する）。上表は同コメントの報告値の転記である。
 
 - **評価軸（固定）**: 上の評価軸に加え、ADR 0047 持ち越し 1（Git tree モード 100644／100755 の往復）、Issue #623 の範囲（取得・設定・既存契約との関係）。
 

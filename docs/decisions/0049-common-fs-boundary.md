@@ -499,7 +499,7 @@ ADR 0005 決定 3、ADR 0016、および [ADR 0025 補足 A-3](0025-runtime-repl
 | `api_shape_and_paths` | `handle_methods_via_open_nofollow` | 1.0 | 1.0 |
 | `directory_modes` | `regular_files_only_now` | 1.0 | 1.0 |
 
-応答の JSON 原本は見張り側の保存場所にある（PR #624 のコメント参照。本リポジトリには、応答の原本を取り込む場合に `typesafe-adr0049-filemode-output.json` として追加する）。上表は同コメントの報告値の転記である。
+応答の JSON 原本は `docs/decisions/records/typesafe-adr0049-filemode-output.json` に保存。
 
 - **評価軸（固定）**: 上の評価軸に加え、ADR 0047 持ち越し 1（Git tree モード 100644／100755 の往復）、Issue #623 の範囲（取得・設定・既存契約との関係）。
 

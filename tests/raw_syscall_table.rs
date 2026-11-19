@@ -463,3 +463,43 @@ fn renameat_dirfds_unused_args_and_paths_checked() {
         );
     }
 }
+
+#[test]
+fn fstat_and_fchmod_checks() {
+    // fstat(5)
+    // 正常実行（無効 fd = 999 への呼び出しは EBADF = -9 を返す）
+    let ok_stat = "  let p = raw.alloc(144, 8);\n  let r = raw.syscall(5, 999, raw.addr_to_int(p), 0, 0, 0, 0);\n  raw.free(p, 144, 8);\n  return r;";
+    assert_eq!(run(ok_stat).unwrap(), "-9");
+    // 未使用引数非ゼロ
+    stops(
+        "  let p = raw.alloc(144, 8);\n  let r = raw.syscall(5, 999, raw.addr_to_int(p), 1, 0, 0, 0);\n  raw.free(p, 144, 8);\n  return r;",
+        "未使用の引数",
+    );
+    // バッファ範囲外
+    stops(
+        "  let p = raw.alloc(64, 8);\n  let r = raw.syscall(5, 999, raw.addr_to_int(p), 0, 0, 0, 0);\n  raw.free(p, 64, 8);\n  return r;",
+        "範囲外",
+    );
+
+    // fchmod(91)
+    // 正常実行（無効 fd = 999 への呼び出しは EBADF = -9 を返す）
+    assert_eq!(
+        run("  return raw.syscall(91, 999, 420, 0, 0, 0, 0);").unwrap(),
+        "-9"
+    );
+    // 未使用引数非ゼロ
+    stops(
+        "  return raw.syscall(91, 999, 420, 1, 0, 0, 0);",
+        "未使用の引数",
+    );
+    // mode 負数
+    stops(
+        "  return raw.syscall(91, 999, -1, 0, 0, 0, 0);",
+        "mode は 0 以上 0o777 以下",
+    );
+    // mode 0o777 超 (512 = 0o1000)
+    stops(
+        "  return raw.syscall(91, 999, 512, 0, 0, 0, 0);",
+        "mode は 0 以上 0o777 以下",
+    );
+}

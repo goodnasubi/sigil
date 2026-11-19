@@ -1234,6 +1234,8 @@ impl<'p> M<'p> {
                             | SYS_FSYNC
                             | SYS_FDATASYNC
                             | SYS_RENAMEAT
+                            | SYS_FSTAT
+                            | SYS_FCHMOD
                     )
                 {
                     self.eval_fs_double_syscall(n, [a0, a1, a2, a3, a4, a5])
@@ -1630,7 +1632,24 @@ impl<'p> M<'p> {
                 }
             }
             SYS_FSTAT => {
+                if a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall fstat: 未使用の引数は 0 のみ許可")
+                    );
+                }
                 self.check_raw_access(addr_of(a[1], "statbuf")?, STAT_SIZE, loc)?;
+            }
+            SYS_FCHMOD => {
+                if a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall fchmod: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                if a[1] < 0 || a[1] > 0o777 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall fchmod: mode は 0 以上 0o777 以下")
+                    );
+                }
             }
             SYS_NEWFSTATAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
@@ -1809,6 +1828,15 @@ impl<'p> M<'p> {
             SYS_FSYNC | SYS_FDATASYNC => {
                 if self.is_shadow_fd(a[0]) {
                     issue_syscall(n, [a[0], 0, 0, 0, 0, 0])
+                } else {
+                    -95
+                }
+            }
+            // ADR 0049 決定 7: 影の実ファイルの fd にだけ本物の fstat／fchmod を発行する。
+            // それ以外の fd は fail-closed（EOPNOTSUPP）。
+            SYS_FSTAT | SYS_FCHMOD => {
+                if self.is_shadow_fd(a[0]) {
+                    issue_syscall(n, a)
                 } else {
                     -95
                 }
@@ -2271,6 +2299,7 @@ const SYS_READ: i64 = 0;
 const SYS_WRITE: i64 = 1;
 const SYS_CLOSE: i64 = 3;
 const SYS_FSTAT: i64 = 5;
+const SYS_FCHMOD: i64 = 91;
 const SYS_MMAP: i64 = 9;
 const SYS_MUNMAP: i64 = 11;
 const SYS_RT_SIGPROCMASK: i64 = 14;

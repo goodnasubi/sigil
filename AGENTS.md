@@ -1,7 +1,7 @@
 # AGENTS.md — Sigil の AI エージェント向け作業ルール
 
 すべての AI エージェント（Claude Code・Gemini・Meta Muse・Codex 等）が最初に読む、単体完結の指示書。
-詳細は [docs/PARALLEL_DEV.md](docs/PARALLEL_DEV.md)（運用）と [docs/CHECK_SPLIT_PLAN.md](docs/CHECK_SPLIT_PLAN.md)（`check.rs` 分割計画）。迷ったらそちらを読む。
+詳細は [docs/PARALLEL_DEV.md](docs/PARALLEL_DEV.md)（運用）、[REVIEW.md](REVIEW.md)（レビュー規約）、[docs/CHECK_SPLIT_PLAN.md](docs/CHECK_SPLIT_PLAN.md)（`check.rs` 分割計画）。迷ったらそちらを読む。
 
 ## プロジェクト
 
@@ -120,6 +120,8 @@ cargo test --test <変更範囲のテスト>
 
 ## レビューとマージ
 
+レビューの観点・チェック項目・信頼性チェックリストなどの詳細は [REVIEW.md](REVIEW.md)（origin/main 側）に従う。レビュー時は対象 PR のブランチではなく、必ず main 側の REVIEW.md を参照すること。
+
 | 変更の種類 | 人間のレビュー | マージの条件 |
 |---|---|---|
 | コードのみ（仕様に影響しない） | 不要 | CI が緑 + 別系統のエージェントの承認 |
@@ -128,11 +130,8 @@ cargo test --test <変更範囲のテスト>
 | セキュリティ関連（ADR 0020、CODEOWNERS 対象） | **必須** | CODEOWNERS の承認 |
 
 - 人間の承認は、対象の Issue の段階で、範囲を明示して先行して与えることもできる（先行承認）。先行承認がある場合、その範囲内の差分にとどまる PR は、CI が緑で別系統のエージェントの承認が揃えば、改めて人間の承認を得ずにマージしてよい。差分が承認の範囲を超える場合は先行承認は及ばず、改めて人間の承認が必要になる。承認の記録は Issue または PR のコメントに残す。
-- 承認・レビュー結果のコメントには、レビューしたエージェント名と系統（例: agy（Gemini 系統）／Codex Cloud（OpenAI 系統）／Claude（Anthropic 系統））を明記する。全員が同じアカウントで投稿するため、明記がないと別系統の承認かを後から確かめられない。
-- 仕様に影響するか迷う PR も、「判断の手順」に従って判断する。
-- PR の説明に、仕様の差分を `sigil spec` の出力で貼る。
-- PR の説明に、実行した環境（`local-windows` / `cloud` / `cloud-shell`）を書く。
-- マージ順: 契約変更 → ADR → 実装 → サンプル・テスト。
+- 承認コメントの記法、チェックリスト、その他のレビュー運用詳細は [REVIEW.md](REVIEW.md) を参照すること。
+
 
 ## ADR
 

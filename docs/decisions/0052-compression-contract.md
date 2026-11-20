@@ -1,6 +1,6 @@
 # 0052: 圧縮の契約
 
-- **状態**: 提案（typesafe-ai 正式判定済み、別系統レビュー前）
+- **状態**: 提案（原案の 6 判断点とレビュー対応の 2 判断点を判定済み、再レビュー待ち）
 - **日付**: 2026-11-20（JST）
 - **対象**: [Issue #635](https://github.com/goodnasubi/sigil/issues/635)、レーン E
 - **仕様基準**: sigil の `main`、`33467e3b43238fdc69331c58a788c95f1de393e5`
@@ -23,10 +23,10 @@
 
 ## フレームと検査値
 
-- **zlib**（[RFC 1950](https://www.rfc-editor.org/rfc/rfc1950)）はヘッダの方式・窓サイズ・FCHECK と末尾の Adler-32 を検証する。FDICT が立つ入力は辞書を調達せず拒否する。中身は [RFC 1951](https://www.rfc-editor.org/rfc/rfc1951) の stored・固定・動的 Huffman ブロックを受理し、終端と長さ・距離を検証する。後方参照は既に展開した範囲と zlib が宣言した窓の両方に収める。書出しは Adler-32 付きの有効な stored ストリームで足りる。
-- **gzip**（[RFC 1952](https://www.rfc-editor.org/rfc/rfc1952)）は upload-pack POST に限り、認証・認可後に単一 member を受理する。magic、方式、予約フラグ、任意項目の長さ・終端、FHCRC があればヘッダ CRC-32 の下位 16 bit、deflate 終端、trailer の展開データ CRC-32 と ISIZE（実際に展開した長さの下位 32 bit）を検証する。gzip の検査値に zlib の Adler-32 は使わない。gzip 出力と HTTP 応答の圧縮は提供しない。
+- **zlib**（[RFC 1950](https://www.rfc-editor.org/rfc/rfc1950)）はヘッダの方式・窓サイズ・FCHECK と末尾の Adler-32 を検証する。FDICT が立つ入力は辞書を調達せず拒否する。中身は [RFC 1951](https://www.rfc-editor.org/rfc/rfc1951) の stored・固定・動的 Huffman ブロックを受理し、終端と長さ・距離を検証する。後方参照は既に展開した範囲と CINFO が宣言した窓の両方に収める。zlib 1.3.1 の `inflate` は `INFLATE_STRICT` を有効にした場合に宣言窓を検査する。本契約ではこの検査を常に必須とし、既定の zlib ビルドより意図的に厳格にする。書出しは Adler-32 付きの有効な stored ストリームで足りる。[zlib の通常経路](https://github.com/madler/zlib/blob/v1.3.1/inflate.c#L1122-L1128)・[高速経路](https://github.com/madler/zlib/blob/v1.3.1/inffast.c#L156-L162)
+- **gzip**（[RFC 1952](https://www.rfc-editor.org/rfc/rfc1952)）は upload-pack POST に限り、認証・認可後に単一 member を受理する。magic、方式、予約フラグ、任意項目の長さ・終端、FHCRC があればヘッダ CRC-32 の下位 16 bit、deflate 終端、trailer の展開データ CRC-32 と ISIZE（実際に展開した長さの下位 32 bit）を検証する。gzip には窓の宣言欄がなく、後方参照は既に展開した範囲と DEFLATE の最大距離 32 KiB の両方に収める。zlib の宣言窓にも DEFLATE のこの最大距離が適用される。gzip の検査値に zlib の Adler-32 は使わない。gzip 出力と HTTP 応答の圧縮は提供しない。
 - **境界**。緩いオブジェクトと gzip 本文は、フレーム全体が与えられた入力をちょうど消費することを検査する。pack は各オブジェクトの zlib ストリームを検証し、検査値末尾までの消費長を pack 呼び出し側に返して次の境界を決める。pack 側で宣言長・展開実長とエントリ／trailer の境界を検証する。次の正規エントリの存在は余剰に当たらない。
-- **pack index**。現行のローカル読み取りは `.idx` の `crc32` 欄を検証に使わず、オブジェクトの OID を再計算する。CRC 欄を検証に使うかは ADR 0047「前提と持ち越し」4 の実装 PR で扱う。gzip CRC-32 は独立した必須検査であり、既存の pack／OID 検証を置き換えない。
+- **pack index**。現行のローカル読み取りは `.idx` の `crc32` 欄を検証に使わず、オブジェクトの OID を再計算する。CRC 欄を検証に使うかは本契約の範囲外とし、ADR 0047「前提と持ち越し」4 を参照して後続の pack 検証 Issue に明記し、その実装 PR で決める。gzip CRC-32 は独立した必須検査であり、既存の pack／OID 検証を置き換えない。
 
 ## 上限と拒否
 
@@ -40,7 +40,7 @@
 | upload-pack POST の gzip | ヘッダ・trailer を含め 2 MiB | 展開後の要求本文 1 MiB | 同上 |
 | identity／符号化指定なしの HTTP 要求 | 本文の実効上限 1 MiB | 同じ 1 MiB | 同上 |
 
-- 80 MiB はローカルの新しい入力上限で、64 MiB の内容にヘッダと圧縮フレームの余裕を確保する。pack 全体をメモリに載せない。ローカルの上限と転送の上限が同時に適用されるときは厳しい方を使う。各処理で文脈の上限、転送の残予算、信用できない宣言長から得た上限のうち最小値を使う。pack や delta の宣言長は処理前に検査し、実長との一致も検証する。gzip の ISIZE に基づく割当ては行わない。
+- ローカルの 80 MiB は本 ADR が定める符号化入力の上限であり、展開後 64 MiB・核の作業メモリ 256 MiB などを定める ADR 0047 決定 5 を補足する。80 MiB の出典は本 ADR とし、決定 5 の改訂は不要。64 MiB の内容にヘッダと圧縮フレームの余裕を確保する。pack 全体をメモリに載せない。ローカルの上限と転送の上限が同時に適用されるときは厳しい方を使う。出力は文脈の上限、転送の残予算、適用される宣言長をすべて満たす範囲に制限する。gzip の ISIZE に基づく割当ては行わない。
 - 入力・未検証出力・窓・復号表・一時コピー・同時処理分を作業メモリに計上し、保持や割当ての前に予約する。長さ・加算・offset を先に検査し、展開中は各追加の前に残量を確認する。累計には delta の解凍と復元の一時出力も計上し、バッファを解放しても累計は戻さない。上限に収まらない予約、読み取り、展開はその時点で停止し、未検証の出力を破棄する。比率にかかわらず、入力・展開量・メモリのどれかが尽きる圧縮爆弾に同じ規則を適用する。
 - gzip 本文を pkt-line、交渉、更新処理に渡すのは全検証後に限る。下表は HTTP 応答開始前の対応。ローカルの zlib 復号には HTTP 状態を返さず、分類と固定理由を使う。Git 応答開始後は ADR 0048 の `ERR`／`ng` を使う。公開する理由には入力内容・内部パス・秘密を含めない。
 
@@ -50,19 +50,37 @@
 | フレーム・ブロック・検査値の途中で入力終了 | `Corrupt` | `truncated_compressed_data` | 400 |
 | zlib preset dictionary | `UnsupportedFormat` | `unsupported_preset_dictionary` | 400 |
 | 完結したフレーム後の連結 member・余剰データ | `Corrupt` | `trailing_compressed_data` | 400 |
-| 入力・展開量・メモリ・転送予算を超過 | `LimitExceeded` | `compression_limit_exceeded` | 413 |
+| 入力・展開量・転送予算を超過、または作業メモリの予算を予約できない | `LimitExceeded` | `compression_limit_exceeded` | 413 |
 | 未対応・多重 `Content-Encoding`、upload-pack POST 以外の gzip | `UnsupportedFormat` | `unsupported_content_encoding` | 415 |
 
-認証・認可の拒否は ADR 0048 に従う。符号化の種類が未対応なら本文を復号せず 415 とし、対応形式は読取り・展開中に上限超過を検出した時点で 413 とする。宣言長が上下限内でも、実長不一致は 400 とする。ただし出力予算超過で先に停止した場合は 413 とする。
+### 検査順序
+
+評価器とネイティブは次の順に論理的な検査を行い、最初の失敗で停止して表の分類・固定理由・HTTP 状態を返す。読取りの分割やデコーダ内の先読みで順序を変えない。
+
+1. HTTP では ADR 0048 の認証・認可に従った後、本文の長さ確認や読取りの前に `Content-Encoding` を検査する。未指定または単一の `identity` を受理し、単一の `gzip` は upload-pack POST で受理する。符号化名は ASCII の大文字・小文字を区別しない。ADR 0048 が列挙した名前に限って受理するため、RFC が同等の扱いを推奨する `x-gzip` も未対応として扱う。別名と、複数のヘッダ行も含めた多重符号化は `unsupported_content_encoding`（415）とする。[RFC 9110 §8.4](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.4)・[§8.4.1.3](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.4.1.3)
+2. 確定した符号化入力長を読み取り・展開前に検査する。pack・delta などの宣言長は取得直後に形式と範囲を検査する。宣言長が適用される出力・転送予算を超える場合は `compression_limit_exceeded`（413）。宣言長の形式が不正な場合は `invalid_compressed_data`（400）。対応する HTTP 本文は長さの指定や分割方法にかかわらず、フレームの検査前に本文の終端か、符号化上限を超える最初の byte まで確認する。有効な `Content-Length` が上限を超える場合も本文を読む前に同じ理由で拒否する。緩い形式もファイル長を先に検査し、上限内で入力全体を取得してからフレームを検査する。pack ではそのストリームの消費位置だけを数え、必要な次の byte が pack 側の読み取り境界内に存在し上限を超えるなら 413、入力が尽きていれば打切りとする。次のエントリの先読みは現ストリームの消費に含めない。
+3. フレームヘッダ、DEFLATE ブロックの順に進み、フィールドと符号を入力順に検査する。zlib 固定ヘッダの方式・窓・FCHECK を確認した後で FDICT を判定し、辞書指定は DICTID を読む前に拒否する。展開の単位は、LEN／NLEN 確認後の stored の 1 byte、Huffman の 1 literal、または長さと距離を検証済みの 1 後方参照とする。各単位に必要な入力の打切りや符号の破損を先に判定する。有効な単位ごとに独立した出力・転送予算、宣言長の超過、作業メモリ予約の順に確認してから追加する。予算と宣言長の両方を超える単位は 413、宣言長だけを超える単位は `invalid_compressed_data`（400）とする。
+4. DEFLATE の終端に達したら展開実長と適用される宣言長の一致を確かめ、次に trailer のフィールドを入力順に検査し、最後に入力全消費または pack の境界を確認する。全検査が終わってから出力を渡す。
+
+入力・出力の保持や割当てに必要な予約はその直前に行う。要求単体と、他の要求が使用中の全体作業メモリが原因の予約失敗は、同じ `compression_limit_exceeded`（413）とする。
+
+| 重なる条件 | 先に返す理由と HTTP 状態 |
+| --- | --- |
+| 出力が上限ちょうどで次の符号が破損／有効な単位が先に上限を超え、後続が破損 | 順に `invalid_compressed_data`（400）／`compression_limit_exceeded`（413） |
+| 途中で打ち切られたデータで、事前に読んだ宣言長自体が予算超過／宣言長は予算内だが次の出力単位が打切り | 順に `compression_limit_exceeded`（413）／`truncated_compressed_data`（400） |
+| 有効な出力単位が宣言長のみを超過／宣言長と出力予算を同時に超過し、いずれも後続で打切り | 順に `invalid_compressed_data`（400）／`compression_limit_exceeded`（413） |
+| 有効な出力単位で予算超過、後続の検査値も不一致 | `compression_limit_exceeded`（413） |
+| gzip ヘッダ不正かつ符号化本文が 2 MiB ちょうど／2 MiB 超過 | 順に `invalid_compressed_data`（400）／`compression_limit_exceeded`（413） |
+| 未対応の符号化かつ本文長が上限超過 | `unsupported_content_encoding`（415）。本文を読まない |
 
 ## 実装時の完了条件
 
 以下を評価器とネイティブで確認し、fixture と結果を実装リポジトリに保存する。
 
-1. **既知ベクトル**。stored（空・複数ブロックを含む）、固定・動的 Huffman、gzip の各任意項目と FHCRC について、期待する出力・消費長・検査値を固定する。Adler-32／CRC-32／ISIZE／FHCRC の不一致、不正な構造・窓参照、打切り、辞書、連結・余剰、未対応・多重符号化を固定 fixture で拒否し、表の理由と HTTP 状態を確認する。
-2. **境界**。各上限の直下・一致・1 byte 超過、宣言長不一致、整数 overflow、極小入力からの大きな展開、出力を生まない入力、同時予約と累計超過を確認する。拒否時は部分出力を成功として取得できず、gzip 要求処理が開始されないことを確認する。
-3. **実物の Git**。SHA-256 対応 Git の版と実行物の検査値を固定する。Git が生成した loose と pack を読み、出力した stored zlib の loose と wire pack を Git が受理することを、内容・OID の一致と `git fsck` で確認する。実際の clone／fetch が送る gzip 要求を捕捉し、検証後の本文が同じ pkt-line を表すことと相互運用を確認する。
-4. **ファジングと性能**。zlib、deflate、gzip、pack の境界と予算を対象に seed・corpus・実行時間／試行数・回帰例を記録する。クラッシュ、上限迂回、未検証出力、両経路の結果不一致を欠陥として扱う。固定の実行版・入力・環境で経過時間、スループット、ピーク作業メモリを両経路で記録する。性能値は合否に使わず、契約上の資源上限は境界試験で検証する。
+1. **既知ベクトル**。stored（空・複数ブロックを含む）、固定・動的 Huffman、gzip の各任意項目と FHCRC について、期待する出力・消費長・検査値を固定する。32 KiB 未満の窓を宣言し十分な展開済み履歴がある zlib で、CINFO の宣言窓ちょうどの距離を受理し、宣言窓を 1 byte 超える距離を `invalid_compressed_data` で拒否する。gzip では 32 KiB ちょうどの距離を受理する。Adler-32／CRC-32／ISIZE／FHCRC の不一致、不正な構造・窓参照、打切り、辞書、連結・余剰、未対応・多重符号化を固定 fixture で拒否し、表の理由と HTTP 状態を確認する。認める符号化名の大文字・小文字の違いと別名の扱いも確認する。
+2. **境界**。各上限の直下・一致・1 byte 超過、宣言長不一致、整数 overflow、極小入力からの大きな展開、出力を生まない入力、同時予約と累計超過を確認する。検査順序の表の全組合せを固定 fixture にし、`Content-Length` の有無や読み取りの分割位置を変えても、評価器とネイティブで表の分類・理由・該当する HTTP 状態が一致することを確かめる。pack は入力上限ちょうどでの打切りと、境界内に次の byte があり上限を超える場合を区別する。拒否時は部分出力を成功として取得できず、gzip 要求処理が開始されないことを確認する。
+3. **実物の Git**。SHA-256 対応 Git の版と実行物の検査値を固定する。Git が生成した loose と pack を読み、出力した stored zlib の loose と wire pack を Git が受理することを、内容・OID の一致と `git fsck` で確認する。実際の clone／fetch が送る gzip 要求を捕捉し、検証後の本文が同じ pkt-line を表すことと相互運用を確認する。zlib の宣言窓を超える距離の拒否は、上の契約固有のベクトルで確かめる。
+4. **ファジングと性能**。zlib、deflate、gzip、pack の境界と予算を対象に seed・corpus・実行時間／試行数・回帰例を記録する。クラッシュ、上限迂回、未検証出力、両経路の結果不一致（分類・固定理由・該当する HTTP 状態を含む）を欠陥として扱う。固定の実行版・入力・環境で経過時間、スループット、ピーク作業メモリを両経路で記録する。性能値は合否に使わず、契約上の資源上限は境界試験で検証する。
 
 ## sigil-git の適合確認
 
@@ -77,7 +95,9 @@
 
 ## 正式判定の記録
 
-2026-11-20（JST）、Codex Cloud が typesafe-ai `jev-1.13.0` を実行し HTTP 200 を受信した。入力と応答の保存場所は本節末尾の JSON。表には採用案の確率と confidence を示す。
+2026-11-20（JST）、Codex Cloud が typesafe-ai `jev-1.13.0` を実行し HTTP 200 を受信した。実行時刻は保存した判定記録から確認できない。入力と応答は本節末尾の JSON に収録した。表には判定対象とした 6 判断点の選択肢と、その確率・confidence を示す。
+
+80 MiB、2 MiB、64 byte などの具体値、固定理由名と HTTP 状態の個別の割当ては起草者が契約案に記載した。2 MiB など既に定められた上限や HTTP 状態は該当する先行 ADR に従う。判定にはこれらを背景として示し、個別の値・名称・割当てを選択肢として比較していない。
 
 | 判断点 | 採用した選択肢 | 確率 | confidence |
 | --- | --- | ---: | ---: |
@@ -219,6 +239,80 @@
   "usage": {
     "input_tokens": 2019,
     "output_tokens": 268
+  }
+}
+```
+
+</details>
+
+### レビュー対応の追加判定
+
+2026-11-20 **12:46:19 JST**、Codex Cloud が typesafe-ai `jev-1.13.0` を実行し HTTP 200 を受信した。追加の対象は検査順序と HTTP 符号化名の 2 判断点。入力と応答は以下の JSON に収録した。
+
+| 判断点 | 採用した選択肢 | 確率 | confidence |
+| --- | --- | ---: | ---: |
+| 検査順序 | `canonical_phases` | 0.98 | 0.97 |
+| HTTP 符号化名 | `canonical_only` | 0.68 | 0.36 |
+
+<details>
+<summary>追加判定の入力 JSON</summary>
+
+```json
+{
+  "model": "jev-1.13.0",
+  "state": "評価軸（固定）: Sigil は AI が実装し人間が仕様をレビューする。小さい契約、最小の信頼基盤、明示的拒否、評価器とネイティブで一致する分類、実物 Git と標準 HTTP との相互運用を優先する。所有者指示: PR 636 の ADR 0052 のレビュー対応のみ。既存 ADR 0047/0048 の予算、upload-pack POST に限る単一 gzip member と認証・認可の手順を維持する。元の六判断は独立した既存記録であり、具体値・固定名は起草案。今回の追加判断は拒否順序と HTTP 符号化名についてのみ。local pack index crc32 は後続に引継ぐ。Gemini Decisions は使わない。",
+  "questions": {
+    "precedence": {
+      "type": "choice",
+      "criteria": {
+        "canonical_phases": "認証認可の後、HTTP の符号化選択を本文読取り前に検査。境界が既知の入力は構文解釈前に bounded intake し、gzip の大小は読取り分割に依存させない。pack 内の個別ストリームは消費位置で入力上限を検査する。宣言長がある場合はその取得直後に範囲検査し、その後フレームヘッダ、復号の論理単位ごとに構造検査から出力予算・適用される宣言長の検査・出力確保と書込みの順、終端後は実長・trailer・余剰を固定順で検証する。最初の失敗で停止し、先行する予算超過後の破損は調べない。評価器とネイティブに同じ順序と重複ベクトルを要求する。",
+        "decode_while_intake": "対応する HTTP 本文は到着直後から展開し、入力長とフレーム破損は観測した順に返す。",
+        "scan_all_first": "予算を超えても構文・検査値のエラーを検索し、データ破損を優先する。"
+      }
+    },
+    "content_encoding_alias": {
+      "type": "choice",
+      "criteria": {
+        "rfc_alias": "HTTP 符号化名を ASCII 大文字小文字無視で比較し、upload-pack POST の x-gzip を RFC 9110 8.4.1.3 の SHOULD に従い gzip の別名として扱って同じ検証と上限を適用する。他の未対応名、多重符号化、他の入口の gzip/x-gzip は本文を読む前に 415。",
+        "canonical_only": "HTTP 符号化名を ASCII 大文字小文字無視で比較し、許可する名前は identity と upload-pack POST の gzip に限定する。x-gzip は未対応として本文を読む前に 415 とする。"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>追加判定の応答 JSON</summary>
+
+```json
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "precedence": {
+      "type": "choice",
+      "choice": "canonical_phases",
+      "confidence": 0.97,
+      "probabilities": {
+        "canonical_phases": 0.98,
+        "decode_while_intake": 0.02,
+        "scan_all_first": 0.0
+      }
+    },
+    "content_encoding_alias": {
+      "type": "choice",
+      "choice": "canonical_only",
+      "confidence": 0.36,
+      "probabilities": {
+        "rfc_alias": 0.32,
+        "canonical_only": 0.68
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 1112,
+    "output_tokens": 84
   }
 }
 ```

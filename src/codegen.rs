@@ -15,6 +15,7 @@
 //!
 //! 出せない構文・組み込みはない（SIR の不変条件が崩れたときだけ `CgError::Internal`）。
 
+mod freestanding;
 mod func;
 mod start;
 mod task;
@@ -32,6 +33,17 @@ use func::Fx;
 use std::collections::HashMap;
 use std::fmt;
 
+/// ネイティブコードの出力先（ADR 0015、ADR 0054 決定 2）。
+/// `targets bare` の機能制約（ADR 0014）とは独立に選択する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Target {
+    /// Linux x86-64 向けの静的 ELF（既定。ADR 0015）。
+    #[default]
+    LinuxX86_64,
+    /// ホスト ABI・確保器・`std.os` に依存しない x86-64 freestanding 静的 ELF（ADR 0054 決定 2・7）。
+    X86_64Freestanding,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Opts {
     /// `--trace-drops`（破棄の記録を標準エラーに出す）。
@@ -40,10 +52,25 @@ pub struct Opts {
     pub trust_base: Vec<String>,
 }
 
+/// `p` をオブジェクトのバイト列にする（Linux x86-64 向け）。
+pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
+    compile_for(p, opts, Target::LinuxX86_64)
+}
+
+/// `p` を指定した出力先 `target` のオブジェクトのバイト列にする（ADR 0054 決定 2・7）。
+pub fn compile_for(p: &Program, opts: &Opts, target: Target) -> Result<Vec<u8>, CgError> {
+    if target == Target::X86_64Freestanding {
+        return freestanding::compile(p, opts);
+    }
+    compile_linux(p, opts)
+}
+
 #[derive(Debug, Clone)]
 pub enum CgError {
-    /// 入口の指定の誤り（引数の型がコマンドラインから受け取れないなど）。
+    /// 入口の指定の誤り（引数の型がコマンドラインや起動契約から受け取れないなど）。
     Entry(String),
+    /// 指定された出力先では使えない機能（freestanding 出力での確保や OS 機能など）。
+    Unsupported(String),
     /// 生成の失敗（Cranelift の検証の失敗など。不具合）。
     Internal(String),
 }
@@ -51,7 +78,7 @@ pub enum CgError {
 impl fmt::Display for CgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CgError::Entry(m) => write!(f, "{m}"),
+            CgError::Entry(m) | CgError::Unsupported(m) => write!(f, "{m}"),
             CgError::Internal(m) => write!(f, "内部エラー: {m}"),
         }
     }
@@ -229,6 +256,7 @@ pub(crate) struct Cg<'p> {
     msgs: Vec<String>,
     msg_idx: HashMap<String, usize>,
     pub trace: bool,
+    pub freestanding: bool,
     pub fids: Vec<FuncId>,
     pub msg_table: DataId,
     /// 大域ごとの静的データ（8 バイトの語。`Program.globals` と同じ添字）。
@@ -674,7 +702,7 @@ fn supported_param(t: &Ty) -> bool {
 }
 
 /// `p` をオブジェクトのバイト列にする。
-pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
+fn compile_linux(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
     let entry: &Func = &p.funcs[p.entry];
     for &pi in &entry.params {
         if !supported_param(&entry.locals[pi].ty) {
@@ -761,6 +789,7 @@ pub fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         msgs: vec![],
         msg_idx: HashMap::new(),
         trace: opts.trace_drops,
+        freestanding: false,
         fids,
         msg_table,
         gids,

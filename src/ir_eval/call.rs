@@ -389,7 +389,7 @@ impl<'p> M<'p> {
                     _ => Val::Unit,
                 }
             }
-            StrLen | StrIsEmpty | StrTrim | StrLines | StrParseInt => {
+            StrLen | StrByteLen | StrIsEmpty | StrTrim | StrLines | StrParseInt => {
                 let (s, p) = self.view(locals, &args[0]);
                 let text: Rc<str> = with_val(&s, &p, |v| match v {
                     Val::Str(x) => x.clone(),
@@ -397,6 +397,7 @@ impl<'p> M<'p> {
                 });
                 match b {
                     StrLen => Val::Int(stext::char_len(&text)),
+                    StrByteLen => Val::Int(text.len() as i64),
                     StrIsEmpty => Val::Bool(text.is_empty()),
                     StrTrim => Val::Str(stext::trim(&text).into()),
                     StrLines => list_of(

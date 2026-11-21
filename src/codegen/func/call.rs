@@ -434,6 +434,10 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (s, _) = self.val(&args[0]);
                 (self.rt("str_len", &[s]), u)
             }
+            StrByteLen => {
+                let (s, _) = self.val(&args[0]);
+                (self.rt("str_bytes", &[s]), u)
+            }
             StrIsEmpty | PathIsEmpty => {
                 let (s, _) = self.val(&args[0]);
                 (self.rt("str_is_empty", &[s]), u)

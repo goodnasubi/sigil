@@ -1115,7 +1115,7 @@ fn push_dec(b: &mut Bytes, n: Int)
     digits.push(48 + v % 10);
     v = v / 10;
   }
-  let mut i = digits.len();
+  let mut i = digits.byte_len();
   while i > 0 {
     i = i - 1;
     b.push(digits.get(i).unwrap_or(48));

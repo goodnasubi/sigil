@@ -302,7 +302,7 @@ fn nonzero(digits: &Bytes) -> Bool
   effects none
 {
   let mut i = 0;
-  while i < digits.len() {
+  while i < digits.byte_len() {
     if digits.get(i).unwrap_or(0) != 0 {
       return true;
     }
@@ -318,7 +318,7 @@ fn twice(digits: &mut Bytes) -> Int
   effects none
 {
   let mut carry = 0;
-  let mut i = digits.len();
+  let mut i = digits.byte_len();
   while i > 0 {
     i = i - 1;
     let n = digits.get(i).unwrap_or(0) * 2 + carry;
@@ -359,7 +359,7 @@ fn decimal_float(digits: &Bytes, point: Int, negative: Bool, sticky: Bool) -> Re
     fraction.push(0);
     i = i + 1;
   }
-  while i < digits.len() {
+  while i < digits.byte_len() {
     fraction.push(digits.get(i).unwrap_or(0));
     i = i + 1;
   }
@@ -367,7 +367,7 @@ fn decimal_float(digits: &Bytes, point: Int, negative: Bool, sticky: Bool) -> Re
   while nonzero(&whole) {
     let mut rem = 0;
     i = 0;
-    while i < whole.len() {
+    while i < whole.byte_len() {
       let n = rem * 10 + whole.get(i).unwrap_or(0);
       whole.set(i, n / 2);
       rem = n % 2;
@@ -375,7 +375,7 @@ fn decimal_float(digits: &Bytes, point: Int, negative: Bool, sticky: Bool) -> Re
     }
     binary.push(rem);
   }
-  let mut exponent = binary.len() - 1;
+  let mut exponent = binary.byte_len() - 1;
   let mut first = 0;
   if binary.is_empty() {
     exponent = -1;
@@ -395,7 +395,7 @@ fn decimal_float(digits: &Bytes, point: Int, negative: Bool, sticky: Bool) -> Re
   let mut mantissa = 0;
   let mut guard = 0;
   let mut taken = 0;
-  i = binary.len();
+  i = binary.byte_len();
   while taken <= precision {
     let mut bit = 0;
     if i > 0 {
@@ -459,7 +459,7 @@ fn number(r: &mut JsonRead) -> Result<JsonNode, Int>
     let d = byte(&r) - 48;
     if digits.is_empty() && d == 0 {
       leading = leading + 1;
-    } else if digits.len() < 1100 {
+    } else if digits.byte_len() < 1100 {
       digits.push(d);
     } else if d != 0 {
       sticky = true;
@@ -482,7 +482,7 @@ fn number(r: &mut JsonRead) -> Result<JsonNode, Int>
       let d = byte(&r) - 48;
       if digits.is_empty() && d == 0 {
         point = point - 1;
-      } else if digits.len() < 1100 {
+      } else if digits.byte_len() < 1100 {
         digits.push(d);
       } else if d != 0 {
         sticky = true;
@@ -700,7 +700,7 @@ fn int_bytes(n: Int) -> Bytes
     digits.push(48 - x % 10);
     x = x / 10;
   }
-  let mut i = digits.len();
+  let mut i = digits.byte_len();
   while i > 0 {
     i = i - 1;
     out.push(digits.get(i).unwrap_or(48));
@@ -716,7 +716,7 @@ fn multiply(digits: &mut Bytes, factor: Int)
 {
   let mut carry = 0;
   let mut i = 0;
-  while i < digits.len() {
+  while i < digits.byte_len() {
     let n = digits.get(i).unwrap_or(0) * factor + carry;
     digits.set(i, n % 10);
     carry = n / 10;
@@ -773,7 +773,7 @@ fn float_bytes(x: Float) -> Bytes
       exponent = exponent - 1;
     }
   }
-  let point = digits.len() - fraction;
+  let point = digits.byte_len() - fraction;
   if point <= 0 {
     out.extend(&"0.".as_bytes());
     let mut zeros = 0 - point;
@@ -782,7 +782,7 @@ fn float_bytes(x: Float) -> Bytes
       zeros = zeros - 1;
     }
   }
-  let mut i = digits.len();
+  let mut i = digits.byte_len();
   while i > 0 {
     i = i - 1;
     out.push(48 + digits.get(i).unwrap_or(0));

@@ -50,7 +50,7 @@ pub fn descriptor(media: &String, data: &Bytes) -> Result<Descriptor, Int>
   ensures none
   effects none
 {
-  let d = Descriptor { media_type_value: media.clone(), digest_value: digest(&data), size_value: data.len() };
+  let d = Descriptor { media_type_value: media.clone(), digest_value: digest(&data), size_value: data.byte_len() };
   descriptor_json(&d)?;
   return Ok(d);
 }
@@ -65,7 +65,7 @@ fn valid_descriptor(d: &Descriptor) -> Bool
     return false;
   }
   let b = d.digest_value.as_bytes();
-  if d.size_value < 0 || d.size_value > 134217728 || b.len() != 71 || b.slice(0, 7).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("") != "sha256:" {
+  if d.size_value < 0 || d.size_value > 134217728 || b.byte_len() != 71 || b.slice(0, 7).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("") != "sha256:" {
     return false;
   }
   let mut i = 7;
@@ -143,7 +143,7 @@ pub fn verify_descriptor(d: &Descriptor, data: &Bytes) -> Result<Bool, Int>
   ensures none
   effects none
 {
-  if !valid_descriptor(&d) || d.size_value != data.len() || d.digest_value != digest(&data) {
+  if !valid_descriptor(&d) || d.size_value != data.byte_len() || d.digest_value != digest(&data) {
     return Err(400);
   }
   return Ok(true);
@@ -204,7 +204,7 @@ pub fn index_json(manifest: &Descriptor) -> Result<Bytes, Int>
     return Err(400);
   }
   let d = descriptor_json(&manifest)?;
-  let text = d.slice(0, d.len() - 1).map_err(|e| 400)?.to_string_utf8().map_err(|e| 400)?;
+  let text = d.slice(0, d.byte_len() - 1).map_err(|e| 400)?.to_string_utf8().map_err(|e| 400)?;
   let mut out = Bytes.new();
   out.extend(&"{\"schemaVersion\":2,\"manifests\":[".as_bytes());
   out.extend(&text.as_bytes());

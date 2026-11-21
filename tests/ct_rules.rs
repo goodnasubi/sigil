@@ -72,6 +72,7 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("from_bytes", &[]),
     ("expose", &[]),
     ("len", &[]),
+    ("byte_len", &[]),
     // SHA-256（PR 6-1c で実装）。ワンショット `sha256` の引数 `data` の
     // 中身は秘密、長さは公開（解析のモデリングで BytesLen は公開になる）。
     // 圧縮 `sha256_compress` は、公開なのはブロックの数 `block_count`
@@ -363,12 +364,16 @@ fn apply_call(
                     format!("定数時間でない関数 {name} へ秘密の値を渡した"),
                 ));
             }
-            // `Secret::len`（対象表の `len`。メソッドなので SIR 名は裸の
-            // 名前）の結果は長さであり、長さは公開の情報（ADR 0020 決定 1、
-            // 対象表の `len` の行の注記）。組み込みの *Len と同じ扱いに
-            // しないと、`requires key.len() >= 32` のような「秘密の長さを
+            // `Secret::len` / `Secret::byte_len`（対象表の `len` / `byte_len`。
+            // メソッドなので SIR 名は裸の名前）の結果は長さであり、長さは公開の情報
+            // （ADR 0020 決定 1、対象表の `len` の行の注記）。組み込みの *Len と同じ扱いに
+            // しないと、`requires key.byte_len() >= 32` のような「秘密の長さを
             // 見る契約」が、中身による分岐として誤検出される。
-            if is_ct && (name == "len" || CT_PUBLIC_COMPARISONS.contains(&name.as_str())) {
+            if is_ct
+                && (name == "len"
+                    || name == "byte_len"
+                    || CT_PUBLIC_COMPARISONS.contains(&name.as_str()))
+            {
                 set_place_taint(state, dest, false);
             } else {
                 set_place_taint(state, dest, any);
@@ -608,7 +613,7 @@ fn probe() -> Int
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len(); }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + s.len() + d.byte_len() + h.byte_len() + p.byte_len(); }
   return 0;
 }
 "#;

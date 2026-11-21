@@ -141,14 +141,14 @@ fn http_accessors_and_status_codes() {
         HttpProgress.Done(r, next) => {
           let m = r.method();
           let hs = r.headers();
-          sum = sum + m.char_count() + r.path().byte_len() * 10 + r.query().byte_len() * 100 + r.version() * 1000;
+          sum = sum + m.byte_len() + r.path().byte_len() * 10 + r.query().byte_len() * 100 + r.version() * 1000;
           sum = sum + hs.len() * 100000 + r.body_len() * 1000000;
           match r.header(&"X-A") {
             Some(v) => { sum = sum + v.byte_len() * 10000000; }
             None => {}
           }
           match hs.get(0) {
-            Some(h) => { sum = sum + h.name().char_count() * 100000000 + h.value().byte_len() * 1000000000; }
+            Some(h) => { sum = sum + h.name().byte_len() * 100000000 + h.value().byte_len() * 1000000000; }
             None => {}
           }
           if next != data.byte_len() { return 0 - 1; }

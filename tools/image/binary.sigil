@@ -19,7 +19,7 @@ pub fn le(data: &Bytes, offset: Int, width: Int) -> Result<Int, Int>
   ensures none
   effects none
 {
-  if width < 1 || width > 8 || !span(data.len(), offset, width) {
+  if width < 1 || width > 8 || !span(data.byte_len(), offset, width) {
     return Err(400);
   }
   let mut n = 0;
@@ -59,7 +59,7 @@ pub fn hex(data: &Bytes) -> String
   let digits = "0123456789abcdef".as_bytes();
   let mut b = Bytes.new();
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let n = data.get(i).unwrap_or(0);
     b.push(digits.get(n / 16).unwrap_or(48));
     b.push(digits.get(n % 16).unwrap_or(48));
@@ -86,7 +86,7 @@ pub fn decimal(n: Int) -> Result<String, Int>
     rest = rest / 10;
   }
   let mut b = Bytes.new();
-  let mut i = rev.len();
+  let mut i = rev.byte_len();
   while i > 0 {
     i = i - 1;
     b.push(rev.get(i).unwrap_or(48));

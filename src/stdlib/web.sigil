@@ -861,7 +861,7 @@ impl Router {
     }
     let method_bytes = method.as_bytes();
     let mut method_index = 0;
-    while method_index < method_bytes.len() {
+    while method_index < method_bytes.byte_len() {
       let b = method_bytes.get(method_index).unwrap_or(0);
       let alpha = (b >= 65 && b <= 90) || (b >= 97 && b <= 122);
       let digit = b >= 48 && b <= 57;

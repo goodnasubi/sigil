@@ -35,15 +35,15 @@ fn path_ok(name: &String) -> Bool
   effects none
 {
   let b = name.as_bytes();
-  if b.len() == 0 || b.len() > 100 {
+  if b.byte_len() == 0 || b.byte_len() > 100 {
     return false;
   }
-  if b.get(0).unwrap_or(0) == 47 || b.get(b.len() - 1).unwrap_or(0) == 47 {
+  if b.get(0).unwrap_or(0) == 47 || b.get(b.byte_len() - 1).unwrap_or(0) == 47 {
     return false;
   }
   let mut i = 0;
   let mut component = 0;
-  while i < b.len() {
+  while i < b.byte_len() {
     let c = b.get(i).unwrap_or(0);
     if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45 || c == 46 || c == 47 || c == 95) {
       return false;
@@ -92,21 +92,21 @@ pub fn append_file(out: &mut Bytes, name: &String, mode: Int, data: &Bytes) -> R
   ensures none
   effects none
 {
-  archive_size(out.len(), data.len())?;
-  if out.len() % 512 != 0 || !path_ok(&name) || (mode != 365 && mode != 420) {
+  archive_size(out.byte_len(), data.byte_len())?;
+  if out.byte_len() % 512 != 0 || !path_ok(&name) || (mode != 365 && mode != 420) {
     return Err(400);
   }
   let mut h = zeros(512);
   let n = name.as_bytes();
   let mut i = 0;
-  while i < n.len() {
+  while i < n.byte_len() {
     h.set(i, n.get(i).unwrap_or(0)).map_err(|e| 400)?;
     i = i + 1;
   }
   octal(&mut h, 100, 8, mode)?;
   octal(&mut h, 108, 8, 0)?;
   octal(&mut h, 116, 8, 0)?;
-  octal(&mut h, 124, 12, data.len())?;
+  octal(&mut h, 124, 12, data.byte_len())?;
   octal(&mut h, 136, 12, 0)?;
   i = 148;
   while i < 156 {
@@ -116,7 +116,7 @@ pub fn append_file(out: &mut Bytes, name: &String, mode: Int, data: &Bytes) -> R
   h.set(156, 48).map_err(|e| 400)?;
   let magic = "ustar\u{0}00".as_bytes();
   i = 0;
-  while i < magic.len() {
+  while i < magic.byte_len() {
     h.set(257 + i, magic.get(i).unwrap_or(0)).map_err(|e| 400)?;
     i = i + 1;
   }
@@ -130,7 +130,7 @@ pub fn append_file(out: &mut Bytes, name: &String, mode: Int, data: &Bytes) -> R
   h.set(155, 32).map_err(|e| 400)?;
   out.extend(&h);
   out.extend(&data);
-  out.extend(&zeros((512 - data.len() % 512) % 512));
+  out.extend(&zeros((512 - data.byte_len() % 512) % 512));
   return Ok(true);
 }
 
@@ -140,7 +140,7 @@ pub fn finish_tar(out: &mut Bytes) -> Result<Bool, Int>
   ensures none
   effects none
 {
-  if out.len() % 512 != 0 || out.len() > 134217728 - 1024 {
+  if out.byte_len() % 512 != 0 || out.byte_len() > 134217728 - 1024 {
     return Err(400);
   }
   out.extend(&zeros(1024));
@@ -175,13 +175,13 @@ pub fn read_tar(data: &Bytes) -> Result<List<TarFile>, Int>
   ensures none
   effects none
 {
-  if data.len() < 1024 || data.len() > 134217728 || data.len() % 512 != 0 {
+  if data.byte_len() < 1024 || data.byte_len() > 134217728 || data.byte_len() % 512 != 0 {
     return Err(400);
   }
   let mut files = List.new();
   let mut p = 0;
-  while p < data.len() - 1024 {
-    if !span(data.len(), p, 512) {
+  while p < data.byte_len() - 1024 {
+    if !span(data.byte_len(), p, 512) {
       return Err(400);
     }
     let h = data.slice(p, p + 512).map_err(|e| 400)?;
@@ -198,7 +198,7 @@ pub fn read_tar(data: &Bytes) -> Result<List<TarFile>, Int>
     }
     let name = h.slice(0, end).map_err(|e| 400)?.to_string_utf8().map_err(|e| 400)?;
     let next = archive_size(p, size)?;
-    if !span(data.len() - 1024, p + 512, next - p - 512) {
+    if !span(data.byte_len() - 1024, p + 512, next - p - 512) {
       return Err(400);
     }
     let body = data.slice(p + 512, p + 512 + size).map_err(|e| 400)?;
@@ -215,10 +215,10 @@ pub fn read_tar(data: &Bytes) -> Result<List<TarFile>, Int>
     files.push(TarFile { name_value: name.clone(), mode_value: mode, data_value: body.clone() });
     p = next;
   }
-  if p != data.len() - 1024 {
+  if p != data.byte_len() - 1024 {
     return Err(400);
   }
-  while p < data.len() {
+  while p < data.byte_len() {
     if data.get(p).unwrap_or(1) != 0 {
       return Err(400);
     }

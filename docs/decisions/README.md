@@ -73,3 +73,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0051](0051-ipv6-listen.md) | net.listen における IPv6 数値アドレスの受け付け | 提案（予約: Issue #613、正式判定は未実施・ADR 内に理由と問いを記録） |
 | [0052](0052-compression-contract.md) | 圧縮の契約 | 提案（予約: Issue #635、正式判定を ADR 内に記録） |
 | [0053](0053-p5-container-management.md) | P5 コンテナ管理 | 提案（予約: Issue #637、正式判定を ADR 内に記録） |
+| [0054](0054-p6-os.md) | P6 の OS 本体 | 提案（予約: Issue #641、正式判定を ADR 内に記録） |

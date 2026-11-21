@@ -1229,6 +1229,7 @@ impl<'p> M<'p> {
                             | SYS_MKDIRAT
                             | SYS_NEWFSTATAT
                             | SYS_UNLINKAT
+                            | SYS_READLINKAT
                             | SYS_GETDENTS64
                             | SYS_FLOCK
                             | SYS_FSYNC
@@ -1573,6 +1574,20 @@ impl<'p> M<'p> {
             }
             SYS_OPENAT | SYS_UNLINKAT => {
                 self.check_path(addr_of(a[1], "path")?, loc)?;
+            }
+            SYS_READLINKAT => {
+                if a[4] != 0 || a[5] != 0 {
+                    return Err(
+                        self.syscall_stop(loc, "raw.syscall readlinkat: 未使用の引数は 0 のみ許可")
+                    );
+                }
+                self.check_path(addr_of(a[1], "path")?, loc)?;
+                if a[3] <= 0 || a[3] > 65536 {
+                    return Err(self
+                        .syscall_stop(loc, "raw.syscall readlinkat: bufsiz は 1 以上 65536 以下"));
+                }
+                let buf = addr_of(a[2], "buf")?;
+                self.check_raw_access(buf, a[3] as usize, loc)?;
             }
             // 同期（ADR 0049 決定 4.2）。fd だけを取り、番地を取らない。未使用の引数は 0 のみ許可。
             SYS_FSYNC | SYS_FDATASYNC => {
@@ -2045,6 +2060,7 @@ impl<'p> M<'p> {
             // ADR 0049 決定 5: 差し替え下でシミュレーション不可能な操作（OFD ロック、生 fd 露出、生ディレクトリエントリ）は
             // 暗黙の偽装を行わず fail-closed（-95: EOPNOTSUPP）で明示的に拒否する。
             SYS_OPENAT => self.double_openat(a),
+            SYS_READLINKAT => self.double_readlinkat(a),
             SYS_FLOCK => self.double_flock(a),
             SYS_GETDENTS64 => -95,
             _ => -95,
@@ -2201,6 +2217,43 @@ impl<'p> M<'p> {
         }
     }
 
+    /// 差し替え下の `readlinkat`。影の根の下のディレクトリ fd を基準にした相対パスに限り、影の実パスに対して本物の `readlinkat` を発行する。
+    /// それ以外の fd や `..` を含むパスは fail-closed（-95: EOPNOTSUPP）。
+    fn double_readlinkat(&mut self, a: [i64; 6]) -> i64 {
+        let path = self.path_string(a[1] as usize);
+        if path.starts_with('/') || a[0] == -100 || super::shadow::requires_dir(&path) {
+            return -95;
+        }
+        let Some(add) = super::shadow::split(&path) else {
+            return -95;
+        };
+        if add.is_empty() {
+            return -95;
+        }
+        let Ok(root) = self.fs_shadow.ensure_root() else {
+            return -5;
+        };
+        let mut comps = match self.shadow_dir_comps(a[0]) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        comps.extend(add);
+        for i in 1..=comps.len() {
+            let key = comps[..i].join("/");
+            if self.is_mock_file(&key) {
+                if let Err(e) = self.shadow_materialize_file(&comps[..i], &root) {
+                    return -(e.raw_os_error().unwrap_or(5) as i64);
+                }
+            } else if self.is_mock_dir(&key) {
+                if let Err(e) = std::fs::create_dir_all(root.join(&key)) {
+                    return -(e.raw_os_error().unwrap_or(5) as i64);
+                }
+            }
+        }
+        let real = root.join(comps.join("/"));
+        self.shadow_syscall_path(SYS_READLINKAT, &real, [a[2], a[3]])
+    }
+
     /// 差し替え下の `flock`。影の実ファイルの fd にだけ本物の `flock` を発行し、それ以外は fail-closed（ロックを偽装しない）。
     fn double_flock(&self, a: [i64; 6]) -> i64 {
         if self.is_shadow_fd(a[0]) {
@@ -2317,6 +2370,7 @@ const SYS_OPENAT: i64 = 257;
 const SYS_MKDIRAT: i64 = 258;
 const SYS_NEWFSTATAT: i64 = 262;
 const SYS_UNLINKAT: i64 = 263;
+const SYS_READLINKAT: i64 = 267;
 const LOCK_SH: i64 = 1;
 const LOCK_EX: i64 = 2;
 const LOCK_NB: i64 = 4;

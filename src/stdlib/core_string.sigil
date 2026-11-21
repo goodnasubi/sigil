@@ -281,6 +281,26 @@ pub fn len(s: Addr) -> Int
   return c;
 }
 
+pub fn char_count(s: Addr) -> Int
+  intent "Unicode のスカラー値の数を走査して数える（長さに比例）"
+  requires none
+  ensures none
+  effects none
+  unchecked "len と同じ（補足 D-2）"
+{
+  return len(s);
+}
+
+pub fn byte_len(s: Addr) -> Int
+  intent "UTF-8 のバイト数を返す（定数時間）。バイト位置を要求する API にはこの値を使う"
+  requires none
+  ensures none
+  effects none
+  unchecked "bytes と同じ（補足 D-2）"
+{
+  return bytes(s);
+}
+
 pub fn is_empty(s: Addr) -> Bool
   intent "バイト数が 0 か"
   requires none

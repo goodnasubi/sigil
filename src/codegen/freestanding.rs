@@ -309,12 +309,12 @@ fn check_builtin(
         ListNew | ListLen | ListIsEmpty | ListGet | ListGetMut | ListPush | ListSumInt
         | ListSumFloat | ListMin | ListMax | ListMap | ListFind | ListMaxBy | ListMinBy
         | OptIsSome | OptIsNone | OptUnwrapOr | OptMap | OptOkOr | ResIsOk | ResIsErr
-        | ResUnwrapOr | ResOk | ResMap | ResMapErr | StrLen | StrIsEmpty | StrTrim | StrLines
-        | StrParseInt | CellNew | SharedNew | SharedGet | SharedSet | ToInt | CtEq | StrAsBytes
-        | BytesNew | BytesWithCapacity | BytesFromList | BytesLen | BytesIsEmpty | BytesGet
-        | BytesSet | BytesPush | BytesSlice | BytesConcat | BytesExtend | BytesToStringUtf8
-        | BytesPushU16Be | BytesPushU32Be | BytesPushU64Be | BytesPushU32Le | BytesReadU32Be
-        | Compare(_) => Err(CgError::Unsupported(format!(
+        | ResUnwrapOr | ResOk | ResMap | ResMapErr | StrLen | StrByteLen | StrIsEmpty | StrTrim
+        | StrLines | StrParseInt | CellNew | SharedNew | SharedGet | SharedSet | ToInt | CtEq
+        | StrAsBytes | BytesNew | BytesWithCapacity | BytesFromList | BytesLen | BytesIsEmpty
+        | BytesGet | BytesSet | BytesPush | BytesSlice | BytesConcat | BytesExtend
+        | BytesToStringUtf8 | BytesPushU16Be | BytesPushU32Be | BytesPushU64Be | BytesPushU32Le
+        | BytesReadU32Be | Compare(_) => Err(CgError::Unsupported(format!(
             "freestanding 出力では確保を要する標準操作（{b:?}、関数 {fname}）を使えない"
         ))),
     }

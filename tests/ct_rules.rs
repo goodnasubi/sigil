@@ -428,6 +428,7 @@ fn apply_builtin(
         | Builtin::BytesLen
         | Builtin::BytesIsEmpty
         | Builtin::StrLen
+        | Builtin::StrByteLen
         | Builtin::StrIsEmpty
         | Builtin::OptIsSome
         | Builtin::OptIsNone

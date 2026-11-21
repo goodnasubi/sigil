@@ -121,6 +121,16 @@ pub fn len(b: Addr) -> Int
   return raw.load_i64(raw.offset(b, 8));
 }
 
+pub fn byte_len(b: Addr) -> Int
+  intent "バイト数を返す（定数時間）。バイト位置を要求する API にはこの値を使う"
+  requires none
+  ensures none
+  effects none
+  unchecked "len と同じ（補足 F-1）"
+{
+  return len(b);
+}
+
 pub fn is_empty(b: Addr) -> Bool
   intent "バイト数が 0 か"
   requires none

@@ -320,6 +320,7 @@ pub enum Builtin {
     ResMap,
     ResMapErr,
     StrLen,
+    StrByteLen,
     StrIsEmpty,
     StrTrim,
     StrLines,

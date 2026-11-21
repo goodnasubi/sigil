@@ -65,7 +65,7 @@ Agent-Env: cloud
 
 - `Agent:` は必須。値は `claude` / `gemini` / `muse` / `codex` / `antigravity`（agy の `Agent:` は `antigravity`。それ以外はブランチ名の `<agent>` と同じ）。
 - `Agent-Model:` は必須。自分が動いているモデルの識別名を、その実行環境で名乗っている名前のまま書く（例: `claude-sonnet-5-5-medium`、`gemini-4-argon-medium`、`gpt-oss-120b-medium`）。正確な識別名が分からないときは、判明している最も具体的な名前を書く。
-- `Agent-Env:` は必須。値は `local-windows` / `cloud` / `cloud-shell`。
+- `Agent-Env:` は必須。値は `local-windows` / `cloud` / `cloud-shell` / `remote`。
 - トレーラーは本文と空行 1 行をあけ、末尾にまとめる。
 - 人間の手作業コミットには付けない（`Agent:` が無いコミット = 人間）。
 - 他のエージェントから引き継いで追加コミットする場合は、そのコミットを書いたエージェント自身の名前を書く。
@@ -130,7 +130,6 @@ cargo test --test <変更範囲のテスト>
 | セキュリティ関連（ADR 0020、CODEOWNERS 対象） | **必須** | CODEOWNERS の承認 |
 
 - 人間の承認は、対象の Issue の段階で、範囲を明示して先行して与えることもできる（先行承認）。先行承認がある場合、その範囲内の差分にとどまる PR は、CI が緑で別系統のエージェントの承認が揃えば、改めて人間の承認を得ずにマージしてよい。差分が承認の範囲を超える場合は先行承認は及ばず、改めて人間の承認が必要になる。承認の記録は Issue または PR のコメントに残す。
-- 承認コメントの記法、チェックリスト、その他のレビュー運用詳細は [REVIEW.md](REVIEW.md) を参照すること。
 
 
 ## ADR

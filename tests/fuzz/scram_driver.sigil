@@ -1,0 +1,111 @@
+module test.scram_driver
+  targets server
+  trust none
+
+fn hex_digit(c: Int) -> Int
+  intent "16進文字を数値に変換する"
+  requires none
+  ensures none
+  effects none
+{
+  if c >= 48 && c <= 57 { return c - 48; }
+  if c >= 97 && c <= 102 { return c - 87; }
+  if c >= 65 && c <= 70 { return c - 55; }
+  return 0;
+}
+
+fn unhex(text: &Bytes, start: Int, end: Int) -> Bytes
+  intent "16進文字列の指定範囲をBytesに復号する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.new();
+  let mut i = start;
+  while i + 1 < end {
+    let hi = hex_digit(text.get(i).unwrap_or(0));
+    let lo = hex_digit(text.get(i + 1).unwrap_or(0));
+    out.push((hi << 4) | lo);
+    i = i + 2;
+  }
+  return out;
+}
+
+fn err_name(e: ScramError) -> String
+  intent "SCRAMエラーを固定の文字列にする"
+  requires none
+  ensures none
+  effects none
+{
+  return match e {
+    ScramError.Protocol => "err:protocol",
+    ScramError.LimitExceeded => "err:limit",
+    ScramError.UnsupportedCredential => "err:unsupported",
+  };
+}
+
+fn test_one(input: &Bytes) -> String
+  intent "1件の入力を解釈して結果を返す"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let mode = input.get(0).unwrap_or(0) % 2;
+  let data = input.slice(1, input.byte_len()).unwrap_or(Bytes.new());
+
+  let password = Secret.from_bytes("pencil".as_bytes());
+  let nonce = "012345678901234567890123".as_bytes();
+
+  let mut sig_bytes = Bytes.new();
+  // RFC 7677 ServerSignature 32 bytes
+  sig_bytes.push(234); sig_bytes.push(186); sig_bytes.push(226); sig_bytes.push(77);
+  sig_bytes.push(16);  sig_bytes.push(98);  sig_bytes.push(219); sig_bytes.push(117);
+  sig_bytes.push(169); sig_bytes.push(69);  sig_bytes.push(31);  sig_bytes.push(240);
+  sig_bytes.push(182); sig_bytes.push(234); sig_bytes.push(126); sig_bytes.push(152);
+  sig_bytes.push(200); sig_bytes.push(84);  sig_bytes.push(101); sig_bytes.push(73);
+  sig_bytes.push(255); sig_bytes.push(116); sig_bytes.push(30);  sig_bytes.push(103);
+  sig_bytes.push(45);  sig_bytes.push(50);  sig_bytes.push(81);  sig_bytes.push(178);
+  sig_bytes.push(57);  sig_bytes.push(125); sig_bytes.push(228); sig_bytes.push(110);
+  let signature = Secret.from_bytes(sig_bytes);
+
+  if mode == 0 {
+    return match respond(&password, &nonce, &data) {
+      Ok(reply) => "ok:".as_bytes().concat(&reply.message).to_string_utf8().unwrap_or("ok:respond"),
+      Err(e) => err_name(e),
+    };
+  } else {
+    return match verify(&signature, &data) {
+      Ok(true) => "ok:true",
+      Ok(false) => "ok:false",
+      Err(e) => err_name(e),
+    };
+  }
+}
+
+pub fn probe(wire: String) -> String
+  intent "改行区切りのhex入力をまとめて検証し改行区切りの全結果を返す"
+  requires none
+  ensures none
+  effects task.suspend
+{
+  let text = wire.as_bytes();
+  let mut answers = Bytes.new();
+  let mut start = 0;
+  let mut i = 0;
+  while i < text.byte_len() {
+    let c = text.get(i).unwrap_or(0);
+    if c == 10 {
+      let input = unhex(&text, start, i);
+      let res = test_one(&input);
+      answers = answers.concat(&res.as_bytes()).concat(&"\n".as_bytes());
+      start = i + 1;
+    }
+    i = i + 1;
+  }
+  if start < text.byte_len() {
+    let input = unhex(&text, start, text.byte_len());
+    let res = test_one(&input);
+    answers = answers.concat(&res.as_bytes()).concat(&"\n".as_bytes());
+  }
+  return answers.to_string_utf8().unwrap_or("");
+}

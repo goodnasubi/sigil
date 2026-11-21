@@ -42,6 +42,28 @@ impl Fx<'_, '_> {
         self.b.ins().trap(TrapCode::unwrap_user(1));
     }
 
+    /// freestanding の `_start` から入る（ADR 0054 決定 2・7）。
+    /// RDI に渡された起動情報 v1 へのポインタ（`const struct boot_info *`）を入口関数へ渡し、
+    /// 復帰・異常停止のいずれでも `sigil_halt`（`cli; hlt` の無限ループ）へ入って戻らない。
+    pub(crate) fn freestanding_boot(&mut self, halt: FuncId) {
+        let ps = self.start_head();
+        let boot_info = ps[0];
+        let p = self.cg.p;
+        let f = &p.funcs[p.entry];
+        let fr = self
+            .cg
+            .m
+            .declare_func_in_func(self.cg.fids[p.entry], self.b.func);
+        if f.params.is_empty() {
+            self.b.ins().call(fr, &[]);
+        } else {
+            self.b.ins().call(fr, &[boot_info]);
+        }
+        let hr = self.cg.m.declare_func_in_func(halt, self.b.func);
+        self.b.ins().call(hr, &[]);
+        self.b.ins().return_(&[]);
+    }
+
     /// 新しいスレッドの入口（`sigil_thread_entry(フラグ, s)`）。`std.os.thread.spawn` が子のスタックの先頭 `s` に置いた
     /// 戻り番地（この関数）へ、子は `sigil_syscall6` の `ret` で入る。`s + 8` の語がハンドルで、`thread_main` を呼び、
     /// スレッドだけを終える（`exit`、番号 60）。戻らない。

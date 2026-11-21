@@ -79,6 +79,9 @@ impl<'a, 'p> Fx<'a, 'p> {
     }
 
     pub(super) fn guard_stack(&mut self) {
+        if self.cg.freestanding {
+            return;
+        }
         let sp = self.b.ins().get_stack_pointer(types::I64);
         let lim = self.rt("stack_limit", &[]);
         let c = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, lim);

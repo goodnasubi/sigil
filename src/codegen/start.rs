@@ -1,4 +1,4 @@
-//! Linux x86_64 の起動用の短い機械語（ADR 0025 C-4）。
+//! Linux x86_64 と freestanding x86_64 の起動用の短い機械語（ADR 0025 C-4、ADR 0054 決定 2・7）。
 use super::*;
 use cranelift_codegen::binemit::Reloc;
 use cranelift_module::{ModuleReloc, ModuleRelocTarget};
@@ -7,6 +7,14 @@ use cranelift_module::{ModuleReloc, ModuleRelocTarget};
 pub(super) const START: &[u8] = &[
     0x48, 0x89, 0xe7, 0x48, 0x83, 0xe4, 0xf0, 0xe8, 0, 0, 0, 0, 0x0f, 0x0b,
 ];
+// freestanding の入口 `_start`: RDI（`const struct boot_info *`）を保ったまま 16B 整列して `sigil_boot` を呼び、
+// 戻ったらマスク可能割り込みを止めて `hlt` を繰り返す（`docs/boot-contract.md`）。
+// and rsp,-16; call sigil_boot; cli; 1: hlt; jmp 1b
+pub(super) const FREESTANDING_START: &[u8] = &[
+    0x48, 0x83, 0xe4, 0xf0, 0xe8, 0, 0, 0, 0, 0xfa, 0xf4, 0xeb, 0xfd,
+];
+// cli; 1: hlt; jmp 1b（戻らない停止）
+pub(super) const FREESTANDING_HALT: &[u8] = &[0xfa, 0xf4, 0xeb, 0xfd];
 // SysV の (番号,rdi,rsi,rdx,r10,r8,r9) へ並べ替え。第 7 引数は戻り番地の次。
 const SYSCALL: &[u8] = &[
     0x48, 0x89, 0xf8, 0x48, 0x89, 0xf7, 0x48, 0x89, 0xd6, 0x48, 0x89, 0xca, 0x4d, 0x89, 0xc2, 0x4d,
@@ -39,6 +47,36 @@ pub(super) fn prepare(cg: &mut Cg<'_>) -> Result<(), CgError> {
     cg.define(lim, lim.as_u32(), shim_sig(cg.cc, 0, 'p'), vec![], |fx| {
         fx.start_limit()
     })?;
+    Ok(())
+}
+
+pub(super) fn define_freestanding(cg: &mut Cg<'_>) -> Result<(), CgError> {
+    let halt =
+        cg.m.declare_function("sigil_halt", Linkage::Local, &shim_sig(cg.cc, 0, 'v'))
+            .map_err(internal)?;
+    cg.m.define_function_bytes(halt, 1, FREESTANDING_HALT, &[])
+        .map_err(internal)?;
+    let boot =
+        cg.m.declare_function("sigil_boot", Linkage::Local, &shim_sig(cg.cc, 1, 'v'))
+            .map_err(internal)?;
+    cg.define(boot, boot.as_u32(), shim_sig(cg.cc, 1, 'v'), vec![], |fx| {
+        fx.freestanding_boot(halt)
+    })?;
+    let start =
+        cg.m.declare_function("_start", Linkage::Export, &shim_sig(cg.cc, 1, 'v'))
+            .map_err(internal)?;
+    cg.m.define_function_bytes(
+        start,
+        16,
+        FREESTANDING_START,
+        &[ModuleReloc {
+            offset: 5,
+            kind: Reloc::X86CallPCRel4,
+            name: ModuleRelocTarget::user(0, boot.as_u32()),
+            addend: -4,
+        }],
+    )
+    .map_err(internal)?;
     Ok(())
 }
 

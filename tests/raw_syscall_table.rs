@@ -503,3 +503,46 @@ fn fstat_and_fchmod_checks() {
         "mode は 0 以上 0o777 以下",
     );
 }
+
+#[test]
+fn readlinkat_path_buffer_and_unused_args_checked() {
+    let setup = "  let p = raw.alloc(4, 1);\n  raw.store_u8(p, 120);\n  raw.store_u8(raw.offset(p, 1), 0);\n  let b = raw.alloc(64, 1);\n";
+    // 存在しないパスへの readlinkat(267) は検査を通って ENOENT (-2)
+    let ok = format!(
+        "{setup}  let r = raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 64, 0, 0);\n  raw.free(p, 4, 1);\n  raw.free(b, 64, 1);\n  return r;"
+    );
+    assert_eq!(run(&ok).unwrap(), "-2");
+
+    // 未使用引数非ゼロ
+    stops(
+        &format!("{setup}  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 64, 1, 0);"),
+        "未使用の引数",
+    );
+    stops(
+        &format!("{setup}  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 64, 0, 1);"),
+        "未使用の引数",
+    );
+    // bufsiz <= 0 または > 65536
+    stops(
+        &format!("{setup}  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 0, 0, 0);"),
+        "bufsiz は 1 以上 65536 以下",
+    );
+    stops(
+        &format!("{setup}  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), -1, 0, 0);"),
+        "bufsiz は 1 以上 65536 以下",
+    );
+    stops(
+        &format!("{setup}  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 65537, 0, 0);"),
+        "bufsiz は 1 以上 65536 以下",
+    );
+    // バッファ範囲外
+    stops(
+        &format!("{setup}  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 65, 0, 0);"),
+        "範囲外",
+    );
+    // パス NUL 終端なし
+    stops(
+        "  let p = raw.alloc(4, 1);\n  raw.set(p, 65, 4);\n  let b = raw.alloc(64, 1);\n  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 64, 0, 0);",
+        "NUL 終端",
+    );
+}

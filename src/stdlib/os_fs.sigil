@@ -1702,6 +1702,135 @@ impl Dir {
     }
   }
 
+  pub fn read_link(self: &Dir, subpath: &Path, max_len: Int) -> Result<Bytes, IoError>
+    intent "ディレクトリ起点の相対パスで symlink のリンク文字列をバイト列として上限付きで読む（リンク先は辿らず、中間 symlink と .. 脱出は拒否。通常ファイル・ディレクトリ等の非 symlink は InvalidInput、上限超過は LimitExceeded。ADR 0049）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "max_len の範囲（0..=4096）と subpath を検査後、中間ディレクトリ構成要素を O_PATH|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC で順次解決して中間 symlink を PermissionDenied(ELOOP) で拒否する。最終要素に対して readlinkat(267) を max_len + 1 バイトのバッファで発行し、実長が max_len を超えれば LimitExceeded で拒否、以内なら所有 Bytes にコピーして一時バッファと中間 fd をすべて解放する"
+  {
+    if max_len < 0 {
+      return Err(IoError.InvalidInput(subpath.clone()));
+    }
+    if max_len > 4096 {
+      return Err(IoError.LimitExceeded(subpath.clone()));
+    }
+    match validate_subpath(&subpath) {
+      Err(e) => { return Err(e); }
+      Ok(b) => {
+        let len = b.len();
+        let mut last_slash = -1;
+        let mut i = 0;
+        while i < len {
+          if b.get(i).unwrap_or(0) == 47 {
+            last_slash = i;
+          }
+          i = i + 1;
+        }
+        let leaf_start = last_slash + 1;
+        let leaf_len = len - leaf_start;
+        if leaf_len == 0 {
+          return Err(IoError.InvalidPath(subpath.clone()));
+        }
+        if leaf_len == 1 {
+          if b.get(leaf_start).unwrap_or(0) == 46 {
+            return Err(IoError.InvalidPath(subpath.clone()));
+          }
+        }
+
+        let mut current_fd = self.fd;
+        let mut owned_fd = -1;
+        let mut err_code = 0;
+        let mut keep_going = true;
+
+        if last_slash >= 0 {
+          let mut comp_start = 0;
+          let mut j = 0;
+          while j <= last_slash {
+            if !keep_going {
+              j = last_slash + 1;
+            } else {
+              if b.get(j).unwrap_or(0) == 47 {
+                let comp_len = j - comp_start;
+                if comp_len > 0 {
+                  let sub_buf = raw.alloc(comp_len + 1, 1);
+                  let mut k = 0;
+                  while k < comp_len {
+                    raw.store_u8(raw.offset(sub_buf, k), b.get(comp_start + k).unwrap_or(0));
+                    k = k + 1;
+                  }
+                  raw.store_u8(raw.offset(sub_buf, comp_len), 0);
+
+                  // 2818048 = O_PATH (2097152) | O_DIRECTORY (65536) | O_NOFOLLOW (131072) | O_CLOEXEC (524288)
+                  let mut next_fd = -4;
+                  while next_fd == -4 {
+                    next_fd = raw.syscall(257, current_fd, raw.addr_to_int(sub_buf), 2818048, 0, 0, 0);
+                  }
+                  if next_fd < 0 {
+                    err_code = check_component_stat(current_fd, sub_buf, next_fd);
+                    keep_going = false;
+                  } else {
+                    if owned_fd >= 0 {
+                      raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+                    }
+                    current_fd = next_fd;
+                    owned_fd = next_fd;
+                  }
+                  raw.free(sub_buf, comp_len + 1, 1);
+                }
+                comp_start = j + 1;
+              }
+              j = j + 1;
+            }
+          }
+        }
+
+        if err_code != 0 {
+          if owned_fd >= 0 {
+            raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+          }
+          return Err(classify_io(err_code, &subpath));
+        }
+
+        let leaf_buf = raw.alloc(leaf_len + 1, 1);
+        let mut m = 0;
+        while m < leaf_len {
+          raw.store_u8(raw.offset(leaf_buf, m), b.get(leaf_start + m).unwrap_or(0));
+          m = m + 1;
+        }
+        raw.store_u8(raw.offset(leaf_buf, leaf_len), 0);
+
+        let probe_len = max_len + 1;
+        let link_buf = raw.alloc(probe_len, 1);
+        let mut r = -4;
+        while r == -4 {
+          r = raw.syscall(267, current_fd, raw.addr_to_int(leaf_buf), raw.addr_to_int(link_buf), probe_len, 0, 0);
+        }
+        raw.free(leaf_buf, leaf_len + 1, 1);
+        if owned_fd >= 0 {
+          raw.syscall(3, owned_fd, 0, 0, 0, 0, 0);
+        }
+
+        if r < 0 {
+          raw.free(link_buf, probe_len, 1);
+          return Err(classify_io(r, &subpath));
+        }
+        if r > max_len {
+          raw.free(link_buf, probe_len, 1);
+          return Err(IoError.LimitExceeded(subpath.clone()));
+        }
+        let mut out = Bytes.with_capacity(r);
+        let mut idx = 0;
+        while idx < r {
+          out.push(raw.load_u8(raw.offset(link_buf, idx)));
+          idx = idx + 1;
+        }
+        raw.free(link_buf, probe_len, 1);
+        return Ok(out);
+      }
+    }
+  }
+
   pub fn read_entries(self: &Dir, max_entries: Int) -> Result<List<DirEntry>, IoError>
     intent "ディレクトリのエントリを最大 max_entries 件（上限 1024）列挙する"
     requires none

@@ -161,7 +161,7 @@ fn parse_ts(data: &Bytes, offset: Int) -> Option<Int>
   ensures none
   effects none
 {
-  if offset < 0 || offset + 8 > data.len() {
+  if offset < 0 || offset + 8 > data.byte_len() {
     return None;
   }
   let b0 = data.get(offset)?;

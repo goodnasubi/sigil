@@ -172,7 +172,7 @@ fn run() -> Int
 {tasks}
     let mut total = 0;
     let mut k = 0;
-    while k < 1920 {{ total = total + rx.recv().len(); k = k + 1; }}
+    while k < 1920 {{ total = total + rx.recv().char_count(); k = k + 1; }}
 {joins}
     match l.acquire() {{
       Ok(g) => {{ return total + g.get() + counter.load(); }}

@@ -340,7 +340,7 @@ fn moved_fields_show_as_unit() {
         defs,
         "() -> Int",
         "none",
-        "  let mut xs = List.new();\n  xs.push(1);\n  xs.push(2);\n  let out = Outer2 { inner: Inner { s: \"hello\", xs: xs }, n: 7 };\n  let taken_s = out.inner.s;\n  let taken_xs = out.inner.xs;\n  return out.n + taken_s.len() + taken_xs.len();",
+        "  let mut xs = List.new();\n  xs.push(1);\n  xs.push(2);\n  let out = Outer2 { inner: Inner { s: \"hello\", xs: xs }, n: 7 };\n  let taken_s = out.inner.s;\n  let taken_xs = out.inner.xs;\n  return out.n + taken_s.char_count() + taken_xs.len();",
     );
     let opts = Options {
         trace_drops: true,
@@ -361,7 +361,7 @@ fn secret_trace_hides() {
     // 秘密の表示は破棄の記録で確かめる（`console.log`・入口には出せない）。
     let src = prog(
         "() -> Int",
-        "  let mut b = Bytes.new();\n  b.push(10);\n  b.push(20);\n  let s = Secret.from_bytes(b);\n  return s.len();",
+        "  let mut b = Bytes.new();\n  b.push(10);\n  b.push(20);\n  let s = Secret.from_bytes(b);\n  return s.byte_len();",
     );
     let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
     assert_eq!(got.code, Some(0), "{}", got.stderr);

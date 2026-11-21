@@ -311,7 +311,7 @@ fn inner(mode: Int) -> Token
   let outcome = task.all_ok(gs);
   match outcome {
     Ok(values) => { return Token { id: values.len() }; }
-    Err(e) => { return Token { id: e.len() }; }
+    Err(e) => { return Token { id: e.char_count() }; }
   }
 }
 

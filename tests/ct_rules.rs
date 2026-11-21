@@ -72,6 +72,7 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("from_bytes", &[]),
     ("expose", &[]),
     ("len", &[]),
+    ("byte_len", &[]),
     // SHA-256（PR 6-1c で実装）。ワンショット `sha256` の引数 `data` の
     // 中身は秘密、長さは公開（解析のモデリングで BytesLen は公開になる）。
     // 圧縮 `sha256_compress` は、公開なのはブロックの数 `block_count`
@@ -363,12 +364,16 @@ fn apply_call(
                     format!("定数時間でない関数 {name} へ秘密の値を渡した"),
                 ));
             }
-            // `Secret::len`（対象表の `len`。メソッドなので SIR 名は裸の
-            // 名前）の結果は長さであり、長さは公開の情報（ADR 0020 決定 1、
-            // 対象表の `len` の行の注記）。組み込みの *Len と同じ扱いに
-            // しないと、`requires key.len() >= 32` のような「秘密の長さを
+            // `Secret::len` / `Secret::byte_len`（対象表の `len` / `byte_len`。
+            // メソッドなので SIR 名は裸の名前）の結果は長さであり、長さは公開の情報
+            // （ADR 0020 決定 1、対象表の `len` の行の注記）。組み込みの *Len と同じ扱いに
+            // しないと、`requires key.byte_len() >= 32` のような「秘密の長さを
             // 見る契約」が、中身による分岐として誤検出される。
-            if is_ct && (name == "len" || CT_PUBLIC_COMPARISONS.contains(&name.as_str())) {
+            if is_ct
+                && (name == "len"
+                    || name == "byte_len"
+                    || CT_PUBLIC_COMPARISONS.contains(&name.as_str()))
+            {
                 set_place_taint(state, dest, false);
             } else {
                 set_place_taint(state, dest, any);
@@ -608,7 +613,7 @@ fn probe() -> Int
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.len() + d.len() + h.len() + p.len(); }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + s.len() + d.byte_len() + h.byte_len() + p.byte_len(); }
   return 0;
 }
 "#;
@@ -766,7 +771,7 @@ fn static_fixture_clean_functions_pass() {
         "{}{}",
         fx(
             "ct_ok(secret: Bytes) -> Int",
-            "  let mut acc = 0;\n  let mut i = 0;\n  while i < secret.len() {\n    acc = acc ^ secret.get(i).unwrap_or(0);\n    i = i + 1;\n  }\n  return acc;"
+            "  let mut acc = 0;\n  let mut i = 0;\n  while i < secret.byte_len() {\n    acc = acc ^ secret.get(i).unwrap_or(0);\n    i = i + 1;\n  }\n  return acc;"
         ),
         fx(
             "ct_wrap(secret: Bytes) -> Bool",
@@ -797,7 +802,7 @@ fn static_fixture_violations_are_caught() {
         ),
         fx(
             "ct_bad_region(secret: Bytes) -> Int",
-            "  let mut copy = Bytes.new();\n  let mut i = 0;\n  while i < secret.len() {\n    copy.push(secret.get(i).unwrap_or(0));\n    i = i + 1;\n  }\n  if copy.get(0).unwrap_or(0) == 1 {\n    return 1;\n  }\n  return 0;"
+            "  let mut copy = Bytes.new();\n  let mut i = 0;\n  while i < secret.byte_len() {\n    copy.push(secret.get(i).unwrap_or(0));\n    i = i + 1;\n  }\n  if copy.get(0).unwrap_or(0) == 1 {\n    return 1;\n  }\n  return 0;"
         ),
         fx(
             "ct_bad_index(secret: Bytes, table: Bytes) -> Int",
@@ -990,7 +995,7 @@ fn sir_branch_budget(func: &Func) -> usize {
 
 #[test]
 fn clif_fixture_ct_ok_is_clean() {
-    let defs = "fn ct_ok(secret: Bytes) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut acc = 0;\n  let mut i = 0;\n  while i < secret.len() {\n    acc = acc ^ secret.get(i).unwrap_or(0);\n    i = i + 1;\n  }\n  return acc;\n}\n\n";
+    let defs = "fn ct_ok(secret: Bytes) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut acc = 0;\n  let mut i = 0;\n  while i < secret.byte_len() {\n    acc = acc ^ secret.get(i).unwrap_or(0);\n    i = i + 1;\n  }\n  return acc;\n}\n\n";
     let delta = clif_delta("ctok", defs, "ct_ok(Bytes.new())");
     assert_eq!(delta.div, 0, "定数時間の fixture に除算命令がある");
     // SIR 側の分岐予算と比較する（対象関数の SIR を組み立て直して数える）。
@@ -1053,7 +1058,10 @@ fn clif_scram_proof_and_signature_have_no_division() {
     let end = source[start..].find("pub fn respond(").unwrap() + start;
     let defs = &source[start..end];
     for (tag, call) in [
-        ("scramproof", "ct_proof(&Bytes.new(), &Bytes.new()).len()"),
+        (
+            "scramproof",
+            "ct_proof(&Bytes.new(), &Bytes.new()).byte_len()",
+        ),
         (
             "scramsignature",
             "match ct_signature(&Bytes.new(), &Bytes.new()) { true => 1, false => 0 }",

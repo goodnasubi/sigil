@@ -175,7 +175,7 @@ fn from_utf8_empty_does_not_read_p() {
 // 利用者のプログラム: `Bytes.to_string_utf8` の文言・`Bytes.from_list`・`as_bytes`
 // ---------------------------------------------------------------------------
 
-const HB: &str = "fn hb(b: &Bytes) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut h = b.len();\n  let mut i = 0;\n  while i < b.len() {\n    h = (h * 257 + b.get(i).unwrap_or(0)) % 1000000007;\n    i = i + 1;\n  }\n  return h;\n}\n\n";
+const HB: &str = "fn hb(b: &Bytes) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut h = b.byte_len();\n  let mut i = 0;\n  while i < b.byte_len() {\n    h = (h * 257 + b.get(i).unwrap_or(0)) % 1000000007;\n    i = i + 1;\n  }\n  return h;\n}\n\n";
 
 fn hb(b: &[u8]) -> i64 {
     let mut h = b.len() as i64;
@@ -282,7 +282,7 @@ fn as_bytes_matches_rust_and_does_not_alias() {
     ];
     for s in strs {
         let body = format!(
-            "  let s = \"{s}\";\n  let mut y = s.as_bytes();\n  y.push(65);\n  return hb(&y) * 1000 + s.len();"
+            "  let s = \"{s}\";\n  let mut y = s.as_bytes();\n  y.push(65);\n  return hb(&y) * 1000 + s.char_count();"
         );
         let src = format!("{HEAD}{HB}pub fn f() -> Int\n{TAIL}{{\n{body}\n}}\n");
         let mut v = s.as_bytes().to_vec();

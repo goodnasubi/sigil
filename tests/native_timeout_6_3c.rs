@@ -92,8 +92,8 @@ fn run(limit: Int, ms: Int) -> Int
   let keep = "keep";
   let r = task.timeout(limit, move || work(ms));
   match r {
-    Some(s) => { return s.len() + keep.len(); }
-    None => { return keep.len(); }
+    Some(s) => { return s.char_count() + keep.char_count(); }
+    None => { return keep.char_count(); }
   }
 }
 "#;

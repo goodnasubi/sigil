@@ -20,7 +20,7 @@ fn read(c: &SyncShared<Config>) -> Int
   effects task.share
 {
   let r = c.borrow();
-  return r.label.len() + r.routes.sum();
+  return r.label.char_count() + r.routes.sum();
 }
 fn run() -> Int
   intent "非 Copyable な内容を複数のハンドルから読む"
@@ -118,7 +118,7 @@ fn run() -> &String
 "#;
     assert!(check(&src(escape)).is_err());
     let write = BORROW.replace(
-        "return r.label.len() + r.routes.sum();",
+        "return r.label.char_count() + r.routes.sum();",
         "r.routes.push(40);\n  return 0;",
     );
     assert!(check(&src(&write)).is_err());

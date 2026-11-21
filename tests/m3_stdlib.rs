@@ -269,7 +269,7 @@ fn clone_copies_option_result_and_string() {
         ),
         func(
             "s(a: &String) -> Int",
-            "let mut c = a.clone();\nc = \"\";\nreturn a.len() * 10 + c.len();"
+            "let mut c = a.clone();\nc = \"\";\nreturn a.char_count() * 10 + c.char_count();"
         ),
     );
     let go = format!(
@@ -369,11 +369,17 @@ fn result_functions() {
         "Err(\"boom\")"
     );
     assert_eq!(
-        t("return bad().map_err(|e| e.len());", "Result<Int, Int>"),
+        t(
+            "return bad().map_err(|e| e.char_count());",
+            "Result<Int, Int>"
+        ),
         "Err(4)"
     );
     assert_eq!(
-        t("return good().map_err(|e| e.len());", "Result<Int, Int>"),
+        t(
+            "return good().map_err(|e| e.char_count());",
+            "Result<Int, Int>"
+        ),
         "Ok(4)"
     );
 }
@@ -401,8 +407,10 @@ fn question_mark_returns_none_and_err_unchanged() {
 
 #[test]
 fn string_functions() {
-    assert_eq!(ev("Int", "\"héllo\".len()"), "5");
-    assert_eq!(ev("Int", "\"日本\".len()"), "2");
+    assert_eq!(ev("Int", "\"héllo\".char_count()"), "5");
+    assert_eq!(ev("Int", "\"日本\".char_count()"), "2");
+    assert_eq!(ev("Int", "\"héllo\".byte_len()"), "6");
+    assert_eq!(ev("Int", "\"日本\".byte_len()"), "6");
     assert_eq!(ev("Bool", "\"\".is_empty()"), "true");
     assert_eq!(ev("Bool", "\"a\".is_empty()"), "false");
     assert_eq!(ev("String", "\"  a b\\t\\n\".trim()"), "\"a b\"");

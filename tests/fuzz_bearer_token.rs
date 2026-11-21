@@ -38,7 +38,7 @@ fn options() -> Options {
     }
     let replacement = r#"
       let count = data.get(0).unwrap_or(0) % 4;
-      let value = data.slice(1, data.len()).unwrap_or(Bytes.new());
+      let value = data.slice(1, data.byte_len()).unwrap_or(Bytes.new());
       let mut hs = List.new(); let mut i = 0;
       while i < count {
         let mut name = "Authorization"; if i % 2 == 1 { name = "AUTHORIZATION"; }

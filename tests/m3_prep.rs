@@ -345,7 +345,7 @@ fn function_values_have_no_clone() {
 
 fn sibling_reuse(inner: &str) -> String {
     format!(
-        "{inner}\n  let s = \"a\";\n  let h = move |x| x + s.len();\n  let a = h;\n  let b = h;\n  return 0;"
+        "{inner}\n  let s = \"a\";\n  let h = move |x| x + s.char_count();\n  let a = h;\n  let b = h;\n  return 0;"
     )
 }
 

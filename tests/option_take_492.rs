@@ -15,7 +15,7 @@ fn take_moves_fields_nested_and_noncopy_values() {
   box.item = Some(None);
   let nested = box.item.take();
   match nested {{ Some(None) => {{}} _ => {{ return 3; }} }}
-  match taken {{ Some(Some(bytes)) => {{ if bytes.len() != 3 {{ return 4; }} }} _ => {{ return 5; }} }}
+  match taken {{ Some(Some(bytes)) => {{ if bytes.byte_len() != 3 {{ return 4; }} }} _ => {{ return 5; }} }}
   let mut n = Some(7);
   let a = n.take();
   n = Some(9);

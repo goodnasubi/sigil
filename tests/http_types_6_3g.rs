@@ -141,17 +141,17 @@ fn http_accessors_and_status_codes() {
         HttpProgress.Done(r, next) => {
           let m = r.method();
           let hs = r.headers();
-          sum = sum + m.len() + r.path().len() * 10 + r.query().len() * 100 + r.version() * 1000;
+          sum = sum + m.byte_len() + r.path().byte_len() * 10 + r.query().byte_len() * 100 + r.version() * 1000;
           sum = sum + hs.len() * 100000 + r.body_len() * 1000000;
           match r.header(&"X-A") {
-            Some(v) => { sum = sum + v.len() * 10000000; }
+            Some(v) => { sum = sum + v.byte_len() * 10000000; }
             None => {}
           }
           match hs.get(0) {
-            Some(h) => { sum = sum + h.name().len() * 100000000 + h.value().len() * 1000000000; }
+            Some(h) => { sum = sum + h.name().byte_len() * 100000000 + h.value().byte_len() * 1000000000; }
             None => {}
           }
-          if next != data.len() { return 0 - 1; }
+          if next != data.byte_len() { return 0 - 1; }
         }
         HttpProgress.NeedMore => { return 0 - 2; }
       }
@@ -167,7 +167,7 @@ fn http_accessors_and_status_codes() {
   }
   if !q.wants_continue() || !q.in_body() { return 0 - 5; }
   let res = HttpResponse.new(204, Bytes.new()).with_header(&"X-Y", &"z".as_bytes());
-  if res.status() != 204 || res.headers().len() != 1 || res.body().len() != 0 { return 0 - 6; }
+  if res.status() != 204 || res.headers().len() != 1 || res.body().byte_len() != 0 { return 0 - 6; }
   let codes = code(&"GET / HTTP/1.1\r\n\r\n".as_bytes()) + code(&"GET / HTTP/3.0\r\n".as_bytes()) * 10000
     + code(&"TRACE / HTTP/1.1\r\n".as_bytes()) * 100000000;
   if codes != 4001 + 50560000 + 501500000000 { return codes; }

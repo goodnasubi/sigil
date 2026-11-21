@@ -13,7 +13,7 @@ pub fn validate_elf(data: &Bytes) -> Result<Bool, Int>
   ensures none
   effects none
 {
-  if data.len() < 64 || data.len() > 67108864 {
+  if data.byte_len() < 64 || data.byte_len() > 67108864 {
     return Err(400);
   }
   if le(&data, 0, 4)? != 1179403647 || le(&data, 4, 1)? != 2 || le(&data, 5, 1)? != 1 || le(&data, 6, 1)? != 1 {
@@ -25,7 +25,7 @@ pub fn validate_elf(data: &Bytes) -> Result<Bool, Int>
   let offset = le(&data, 32, 8)?;
   let count = le(&data, 56, 2)?;
   // 拡張program header数(PN_XNUM)はこの固定形式では扱わない。
-  if count == 0 || count == 65535 || offset < 64 || !span(data.len(), offset, count * 56) {
+  if count == 0 || count == 65535 || offset < 64 || !span(data.byte_len(), offset, count * 56) {
     return Err(400);
   }
   let mut i = 0;
@@ -37,7 +37,7 @@ pub fn validate_elf(data: &Bytes) -> Result<Bool, Int>
     }
     let start = le(&data, p + 8, 8)?;
     let size = le(&data, p + 32, 8)?;
-    if !span(data.len(), start, size) {
+    if !span(data.byte_len(), start, size) {
       return Err(400);
     }
     if kind == 1 {

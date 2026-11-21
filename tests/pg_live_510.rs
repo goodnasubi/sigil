@@ -57,9 +57,9 @@ fn exercise(port: Int, scenario: Int, user: String, database: String, password: 
         match r.get(3) { Some(Some(PgValue.Integer(n))) => { if n != (0 - 9223372036854775807) - 1 { return Ok(9); } } _ => { return Ok(10); } }
         match r.get(4) { Some(Some(PgValue.Text(t))) => { if t != "日本語 ' ; select" { return Ok(11); } } _ => { return Ok(12); } }
         match r.get(5) { Some(Some(PgValue.Text(t))) => { if t != "" { return Ok(13); } } _ => { return Ok(14); } }
-        match r.get(6) { Some(Some(PgValue.Binary(b))) => { if b.len() != 2 || b.get(0).unwrap_or(1) != 0 || b.get(1).unwrap_or(0) != 120 { return Ok(15); } } _ => { return Ok(16); } }
+        match r.get(6) { Some(Some(PgValue.Binary(b))) => { if b.byte_len() != 2 || b.get(0).unwrap_or(1) != 0 || b.get(1).unwrap_or(0) != 120 { return Ok(15); } } _ => { return Ok(16); } }
         match r.get(7) { Some(None) => {} _ => { return Ok(17); } }
-        match r.get(8) { Some(Some(PgValue.Binary(b))) => { if b.len() != 0 { return Ok(18); } } _ => { return Ok(19); } }
+        match r.get(8) { Some(Some(PgValue.Binary(b))) => { if b.byte_len() != 0 { return Ok(18); } } _ => { return Ok(19); } }
       }
       None => { return Ok(20); }
     }

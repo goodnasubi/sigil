@@ -98,8 +98,8 @@ fn wide_program_is_freestanding_and_runs() {
   let f = 1.5 + 2.25;
   console.log(&s);
   console.log(&f);
-  console.log(&b.len());
-  return xs.sum() + s.len() + "a\nb\nc".lines().len();"#;
+  console.log(&b.byte_len());
+  return xs.sum() + s.char_count() + "a\nb\nc".lines().len();"#;
     let exe = build(&func("main() -> Int", "console", body), "main");
     assert_freestanding(&exe);
     let got = exec(&exe, &[]);

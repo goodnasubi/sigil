@@ -112,7 +112,7 @@ pub fn main(p: Path) -> String
         let bytes = line.as_bytes();
         let mut b = Bytes.new();
         let mut j = 0;
-        while j + 1 < bytes.len() {
+        while j + 1 < bytes.byte_len() {
           b.push(unhex(bytes.get(j).unwrap_or(48)) * 16 + unhex(bytes.get(j + 1).unwrap_or(48)));
           j = j + 2;
         }

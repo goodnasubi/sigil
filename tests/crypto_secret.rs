@@ -35,14 +35,16 @@ fn check_err(src: &str) -> String {
 fn secret_round_trip() {
     // 取り込み → 長さと中身（expose 経由）を取り出す。
     let v = run(
-        "  let mut b = Bytes.new();\n  b.push(10);\n  b.push(20);\n  b.push(30);\n  let s = Secret.from_bytes(b);\n  let inner = s.expose();\n  return s.len() * 1000 + inner.get(0).unwrap_or(0) * 100 + inner.get(1).unwrap_or(0) * 10 + inner.get(2).unwrap_or(0);",
+        "  let mut b = Bytes.new();\n  b.push(10);\n  b.push(20);\n  b.push(30);\n  let s = Secret.from_bytes(b);\n  let inner = s.expose();\n  return s.byte_len() * 1000 + inner.get(0).unwrap_or(0) * 100 + inner.get(1).unwrap_or(0) * 10 + inner.get(2).unwrap_or(0);",
     );
     assert_eq!(v, 3000 + 1000 + 200 + 30);
 }
 
 #[test]
 fn secret_empty() {
-    let v = run("  let s = Secret.from_bytes(Bytes.new());\n  return s.len() + s.expose().len();");
+    let v = run(
+        "  let s = Secret.from_bytes(Bytes.new());\n  return s.byte_len() + s.expose().byte_len();",
+    );
     assert_eq!(v, 0);
 }
 
@@ -63,7 +65,7 @@ fn secret_is_not_displayable() {
 fn secret_is_not_copyable() {
     // 値を渡したあとに元の束縛を使うと、移動済みとして検査で落ちる。
     let src = format!(
-        "{HEAD}fn take(s: Secret) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return s.len();\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret.from_bytes(Bytes.new());\n  let a = take(s);\n  return a + s.len();\n}}\n"
+        "{HEAD}fn take(s: Secret) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  return s.byte_len();\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret.from_bytes(Bytes.new());\n  let a = take(s);\n  return a + s.byte_len();\n}}\n"
     );
     let e = check_err(&src);
     assert!(!e.is_empty());
@@ -101,11 +103,11 @@ fn user_defined_secret_is_a_plain_struct() {
         r.value.parse().unwrap()
     };
     let tuple_first = format!(
-        "{HEAD}struct Secret {{\n  xs: (Int, String)\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ xs: (7, \"hello\") }};\n  let (n, text) = s.xs;\n  return n + text.len();\n}}\n"
+        "{HEAD}struct Secret {{\n  xs: (Int, String)\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ xs: (7, \"hello\") }};\n  let (n, text) = s.xs;\n  return n + text.char_count();\n}}\n"
     );
     assert_eq!(run_full(&tuple_first), 7 + 5);
     let string_first = format!(
-        "{HEAD}struct Secret {{\n  name: String,\n  n: Int\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ name: \"abc\", n: 40 }};\n  return s.n + s.name.len();\n}}\n"
+        "{HEAD}struct Secret {{\n  name: String,\n  n: Int\n}}\n\nfn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let s = Secret {{ name: \"abc\", n: 40 }};\n  return s.n + s.name.char_count();\n}}\n"
     );
     assert_eq!(run_full(&string_first), 40 + 3);
     let list_first = format!(
@@ -137,7 +139,7 @@ fn user_defined_secret_trace_is_not_redacted() {
 fn real_secret_trace_is_redacted() {
     // 本物の `Secret`（std.crypto）の破棄は `Secret(***)` とだけ記録される。
     let src = format!(
-        "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let mut b = Bytes.new();\n  b.push(10);\n  let s = Secret.from_bytes(b);\n  return s.len();\n}}\n"
+        "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let mut b = Bytes.new();\n  b.push(10);\n  let s = Secret.from_bytes(b);\n  return s.byte_len();\n}}\n"
     );
     let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
     assert_eq!(got.code, Some(0), "{}", got.stderr);

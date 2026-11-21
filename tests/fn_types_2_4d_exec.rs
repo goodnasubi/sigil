@@ -85,7 +85,7 @@ fn returned_struct_with_stored_closure_runs() {
         func(
             "make_box() -> FnBox",
             "none",
-            "  let s = \"xyz\";\n  return FnBox { f: move |x| x + s.len() };"
+            "  let s = \"xyz\";\n  return FnBox { f: move |x| x + s.char_count() };"
         ),
         func(
             "main() -> Int",
@@ -93,7 +93,7 @@ fn returned_struct_with_stored_closure_runs() {
             "  let b = make_box();\n  return b.f(1) * 10 + b.f(2);"
         )
     );
-    // s.len() = 3: 40 + 5
+    // s.char_count() = 3: 40 + 5
     assert_eq!(run_int(&src, "main"), "45");
 }
 
@@ -133,10 +133,10 @@ fn stored_move_closure_called_repeatedly_runs() {
         func(
             "main() -> Int",
             "none",
-            "  let s = \"hello\";\n  let b = FnBox { f: move |x| x + s.len() };\n  return b.f(1) + b.f(2) * 10 + apply(&b, 3) * 100;"
+            "  let s = \"hello\";\n  let b = FnBox { f: move |x| x + s.char_count() };\n  return b.f(1) + b.f(2) * 10 + apply(&b, 3) * 100;"
         )
     );
-    // s.len() = 5: 6 + 70 + 800
+    // s.char_count() = 5: 6 + 70 + 800
     assert_eq!(run_int(&src, "main"), "876");
 }
 
@@ -173,7 +173,7 @@ fn returned_fn_values_run() {
         func(
             "make_lenner() -> fn(Int) -> Int effects none",
             "none",
-            "  let s = \"abcd\";\n  return move |x| x + s.len();"
+            "  let s = \"abcd\";\n  return move |x| x + s.char_count();"
         ),
         func(
             "main() -> Int",
@@ -216,7 +216,7 @@ fn enum_payload_fn_values_run() {
         func(
             "main() -> Int",
             "none",
-            "  let a = call_db(Handler.Db(handler_impl), Request { id: 1 });\n  let s = \"ab\";\n  let b = call_pure(Handler.Pure(move |x| x + s.len()));\n  return a * 1000 + b;"
+            "  let a = call_db(Handler.Db(handler_impl), Request { id: 1 });\n  let s = \"ab\";\n  let b = call_pure(Handler.Pure(move |x| x + s.char_count()));\n  return a * 1000 + b;"
         )
     ));
     // a = 203, b = 30 + 4 = 34
@@ -292,7 +292,7 @@ fn stored_closure_drop_does_not_grow_with_the_iteration_count() {
         func(
             "run(n: Int) -> Int",
             "none",
-            "  let mut i = 0;\n  let mut total = 0;\n  while i < n {\n    let base = \"  abcdef  \";\n    let s = base.trim();\n    let b = FnBox { f: move |x| x + s.len() };\n    total = total + b.f(1) + b.f(2);\n    let s2 = base.trim();\n    let e = Tag2.Pure(move |x| x + s2.len());\n    total = total + match e {\n      Tag2.Pure(f) => f(0),\n      Tag2.Empty => 0,\n    };\n    i = i + 1;\n  }\n  return total;"
+            "  let mut i = 0;\n  let mut total = 0;\n  while i < n {\n    let base = \"  abcdef  \";\n    let s = base.trim();\n    let b = FnBox { f: move |x| x + s.char_count() };\n    total = total + b.f(1) + b.f(2);\n    let s2 = base.trim();\n    let e = Tag2.Pure(move |x| x + s2.char_count());\n    total = total + match e {\n      Tag2.Pure(f) => f(0),\n      Tag2.Empty => 0,\n    };\n    i = i + 1;\n  }\n  return total;"
         )
     );
     let (s1, out1) = live(&src, 1_000);

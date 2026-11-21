@@ -229,7 +229,7 @@ use common::native::{exec, exec_env, scratch, try_build};
 const MODP: i64 = 1_000_000_007;
 
 /// 列の中身を畳む補助（長さと各バイト）。Rust の `hb` と同じ式。
-const HB: &str = "fn hb(b: &Bytes) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut h = b.len();\n  let mut i = 0;\n  while i < b.len() {\n    h = (h * 257 + b.get(i).unwrap_or(0)) % 1000000007;\n    i = i + 1;\n  }\n  return h;\n}\n\n";
+const HB: &str = "fn hb(b: &Bytes) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut h = b.byte_len();\n  let mut i = 0;\n  while i < b.byte_len() {\n    h = (h * 257 + b.get(i).unwrap_or(0)) % 1000000007;\n    i = i + 1;\n  }\n  return h;\n}\n\n";
 
 fn hb(b: &[u8]) -> i64 {
     let mut h = b.len() as i64;

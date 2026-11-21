@@ -153,13 +153,13 @@ fn exchange(value: Holder) -> Int
   while i < 180000 {{ data.push(i % 251); i = i + 1; }}
   match c.s.write_all(&data) {{ Ok(u) => {{}} Err(e) => {{ return 0 - 1; }} }}
   let mut all = Bytes.new();
-  while all.len() < 180000 {{
+  while all.byte_len() < 180000 {{
     match c.s.read(65536) {{
       Ok(b) => {{ if b.is_empty() {{ return 0 - 2; }} all.extend(&b); }}
       Err(e) => {{ return 0 - 3; }}
     }}
   }}
-  if all == data {{ return all.len(); }}
+  if all == data {{ return all.byte_len(); }}
   return 0 - 4;
 }}
 pub fn main(port: Int) -> Int
@@ -224,7 +224,7 @@ pub fn main() -> Int
 {{
   match random.bytes(24) {{
     Some(a) => {{
-      match random.bytes(65536) {{ Some(b) => {{ return a.len() + b.len(); }} None => {{ return 0 - 2; }} }}
+      match random.bytes(65536) {{ Some(b) => {{ return a.byte_len() + b.byte_len(); }} None => {{ return 0 - 2; }} }}
     }}
     None => {{ return 0 - 1; }}
   }}
@@ -249,7 +249,7 @@ pub fn main() -> Int
   effects random
 {{
   match random.bytes(24) {{
-    Some(b) => {{ let mut i = 0; while i < 24 {{ if b.get(i).unwrap_or(0) != 73 {{ return 0 - 1; }} i = i + 1; }} return b.len(); }}
+    Some(b) => {{ let mut i = 0; while i < 24 {{ if b.get(i).unwrap_or(0) != 73 {{ return 0 - 1; }} i = i + 1; }} return b.byte_len(); }}
     None => {{ return 0; }}
   }}
 }}
@@ -355,7 +355,7 @@ fn checkpoint(port: Int) -> Int
   effects net.client, task.suspend
 {{
   match net.connect(&"127.0.0.1", port) {{
-    Ok(c) => {{ let mut stream = c; match stream.read(1) {{ Ok(v) => {{ return v.len(); }} Err(e) => {{ return 0; }} }} }}
+    Ok(c) => {{ let mut stream = c; match stream.read(1) {{ Ok(v) => {{ return v.byte_len(); }} Err(e) => {{ return 0; }} }} }}
     Err(e) => {{ return 0; }}
   }}
 }}
@@ -381,7 +381,7 @@ fn blocked_io(c: &mut TcpClient, writing: Bool) -> Int
     while i < 65536 {{ b.push(73); i = i + 1; }}
     let mut k = 0;
     while k < 1024 {{ match c.write_all(&b) {{ Ok(u) => {{}} Err(e) => {{ return 0 - 2; }} }} k = k + 1; }}
-  }} else {{ match c.read(1) {{ Ok(b) => {{ return b.len(); }} Err(e) => {{ return 0 - 1; }} }} }}
+  }} else {{ match c.read(1) {{ Ok(b) => {{ return b.byte_len(); }} Err(e) => {{ return 0 - 1; }} }} }}
   return 0;
 }}
 pub fn main(port: Int, refused: Int) -> Int
@@ -523,7 +523,7 @@ pub fn main() -> Int
 #[test]
 fn limit_random_and_connect_arguments_are_enforced_in_both_engines() {
     for (body, effects, values) in [
-        ("match random.bytes(n) { Some(b) => { return b.len(); } None => { return 0; } }", "random", vec![0, 65537]),
+        ("match random.bytes(n) { Some(b) => { return b.byte_len(); } None => { return 0; } }", "random", vec![0, 65537]),
         ("match net.connect(&\"127.0.0.1\", n) { Ok(c) => { return 1; } Err(e) => { return 0; } }", "net.client, task.suspend", vec![0, 65536]),
     ] {
         let src = format!("{HEAD}pub fn main(n: Int) -> Int\n intent \"公開入口の上限\"\n requires none\n ensures none\n effects {effects}\n{{ {body} }}");

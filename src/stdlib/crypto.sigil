@@ -60,7 +60,7 @@ impl Secret {
     ensures none
     effects none
   {
-    return self.data.len();
+    return self.data.byte_len();
   }
 
   pub fn byte_len(self: &Secret) -> Int
@@ -129,13 +129,13 @@ impl Sha256 {
     ensures none
     effects none
   {
-    self.total_len = self.total_len + data.len();
+    self.total_len = self.total_len + data.byte_len();
     let mut buf = self.buffer.clone();
     buf.extend(&data);
-    while buf.len() >= 64 {
+    while buf.byte_len() >= 64 {
       let block = buf.slice(0, 64).unwrap_or(Bytes.new());
       self.state = sha256_compress(&self.state, &block, 1);
-      buf = buf.slice(64, buf.len()).unwrap_or(Bytes.new());
+      buf = buf.slice(64, buf.byte_len()).unwrap_or(Bytes.new());
     }
     self.buffer = buf;
   }
@@ -146,17 +146,17 @@ impl Sha256 {
   pub fn finalize(self: &mut Sha256) -> Bytes
     intent "パディングを適用し 32 バイトのダイジェストを返す"
     requires none
-    ensures result.len() == 32
+    ensures result.byte_len() == 32
     effects none
   {
     let zero = 0;
     let mut tail = self.buffer.clone();
     tail.push(0x80);
-    while tail.len() % 64 != 56 {
+    while tail.byte_len() % 64 != 56 {
       tail.push(0);
     }
     tail.push_u64_be(self.total_len * 8);
-    self.state = sha256_compress(&self.state, &tail, tail.len() / 64);
+    self.state = sha256_compress(&self.state, &tail, tail.byte_len() / 64);
     // 状態の読みは写しを取ってから行う（フィールド越しの get と既定値の
     // 借用が重なると、参照の位置の規則に合わないため）。
     let done = self.state.clone();
@@ -180,15 +180,15 @@ impl Sha256 {
 pub fn sha256(data: &Bytes) -> Bytes
   intent "データ全体の SHA-256 ダイジェスト (32 バイト) を計算する"
   requires none
-  ensures result.len() == 32
+  ensures result.byte_len() == 32
   effects none
 {
   let mut padded = data.clone();
   padded.push(0x80);
-  while padded.len() % 64 != 56 {
+  while padded.byte_len() % 64 != 56 {
     padded.push(0);
   }
-  padded.push_u64_be(data.len() * 8);
+  padded.push_u64_be(data.byte_len() * 8);
   let mut st = List.new();
   st.push(0x6a09e667);
   st.push(0xbb67ae85);
@@ -198,7 +198,7 @@ pub fn sha256(data: &Bytes) -> Bytes
   st.push(0x9b05688c);
   st.push(0x1f83d9ab);
   st.push(0x5be0cd19);
-  let done = sha256_compress(&st, &padded, padded.len() / 64);
+  let done = sha256_compress(&st, &padded, padded.byte_len() / 64);
   let mut out = Bytes.new();
   out.push_u32_be(done.get(0).map(|x| x + 0).unwrap_or(0));
   out.push_u32_be(done.get(1).map(|x| x + 0).unwrap_or(0));
@@ -366,15 +366,15 @@ pub fn sha256_compress(st: &List<Int>, data: &Bytes, block_count: Int) -> List<I
 
 pub fn hmac_sha256(key: &Secret, message: &Bytes) -> Secret
   intent "HMAC-SHA-256 を計算する"
-  requires key.len() >= 32
-  ensures result.len() == 32
+  requires key.byte_len() >= 32
+  ensures result.byte_len() == 32
   effects none
 {
   let mut kb = key.expose();
-  if kb.len() > 64 {
+  if kb.byte_len() > 64 {
     kb = sha256(&kb);
   }
-  while kb.len() < 64 {
+  while kb.byte_len() < 64 {
     kb.push(0);
   }
   let mut ipad = Bytes.new();
@@ -399,7 +399,7 @@ pub fn hmac_sha256(key: &Secret, message: &Bytes) -> Secret
 
 pub fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool
   intent "HMAC-SHA-256 を定数時間で照合する"
-  requires key.len() >= 32
+  requires key.byte_len() >= 32
   ensures none
   effects none
 {
@@ -433,16 +433,16 @@ pub fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bo
 fn hmac_from_pads(ist: &List<Int>, ost: &List<Int>, message: &Bytes) -> Bytes
   intent "処理済みのパッドの状態から HMAC-SHA-256 を計算する"
   requires none
-  ensures result.len() == 32
+  ensures result.byte_len() == 32
   effects none
 {
   let mut inner = message.clone();
   inner.push(0x80);
-  while inner.len() % 64 != 56 {
+  while inner.byte_len() % 64 != 56 {
     inner.push(0);
   }
-  inner.push_u64_be((64 + message.len()) * 8);
-  let ih = sha256_compress(&ist, &inner, inner.len() / 64);
+  inner.push_u64_be((64 + message.byte_len()) * 8);
+  let ih = sha256_compress(&ist, &inner, inner.byte_len() / 64);
   let mut outer = Bytes.new();
   outer.push_u32_be(ih.get(0).map(|x| x + 0).unwrap_or(0));
   outer.push_u32_be(ih.get(1).map(|x| x + 0).unwrap_or(0));
@@ -453,11 +453,11 @@ fn hmac_from_pads(ist: &List<Int>, ost: &List<Int>, message: &Bytes) -> Bytes
   outer.push_u32_be(ih.get(6).map(|x| x + 0).unwrap_or(0));
   outer.push_u32_be(ih.get(7).map(|x| x + 0).unwrap_or(0));
   outer.push(0x80);
-  while outer.len() % 64 != 56 {
+  while outer.byte_len() % 64 != 56 {
     outer.push(0);
   }
   outer.push_u64_be((64 + 32) * 8);
-  let oh = sha256_compress(&ost, &outer, outer.len() / 64);
+  let oh = sha256_compress(&ost, &outer, outer.byte_len() / 64);
   let mut out = Bytes.new();
   out.push_u32_be(oh.get(0).map(|x| x + 0).unwrap_or(0));
   out.push_u32_be(oh.get(1).map(|x| x + 0).unwrap_or(0));
@@ -473,7 +473,7 @@ fn hmac_from_pads(ist: &List<Int>, ost: &List<Int>, message: &Bytes) -> Bytes
 pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret
   intent "PBKDF2-HMAC-SHA-256 で鍵を導出する"
   requires iterations >= 4096 && iterations <= 100000 && dk_len > 0
-  ensures result.len() == dk_len
+  ensures result.byte_len() == dk_len
   effects task.suspend
 {
   let mut out = Bytes.new();
@@ -482,10 +482,10 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
   // 鍵は全反復で同じなので、ipad・opad のブロックを処理した状態を最初に
   // 1 回だけ求め、反復ごとに使い回す（`hmac_from_pads`）。
   let mut kb = password.expose();
-  if kb.len() > 64 {
+  if kb.byte_len() > 64 {
     kb = sha256(&kb);
   }
-  while kb.len() < 64 {
+  while kb.byte_len() < 64 {
     kb.push(0);
   }
   let mut ipad = Bytes.new();
@@ -521,7 +521,7 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
       u = nu;
       let mut nt = Bytes.new();
       let mut i = 0;
-      while i < t.len() {
+      while i < t.byte_len() {
         let tb = t.get(i).map(|x| x + 0).unwrap_or(0);
         let ub = u.get(i).map(|x| x + 0).unwrap_or(0);
         nt.push(tb ^ ub);

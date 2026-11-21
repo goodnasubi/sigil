@@ -266,7 +266,7 @@ fn closure_captures_ok() {
         func(
             "box_str() -> FnBox",
             "none",
-            "  let s = \"sigil\";\n  return FnBox { f: move |x| x + s.len() };"
+            "  let s = \"sigil\";\n  return FnBox { f: move |x| x + s.char_count() };"
         ),
         func(
             "call_box() -> Int",

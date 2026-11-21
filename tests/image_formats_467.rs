@@ -147,7 +147,7 @@ fn ustar_boundaries_canonical_bytes_and_corruption() {
   if archive_size(0, 9223372036854775807).is_ok() || archive_size(9223372036854775807, 1).is_ok() || archive_size(0, 8589934592).is_ok() || archive_size(0, 0 - 1).is_ok() { return Ok(2); }
   if archive_size(134216192, 0)? != 134216704 || archive_size(134216704, 0).is_ok() { return Ok(3); }
   let mut empty = Bytes.new(); finish_tar(&mut empty)?;
-  if empty.len() != 1024 || read_tar(&empty)?.len() != 0 { return Ok(4); }
+  if empty.byte_len() != 1024 || read_tar(&empty)?.len() != 0 { return Ok(4); }
   let mut sizes = List.new(); sizes.push(0); sizes.push(1); sizes.push(511); sizes.push(512); sizes.push(513);
   let mut i = 0;
   while i < sizes.len() {
@@ -157,7 +157,7 @@ fn ustar_boundaries_canonical_bytes_and_corruption() {
     match files.get(0) {
       Some(f) => {
         let contents = tar_data(&f);
-        if tar_name(&f) != "app" || tar_mode(&f) != 365 || contents.len() != n { return Ok(6); }
+        if tar_name(&f) != "app" || tar_mode(&f) != 365 || contents.byte_len() != n { return Ok(6); }
         let mut again = Bytes.new(); append_file(&mut again, &tar_name(&f), tar_mode(&f), &contents)?; finish_tar(&mut again)?;
         if digest(&again) != digest(&tar) { return Ok(7); }
       }
@@ -166,7 +166,7 @@ fn ustar_boundaries_canonical_bytes_and_corruption() {
     i = i + 1;
   }
   let mut tar = Bytes.new(); append_file(&mut tar, &"app", 365, &"abc".as_bytes())?; finish_tar(&mut tar)?;
-  if tar.len() != 2048 || tar.get(100).unwrap_or(0) != 48 || tar.get(104).unwrap_or(0) != 53 || tar.get(107).unwrap_or(1) != 0 || tar.get(156).unwrap_or(0) != 48 { return Ok(8); }
+  if tar.byte_len() != 2048 || tar.get(100).unwrap_or(0) != 48 || tar.get(104).unwrap_or(0) != 53 || tar.get(107).unwrap_or(1) != 0 || tar.get(156).unwrap_or(0) != 48 { return Ok(8); }
   let mut offsets = List.new(); offsets.push(0); offsets.push(100); offsets.push(124); offsets.push(148); offsets.push(154); offsets.push(155); offsets.push(156); offsets.push(157); offsets.push(257); offsets.push(263); offsets.push(345); offsets.push(511); offsets.push(515); offsets.push(1024); offsets.push(2047);
   i = 0;
   while i < offsets.len() {
@@ -174,8 +174,8 @@ fn ustar_boundaries_canonical_bytes_and_corruption() {
     if read_tar(&bad).is_ok() { return Ok(9); } i = i + 1;
   }
   if read_tar(&tar.slice(0, 1536).map_err(|e| 400)?).is_ok() { return Ok(10); }
-  let before = tar.len();
-  if append_file(&mut tar, &"../app", 365, &Bytes.new()).is_ok() || append_file(&mut tar, &"/app", 365, &Bytes.new()).is_ok() || append_file(&mut tar, &"app", 511, &Bytes.new()).is_ok() || tar.len() != before { return Ok(11); }
+  let before = tar.byte_len();
+  if append_file(&mut tar, &"../app", 365, &Bytes.new()).is_ok() || append_file(&mut tar, &"/app", 365, &Bytes.new()).is_ok() || append_file(&mut tar, &"app", 511, &Bytes.new()).is_ok() || tar.byte_len() != before { return Ok(11); }
   return Ok(0);"#);
 }
 #[test]

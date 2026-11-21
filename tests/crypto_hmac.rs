@@ -33,7 +33,7 @@ use sigil::exec::{Arg, RunError, StopKind};
 const HEAD: &str = "module crypto_hmac.t\n  targets server\n  trust none\n\n";
 
 /// ダイジェストと期待バイト列の不一致の数を数える補助（テスト側の関数）。
-const MISMATCH_FN: &str = "fn mismatch(d: &Bytes, want: &List<Int>) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut bad = 0;\n  let mut i = 0;\n  while i < want.len() {\n    let w = match want.get(i) { Some(v) => v, None => 0 };\n    let g = d.get(i).unwrap_or(0 - 1);\n    if g != w {\n      bad = bad + 1;\n    }\n    i = i + 1;\n  }\n  if d.len() != want.len() {\n    bad = bad + 100;\n  }\n  return bad;\n}\n\n";
+const MISMATCH_FN: &str = "fn mismatch(d: &Bytes, want: &List<Int>) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut bad = 0;\n  let mut i = 0;\n  while i < want.len() {\n    let w = match want.get(i) { Some(v) => v, None => 0 };\n    let g = d.get(i).unwrap_or(0 - 1);\n    if g != w {\n      bad = bad + 1;\n    }\n    i = i + 1;\n  }\n  if d.byte_len() != want.len() {\n    bad = bad + 100;\n  }\n  return bad;\n}\n\n";
 
 fn build_bytes(name: &str, bytes: &[u8]) -> String {
     let mut s = format!("  let mut {name} = Bytes.new();\n");
@@ -334,7 +334,7 @@ fn stop_kind(src: &str) -> StopKind {
 fn hmac_short_key_is_a_contract_violation() {
     // 31 バイトの鍵（requires は 32 バイト以上）。
     let src = format!(
-        "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{}  let key = Secret.from_bytes(kb);\n{}  let mac = hmac_sha256(&key, &msg);\n  return mac.len();\n}}\n",
+        "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n{}  let key = Secret.from_bytes(kb);\n{}  let mac = hmac_sha256(&key, &msg);\n  return mac.byte_len();\n}}\n",
         build_bytes("kb", &[7u8; 31]),
         build_bytes("msg", b"abc"),
     );
@@ -356,7 +356,7 @@ fn verify_short_key_is_a_contract_violation() {
 fn pbkdf2_out_of_range_is_a_contract_violation() {
     for (iterations, dk_len) in [(4095, 32), (100001, 32), (4096, 0)] {
         let src = format!(
-            "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects task.suspend\n{{\n{}  let pw = Secret.from_bytes(pb);\n{}  let dk = pbkdf2_sha256(&pw, &salt, {iterations}, {dk_len});\n  return dk.len();\n}}\n",
+            "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects task.suspend\n{{\n{}  let pw = Secret.from_bytes(pb);\n{}  let dk = pbkdf2_sha256(&pw, &salt, {iterations}, {dk_len});\n  return dk.byte_len();\n}}\n",
             build_bytes("pb", b"password"),
             build_bytes("salt", b"salt"),
         );

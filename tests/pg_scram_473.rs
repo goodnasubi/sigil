@@ -66,12 +66,12 @@ fn format_and_bounds() {
  let mut salt = Bytes.new(); let mut j = 0;
  while j < 1024 { salt.push(1); j = j + 1; }
  let mut sm = "r=abcd,s=".as_bytes(); sm.extend(&ct_base64(&salt)); sm.extend(&",i=4096".as_bytes());
- let valid = challenge(&n, &sm)?; if valid.salt.len() != 1024 { return Ok(41); }
+ let valid = challenge(&n, &sm)?; if valid.salt.byte_len() != 1024 { return Ok(41); }
  salt.push(1);
  let mut over = "r=abcd,s=".as_bytes(); over.extend(&ct_base64(&salt)); over.extend(&",i=4096".as_bytes());
  match challenge(&n, &over) { Err(ScramError.LimitExceeded) => {} _ => { return Ok(42); } }
  let mut maximum = "r=abcd".as_bytes();
- while maximum.len() < 16384 - 18 { maximum.push(120); }
+ while maximum.byte_len() < 16384 - 18 { maximum.push(120); }
  maximum.extend(&",s=c2FsdA==,i=4096".as_bytes());
  let accepted = challenge(&n, &maximum)?;
  maximum.push(120);

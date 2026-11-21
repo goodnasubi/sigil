@@ -216,7 +216,7 @@ fn reply(s: &TcpStream, data: &Bytes) -> Int
     Ok(u) => {}
     Err(e) => { return 0 - 3; }
   }
-  return data.len();
+  return data.byte_len();
 }
 
 fn echo(c: &Conn) -> Int
@@ -360,7 +360,7 @@ fn chat(c: &Conn) -> Int
           go = false;
         } else {
           match c.s.write_all(&b) {
-            Ok(u) => { n = n + b.len(); }
+            Ok(u) => { n = n + b.byte_len(); }
             Err(e) => { return 0 - 2; }
           }
         }
@@ -823,7 +823,7 @@ fn late500(c: Conn)
   m.push(48);
   m.push(48);
   match read_all(&c.s) {
-    Ok(all) => { c.tx.send(all.len() * 100 + reply(&c.s, &m)); }
+    Ok(all) => { c.tx.send(all.byte_len() * 100 + reply(&c.s, &m)); }
     Err(e) => { c.tx.send(0 - 1); }
   }
 }

@@ -110,7 +110,7 @@ fn decimal(value: Int) -> String
     n = n / 10;
   }
   let mut digits = Bytes.new();
-  let mut i = reverse.len();
+  let mut i = reverse.byte_len();
   while i > 0 {
     i = i - 1;
     digits.push(reverse.get(i).unwrap_or(48));
@@ -368,10 +368,10 @@ fn decode(data: &Bytes, plus_space: Bool) -> Result<String, HttpResponse>
 {
   let mut out = Bytes.new();
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let mut b = data.get(i).unwrap_or(0);
     if b == 37 {
-      if i + 2 >= data.len() {
+      if i + 2 >= data.byte_len() {
         return Err(error_response(400));
       }
       let hi = hex_digit(data.get(i + 1).unwrap_or(0));
@@ -402,16 +402,16 @@ fn path_segments(path: &String) -> Result<List<String>, HttpResponse>
   effects none
 {
   let data = path.as_bytes();
-  if data.len() == 0 || data.get(0).unwrap_or(0) != 47 {
+  if data.byte_len() == 0 || data.get(0).unwrap_or(0) != 47 {
     return Err(error_response(400));
   }
   let mut items = List.new();
-  if data.len() == 1 {
+  if data.byte_len() == 1 {
     return Ok(items);
   }
   let mut start = 1;
   let mut i = 1;
-  while i <= data.len() {
+  while i <= data.byte_len() {
     let b = data.get(i).unwrap_or(47);
     if b == 47 {
       let segment = data.slice(start, i).unwrap_or(Bytes.new()).to_string_utf8().map_err(|e| error_response(400))?;
@@ -438,7 +438,7 @@ fn decode_path(data: &Bytes) -> Result<String, HttpResponse>
 {
   // 符号化された区切りは経路の別名を生まないよう拒否する。
   let mut i = 0;
-  while i + 2 < data.len() {
+  while i + 2 < data.byte_len() {
     if data.get(i).unwrap_or(0) == 37 {
       let b = hex_digit(data.get(i + 1).unwrap_or(0)) * 16 + hex_digit(data.get(i + 2).unwrap_or(0));
       if b == 47 || b == 92 {
@@ -460,15 +460,15 @@ fn parse_query(data: &Bytes, cap: Int) -> Result<List<WebParam>, HttpResponse>
   effects none
 {
   let mut items = List.new();
-  if data.len() == 0 {
+  if data.byte_len() == 0 {
     return Ok(items);
   }
   let mut start = 0;
   let mut i = 0;
   let mut count = 0;
-  while i <= data.len() {
+  while i <= data.byte_len() {
     let current = data.get(i).unwrap_or(0);
-    if i == data.len() || current == 38 {
+    if i == data.byte_len() || current == 38 {
       count = count + 1;
       if count > cap {
         return Err(error_response(400));
@@ -548,7 +548,7 @@ fn match_route(pattern: &String, path: &List<String>) -> Option<List<WebParam>>
     let b = path.get(i)?;
     let bytes = a.as_bytes();
     if bytes.get(0).unwrap_or(0) == 58 {
-      let name = bytes.slice(1, bytes.len()).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
+      let name = bytes.slice(1, bytes.byte_len()).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
       params.push(WebParam { param_name: name, param_value: b.clone() });
     } else {
       if a != b {
@@ -625,11 +625,11 @@ fn ascii_eq_ignore_case(a: &String, b: &String) -> Bool
 {
   let ab = a.as_bytes();
   let bb = b.as_bytes();
-  if ab.len() != bb.len() {
+  if ab.byte_len() != bb.byte_len() {
     return false;
   }
   let mut i = 0;
-  while i < ab.len() {
+  while i < ab.byte_len() {
     let ca = match ab.get(i) {
       Some(c) => ascii_lower_byte(c),
       None => -1,
@@ -877,10 +877,10 @@ impl Router {
       let segment = segments.get(i)?;
       let bytes = segment.as_bytes();
       if bytes.get(0).unwrap_or(0) == 58 {
-        if bytes.len() == 1 {
+        if bytes.byte_len() == 1 {
           return None;
         }
-        let name = bytes.slice(1, bytes.len()).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
+        let name = bytes.slice(1, bytes.byte_len()).unwrap_or(Bytes.new()).to_string_utf8().unwrap_or("");
         let mut j = 0;
         while j < names.len() {
           if names.get(j)? == name {
@@ -1116,7 +1116,7 @@ pub fn load_bearer_config() -> Result<BearerConfig, ConfigError>
     None => { return Err(ConfigError { config_name: "SIGIL_AUTH_HMAC_KEY_HEX", config_kind: "missing" }); }
   }
   let key_bytes = key.as_bytes();
-  if key_bytes.len() != 64 {
+  if key_bytes.byte_len() != 64 {
     let wipe = Secret.from_bytes(key_bytes);
     return Err(ConfigError { config_name: "SIGIL_AUTH_HMAC_KEY_HEX", config_kind: "invalid" });
   }
@@ -1183,10 +1183,10 @@ fn bearer_request(config: &BearerConfig, req: &AppRequest) -> Result<AuthIdentit
   let now = clock.unix_seconds();
   if req.header_count(&"authorization") != 1 { return Err(bearer_unauthorized()); }
   let value = req.header(&"authorization").unwrap_or(Bytes.new());
-  if value.len() < 8 { return Err(bearer_unauthorized()); }
+  if value.byte_len() < 8 { return Err(bearer_unauthorized()); }
   let prefix = value.slice(0, 7).unwrap_or(Bytes.new());
   if !bearer_scheme(&prefix) { return Err(bearer_unauthorized()); }
-  let token = value.slice(7, value.len()).unwrap_or(Bytes.new());
+  let token = value.slice(7, value.byte_len()).unwrap_or(Bytes.new());
   match now {
     None => { return Err(bearer_unauthorized()); }
     Some(sec) => {
@@ -1205,7 +1205,7 @@ fn bearer_scheme(prefix: &Bytes) -> Bool
   effects none
 {
   let expected = "bearer ".as_bytes();
-  if prefix.len() != 7 { return false; }
+  if prefix.byte_len() != 7 { return false; }
   let mut i = 0;
   while i < 7 {
     let mut c = prefix.get(i).unwrap_or(256);
@@ -1236,14 +1236,14 @@ pub fn verify_bearer(key: &Secret, audience: &String, token: &Bytes, now: Int) -
   ensures none
   effects none
 {
-  if key.len() != 32 || now < 0 || now > 253402300799 { return Err("unauthorized"); }
+  if key.byte_len() != 32 || now < 0 || now > 253402300799 { return Err("unauthorized"); }
   let expected_aud = audience.as_bytes();
   if !bearer_identifier(&expected_aud, 128) { return Err("unauthorized"); }
-  if token.len() > 1024 || token.len() < 9 { return Err("unauthorized"); }
+  if token.byte_len() > 1024 || token.byte_len() < 9 { return Err("unauthorized"); }
   let mut dots = 0;
   let mut split = 0;
   let mut i = 0;
-  while i < token.len() {
+  while i < token.byte_len() {
     if token.get(i).unwrap_or(0) == 46 { dots = dots + 1; split = i; }
     i = i + 1;
   }
@@ -1251,12 +1251,12 @@ pub fn verify_bearer(key: &Secret, audience: &String, token: &Bytes, now: Int) -
   let prefix = token.slice(0, 7).unwrap_or(Bytes.new());
   if prefix != "sigil1.".as_bytes() || split <= 7 { return Err("unauthorized"); }
   let encoded = token.slice(7, split).unwrap_or(Bytes.new());
-  let tag_text = token.slice(split + 1, token.len()).unwrap_or(Bytes.new());
-  if tag_text.len() != 43 { return Err("unauthorized"); }
+  let tag_text = token.slice(split + 1, token.byte_len()).unwrap_or(Bytes.new());
+  if tag_text.byte_len() != 43 { return Err("unauthorized"); }
   // ここでは復号と正規形・サイズの確認のみ。フィールドには触れない。
   let payload = bearer_base64url(&encoded, 404)?;
   let tag = bearer_base64url(&tag_text, 32)?;
-  if tag.len() != 32 { return Err("unauthorized"); }
+  if tag.byte_len() != 32 { return Err("unauthorized"); }
   let signed = token.slice(0, split).unwrap_or(Bytes.new());
   if !ct_bearer_signature(&key, &signed, &tag) { return Err("unauthorized"); }
   // 署名後の意味解釈はこの一箇所だけ。HMAC は上の一回だけ。
@@ -1294,12 +1294,12 @@ fn bearer_base64url(data: &Bytes, max: Int) -> Result<Bytes, String>
   ensures none
   effects none
 {
-  if data.len() == 0 || data.len() % 4 == 1 || data.len() > ((max * 4 + 2) / 3) { return Err("unauthorized"); }
+  if data.byte_len() == 0 || data.byte_len() % 4 == 1 || data.byte_len() > ((max * 4 + 2) / 3) { return Err("unauthorized"); }
   let mut out = Bytes.new();
   let mut acc = 0;
   let mut bits = 0;
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let value = bearer_digit(data.get(i).unwrap_or(0));
     if value < 0 { return Err("unauthorized"); }
     acc = (acc << 6) | value;
@@ -1313,7 +1313,7 @@ fn bearer_base64url(data: &Bytes, max: Int) -> Result<Bytes, String>
   }
   // 正規アルファベット、不可能長の排除、未使用ビットゼロは
   // 復号して再符号化した文字列との完全一致と同値。
-  if acc != 0 || out.len() > max { return Err("unauthorized"); }
+  if acc != 0 || out.byte_len() > max { return Err("unauthorized"); }
   return Ok(out);
 }
 
@@ -1323,9 +1323,9 @@ fn bearer_identifier(data: &Bytes, max: Int) -> Bool
   ensures none
   effects none
 {
-  if data.len() == 0 || data.len() > max { return false; }
+  if data.byte_len() == 0 || data.byte_len() > max { return false; }
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let c = data.get(i).unwrap_or(0);
     if !((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 46 || c == 95 || c == 58 || c == 45) { return false; }
     i = i + 1;
@@ -1357,19 +1357,19 @@ fn bearer_claims(data: &Bytes, audience: &Bytes, now: Int) -> Result<AuthIdentit
   ensures none
   effects none
 {
-  if data.len() < 22 { return Err("unauthorized"); }
+  if data.byte_len() < 22 { return Err("unauthorized"); }
   let iat = bearer_time(&data, 0)?;
   let exp = bearer_time(&data, 8)?;
   if exp <= iat || iat > now || now >= exp { return Err("unauthorized"); }
   if exp - iat > 3600 { return Err("unauthorized"); }
   let aud_len = data.get(16).unwrap_or(0) * 256 + data.get(17).unwrap_or(0);
-  if aud_len < 1 || aud_len > 128 || 20 + aud_len > data.len() { return Err("unauthorized"); }
+  if aud_len < 1 || aud_len > 128 || 20 + aud_len > data.byte_len() { return Err("unauthorized"); }
   let aud = data.slice(18, 18 + aud_len).unwrap_or(Bytes.new());
   if !bearer_identifier(&aud, 128) || aud != audience { return Err("unauthorized"); }
   let pos = 18 + aud_len;
   let sub_len = data.get(pos).unwrap_or(0) * 256 + data.get(pos + 1).unwrap_or(0);
-  if sub_len < 1 || sub_len > 256 || pos + 2 + sub_len != data.len() { return Err("unauthorized"); }
-  let sub = data.slice(pos + 2, data.len()).unwrap_or(Bytes.new());
+  if sub_len < 1 || sub_len > 256 || pos + 2 + sub_len != data.byte_len() { return Err("unauthorized"); }
+  let sub = data.slice(pos + 2, data.byte_len()).unwrap_or(Bytes.new());
   if !bearer_identifier(&sub, 256) { return Err("unauthorized"); }
   return Ok(AuthIdentity.new(sub.to_string_utf8().unwrap_or("")));
 }

@@ -25,12 +25,12 @@ fn parse_positive_int(b: &Bytes) -> Option<Int>
   ensures none
   effects none
 {
-  if b.len() == 0 {
+  if b.byte_len() == 0 {
     return None;
   }
   let mut i = 0;
   let mut acc = 0;
-  while i < b.len() {
+  while i < b.byte_len() {
     let c = b.get(i).unwrap_or(0);
     if c < 48 || c > 57 {
       return None;
@@ -71,10 +71,10 @@ fn decode_query_value(data: &Bytes) -> Option<String>
 {
   let mut out = Bytes.new();
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let mut b = data.get(i).unwrap_or(0);
     if b == 37 {
-      if i + 2 >= data.len() {
+      if i + 2 >= data.byte_len() {
         return None;
       }
       let hi = hex_digit(data.get(i + 1).unwrap_or(0));
@@ -104,15 +104,15 @@ fn count_query_param(q: &Bytes, key: &Bytes) -> Int
   ensures none
   effects none
 {
-  if q.len() == 0 {
+  if q.byte_len() == 0 {
     return 0;
   }
   let mut count = 0;
   let mut start = 0;
   let mut i = 0;
-  while i <= q.len() {
+  while i <= q.byte_len() {
     let current = q.get(i).unwrap_or(0);
-    if i == q.len() || current == 38 {
+    if i == q.byte_len() || current == 38 {
       let mut split = start;
       while split < i && q.get(split).unwrap_or(0) != 61 {
         split = split + 1;
@@ -134,14 +134,14 @@ fn has_duplicate_query_keys(q: &Bytes) -> Bool
   ensures none
   effects none
 {
-  if q.len() == 0 {
+  if q.byte_len() == 0 {
     return false;
   }
   let mut start = 0;
   let mut i = 0;
-  while i <= q.len() {
+  while i <= q.byte_len() {
     let current = q.get(i).unwrap_or(0);
-    if i == q.len() || current == 38 {
+    if i == q.byte_len() || current == 38 {
       let mut split = start;
       while split < i && q.get(split).unwrap_or(0) != 61 {
         split = split + 1;
@@ -163,14 +163,14 @@ fn extract_query_param(q: &Bytes, key: &Bytes) -> Option<Bytes>
   ensures none
   effects none
 {
-  if q.len() == 0 {
+  if q.byte_len() == 0 {
     return None;
   }
   let mut start = 0;
   let mut i = 0;
-  while i <= q.len() {
+  while i <= q.byte_len() {
     let current = q.get(i).unwrap_or(0);
-    if i == q.len() || current == 38 {
+    if i == q.byte_len() || current == 38 {
       let mut split = start;
       while split < i && q.get(split).unwrap_or(0) != 61 {
         split = split + 1;
@@ -261,7 +261,7 @@ fn handle_items_post(req: &HttpRequest) -> HttpResponse
                 Some(name_bytes) => {
                   match decode_query_value(&name_bytes) {
                     Some(name) => {
-                      if name.as_bytes().len() == 0 {
+                      if name.byte_len() == 0 {
                         return HttpResponse.new(400, "empty name".as_bytes());
                       }
 

@@ -303,7 +303,7 @@ fn core_allows_core_items() {
     let items = func(
         "f(xs: &List<Int>, s: &String) -> Int",
         "none",
-        "  let ys = xs.map(|x| x + 1);\n  let n = ys.len() + s.len();\n  let o = Some(n);\n  let r = s.parse_int();\n  let t = s.trim();\n  let m = Int.min_value();\n  let c = ys.clone();\n  let k = to_int(to_float(n));\n  return o.unwrap_or(m) + r.unwrap_or(0) + t.len() + c.len() + k.unwrap_or(0);",
+        "  let ys = xs.map(|x| x + 1);\n  let n = ys.len() + s.char_count();\n  let o = Some(n);\n  let r = s.parse_int();\n  let t = s.trim();\n  let m = Int.min_value();\n  let c = ys.clone();\n  let k = to_int(to_float(n));\n  return o.unwrap_or(m) + r.unwrap_or(0) + t.char_count() + c.len() + k.unwrap_or(0);",
     );
     ok(&with("bare", "none", &items));
 }

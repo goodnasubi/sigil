@@ -534,7 +534,7 @@ fn run(n: Int) -> Int
     let mut k = 0;
     while k < n {
       let j = rx.recv();
-      sum = sum + j.id + j.label.len();
+      sum = sum + j.id + j.label.char_count();
       k = k + 1;
     }
     return sum + producer.join();
@@ -987,7 +987,7 @@ fn run() -> Int
   let d = dirty(123456789) + dirty(987654321) + dirty(55555555) + dirty(777);
   let l = Lock.new("abc");
   match l.acquire() {
-    Ok(g) => { return g.get().len() + d - d; }
+    Ok(g) => { return g.get().char_count() + d - d; }
     Err(e) => { return 0 - 1; }
   }
 }

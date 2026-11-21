@@ -88,7 +88,7 @@ fn read_link_returns_raw_target_bytes_without_following() {
                 match d.read_link(&p3, 16) {
                     Err(_) => { return "err_read_raw"; }
                     Ok(b) => {
-                        if b.len() != 4 { return "err_raw_len"; }
+                        if b.byte_len() != 4 { return "err_raw_len"; }
                         if b.get(0).unwrap_or(0) != 97 { return "err_raw_0"; }
                         if b.get(1).unwrap_or(0) != 255 { return "err_raw_1"; }
                         if b.get(2).unwrap_or(0) != 254 { return "err_raw_2"; }
@@ -139,7 +139,7 @@ fn read_link_enforces_max_len_boundaries() {
                 match d.read_link(&p, 10) {
                     Err(_) => { return "err_exact_10_failed"; }
                     Ok(b) => {
-                        if b.len() != 10 { return "err_exact_10_len"; }
+                        if b.byte_len() != 10 { return "err_exact_10_len"; }
                     }
                 }
 
@@ -180,7 +180,7 @@ fn read_link_enforces_max_len_boundaries() {
                 match d.read_link(&p, 4096) {
                     Err(_) => { return "err_4096_failed"; }
                     Ok(b) => {
-                        if b.len() != 10 { return "err_4096_len"; }
+                        if b.byte_len() != 10 { return "err_4096_len"; }
                     }
                 }
 

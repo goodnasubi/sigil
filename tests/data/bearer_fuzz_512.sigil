@@ -8,7 +8,7 @@ fn encode(data: &Bytes) -> Bytes
 {
  let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".as_bytes();
  let mut out = Bytes.new(); let mut acc = 0; let mut bits = 0; let mut i = 0;
- while i < data.len() {
+ while i < data.byte_len() {
   acc = (acc << 8) | data.get(i).unwrap_or(0); bits = bits + 8;
   while bits >= 6 {
    bits = bits - 6; out.push(alphabet.get((acc >> bits) & 63).unwrap_or(0));
@@ -25,7 +25,7 @@ fn verify_input(input: &Bytes) -> String
  let mut kb = Bytes.new(); let mut i = 0;
  while i < 32 { kb.push(i); i = i + 1; }
  let mode = input.get(0).unwrap_or(0);
- let data = input.slice(1, input.len()).unwrap_or(Bytes.new());
+ let data = input.slice(1, input.byte_len()).unwrap_or(Bytes.new());
  if mode == 2 {
   return request(&data);
  }
@@ -50,7 +50,7 @@ fn probe(input: String) -> String
  requires none ensures none effects env, clock, console, db, random, task
 {
  let text = input.as_bytes(); let mut answers = Bytes.new(); let mut data = Bytes.new(); let mut i = 0;
- while i < text.len() {
+ while i < text.byte_len() {
   let c = text.get(i).unwrap_or(0);
   if c == 10 {
    answers = answers.concat(&verify_input(&data).as_bytes()).concat(&"\n".as_bytes()); data = Bytes.new(); i = i + 1;

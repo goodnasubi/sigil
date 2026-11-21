@@ -610,7 +610,7 @@ pub const REQUIRES: &[(&str, &str)] = &[
     // HTTP（ADR 0032 決定 2-3・4-3）。上限の上限は `std.http.limits` の `requires` と同じ（単体テストで固定する）。
     (
         "feed(self: &mut HttpParser, data: &Bytes, start: Int) -> Result<HttpProgress, HttpError>",
-        "0 <= start && start <= data.len()",
+        "0 <= start && start <= data.byte_len()",
     ),
     (
         "new(status: Int, body: Bytes) -> HttpResponse",
@@ -682,11 +682,11 @@ pub const REQUIRES: &[(&str, &str)] = &[
     // 少なすぎる・多すぎる反復回数を、呼び出し側の責任として弾く。
     (
         "hmac_sha256(key: &Secret, message: &Bytes) -> Secret",
-        "key.len() >= 32",
+        "key.byte_len() >= 32",
     ),
     (
         "verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool",
-        "key.len() >= 32",
+        "key.byte_len() >= 32",
     ),
     (
         "pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret",

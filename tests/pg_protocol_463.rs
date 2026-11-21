@@ -66,8 +66,8 @@ fn types_and_frontend() {
   let p = parse(&"select $1", &ps, 1048576).unwrap();
   let b = bind(&ps, 1048576).unwrap();
   if p.get(0).unwrap_or(0) != 80 || b.get(0).unwrap_or(0) != 66 { return 1; }
-  if describe(7).unwrap().len() != 7 || execute(10).unwrap().len() != 10 || sync(5).unwrap().len() != 5 { return 2; }
-  match decode_value(17, &"\\x00ff".as_bytes()).unwrap() { PgValue.Binary(v) => { if v.len() != 2 { return 3; } } _ => { return 4; } }
+  if describe(7).unwrap().byte_len() != 7 || execute(10).unwrap().byte_len() != 10 || sync(5).unwrap().byte_len() != 5 { return 2; }
+  match decode_value(17, &"\\x00ff".as_bytes()).unwrap() { PgValue.Binary(v) => { if v.byte_len() != 2 { return 3; } } _ => { return 4; } }
   match param(21, Some(PgValue.Integer(32768))) { Err(PgError.TypeMismatch) => {} _ => { return 5; } }
   match param(999, None) { Err(PgError.UnsupportedType) => {} _ => { return 6; } }
   match param(25, Some(PgValue.Text("a\0b"))) { Err(PgError.TypeMismatch) => {} _ => { return 7; } }
@@ -80,13 +80,13 @@ fn fragmented_and_coalesced() {
   let wire = frame(90, "I".as_bytes(), 6).unwrap();
   let mut all = wire.clone(); all.extend(&wire);
   let mut split = 0;
-  while split <= wire.len() {
+  while split <= wire.byte_len() {
     let mut d = decoder(6).unwrap();
-    let a = part(&wire, 0, split); let b = part(&all, split, all.len());
+    let a = part(&wire, 0, split); let b = part(&all, split, all.byte_len());
     let first = d.feed(&a).unwrap();
-    if split < wire.len() {
+    if split < wire.byte_len() {
       match first { PgProgress.NeedMore(n) => { if n != split { return 1; } } _ => { return 2; } }
-      match d.feed(&b).unwrap() { PgProgress.Done(f, n) => { if n != wire.len() - split || f.tag != 90 { return 3; } } _ => { return 4; } }
+      match d.feed(&b).unwrap() { PgProgress.Done(f, n) => { if n != wire.byte_len() - split || f.tag != 90 { return 3; } } _ => { return 4; } }
     }
     match d.finish() { Ok(v) => {} Err(e) => { return 5; } }
     split = split + 1;
@@ -116,7 +116,7 @@ fn backend_shapes_and_null() {
   match backend(&f, &cols).unwrap() {
     PgBackend.DataRow(v) => {
       match v.get(0) { Some(x) => { match x { None => {} _ => { return 2; } } } _ => { return 3; } }
-      match v.get(1) { Some(x) => { match x { Some(PgValue.Binary(empty_bytes)) => { if empty_bytes.len() != 0 { return 4; } } _ => { return 5; } } } _ => { return 6; } }
+      match v.get(1) { Some(x) => { match x { Some(PgValue.Binary(empty_bytes)) => { if empty_bytes.byte_len() != 0 { return 4; } } _ => { return 5; } } } _ => { return 6; } }
     }
     _ => { return 7; }
   }
@@ -235,8 +235,8 @@ fn fingerprint(data: &Bytes, split: Int) -> Int
 {
   let mut d = decoder(256).unwrap_or(PgDecoder { data: Bytes.new(), failed: true, max: 256 });
   let mut pos = 0; let mut sum = 0;
-  while pos < data.len() {
-    let mut end = data.len(); if pos < split { end = split; }
+  while pos < data.byte_len() {
+    let mut end = data.byte_len(); if pos < split { end = split; }
     let b = part(&data, pos, end);
     match d.feed(&b) {
       Err(e) => { return 0 - 1; }
@@ -245,7 +245,7 @@ fn fingerprint(data: &Bytes, split: Int) -> Int
         PgProgress.Done(f, n) => {
           // 任意のbodyを型とbackend解釈へ渡しても契約停止しない。
           decode_value(20, &f.body); decode_value(17, &f.body); backend(&f, &List.new());
-          sum = (sum + f.tag + f.body.len()) % 100000;
+          sum = (sum + f.tag + f.body.byte_len()) % 100000;
           pos = pos + n;
         }
       } }
@@ -259,9 +259,9 @@ fn fingerprint(data: &Bytes, split: Int) -> Int
         r#"
   let mut data = Bytes.new(); let mut i = 0;
   while i < input.len() { let n = match input.get(i) { Some(n) => n, None => 0 }; data.push(n); i = i + 1; }
-  let want = fingerprint(&data, data.len());
+  let want = fingerprint(&data, data.byte_len());
   i = 0;
-  while i <= data.len() { if fingerprint(&data, i) != want { return 1; } i = i + 1; }
+  while i <= data.byte_len() { if fingerprint(&data, i) != want { return 1; } i = i + 1; }
   return 0;
 "#,
     );

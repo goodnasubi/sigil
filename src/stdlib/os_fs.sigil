@@ -439,7 +439,7 @@ fn validate_path(p: &Path) -> Result<Bytes, IoError>
   effects none
 {
   let b = p.as_bytes();
-  let len = b.len();
+  let len = b.byte_len();
   if len == 0 || len > 4096 {
     return Err(IoError.InvalidPath(p.clone()));
   }
@@ -460,7 +460,7 @@ fn validate_subpath(p: &Path) -> Result<Bytes, IoError>
   effects none
 {
   let b = p.as_bytes();
-  let len = b.len();
+  let len = b.byte_len();
   if len == 0 || len > 4096 {
     return Err(IoError.InvalidPath(p.clone()));
   }
@@ -506,7 +506,7 @@ fn c_path_buf(b: &Bytes) -> Addr
   effects none
   unchecked "b の長さに +1 したバッファを確保し、NUL 終端する"
 {
-  let len = b.len();
+  let len = b.byte_len();
   let buf = raw.alloc(len + 1, 1);
   let mut i = 0;
   while i < len {
@@ -572,7 +572,7 @@ impl File {
     effects fs
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
   {
-    let len = buf.len();
+    let len = buf.byte_len();
     if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(0); }
@@ -595,7 +595,7 @@ impl File {
     effects fs
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
   {
-    let len = buf.len();
+    let len = buf.byte_len();
     if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(unit()); }
@@ -632,7 +632,7 @@ impl File {
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
   {
     if self.append_mode { return Err(IoError.InvalidInput(self.file_path.clone())); }
-    let len = buf.len();
+    let len = buf.byte_len();
     if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(0); }
@@ -656,7 +656,7 @@ impl File {
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
   {
     if self.append_mode { return Err(IoError.InvalidInput(self.file_path.clone())); }
-    let len = buf.len();
+    let len = buf.byte_len();
     if offset < 0 { return Err(IoError.InvalidInput(self.file_path.clone())); }
     if !check_io_range(len, offset) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(unit()); }
@@ -679,7 +679,7 @@ impl File {
     effects fs
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesは公開get/setでコピー、部分読み込みも保持する。fdはselfの生存借用中のみ使用する"
   {
-    let len = buf.len();
+    let len = buf.byte_len();
     if !check_io_range(len, 0) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(0); }
     let staging = raw.alloc(len, 1);
@@ -701,7 +701,7 @@ impl File {
     effects fs
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
   {
-    let len = buf.len();
+    let len = buf.byte_len();
     if !check_io_range(len, 0) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(0); }
     let staging = raw.alloc(len, 1);
@@ -723,7 +723,7 @@ impl File {
     effects fs
     unchecked "長さと終端を確保前に検査。stagingはlenバイトの独占領域、IO完了後に同じlenで解放。Bytesの共有借用をgetでコピーし、入力を変更・保持・解放しない。fdはselfの生存借用中のみ使用する"
   {
-    let len = buf.len();
+    let len = buf.byte_len();
     if !check_io_range(len, 0) { return Err(IoError.LimitExceeded(self.file_path.clone())); }
     if len == 0 { return Ok(unit()); }
     let staging = raw.alloc(len, 1);
@@ -1125,14 +1125,14 @@ impl OpenOptions {
           while fd == -4 {
             fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
           }
-          raw.free(buf, b.len() + 1, 1);
+          raw.free(buf, b.byte_len() + 1, 1);
           if fd < 0 {
             return Err(classify_io(fd, &p));
           }
           return Ok(File { fd: fd, file_path: p.clone(), append_mode: self.opt_append });
         }
 
-        let len = b.len();
+        let len = b.byte_len();
         let mut last_slash = -1;
         let mut i = 0;
         while i < len {
@@ -1148,7 +1148,7 @@ impl OpenOptions {
           while fd == -4 {
             fd = raw.syscall(257, -100, raw.addr_to_int(buf), flags, 438, 0, 0);
           }
-          raw.free(buf, b.len() + 1, 1);
+          raw.free(buf, b.byte_len() + 1, 1);
           if fd < 0 {
             return Err(classify_io(fd, &p));
           }
@@ -1329,7 +1329,7 @@ impl Dir {
     match validate_path(&p) {
       Err(e) => { return Err(e); }
       Ok(b) => {
-        let len = b.len();
+        let len = b.byte_len();
         let is_abs = b.get(0).unwrap_or(0) == 47;
         let mut current_fd = -100;
         let mut owned_fd = -1;
@@ -1463,7 +1463,7 @@ impl Dir {
     match validate_subpath(&subpath) {
       Err(e) => { return Err(e); }
       Ok(b) => {
-        let len = b.len();
+        let len = b.byte_len();
         let mut last_slash = -1;
         let mut i = 0;
         while i < len {
@@ -1577,7 +1577,7 @@ impl Dir {
     match validate_subpath(&subpath) {
       Err(e) => { return Err(e); }
       Ok(b) => {
-        let len = b.len();
+        let len = b.byte_len();
         let mut last_slash = -1;
         let mut i = 0;
         while i < len {
@@ -1718,7 +1718,7 @@ impl Dir {
     match validate_subpath(&subpath) {
       Err(e) => { return Err(e); }
       Ok(b) => {
-        let len = b.len();
+        let len = b.byte_len();
         let mut last_slash = -1;
         let mut i = 0;
         while i < len {
@@ -1995,7 +1995,7 @@ pub fn create_dir(p: &Path) -> Result<Unit, IoError>
       while r == -4 {
         r = raw.syscall(258, -100, raw.addr_to_int(buf), 511, 0, 0, 0);
       }
-      raw.free(buf, b.len() + 1, 1);
+      raw.free(buf, b.byte_len() + 1, 1);
       if r < 0 {
         return Err(classify_io(r, &p));
       }
@@ -2014,7 +2014,7 @@ pub fn create_dir_all(p: &Path) -> Result<Unit, IoError>
   match validate_path(&p) {
     Err(e) => { return Err(e); }
     Ok(b) => {
-      let len = b.len();
+      let len = b.byte_len();
       let stat_buf = raw.alloc(144, 8);
       let mut i = 1;
       let mut err_code = 0;
@@ -2107,7 +2107,7 @@ pub fn remove_dir(p: &Path) -> Result<Unit, IoError>
       while r == -4 {
         r = raw.syscall(263, -100, raw.addr_to_int(buf), 512, 0, 0, 0);
       }
-      raw.free(buf, b.len() + 1, 1);
+      raw.free(buf, b.byte_len() + 1, 1);
       if r < 0 {
         return Err(classify_io(r, &p));
       }
@@ -2135,8 +2135,8 @@ pub fn rename(from: &Path, to: &Path) -> Result<Unit, IoError>
           while r == -4 {
             r = raw.syscall(264, -100, raw.addr_to_int(fbuf), -100, raw.addr_to_int(tbuf), 0, 0);
           }
-          raw.free(fbuf, fb.len() + 1, 1);
-          raw.free(tbuf, tb.len() + 1, 1);
+          raw.free(fbuf, fb.byte_len() + 1, 1);
+          raw.free(tbuf, tb.byte_len() + 1, 1);
           if r < 0 {
             return Err(classify_io(r, &from));
           }
@@ -2162,7 +2162,7 @@ pub fn remove_file(p: &Path) -> Result<Unit, IoError>
       while r == -4 {
         r = raw.syscall(263, -100, raw.addr_to_int(buf), 0, 0, 0, 0);
       }
-      raw.free(buf, b.len() + 1, 1);
+      raw.free(buf, b.byte_len() + 1, 1);
       if r < 0 {
         return Err(classify_io(r, &p));
       }

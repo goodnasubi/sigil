@@ -76,9 +76,9 @@ fn measure_program(cmp_name: &str, cmp_src: &str, diff_at: usize) -> String {
     )
 }
 
-const CMP_EARLY: &str = "fn cmp_early(a: &Bytes, b: &Bytes) -> Bool\n  intent \"早く抜ける比較（陽性の対照）\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut i = 0;\n  while i < a.len() {\n    if a.get(i).unwrap_or(0) != b.get(i).unwrap_or(0) {\n      return false;\n    }\n    i = i + 1;\n  }\n  return true;\n}\n";
+const CMP_EARLY: &str = "fn cmp_early(a: &Bytes, b: &Bytes) -> Bool\n  intent \"早く抜ける比較（陽性の対照）\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut i = 0;\n  while i < a.byte_len() {\n    if a.get(i).unwrap_or(0) != b.get(i).unwrap_or(0) {\n      return false;\n    }\n    i = i + 1;\n  }\n  return true;\n}\n";
 
-const CMP_CT: &str = "fn cmp_ct(a: &Bytes, b: &Bytes) -> Bool\n  intent \"定数時間の比較（XOR で積む）\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut diff = 0;\n  let mut i = 0;\n  while i < a.len() {\n    diff = diff | (a.get(i).unwrap_or(0) ^ b.get(i).unwrap_or(0));\n    i = i + 1;\n  }\n  return diff == 0;\n}\n";
+const CMP_CT: &str = "fn cmp_ct(a: &Bytes, b: &Bytes) -> Bool\n  intent \"定数時間の比較（XOR で積む）\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut diff = 0;\n  let mut i = 0;\n  while i < a.byte_len() {\n    diff = diff | (a.get(i).unwrap_or(0) ^ b.get(i).unwrap_or(0));\n    i = i + 1;\n  }\n  return diff == 0;\n}\n";
 
 static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

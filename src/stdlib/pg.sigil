@@ -161,12 +161,12 @@ pub fn encode_value(p: &PgParam) -> Result<Option<Bytes>, PgError>
           if p.oid != 25 && p.oid != 1043 {
             return Err(PgError.TypeMismatch);
           }
-          if t.len() > 1048571 {
+          if t.byte_len() > 1048571 {
             return Err(PgError.LimitExceeded);
           }
           let b = t.as_bytes();
           let mut i = 0;
-          while i < b.len() {
+          while i < b.byte_len() {
             if b.get(i).unwrap_or(0) == 0 {
               return Err(PgError.TypeMismatch);
             }
@@ -178,13 +178,13 @@ pub fn encode_value(p: &PgParam) -> Result<Option<Bytes>, PgError>
           if p.oid != 17 {
             return Err(PgError.TypeMismatch);
           }
-          if b.len() > 524284 {
+          if b.byte_len() > 524284 {
             return Err(PgError.LimitExceeded);
           }
           let mut out = "\\x".as_bytes();
           let hex = "0123456789abcdef".as_bytes();
           let mut i = 0;
-          while i < b.len() {
+          while i < b.byte_len() {
             let x = b.get(i).unwrap_or(0);
             out.push(hex.get(x / 16).unwrap_or(0));
             out.push(hex.get(x % 16).unwrap_or(0));
@@ -239,16 +239,16 @@ pub fn decode_value(oid: Int, data: &Bytes) -> Result<PgValue, PgError>
   if !supported(oid) {
     return Err(PgError.UnsupportedType);
   }
-  if data.len() > 1048571 {
+  if data.byte_len() > 1048571 {
     return Err(PgError.LimitExceeded);
   }
   if oid == 17 {
-    if data.len() < 2 || data.get(0).unwrap_or(0) != 92 || data.get(1).unwrap_or(0) != 120 || data.len() % 2 != 0 {
+    if data.byte_len() < 2 || data.get(0).unwrap_or(0) != 92 || data.get(1).unwrap_or(0) != 120 || data.byte_len() % 2 != 0 {
       return Err(PgError.TypeMismatch);
     }
     let mut out = Bytes.new();
     let mut i = 2;
-    while i < data.len() {
+    while i < data.byte_len() {
       let a = unhex(data.get(i).unwrap_or(0));
       let b = unhex(data.get(i + 1).unwrap_or(0));
       if a < 0 || b < 0 {
@@ -276,10 +276,10 @@ pub fn decode_value(oid: Int, data: &Bytes) -> Result<PgValue, PgError>
   if data.get(0).unwrap_or(0) == 45 {
     i = 1;
   }
-  if i == data.len() {
+  if i == data.byte_len() {
     return Err(PgError.TypeMismatch);
   }
-  while i < data.len() {
+  while i < data.byte_len() {
     let c = data.get(i).unwrap_or(0);
     if c < 48 || c > 57 {
       return Err(PgError.TypeMismatch);
@@ -316,10 +316,10 @@ impl PgDecoder {
       return Err(PgError.Protocol);
     }
     let mut used = 0;
-    while used < input.len() {
+    while used < input.byte_len() {
       self.data.push(input.get(used).unwrap_or(0));
       used = used + 1;
-      if self.data.len() == 5 {
+      if self.data.byte_len() == 5 {
         let n = self.data.read_u32_be(1).unwrap_or(0);
         if n < 4 || n > 2147483647 {
           self.failed = true;
@@ -330,9 +330,9 @@ impl PgDecoder {
           return Err(PgError.LimitExceeded);
         }
       }
-      if self.data.len() >= 5 {
+      if self.data.byte_len() >= 5 {
         let n = self.data.read_u32_be(1).unwrap_or(0);
-        if self.data.len() == n + 1 {
+        if self.data.byte_len() == n + 1 {
           let f = PgFrame { tag: self.data.get(0).unwrap_or(0), body: part(&self.data, 5, n + 1) };
           self.data = Bytes.new();
           return Ok(PgProgress.Done(f, used));
@@ -348,7 +348,7 @@ impl PgDecoder {
     ensures none
     effects none
   {
-    if self.failed || self.data.len() != 0 {
+    if self.failed || self.data.byte_len() != 0 {
       self.failed = true;
       return Err(PgError.Protocol);
     }
@@ -362,7 +362,7 @@ pub fn frame(tag: Int, body: Bytes, max: Int) -> Result<Bytes, PgError>
   ensures none
   effects none
 {
-  if max < 5 || max > 1048576 || body.len() > max - 5 {
+  if max < 5 || max > 1048576 || body.byte_len() > max - 5 {
     return Err(PgError.LimitExceeded);
   }
   if tag < 0 || tag > 255 {
@@ -370,7 +370,7 @@ pub fn frame(tag: Int, body: Bytes, max: Int) -> Result<Bytes, PgError>
   }
   let mut out = Bytes.new();
   out.push(tag);
-  out.push_u32_be(body.len() + 4);
+  out.push_u32_be(body.byte_len() + 4);
   out.extend(&body);
   return Ok(out);
 }
@@ -394,7 +394,7 @@ impl PgBudget {
     ensures none
     effects none
   {
-    let n = f.body.len() + 5;
+    let n = f.body.byte_len() + 5;
     if n > self.max_wire - self.wire {
       return Err(PgError.LimitExceeded);
     }
@@ -415,7 +415,7 @@ fn read_n(r: &mut PgReader, n: Int) -> Result<Bytes, PgError>
   ensures none
   effects none
 {
-  if n < 0 || n > r.data.len() - r.pos {
+  if n < 0 || n > r.data.byte_len() - r.pos {
     return Err(PgError.Protocol);
   }
   let out = part(&r.data, r.pos, r.pos + n);
@@ -446,7 +446,7 @@ fn cstring(r: &mut PgReader) -> Result<String, PgError>
   effects none
 {
   let start = r.pos;
-  while r.pos < r.data.len() {
+  while r.pos < r.data.byte_len() {
     let c = r.data.get(r.pos).unwrap_or(0);
     r.pos = r.pos + 1;
     if c == 0 {
@@ -549,7 +549,7 @@ fn error_fields(r: &mut PgReader) -> Result<String, PgError>
 {
   let mut sqlstate = "";
   let mut seen = false;
-  while r.pos < r.data.len() {
+  while r.pos < r.data.byte_len() {
     let tag = uint(&mut r, 1)?;
     if tag == 0 {
       if !seen {
@@ -559,7 +559,7 @@ fn error_fields(r: &mut PgReader) -> Result<String, PgError>
     }
     let t = cstring(&mut r)?;
     if tag == 67 {
-      if seen || t.len() != 5 {
+      if seen || t.byte_len() != 5 {
         return Err(PgError.Protocol);
       }
       let b = t.as_bytes();
@@ -584,12 +584,12 @@ pub fn backend(f: &PgFrame, cols: &List<PgColumn>) -> Result<PgBackend, PgError>
   ensures none
   effects none
 {
-  if f.body.len() > 1048571 {
+  if f.body.byte_len() > 1048571 {
     return Err(PgError.LimitExceeded);
   }
   let mut r = PgReader { data: f.body.clone(), pos: 0 };
   let v = backend_body(f.tag, &mut r, &cols)?;
-  if r.pos != r.data.len() {
+  if r.pos != r.data.byte_len() {
     return Err(PgError.Protocol);
   }
   return Ok(v);
@@ -668,15 +668,15 @@ pub fn parse(sql: &String, params: &List<PgParam>, max: Int) -> Result<Bytes, Pg
   ensures none
   effects none
 {
-  if sql.len() > 65536 || params.len() > 256 {
+  if sql.byte_len() > 65536 || params.len() > 256 {
     return Err(PgError.LimitExceeded);
   }
-  if max < 5 || max > 1048576 || sql.len() > max - 5 || params.len() * 4 + 4 > max - 5 - sql.len() {
+  if max < 5 || max > 1048576 || sql.byte_len() > max - 5 || params.len() * 4 + 4 > max - 5 - sql.byte_len() {
     return Err(PgError.LimitExceeded);
   }
   let b = sql.as_bytes();
   let mut i = 0;
-  while i < b.len() {
+  while i < b.byte_len() {
     if b.get(i).unwrap_or(0) == 0 {
       return Err(PgError.Protocol);
     }
@@ -730,7 +730,7 @@ pub fn bind(params: &List<PgParam>, max: Int) -> Result<Bytes, PgError>
       }
       Some(p) => {
         let v = encode_value(&p)?;
-        if out.len() > max - 11 {
+        if out.byte_len() > max - 11 {
           return Err(PgError.LimitExceeded);
         }
         match v {
@@ -738,10 +738,10 @@ pub fn bind(params: &List<PgParam>, max: Int) -> Result<Bytes, PgError>
             out.push_u32_be(4294967295);
           }
           Some(b) => {
-            if b.len() > max - 11 - out.len() {
+            if b.byte_len() > max - 11 - out.byte_len() {
               return Err(PgError.LimitExceeded);
             }
-            out.push_u32_be(b.len());
+            out.push_u32_be(b.byte_len());
             out.extend(&b);
           }
         }
@@ -807,7 +807,7 @@ fn int_text(n: Int) -> Bytes
   if n < 0 {
     out.push(45);
   }
-  let mut i = rev.len();
+  let mut i = rev.byte_len();
   while i > 0 {
     i = i - 1;
     out.push(rev.get(i).unwrap_or(0));
@@ -863,11 +863,11 @@ pub fn config(host: String, port: Int, user: String, database: String, password:
   if port < 1 || port > 65535 { return Err(PgError.Protocol); }
   let u = user.as_bytes();
   let d = database.as_bytes();
-  if u.len() == 0 || d.len() == 0 || u.len() > 1024 || d.len() > 1024 { return Err(PgError.UnsupportedCredential); }
+  if u.byte_len() == 0 || d.byte_len() == 0 || u.byte_len() > 1024 || d.byte_len() > 1024 { return Err(PgError.UnsupportedCredential); }
   let mut i = 0;
-  while i < u.len() { if u.get(i).unwrap_or(0) == 0 { return Err(PgError.UnsupportedCredential); } i = i + 1; }
+  while i < u.byte_len() { if u.get(i).unwrap_or(0) == 0 { return Err(PgError.UnsupportedCredential); } i = i + 1; }
   i = 0;
-  while i < d.len() { if d.get(i).unwrap_or(0) == 0 { return Err(PgError.UnsupportedCredential); } i = i + 1; }
+  while i < d.byte_len() { if d.get(i).unwrap_or(0) == 0 { return Err(PgError.UnsupportedCredential); } i = i + 1; }
   let pw = password.expose();
   let valid = credential(&pw);
   let wipe = Secret.from_bytes(pw);
@@ -919,7 +919,7 @@ fn startup(user: &String, database: &String) -> Bytes
   body.extend(&"user\u{0}".as_bytes()); body.extend(&user.as_bytes()); body.push(0);
   body.extend(&"database\u{0}".as_bytes()); body.extend(&database.as_bytes()); body.push(0);
   body.extend(&"client_encoding\u{0}UTF8\u{0}options\u{0}-c bytea_output=hex\u{0}\u{0}".as_bytes());
-  let mut out = Bytes.new(); out.push_u32_be(body.len() + 4); out.extend(&body);
+  let mut out = Bytes.new(); out.push_u32_be(body.byte_len() + 4); out.extend(&body);
   return out;
 }
 
@@ -947,7 +947,7 @@ fn receive(stream: &mut TcpClient, budget: &mut PgBudget) -> Result<PgFrame, PgE
   while true {
     match stream.read(1) {
       Ok(data) => {
-        if data.len() == 0 { return Err(PgError.Connection); }
+        if data.byte_len() == 0 { return Err(PgError.Connection); }
         match d.feed(&data)? {
           PgProgress.Done(f, n) => { budget.accept(&f)?; return Ok(f); }
           PgProgress.NeedMore(n) => {}
@@ -974,10 +974,10 @@ fn auth(f: &PgFrame, code: Int) -> Result<Bytes, PgError>
   ensures none
   effects none
 {
-  if f.tag != 82 || f.body.len() < 4 { return Err(PgError.Authentication); }
+  if f.tag != 82 || f.body.byte_len() < 4 { return Err(PgError.Authentication); }
   if f.body.read_u32_be(0).unwrap_or(0 - 1) != code { return Err(PgError.Authentication); }
-  if f.body.len() > 16388 { return Err(PgError.LimitExceeded); }
-  return Ok(part(&f.body, 4, f.body.len()));
+  if f.body.byte_len() > 16388 { return Err(PgError.LimitExceeded); }
+  return Ok(part(&f.body, 4, f.body.byte_len()));
 }
 
 fn sasl(mechanisms: &Bytes) -> Result<Bool, PgError>
@@ -988,10 +988,10 @@ fn sasl(mechanisms: &Bytes) -> Result<Bool, PgError>
 {
   let mut r = PgReader { data: mechanisms.clone(), pos: 0 };
   let mut found = false;
-  while r.pos < r.data.len() {
+  while r.pos < r.data.byte_len() {
     let name = cstring(&mut r)?;
     if name == "" {
-      if r.pos != r.data.len() || !found { return Err(PgError.Authentication); }
+      if r.pos != r.data.byte_len() || !found { return Err(PgError.Authentication); }
       return Ok(true);
     }
     if name == "SCRAM-SHA-256" { if found { return Err(PgError.Authentication); } found = true; }
@@ -1012,7 +1012,7 @@ fn connect_inner(c: &PgConfig) -> Result<PgConn, PgError>
   let mut b = budget(4194304, 0)?;
   let methods = auth(&receive(&mut stream, &mut b)?, 10)?;
   sasl(&methods)?;
-  let mut body = "SCRAM-SHA-256\u{0}".as_bytes(); body.push_u32_be(initial.len()); body.extend(&initial);
+  let mut body = "SCRAM-SHA-256\u{0}".as_bytes(); body.push_u32_be(initial.byte_len()); body.extend(&initial);
   send(&mut stream, &frame(112, body, 1048576)?)?;
   let challenge = auth(&receive(&mut stream, &mut b)?, 11)?;
   let reply = match respond(&c.password, &nonce, &challenge) { Ok(r) => Ok(r), Err(e) => Err(scram_error(e)), }?;
@@ -1024,7 +1024,7 @@ fn connect_inner(c: &PgConfig) -> Result<PgConn, PgError>
     Err(e) => { return Err(scram_error(e)); }
   }
   let ok = auth(&receive(&mut stream, &mut b)?, 0)?;
-  if ok.len() != 0 { return Err(PgError.Authentication); }
+  if ok.byte_len() != 0 { return Err(PgError.Authentication); }
   let mut encoding = false;
   let mut key = false;
   while true {

@@ -183,7 +183,7 @@ pub fn main() -> Int
         Ok(s) => {
           match read_all(&s) {
             Ok(b) => {
-              let len = b.len();
+              let len = b.byte_len();
               match s.write_all(&b) {
                 Ok(u) => {}
                 Err(e) => { return 0 - 3; }

@@ -21,7 +21,7 @@ fn test_bytes(s: &String) -> Int
   effects none
 {
   let b = Bytes.new();
-  let l = b.len();
+  let l = b.byte_len();
   let b2 = s.as_bytes();
   let eq = ct_eq(&b, &b2);
   let n = 10;
@@ -52,7 +52,7 @@ fn test_exec() -> Int
   b.push(1);
   b.push(2);
   b.push_u16_be(0x1234);
-  let l = b.len();
+  let l = b.byte_len();
   let b1 = b.get(0).unwrap_or(0);
   let b2 = b.get(1).unwrap_or(0);
   let u16_val = b.read_u32_be(0).unwrap_or(0);

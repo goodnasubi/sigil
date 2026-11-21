@@ -620,7 +620,8 @@ fn refinement_declarations() {
 
 #[test]
 fn std_methods_and_functions_typecheck() {
-    body_ok("f(x: String) -> Int", "  return x.len();");
+    body_ok("f(x: String) -> Int", "  return x.char_count();");
+    body_ok("f(x: String) -> Int", "  return x.byte_len();");
     body_ok("f(x: &List<Int>) -> Int", "  return x.len();");
     body_ok("f() -> List<Int>", "  return List.new();");
     body_ok(

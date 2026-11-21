@@ -11,10 +11,10 @@ pub fn credential(password: &Bytes) -> Bool
   ensures none
   effects none
 {
-  if password.len() == 0 || password.len() > 1024 { return false; }
+  if password.byte_len() == 0 || password.byte_len() > 1024 { return false; }
   let mut i = 0;
   let mut valid = true;
-  while i < password.len() {
+  while i < password.byte_len() {
     let b = password.get(i).unwrap_or(0);
     valid = valid && b >= 32 && b <= 126;
     i = i + 1;
@@ -43,15 +43,15 @@ pub fn ct_base64(data: &Bytes) -> Bytes
 {
   let mut out = Bytes.new();
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let a = data.get(i).map(|x| x + 0).unwrap_or(0);
     let b = data.get(i + 1).map(|x| x + 0).unwrap_or(0);
     let c = data.get(i + 2).map(|x| x + 0).unwrap_or(0);
     out.push(ct_base64_char(a >> 2));
     out.push(ct_base64_char(((a & 3) << 4) | (b >> 4)));
-    if i + 1 < data.len() { out.push(ct_base64_char(((b & 15) << 2) | (c >> 6))); }
+    if i + 1 < data.byte_len() { out.push(ct_base64_char(((b & 15) << 2) | (c >> 6))); }
     else { out.push(61); }
-    if i + 2 < data.len() { out.push(ct_base64_char(c & 63)); }
+    if i + 2 < data.byte_len() { out.push(ct_base64_char(c & 63)); }
     else { out.push(61); }
     i = i + 3;
   }
@@ -78,11 +78,11 @@ fn unbase64(data: &Bytes, max: Int) -> Result<Bytes, ScramError>
   ensures none
   effects none
 {
-  if data.len() == 0 || data.len() % 4 != 0 { return Err(ScramError.Protocol); }
-  if data.len() > ((max + 2) / 3) * 4 { return Err(ScramError.LimitExceeded); }
+  if data.byte_len() == 0 || data.byte_len() % 4 != 0 { return Err(ScramError.Protocol); }
+  if data.byte_len() > ((max + 2) / 3) * 4 { return Err(ScramError.LimitExceeded); }
   let mut out = Bytes.new();
   let mut i = 0;
-  while i < data.len() {
+  while i < data.byte_len() {
     let a = digit(data.get(i).unwrap_or(0));
     let b = digit(data.get(i + 1).unwrap_or(0));
     let cc = data.get(i + 2).unwrap_or(0);
@@ -91,12 +91,12 @@ fn unbase64(data: &Bytes, max: Int) -> Result<Bytes, ScramError>
     if a < 0 || b < 0 { return Err(ScramError.Protocol); }
     out.push((a << 2) | (b >> 4));
     if cc == 61 {
-      if dd != 61 || i + 4 != data.len() || (b & 15) != 0 { return Err(ScramError.Protocol); }
+      if dd != 61 || i + 4 != data.byte_len() || (b & 15) != 0 { return Err(ScramError.Protocol); }
     } else {
       if c < 0 { return Err(ScramError.Protocol); }
       out.push(((b & 15) << 4) | (c >> 2));
       if dd == 61 {
-        if i + 4 != data.len() || (c & 3) != 0 { return Err(ScramError.Protocol); }
+        if i + 4 != data.byte_len() || (c & 3) != 0 { return Err(ScramError.Protocol); }
       } else {
         if d < 0 { return Err(ScramError.Protocol); }
         out.push(((c & 3) << 6) | d);
@@ -104,7 +104,7 @@ fn unbase64(data: &Bytes, max: Int) -> Result<Bytes, ScramError>
     }
     i = i + 4;
   }
-  if out.len() > max { return Err(ScramError.LimitExceeded); }
+  if out.byte_len() > max { return Err(ScramError.LimitExceeded); }
   return Ok(out);
 }
 
@@ -114,7 +114,7 @@ pub fn first(nonce: &Bytes) -> Result<Bytes, ScramError>
   ensures none
   effects none
 {
-  if nonce.len() != 24 { return Err(ScramError.Protocol); }
+  if nonce.byte_len() != 24 { return Err(ScramError.Protocol); }
   let mut out = "n,,n=,r=".as_bytes();
   out.extend(&ct_base64(&nonce));
   return Ok(out);
@@ -127,23 +127,23 @@ fn challenge(nonce: &Bytes, message: &Bytes) -> Result<Challenge, ScramError>
   ensures none
   effects none
 {
-  if message.len() > 16384 { return Err(ScramError.LimitExceeded); }
+  if message.byte_len() > 16384 { return Err(ScramError.LimitExceeded); }
   let mut r_start = 0; let mut r_end = 0; let mut s_start = 0; let mut s_end = 0; let mut iterations = 0;
   let mut seen_r = false; let mut seen_s = false; let mut seen_i = false;
   let mut seen = Bytes.new();
   let mut pos = 0;
-  while pos < message.len() {
+  while pos < message.byte_len() {
     let key = message.get(pos).unwrap_or(0);
     let equals = message.get(pos + 1).unwrap_or(0);
     if key < 65 || key > 122 || (key > 90 && key < 97) || equals != 61 { return Err(ScramError.Protocol); }
     let mut j = 0;
-    while j < seen.len() { if seen.get(j).unwrap_or(0) == key { return Err(ScramError.Protocol); } j = j + 1; }
+    while j < seen.byte_len() { if seen.get(j).unwrap_or(0) == key { return Err(ScramError.Protocol); } j = j + 1; }
     seen.push(key);
     if key == 109 { return Err(ScramError.Protocol); }
     let start = pos + 2;
     pos = start;
     let mut scanning = true;
-    while pos < message.len() && scanning {
+    while pos < message.byte_len() && scanning {
       let b = message.get(pos).unwrap_or(0);
       if b == 44 { scanning = false; }
       else {
@@ -159,7 +159,7 @@ fn challenge(nonce: &Bytes, message: &Bytes) -> Result<Challenge, ScramError>
       let first_digit = value.get(0).unwrap_or(0);
       if first_digit < 49 || first_digit > 57 { return Err(ScramError.Protocol); }
       let mut k = 0;
-      while k < value.len() {
+      while k < value.byte_len() {
         let b = value.get(k).unwrap_or(0);
         if b < 48 || b > 57 { return Err(ScramError.Protocol); }
         if iterations > 10000 { return Err(ScramError.LimitExceeded); }
@@ -168,7 +168,7 @@ fn challenge(nonce: &Bytes, message: &Bytes) -> Result<Challenge, ScramError>
       }
       seen_i = true;
     }
-    if pos < message.len() { pos = pos + 1; if pos == message.len() { return Err(ScramError.Protocol); } }
+    if pos < message.byte_len() { pos = pos + 1; if pos == message.byte_len() { return Err(ScramError.Protocol); } }
   }
   if !seen_r || !seen_s || !seen_i { return Err(ScramError.Protocol); }
   if iterations < 4096 || iterations > 100000 { return Err(ScramError.LimitExceeded); }
@@ -176,8 +176,8 @@ fn challenge(nonce: &Bytes, message: &Bytes) -> Result<Challenge, ScramError>
   let salt_text = message.slice(s_start, s_end).unwrap_or(Bytes.new());
   let s = unbase64(&salt_text, 1024)?;
   // nonce は最大メッセージ長以下、元の nonce を厳密に延長する。
-  if r.len() <= nonce.len() { return Err(ScramError.Protocol); }
-  let prefix = r.slice(0, nonce.len()).unwrap_or(Bytes.new());
+  if r.byte_len() <= nonce.byte_len() { return Err(ScramError.Protocol); }
+  let prefix = r.slice(0, nonce.byte_len()).unwrap_or(Bytes.new());
   if !ct_eq(&prefix, &nonce) { return Err(ScramError.Protocol); }
   return Ok(Challenge { nonce: r, salt: s, iterations: iterations });
 }
@@ -214,7 +214,7 @@ pub fn respond(password: &Secret, nonce: &Bytes, server_first: &Bytes) -> Result
   ensures none
   effects task.suspend
 {
-  if nonce.len() != 24 { return Err(ScramError.Protocol); }
+  if nonce.byte_len() != 24 { return Err(ScramError.Protocol); }
   return respond_text(&password, &ct_base64(&nonce), &server_first);
 }
 
@@ -259,13 +259,13 @@ pub fn verify(signature: &Secret, server_final: &Bytes) -> Result<Bool, ScramErr
   ensures none
   effects none
 {
-  if server_final.len() > 16384 { return Err(ScramError.LimitExceeded); }
+  if server_final.byte_len() > 16384 { return Err(ScramError.LimitExceeded); }
   if server_final.get(0).unwrap_or(0) != 118 || server_final.get(1).unwrap_or(0) != 61 { return Err(ScramError.Protocol); }
   // 最終署名は SHA-256 の32バイト、canonical base64 44文字。
-  if server_final.len() != 46 { return Err(ScramError.Protocol); }
-  let value = server_final.slice(2, server_final.len()).unwrap_or(Bytes.new());
+  if server_final.byte_len() != 46 { return Err(ScramError.Protocol); }
+  let value = server_final.slice(2, server_final.byte_len()).unwrap_or(Bytes.new());
   let expected = unbase64(&value, 32)?;
-  if expected.len() != 32 { return Err(ScramError.Protocol); }
+  if expected.byte_len() != 32 { return Err(ScramError.Protocol); }
   let got = signature.expose();
   let ok = ct_signature(&got, &expected);
   let wipe = Secret.from_bytes(got);

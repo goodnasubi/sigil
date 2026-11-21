@@ -10,7 +10,7 @@ module examples.bytes
 fn build_packet(tag: Int, first: Int, second: Int) -> Bytes
   intent "種別と長さを前に付けたバイナリメッセージを組み立てる"
   requires 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
-  ensures result.len() == 7
+  ensures result.byte_len() == 7
   effects none
 {
   let mut payload = Bytes.new();
@@ -18,7 +18,7 @@ fn build_packet(tag: Int, first: Int, second: Int) -> Bytes
   payload.push(second);
   let mut packet = Bytes.new();
   packet.push(tag);
-  packet.push_u32_be(payload.len());
+  packet.push_u32_be(payload.byte_len());
   packet.extend(&payload);
   return packet;
 }
@@ -52,7 +52,7 @@ fn checksum(packet: &Bytes) -> Int
 {
   let mut acc = 0;
   let mut i = 0;
-  while i < packet.len() {
+  while i < packet.byte_len() {
     let b = packet.get(i).unwrap_or(0);
     acc = (acc ^ b).rotr32(1);
     i = i + 1;
@@ -81,7 +81,7 @@ fn sample_len(tag: Int, first: Int, second: Int) -> Int
   effects none
 {
   let packet = build_packet(tag, first, second);
-  return packet.len();
+  return packet.byte_len();
 }
 
 fn sample_tag(tag: Int, first: Int, second: Int) -> Int

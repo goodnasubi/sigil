@@ -26,12 +26,12 @@ fn churn() -> String {
     ));
     s.push_str(&func(
         "pick(t: Tag) -> Int",
-        "match t {\n    Tag.Named(x) => {\n        let y = x.clone();\n        return y.len();\n    }\n    Tag.Empty => {\n        return 0;\n    }\n}",
+        "match t {\n    Tag.Named(x) => {\n        let y = x.clone();\n        return y.char_count();\n    }\n    Tag.Empty => {\n        return 0;\n    }\n}",
     ));
     s.push_str(&func("echo(s: String) -> String", "return s;"));
     s.push_str(&func(
         "run(n: Int) -> Int",
-        "let mut i = 0;\nlet mut total = 0;\nwhile i < n {\n    let a = \"  abc  \";\n    let b = a.trim();\n    let c = b.clone();\n    let d = echo(c);\n    total = total + d.len();\n    let p = Path.new(&\"/etc/app\");\n    let q = p.join(&\"conf.toml\");\n    let r = q.file_name().unwrap_or(\"\");\n    total = total + r.len();\n    let k = mk(i);\n    let k2 = k.name.clone();\n    total = total + k2.len();\n    let t = Tag.Named(\"zz\");\n    total = total + pick(t);\n    let l = \"a\\nb\".lines();\n    total = total + l.len();\n    let mut xs = List.new();\n    xs.push(\"ab\");\n    xs.push(\"c\");\n    let w = xs.get(0).map(|x| x.len()).unwrap_or(100);\n    total = total + w;\n    i = i + 1;\n}\nreturn total;",
+        "let mut i = 0;\nlet mut total = 0;\nwhile i < n {\n    let a = \"  abc  \";\n    let b = a.trim();\n    let c = b.clone();\n    let d = echo(c);\n    total = total + d.char_count();\n    let p = Path.new(&\"/etc/app\");\n    let q = p.join(&\"conf.toml\");\n    let r = q.file_name().unwrap_or(\"\");\n    total = total + r.char_count();\n    let k = mk(i);\n    let k2 = k.name.clone();\n    total = total + k2.char_count();\n    let t = Tag.Named(\"zz\");\n    total = total + pick(t);\n    let l = \"a\\nb\".lines();\n    total = total + l.len();\n    let mut xs = List.new();\n    xs.push(\"ab\");\n    xs.push(\"c\");\n    let w = xs.get(0).map(|x| x.char_count()).unwrap_or(100);\n    total = total + w;\n    i = i + 1;\n}\nreturn total;",
     ));
     s
 }
@@ -76,7 +76,7 @@ fn create_and_discard_does_not_grow_with_the_iteration_count() {
 fn console_log_does_not_grow_with_the_iteration_count() {
     let mut s = String::from("module m.a\n  targets server\n  trust none\n\n");
     s.push_str(
-        "fn run(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects console\n{\nlet mut i = 0;\nwhile i < n {\n    let a = \"abc\";\n    console.log(&a);\n    let n2 = a.len();\n    console.log(&n2);\n    let o = a.clone().len();\n    console.log(&o);\n    i = i + 1;\n}\nreturn n;\n}\n",
+        "fn run(n: Int) -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects console\n{\nlet mut i = 0;\nwhile i < n {\n    let a = \"abc\";\n    console.log(&a);\n    let n2 = a.char_count();\n    console.log(&n2);\n    let o = a.clone().char_count();\n    console.log(&o);\n    i = i + 1;\n}\nreturn n;\n}\n",
     );
     let (s1, _) = live(&s, 100);
     let (s2, _) = live(&s, 10_000);

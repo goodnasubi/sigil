@@ -118,7 +118,7 @@ fn parse_ipv4(host: &String) -> Int
   effects none
 {
   let b = host.as_bytes();
-  let n = b.len();
+  let n = b.byte_len();
   let mut i = 0;
   let mut parts = 0;
   let mut acc = 0;
@@ -164,7 +164,7 @@ fn is_ipv6(host: &String) -> Bool
   effects none
 {
   let b = host.as_bytes();
-  let n = b.len();
+  let n = b.byte_len();
   let mut i = 0;
   while i < n {
     if b.get(i).unwrap_or(0) == 58 {
@@ -233,7 +233,7 @@ fn parse_ipv6(host: &String, out: Addr) -> Bool
   unchecked "out は少なくとも 16 バイト確保された生メモリ。書き込みは 16 バイトの範囲内に収まる"
 {
   let b = host.as_bytes();
-  let n = b.len();
+  let n = b.byte_len();
   if n < 2 || n > 39 {
     return false;
   }
@@ -557,7 +557,7 @@ fn fill_buffer(buf: Addr, data: &Bytes, off: Int, k: Int)
   requires none
   ensures none
   effects none
-  unchecked "0 <= off、0 <= k、off+k <= data.len()。buf..buf+k が生きた書き込み可能領域。システムコールと待機は行わない"
+  unchecked "0 <= off、0 <= k、off+k <= data.byte_len()。buf..buf+k が生きた書き込み可能領域。システムコールと待機は行わない"
 {
   // 4 バイトずつ read_u32_be（ビッグエンディアン）で読んで、上位から順に 4 バイトを書く。1 バイトずつの get（Option を
   // 毎回作る）は、書きの速さの支配的な費用だった（Issue #427）。端数は 1 バイトずつ。
@@ -599,9 +599,9 @@ fn send_once(fd: Int, data: &Bytes, off: Int) -> Int
   requires none
   ensures none
   effects net.server
-  unchecked "fd は呼び出し側が所有する開いたソケット。0 <= off < data.len()。確保した k バイトの範囲だけに写して書き、戻る前に領域を返す。発行するのは sendto（44）だけ"
+  unchecked "fd は呼び出し側が所有する開いたソケット。0 <= off < data.byte_len()。確保した k バイトの範囲だけに写して書き、戻る前に領域を返す。発行するのは sendto（44）だけ"
 {
-  let mut k = data.len() - off;
+  let mut k = data.byte_len() - off;
   if k > 65536 {
     k = 65536;
   }
@@ -689,7 +689,7 @@ impl TcpStream {
     effects net.server, task.suspend
     unchecked "self.fd は self が所有する開いたソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは書いた数（Int）だけ"
   {
-    let n = data.len();
+    let n = data.byte_len();
     let mut off = 0;
     while off < n {
       let r = send_once(self.fd, &data, off);
@@ -745,9 +745,9 @@ fn client_send_once(fd: Int, data: &Bytes, off: Int) -> Int
   requires none
   ensures none
   effects net.client
-  unchecked "fd は呼び出し側が所有する開いたソケット。0 <= off < data.len()。確保した k バイトの範囲だけに写して書き、戻る前に領域を返す。発行するのは sendto（44）だけ"
+  unchecked "fd は呼び出し側が所有する開いたソケット。0 <= off < data.byte_len()。確保した k バイトの範囲だけに写して書き、戻る前に領域を返す。発行するのは sendto（44）だけ"
 {
-  let mut k = data.len() - off;
+  let mut k = data.byte_len() - off;
   if k > 65536 {
     k = 65536;
   }
@@ -910,7 +910,7 @@ impl TcpClient {
     effects net.client, task.suspend
     unchecked "self.fd は self が所有する開いたソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは書いた数（Int）だけ"
   {
-    let n = data.len();
+    let n = data.byte_len();
     let mut off = 0;
     while off < n {
       let r = client_send_once(self.fd, &data, off);

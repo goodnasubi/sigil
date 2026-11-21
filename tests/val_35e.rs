@@ -355,8 +355,8 @@ ws.push("bb");
 ws.push("a");
 ws.push("ccc");
 ws.push("dd");
-let lo = ws.min_by(|w| w.len());
-let hi = ws.max_by(|w| w.len());
+let lo = ws.min_by(|w| w.char_count());
+let hi = ws.max_by(|w| w.char_count());
 match lo {
     Some(w) => { if w == "a" { r = r + 64; } }
     None => {}

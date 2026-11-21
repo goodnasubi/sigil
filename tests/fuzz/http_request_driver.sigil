@@ -64,7 +64,7 @@ fn push_hex(out: &mut Bytes, b: &Bytes)
   effects none
 {
   let mut i = 0;
-  while i < b.len() {
+  while i < b.byte_len() {
     let c = b.get(i).unwrap_or(0);
     out.push(hex_digit(c / 16));
     out.push(hex_digit(c % 16));
@@ -96,7 +96,7 @@ fn from_hex(s: &String) -> Bytes
   let b = s.as_bytes();
   let mut out = Bytes.new();
   let mut i = 0;
-  while i + 1 < b.len() {
+  while i + 1 < b.byte_len() {
     out.push(unhex(b.get(i).unwrap_or(0)) * 16 + unhex(b.get(i + 1).unwrap_or(0)));
     i = i + 2;
   }
@@ -244,7 +244,7 @@ fn run_feeds(input: &Bytes, step: Int, cuts: &List<Int>, lim: &HttpLimits, full:
   let mut pos = 0;
   let mut ci = 0;
   let mut stop = false;
-  let n = input.len();
+  let n = input.byte_len();
   while pos < n && !stop {
     let end = piece_end(n, pos, step, &cuts, ci);
     ci = ci + 1;
@@ -263,12 +263,12 @@ fn run_feeds(input: &Bytes, step: Int, cuts: &List<Int>, lim: &HttpLimits, full:
               out.push(124);
               fed = 0;
               start = next;
-              if start >= piece.len() {
+              if start >= piece.byte_len() {
                 more = false;
               }
             }
             HttpProgress.NeedMore => {
-              fed = fed + piece.len() - start;
+              fed = fed + piece.byte_len() - start;
               more = false;
             }
           }
@@ -310,7 +310,7 @@ fn serialize(r: &HttpRequest) -> Bytes
   out.push(32);
   out.extend(&r.path());
   let q = r.query();
-  if q.len() > 0 {
+  if q.byte_len() > 0 {
     out.push(63);
     out.extend(&q);
   }
@@ -336,9 +336,9 @@ fn serialize(r: &HttpRequest) -> Bytes
     i = i + 1;
   }
   let body = r.body();
-  if body.len() > 0 {
+  if body.byte_len() > 0 {
     push_text(&mut out, &"content-length: ");
-    push_int(&mut out, body.len());
+    push_int(&mut out, body.byte_len());
     push_text(&mut out, &"\r\n");
   }
   push_text(&mut out, &"\r\n");
@@ -357,7 +357,7 @@ fn roundtrip(input: &Bytes, lim: &HttpLimits) -> Bytes
   let mut start = 0;
   let mut go = true;
   let mut count = 0;
-  while go && start < input.len() {
+  while go && start < input.byte_len() {
     match p.feed(&input, start) {
       Ok(pr) => {
         match pr {
@@ -372,7 +372,7 @@ fn roundtrip(input: &Bytes, lim: &HttpLimits) -> Bytes
                     push_request(&mut a, &r, false, true);
                     let mut b = Bytes.new();
                     push_request(&mut b, &r2, false, true);
-                    if a != b || next2 != text.len() {
+                    if a != b || next2 != text.byte_len() {
                       return "NG:differ".as_bytes();
                     }
                   }
@@ -514,11 +514,11 @@ fn filled(n: Int) -> Bytes
     return b;
   }
   b.push(97);
-  while b.len() * 2 <= n {
+  while b.byte_len() * 2 <= n {
     let c = b.clone();
     b.extend(&c);
   }
-  let rest = n - b.len();
+  let rest = n - b.byte_len();
   let tail = b.slice(0, rest).unwrap_or(Bytes.new());
   b.extend(&tail);
   return b;

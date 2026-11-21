@@ -428,7 +428,7 @@ spec:
   引数: tag を受け取る（Int）、first を受け取る（Int）、second を受け取る（Int）
   戻り値: Bytes
   事前条件: 0 <= tag && tag <= 255 && 0 <= first && first <= 255 && 0 <= second && second <= 255
-  事後条件: result.len() == 7
+  事後条件: result.byte_len() == 7
   効果: なし
 
 関数 packet_tag（非公開）

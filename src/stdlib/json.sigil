@@ -211,7 +211,7 @@ fn string(r: &mut JsonRead) -> Result<String, Int>
   }
   r.pos = r.pos + 1;
   let mut out = Bytes.new();
-  while r.pos < r.data.len() {
+  while r.pos < r.data.byte_len() {
     let c = byte(&r);
     r.pos = r.pos + 1;
     if c == 34 {
@@ -276,7 +276,7 @@ fn literal(r: &mut JsonRead, word: &String) -> Result<Bool, Int>
 {
   let b = word.as_bytes();
   let mut i = 0;
-  while i < b.len() {
+  while i < b.byte_len() {
     if byte(&r) != b.get(i).unwrap_or(-1) {
       return Err(400);
     }
@@ -501,7 +501,7 @@ fn number(r: &mut JsonRead) -> Result<JsonNode, Int>
       return Err(400);
     }
     // 入力長より大きな指数は、ゼロ以外を確実に範囲外/ゼロへ運ぶ。
-    let limit = r.data.len() + 400;
+    let limit = r.data.byte_len() + 400;
     let mut exp = 0;
     while digit(byte(&r)) {
       if exp < limit / 10 {
@@ -599,7 +599,7 @@ pub fn parse(data: &Bytes) -> Result<JsonValue, Int>
         }
       }
     } else if root >= 0 {
-      if r.pos != r.data.len() {
+      if r.pos != r.data.byte_len() {
         return Err(400);
       }
       return Ok(JsonValue.new(nodes, root));
@@ -807,7 +807,7 @@ fn quote(s: &String) -> Bytes
   let mut out = Bytes.new();
   out.push(34);
   let mut i = 0;
-  while i < b.len() {
+  while i < b.byte_len() {
     let c = b.get(i).unwrap_or(0);
     if c == 34 || c == 92 {
       out.push(92);

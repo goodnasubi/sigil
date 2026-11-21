@@ -275,7 +275,7 @@ fn hex_value(c: Int) -> Int
 
 fn lower_of(b: &Bytes, start: Int, end: Int) -> Bytes
   intent "b の start 以上 end 未満を、ASCII の大文字を小文字にして写す"
-  requires 0 <= start && start <= end && end <= b.len()
+  requires 0 <= start && start <= end && end <= b.byte_len()
   ensures none
   effects none
 {
@@ -290,7 +290,7 @@ fn lower_of(b: &Bytes, start: Int, end: Int) -> Bytes
 
 fn all_tchar(b: &Bytes, start: Int, end: Int) -> Bool
   intent "b の start 以上 end 未満が空でなく、すべて token の文字か"
-  requires 0 <= start && start <= end && end <= b.len()
+  requires 0 <= start && start <= end && end <= b.byte_len()
   ensures none
   effects none
 {
@@ -310,14 +310,14 @@ fn all_tchar(b: &Bytes, start: Int, end: Int) -> Bool
 impl HttpParser {
   pub fn feed(self: &mut HttpParser, data: &Bytes, start: Int) -> Result<HttpProgress, HttpError>
     intent "data の start 以降を解釈の状態に足す。要求が完成したら、その要求と data の中の次の位置を返す（残りは写さない）。足りなければ NeedMore。解釈の失敗は Err で、以後も同じ Err"
-    requires 0 <= start && start <= data.len()
+    requires 0 <= start && start <= data.byte_len()
     ensures none
     effects none
   {
     if self.failed != 0 {
       return Err(error_of(self.failed));
     }
-    let n = data.len();
+    let n = data.byte_len();
     let mut i = start;
     while i < n {
       if self.phase == 8 || self.phase == 12 {
@@ -381,7 +381,7 @@ impl HttpParser {
     ensures none
     effects none
   {
-    return self.line.len() + self.stored + self.body.len();
+    return self.line.byte_len() + self.stored + self.body.byte_len();
   }
 
   pub fn in_body(self: &HttpParser) -> Bool
@@ -604,7 +604,7 @@ impl HttpParser {
         return 0;
       }
       // 本文の上限（決定 4-1）: 復号した長さの合計。塊の中身を読む前に比べる。
-      if self.body.len() + self.size > self.lim_body {
+      if self.body.byte_len() + self.size > self.lim_body {
         return 413;
       }
       self.remaining = self.size;
@@ -639,7 +639,7 @@ impl HttpParser {
     ensures none
     effects none
   {
-    let n = self.line.len();
+    let n = self.line.byte_len();
     let mut s1 = -1;
     let mut s2 = -1;
     let mut i = 0;
@@ -726,7 +726,7 @@ impl HttpParser {
         return 400;
       }
     }
-    self.stored = self.method.len() + self.path.len() + self.query.len();
+    self.stored = self.method.byte_len() + self.path.byte_len() + self.query.byte_len();
     return 0;
   }
 
@@ -736,7 +736,7 @@ impl HttpParser {
     ensures none
     effects none
   {
-    let n = self.line.len();
+    let n = self.line.byte_len();
     let mut colon = -1;
     let mut i = 0;
     while i < n && colon < 0 {
@@ -777,7 +777,7 @@ impl HttpParser {
       if self.cl >= 0 {
         return 400;
       }
-      let k = value.len();
+      let k = value.byte_len();
       if k == 0 {
         return 400;
       }
@@ -822,7 +822,7 @@ impl HttpParser {
       }
     } else if name == "expect".as_bytes() {
       // `100-continue`（大文字小文字を区別しない）だけを受ける。ほかは見出しの終わりで 417（ADR 0020 決定 4）。
-      if lower_of(&value, 0, value.len()) == "100-continue".as_bytes() {
+      if lower_of(&value, 0, value.byte_len()) == "100-continue".as_bytes() {
         if self.expect == 0 {
           self.expect = 1;
         }
@@ -832,7 +832,7 @@ impl HttpParser {
     }
     match name.to_string_utf8() {
       Ok(s) => {
-        self.stored = self.stored + s.len() + value.len();
+        self.stored = self.stored + s.byte_len() + value.byte_len();
         self.headers.push(HttpHeader { h_name: s, h_value: value });
       }
       Err(e) => {
@@ -965,7 +965,7 @@ impl HttpRequest {
     effects none
   {
     let want = name.as_bytes();
-    let key = lower_of(&want, 0, want.len());
+    let key = lower_of(&want, 0, want.byte_len());
     let mut i = 0;
     while i < self.req_headers.len() {
       match self.req_headers.get(i) {
@@ -996,7 +996,7 @@ impl HttpRequest {
     ensures none
     effects none
   {
-    return self.req_body.len();
+    return self.req_body.byte_len();
   }
 }
 
@@ -1038,7 +1038,7 @@ impl HttpResponse {
   {
     let mut r = self;
     let n = name.as_bytes();
-    let lower = lower_of(&n, 0, n.len());
+    let lower = lower_of(&n, 0, n.byte_len());
     match lower.to_string_utf8() {
       Ok(s) => {
         r.res_headers.push(HttpHeader { h_name: s, h_value: value.clone() });
@@ -1194,7 +1194,7 @@ fn render(status: Int, headers: &List<HttpHeader>, body: &Bytes, head_only: Bool
     push_str(&mut out, &"content-length: 0\r\n");
   } else if !(status == 204 || status == 304) {
     push_str(&mut out, &"content-length: ");
-    push_dec(&mut out, body.len());
+    push_dec(&mut out, body.byte_len());
     push_str(&mut out, &"\r\n");
   }
   if close {
@@ -1221,7 +1221,7 @@ fn response_fault(res: &HttpResponse, head_only: Bool, max_body: Int) -> Int
     match res.res_headers.get(i) {
       Some(h) => {
         let n = h.h_name.as_bytes();
-        if n.len() == 0 || !all_tchar(&n, 0, n.len()) {
+        if n.byte_len() == 0 || !all_tchar(&n, 0, n.byte_len()) {
           return 2;
         }
         // 文字列の書き出しとの `==` はネイティブで書き出しの塊が漏れる（別 Issue で報告）ので、Bytes で比べる。
@@ -1229,7 +1229,7 @@ fn response_fault(res: &HttpResponse, head_only: Bool, max_body: Int) -> Int
           return 2;
         }
         let mut k = 0;
-        while k < h.h_value.len() {
+        while k < h.h_value.byte_len() {
           let c = h.h_value.get(k).unwrap_or(0);
           if c == 13 || c == 10 || c == 0 {
             return 2;
@@ -1241,10 +1241,10 @@ fn response_fault(res: &HttpResponse, head_only: Bool, max_body: Int) -> Int
     }
     i = i + 1;
   }
-  if (res.res_status == 204 || res.res_status == 205 || res.res_status == 304) && res.res_body.len() > 0 {
+  if (res.res_status == 204 || res.res_status == 205 || res.res_status == 304) && res.res_body.byte_len() > 0 {
     return 3;
   }
-  if res.res_body.len() > max_body {
+  if res.res_body.byte_len() > max_body {
     return 4;
   }
   return 0;
@@ -1259,8 +1259,8 @@ fn has_token(v: &Bytes, tok: &String) -> Bool
   let want = tok.as_bytes();
   let mut start = 0;
   let mut i = 0;
-  while i <= v.len() {
-    let at_end = i == v.len();
+  while i <= v.byte_len() {
+    let at_end = i == v.byte_len();
     if at_end || v.get(i).unwrap_or(0) == 44 {
       let mut a = start;
       let mut z = i;
@@ -1367,12 +1367,12 @@ fn read_step(c: &HttpConn, p: &mut HttpParser, b: &mut HttpBuf, body: Bool, max:
   effects net.server, task.suspend
 {
   while true {
-    if b.pos < b.data.len() {
+    if b.pos < b.data.byte_len() {
       match p.feed(&b.data, b.pos) {
         Ok(prog) => {
           match prog {
             HttpProgress.NeedMore => {
-              b.pos = b.data.len();
+              b.pos = b.data.byte_len();
               if !body && p.in_body() {
                 return HttpStep.HeadDone;
               }
@@ -1390,7 +1390,7 @@ fn read_step(c: &HttpConn, p: &mut HttpParser, b: &mut HttpBuf, body: Bool, max:
     } else {
       match c.stream.read(max) {
         Ok(d) => {
-          if d.len() == 0 {
+          if d.byte_len() == 0 {
             return HttpStep.Eof;
           }
           b.data = d;
@@ -1459,12 +1459,12 @@ pub fn serve_conn(c: &HttpConn, limits: &HttpLimits, h: fn(&HttpRequest) -> Http
   let mut go = true;
   while go {
     c.stage.store(0);
-    if n > 0 && b.pos >= b.data.len() {
+    if n > 0 && b.pos >= b.data.byte_len() {
       match task.timeout(limits.idle_ms(), || c.stream.read(max)) {
         Some(r) => {
           match r {
             Ok(d) => {
-              if d.len() == 0 {
+              if d.byte_len() == 0 {
                 finish_close(&c);
                 return;
               }

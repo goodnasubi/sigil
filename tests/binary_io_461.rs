@@ -17,14 +17,14 @@ fn read(p: String, max: Int) -> Result<Int, BinaryIoError>
     Ok(b) => {
       let mut sum = 0;
       let mut i = 0;
-      while i < b.len() {
+      while i < b.byte_len() {
         match b.get(i) {
           Some(x) => { sum = (sum * 257 + x) % 1000000007; }
           None => {}
         }
         i = i + 1;
       }
-      return Ok(sum + b.len() * 1000000007);
+      return Ok(sum + b.byte_len() * 1000000007);
     }
     Err(e) => { return Err(e); }
   }
@@ -48,7 +48,7 @@ fn write(p: String, max: Int, n: Int) -> Result<Int, BinaryIoError>
     Ok(u) => {
       let rejected = fs.write_bytes(&path, &b, 0);
       match fs.write_bytes(&path, &b, max) {
-        Ok(v) => { return Ok(b.len()); }
+        Ok(v) => { return Ok(b.byte_len()); }
         Err(e) => { return Err(e); }
       }
     }

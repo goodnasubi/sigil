@@ -437,7 +437,7 @@ fn rejects_allocation_and_os_features_in_freestanding_mode() {
     // 3. String（確保を要する型）
     let str_src = "module m.a\n  targets bare\n  trust none\n\n\
         fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n\
-          let s = \"hello\";\n  return s.len();\n}\n";
+          let s = \"hello\";\n  return s.char_count();\n}\n";
     assert_rejected(str_src, "main", &[], "確保");
 
     // 4. List（確保を要する型）
@@ -449,7 +449,7 @@ fn rejects_allocation_and_os_features_in_freestanding_mode() {
     // 5. Bytes（確保を要する型）
     let bytes_src = "module m.a\n  targets bare\n  trust none\n\n\
         fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{\n\
-          let b = Bytes.new();\n  return b.len();\n}\n";
+          let b = Bytes.new();\n  return b.byte_len();\n}\n";
     assert_rejected(bytes_src, "main", &[], "確保");
 
     // 6. console.log（OS 機能）

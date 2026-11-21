@@ -28,7 +28,7 @@ fn f(p: Pair, n: Int) -> Int
   let s = p.name.clone();
   let t = s;
   if n > 1 {
-    return t.len();
+    return t.char_count();
   }
   return n + 1;
 }
@@ -40,7 +40,7 @@ fn g(t: Tag) -> Int
   effects none
 {
   return match t {
-    Tag.Named(x) => x.len(),
+    Tag.Named(x) => x.char_count(),
     Tag.Num(k) => k,
   };
 }

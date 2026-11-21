@@ -175,6 +175,11 @@ impl Ck {
                         Some(TypeDef::Opaque(_))
                             if !self.methods.contains_key(&(tn.clone(), name.clone())) =>
                         {
+                            if name == "len" {
+                                if let Some(hint) = len_guidance(&tn) {
+                                    return self.err(ErrorKind::NoSuchMember, hint);
+                                }
+                            }
                             return self.err(
                                 ErrorKind::NoSuchMember,
                                 format!("標準の型 `{tn}` に `{name}` という関数・値がない"),
@@ -188,10 +193,15 @@ impl Ck {
                         None => match self.trait_typefn_sig(&tn, name)? {
                             Some((s, tr)) => (s, ResKind::TraitTypeFn, tr),
                             None => {
+                                if name == "len" {
+                                    if let Some(hint) = len_guidance(&tn) {
+                                        return self.err(ErrorKind::NoSuchMember, hint);
+                                    }
+                                }
                                 return self.err(
                                     ErrorKind::NoSuchMember,
                                     format!("`{tn}` に `{name}` という関数・値がない"),
-                                )
+                                );
                             }
                         },
                     };
@@ -320,10 +330,15 @@ impl Ck {
                         None => match self.trait_method_sig(&rt, name)? {
                             Some((s, tr)) => (s, ResKind::TraitMethod, tr),
                             None => {
+                                if name == "len" {
+                                    if let Some(hint) = len_guidance(&tn) {
+                                        return self.err(ErrorKind::NoSuchMember, hint);
+                                    }
+                                }
                                 return self.err(
                                     ErrorKind::NoSuchMember,
                                     format!("型 `{tn}` にメソッド `{name}` がない"),
-                                )
+                                );
                             }
                         },
                     },
@@ -640,5 +655,14 @@ impl Ck {
             self.add_eff(a);
         }
         Ok(srcs)
+    }
+}
+
+pub(super) fn len_guidance(tn: &str) -> Option<&'static str> {
+    match tn {
+        "String" => Some("`String` に `len` は無い。文字数は `char_count`、バイト数は `byte_len`"),
+        "Bytes" => Some("`Bytes` に `len` は無い。バイト数は `byte_len`"),
+        "Secret" => Some("`Secret` に `len` は無い。バイト数は `byte_len`"),
+        _ => None,
     }
 }

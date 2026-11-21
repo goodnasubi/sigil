@@ -761,7 +761,6 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         &[
             ("from_bytes(b: Bytes) -> Secret", "none"),
             ("expose(self: &Secret) -> Bytes", "none"),
-            ("len(self: &Secret) -> Int", "none"),
             ("byte_len(self: &Secret) -> Int", "none"),
         ],
     ),
@@ -875,7 +874,6 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         Layer::Core,
         "String",
         &[
-            ("len(self: &String) -> Int", "none"),
             ("char_count(self: &String) -> Int", "none"),
             ("byte_len(self: &String) -> Int", "none"),
             ("is_empty(self: &String) -> Bool", "none"),
@@ -898,7 +896,6 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
                 "from_list(bytes: &List<Int>) -> Result<Bytes, String>",
                 "none",
             ),
-            ("len(self: &Bytes) -> Int", "none"),
             ("byte_len(self: &Bytes) -> Int", "none"),
             ("is_empty(self: &Bytes) -> Bool", "none"),
             ("get(self: &Bytes, index: Int) -> Option<Int>", "none"),

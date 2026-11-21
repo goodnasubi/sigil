@@ -53,16 +53,6 @@ impl Secret {
     return self.data.clone();
   }
 
-  // 範囲: 中身の長さ。長さは公開の情報（ADR 0020 決定 1）。
-  pub fn len(self: &Secret) -> Int
-    intent "中身のバイト列の長さを返す"
-    requires none
-    ensures none
-    effects none
-  {
-    return self.data.byte_len();
-  }
-
   pub fn byte_len(self: &Secret) -> Int
     intent "中身のバイト列の長さを返す（定数時間）。バイト位置を要求する API にはこの値を使う"
     requires none

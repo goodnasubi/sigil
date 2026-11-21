@@ -68,10 +68,9 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.core.bytes.ct_equal", &[]),
     // `Secret` の入口（PR 6-1b）。メソッドの SIR 名は裸の名前になる。
     // `from_bytes` の引数は取り込む秘密、`expose` は明示的な取り出し
-    // （秘密を返すこと自体は違反ではない）、`len` は長さ（公開）だけを見る。
+    // （秘密を返すこと自体は違反ではない）、`byte_len` は長さ（公開）だけを見る。
     ("from_bytes", &[]),
     ("expose", &[]),
-    ("len", &[]),
     ("byte_len", &[]),
     // SHA-256（PR 6-1c で実装）。ワンショット `sha256` の引数 `data` の
     // 中身は秘密、長さは公開（解析のモデリングで BytesLen は公開になる）。
@@ -613,7 +612,7 @@ fn probe() -> Int
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.byte_len() + s.len() + d.byte_len() + h.byte_len() + p.byte_len(); }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len(); }
   return 0;
 }
 "#;

@@ -1076,7 +1076,6 @@ impl<'a> L<'a> {
             ("Result", "ok") => (ResOk, true),
             ("Result", "map") => (ResMap, true),
             ("Result", "map_err") => (ResMapErr, true),
-            ("String", "len") => (StrLen, false),
             ("String", "char_count") => (StrLen, false),
             ("String", "byte_len") => (StrByteLen, false),
             ("String", "is_empty") => (StrIsEmpty, false),
@@ -1088,7 +1087,6 @@ impl<'a> L<'a> {
             ("Int", "rotr") => (IntRotr, false),
             ("Int", "rotr32") => (IntRotr32, false),
             ("Int", "ashr") => (IntAshr, false),
-            ("Bytes", "len") => (BytesLen, false),
             ("Bytes", "byte_len") => (BytesLen, false),
             ("Bytes", "is_empty") => (BytesIsEmpty, false),
             ("Bytes", "get") => (BytesGet, false),
@@ -1124,7 +1122,21 @@ impl<'a> L<'a> {
             ("RootGroup", "reserve") => (RootReserve, false),
             // `RootSlot` は消費される（ADR 0031 決定 4-1）。
             ("RootSlot", "start") => (RootStart, true),
-            (o, n) => return bail(format!("メソッド {o}.{n}")),
+            (o, n) => {
+                if n == "len" {
+                    match o {
+                        "String" => {
+                            return bail(
+                                "`String` に `len` は無い。文字数は `char_count`、バイト数は `byte_len`",
+                            )
+                        }
+                        "Bytes" => return bail("`Bytes` に `len` は無い。バイト数は `byte_len`"),
+                        "Secret" => return bail("`Secret` に `len` は無い。バイト数は `byte_len`"),
+                        _ => {}
+                    }
+                }
+                return bail(format!("メソッド {o}.{n}"));
+            }
         };
         if owner == "Path" {
             self.core_only = false;

@@ -1,5 +1,5 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
-//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256）
+//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM）
 //! および陽性の対照（素の `cmp_early`、HMAC包み `verify_hmac_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
@@ -85,6 +85,8 @@ enum CmpTarget {
     Hmac,
     Bearer,
     Hkdf,
+    AesGcm,
+    AesGcmLeaky,
 }
 
 const CMP_EARLY: &str = "\
@@ -189,6 +191,35 @@ fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
             raw_ikm = pushes("raw_ikm", &input),
             info = pushes("info", &MSG),
         ),
+        // AES-128-GCM（ADR 0058 決定 3、段 1b）。鍵が秘密の入力（組 A は先頭、組 B は末尾の
+        // バイトだけ反転）、nonce・AAD・平文の長さは公開で組の間で同じ。暗号化と
+        // 復号（タグの照合を含む）の両方を通す。`AesGcmLeaky` は同じ形のまま、鍵の 2 バイト目が
+        // 10 のとき（組 B）だけ暗号化をもう 1 回する陽性の対照（秘密に依存する仕事量の差）。
+        CmpTarget::AesGcm | CmpTarget::AesGcmLeaky => {
+            let leak = if matches!(target, CmpTarget::AesGcmLeaky) {
+                "    if raw_key.get(1).unwrap_or(0) == 10 {
+      match Nonce96.from_slice(&iv) {
+        Err(e) => { return 0 - 1; }
+        Ok(n3) => {
+          match aes128_gcm_seal(&key, n3, &aad, &Secret.from_bytes(pt.clone())) {
+            Err(e) => { return 0 - 1; }
+            Ok(extra) => { acc = acc + 1; }
+          }
+        }
+      }
+    }
+"
+            } else {
+                ""
+            };
+            format!(
+                "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}{iv}{aad}{pt}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let key_opt = Aes128GcmKey.from_secret(Secret.from_bytes(raw_key.clone()));\n    match key_opt {{\n      Err(e) => {{ return 0 - 1; }}\n      Ok(key) => {{\n        match Nonce96.from_slice(&iv) {{\n          Err(e) => {{ return 0 - 1; }}\n          Ok(n1) => {{\n            match Nonce96.from_slice(&iv) {{\n              Err(e) => {{ return 0 - 1; }}\n              Ok(n2) => {{\n                match aes128_gcm_seal(&key, n1, &aad, &Secret.from_bytes(pt.clone())) {{\n                  Err(e) => {{ return 0 - 1; }}\n                  Ok(sealed) => {{\n                    match aes128_gcm_open(&key, &n2, &aad, &sealed) {{\n                      Err(e) => {{ return 0 - 1; }}\n                      Ok(o) => {{ acc = acc + o.byte_len(); }}\n                    }}\n{leak}                  }}\n                }}\n              }}\n            }}\n          }}\n        }}\n      }}\n    }}\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+                raw_key = pushes("raw_key", &input[..16]),
+                iv = pushes("iv", &MSG[..12]),
+                aad = pushes("aad", &MSG[12..20]),
+                pt = pushes("pt", &MSG),
+            )
+        }
     }
 }
 
@@ -259,6 +290,8 @@ const DEFAULT_HMAC_SAMPLES: usize = 80;
 const DEFAULT_HMAC_ITERS: usize = 1_250;
 /// HKDF（Extract + 2 ブロックの Expand）は HMAC 約 3 回分の計算なので、反復を絞る。
 const DEFAULT_HKDF_ITERS: usize = 400;
+/// AES-128-GCM（暗号化と復号の 2 回。32 バイトの平文）は 1 反復が重いので、さらに絞る。
+const DEFAULT_AEAD_ITERS: usize = 40;
 
 fn get_iters(default: usize) -> usize {
     std::env::var("SIGIL_CT_ITERS")
@@ -420,6 +453,33 @@ fn ct_measure_hkdf() {
 
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_positive_control_aes_gcm() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::AesGcmLeaky, "aes_gcm_leaky", iters, samples);
+    println!("陽性の対照（AES-128-GCM 形, 鍵に依存する仕事量, 各組 {total} 回): t = {t:.2}");
+    assert!(
+        t.abs() >= 4.5,
+        "AES-128-GCM 陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_aes_gcm() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::AesGcm, "aes_gcm", iters, samples);
+    println!(
+        "AES-128-GCM (std.crypto.aes128_gcm_seal + aes128_gcm_open, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(t.abs() < 4.5, "AES-128-GCM に時間の差が出た: t = {t:.2}");
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn dudect_compare_timing() {
     // 互換性のための全対象一括実行
     ct_measure_positive_control();
@@ -429,4 +489,6 @@ fn dudect_compare_timing() {
     ct_measure_hmac();
     ct_measure_bearer();
     ct_measure_hkdf();
+    ct_measure_positive_control_aes_gcm();
+    ct_measure_aes_gcm();
 }

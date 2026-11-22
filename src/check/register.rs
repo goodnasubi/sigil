@@ -130,6 +130,18 @@ impl Ck {
                     .collect(),
             },
         );
+        // `AeadError` も腕を `match` できる列挙（ADR 0058 決定 2）。`NetError` と同じ作法で、表の行は残して
+        // 型の定義だけを列挙に置き換える。実体は `std.crypto` の同じ並びの宣言（lower が名前で結ぶ）。
+        self.types.insert(
+            "AeadError".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: crate::stdlib::AEAD_ERROR_ARMS
+                    .iter()
+                    .map(|a| ((*a).to_string(), vec![]))
+                    .collect(),
+            },
+        );
         // `HttpError`・`HttpProgress` も腕を `match` できる列挙（ADR 0032 決定 2-2・2-3）。`NetError` と同じく、表の行（OS 層の
         // 印）は残し、型の定義だけを列挙に置き換える。実体は `std.http` の同じ並びの宣言（lower が名前で結ぶ）。
         self.types.insert(

@@ -1,26 +1,18 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
-//! PR 6-1a で置き場と道具（dudect 方式＋Welch の t 検定）を用意する。
+//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合）
+//! および陽性の対照（`cmp_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
 //!
 //! ```text
-//! cargo test --test ct_measure -- --ignored --nocapture
+//! cargo test --release --test ct_measure -- --ignored --nocapture
 //! ```
 //!
-//! 方法（dudect）: 比較関数について、入力の組を 2 つ用意する。
+//! 方法（dudect）: 各比較関数について、入力の組を 2 つ用意する。
 //! 組 A は先頭のバイトだけが違い、組 B は末尾のバイトだけが違う。
-//! 早く抜ける比較では A の方が速く終わるので、実行時間の分布に差が出る。
-//! 定数時間の比較では、差が出ないはずである。各組を何度も測り、
-//! Welch の t 値で差を判定する（|t| < 4.5 なら差は見つからなかった）。
-//! わざと早く抜ける比較を陽性の対照として同時に測り、対照で差が出ない
-//! 場合は計測自体の感度不足として失敗にする（ADR 0020）。
-//!
-//! 計測は、対象の比較を大きな回数くり返すネイティブの実行ファイルを
-//! 組み立てて、その実行時間を測る形にしている。プロセス起動の雑音が
-//! 入るため、1 回の実行の中で比較を十分な回数くり返して、測りたい
-//! 時間が支配的になるようにしてある。
-//! 本来の計測（ADR 6-1 の完了時など）では、対象は `std.crypto` の実物に
-//! 差し替える。この置き場の fixture は、道具の感度を確かめるためのもの。
+//! 2 組を交互に各組 1,000,000 回（既定値: 40,000 回ループ × 25 サンプル）実行し、
+//! Welch の t 値で判定する（|t| < 4.5 なら差は見つからなかった）。
+//! 陽性の対照（`cmp_early`）では |t| >= 4.5 となり感度が確認される。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -57,6 +49,11 @@ const KEY: [i64; 32] = [
     157, 164, 171, 178, 185, 192, 199, 206, 213, 220,
 ];
 
+const MSG: [i64; 32] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32,
+];
+
 fn pushes(name: &str, bytes: &[i64]) -> String {
     let mut s = format!("  let mut {name} = Bytes.new();\n");
     for b in bytes {
@@ -65,20 +62,90 @@ fn pushes(name: &str, bytes: &[i64]) -> String {
     s
 }
 
-/// 比較関数 `cmp` と入力の組（どこで違うか）から、計測用のプログラムを作る。
-fn measure_program(cmp_name: &str, cmp_src: &str, diff_at: usize) -> String {
-    let mut input = KEY;
-    input[diff_at] ^= 0xFF;
-    format!(
-        "module {{MODULE}}\n  targets server\n  trust none\n\n{cmp_src}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{key}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < 200000 {{\n    acc = acc + match {cmp_name}(&input, &key) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
-        key = pushes("key", &KEY),
-        input = pushes("input", &input),
-    )
+#[derive(Clone, Copy, Debug)]
+enum CmpTarget {
+    Early,
+    CtEq,
+    Scram,
+    Hmac,
+    Bearer,
 }
 
-const CMP_EARLY: &str = "fn cmp_early(a: &Bytes, b: &Bytes) -> Bool\n  intent \"早く抜ける比較（陽性の対照）\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut i = 0;\n  while i < a.byte_len() {\n    if a.get(i).unwrap_or(0) != b.get(i).unwrap_or(0) {\n      return false;\n    }\n    i = i + 1;\n  }\n  return true;\n}\n";
+const CMP_EARLY: &str = "\
+fn cmp_early(a: &Bytes, b: &Bytes) -> Bool
+  intent \"早く抜ける比較（陽性の対照）\"
+  requires none
+  ensures none
+  effects none
+{
+  let mut i = 0;
+  while i < a.byte_len() {
+    if a.get(i).unwrap_or(0) != b.get(i).unwrap_or(0) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+";
 
-const CMP_CT: &str = "fn cmp_ct(a: &Bytes, b: &Bytes) -> Bool\n  intent \"定数時間の比較（XOR で積む）\"\n  requires none\n  ensures none\n  effects none\n{\n  let mut diff = 0;\n  let mut i = 0;\n  while i < a.byte_len() {\n    diff = diff | (a.get(i).unwrap_or(0) ^ b.get(i).unwrap_or(0));\n    i = i + 1;\n  }\n  return diff == 0;\n}\n";
+const SCRAM_SIG: &str = "\
+pub fn ct_signature(signature: &Bytes, expected: &Bytes) -> Bool
+  intent \"SCRAM の形式と上限を検査して認証する\"
+  requires none
+  ensures none
+  effects none
+{
+  return ct_eq(&signature, &expected);
+}
+";
+
+const BEARER_SIG: &str = "\
+fn ct_bearer_signature(key: &Secret, message: &Bytes, tag: &Bytes) -> Bool
+  intent \"既存 HMAC の定数時間照合に受信署名対象を渡す\"
+  requires none
+  ensures none
+  effects none
+{
+  return verify_hmac_sha256(&key, &message, &tag);
+}
+";
+
+/// 比較対象と入力の組（どこで違うか）から、計測用のプログラムを作る。
+fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
+    let mut input = KEY;
+    input[diff_at] ^= 0xFF;
+
+    match target {
+        CmpTarget::Early => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\n{CMP_EARLY}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{key}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match cmp_early(&input, &key) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            key = pushes("key", &KEY),
+            input = pushes("input", &input),
+        ),
+        CmpTarget::CtEq => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{key}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match ct_eq(&input, &key) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            key = pushes("key", &KEY),
+            input = pushes("input", &input),
+        ),
+        CmpTarget::Scram => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\n{SCRAM_SIG}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{key}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match ct_signature(&input, &key) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            key = pushes("key", &KEY),
+            input = pushes("input", &input),
+        ),
+        CmpTarget::Hmac => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match verify_hmac_sha256(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            raw_key = pushes("raw_key", &KEY),
+            msg = pushes("msg", &MSG),
+            input = pushes("input", &input),
+        ),
+        CmpTarget::Bearer => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\n{BEARER_SIG}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match ct_bearer_signature(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            raw_key = pushes("raw_key", &KEY),
+            msg = pushes("msg", &MSG),
+            input = pushes("input", &input),
+        ),
+    }
+}
 
 static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -114,48 +181,123 @@ fn build_exe(tag: &str, src: &str) -> (PathBuf, PathBuf) {
     (dir, exe)
 }
 
-/// 実行ファイルを指定回数だけ実行し、各回の所要時間（ミリ秒）を集める。
-fn time_runs(exe: &PathBuf, samples: usize) -> Vec<f64> {
-    let mut out = Vec::with_capacity(samples);
+/// 2 つの実行ファイルを交互に指定回数（samples）だけ実行し、各回の所要時間（ミリ秒）を集める。
+/// 交互に並べることで、時間経過に伴う温度上昇・CPU 周波数変動などの系統的ドリフトを相殺する（ADR 0020）。
+fn measure_pair(exe_a: &PathBuf, exe_b: &PathBuf, samples: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut a = Vec::with_capacity(samples);
+    let mut b = Vec::with_capacity(samples);
     for _ in 0..samples {
-        let start = Instant::now();
-        let status = Command::new(exe)
+        let start_a = Instant::now();
+        let status_a = Command::new(exe_a)
             .output()
-            .expect("計測用プログラムを実行できない");
-        assert!(status.status.success(), "計測用プログラムが失敗");
-        out.push(start.elapsed().as_secs_f64() * 1000.0);
+            .expect("計測用プログラム A を実行できない");
+        assert!(status_a.status.success(), "計測用プログラム A が失敗");
+        a.push(start_a.elapsed().as_secs_f64() * 1000.0);
+
+        let start_b = Instant::now();
+        let status_b = Command::new(exe_b)
+            .output()
+            .expect("計測用プログラム B を実行できない");
+        assert!(status_b.status.success(), "計測用プログラム B が失敗");
+        b.push(start_b.elapsed().as_secs_f64() * 1000.0);
     }
-    out
+    (a, b)
 }
 
-/// 1 つの比較関数について、組 A（先頭で違う）と組 B（末尾で違う）の
-/// 実行時間の Welch の t 値を返す。
-fn measure(cmp_name: &str, cmp_src: &str) -> f64 {
-    let (dir_a, exe_a) = build_exe(cmp_name, &measure_program(cmp_name, cmp_src, 0));
-    let (dir_b, exe_b) = build_exe(cmp_name, &measure_program(cmp_name, cmp_src, 31));
-    let a = time_runs(&exe_a, 25);
-    let b = time_runs(&exe_b, 25);
+const DEFAULT_SAMPLES: usize = 25;
+const DEFAULT_ITERS: usize = 40_000;
+
+fn get_iters() -> usize {
+    std::env::var("SIGIL_CT_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_ITERS)
+}
+
+fn get_samples() -> usize {
+    std::env::var("SIGIL_CT_SAMPLES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_SAMPLES)
+}
+
+fn measure_target(target: CmpTarget, name: &str, iters: usize, samples: usize) -> f64 {
+    let (dir_a, exe_a) = build_exe(&format!("{name}_a"), &measure_program(target, 0, iters));
+    let (dir_b, exe_b) = build_exe(&format!("{name}_b"), &measure_program(target, 31, iters));
+    let (a, b) = measure_pair(&exe_a, &exe_b, samples);
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
     welch_t(&a, &b)
 }
 
 #[test]
-#[ignore = "手動計測（ADR 0024 決定 3-4）。cargo test -- --ignored で実行"]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_positive_control() {
+    let iters = get_iters();
+    let samples = get_samples();
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::Early, "cmp_early", iters, samples);
+    println!("陽性の対照 (cmp_early, 各組 {total} 回): t = {t:.2}");
+    assert!(
+        t.abs() >= 4.5,
+        "陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_ct_eq() {
+    let iters = get_iters();
+    let samples = get_samples();
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::CtEq, "ct_eq", iters, samples);
+    println!("ct_eq (std.core.bytes.ct_equal, 各組 {total} 回): t = {t:.2}");
+    assert!(t.abs() < 4.5, "ct_eq に時間の差が出た: t = {t:.2}");
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_scram() {
+    let iters = get_iters();
+    let samples = get_samples();
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::Scram, "scram_sig", iters, samples);
+    println!("SCRAM 照合 (std.pg_scram.ct_signature, 各組 {total} 回): t = {t:.2}");
+    assert!(t.abs() < 4.5, "SCRAM 照合に時間の差が出た: t = {t:.2}");
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_hmac() {
+    let iters = get_iters();
+    let samples = get_samples();
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::Hmac, "hmac_verify", iters, samples);
+    println!("HMAC 照合 (std.crypto.verify_hmac_sha256, 各組 {total} 回): t = {t:.2}");
+    assert!(t.abs() < 4.5, "HMAC 照合に時間の差が出た: t = {t:.2}");
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_bearer() {
+    let iters = get_iters();
+    let samples = get_samples();
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::Bearer, "bearer_sig", iters, samples);
+    println!("ベアラー署名照合 (std.web.ct_bearer_signature, 各組 {total} 回): t = {t:.2}");
+    assert!(
+        t.abs() < 4.5,
+        "ベアラー署名照合に時間の差が出た: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn dudect_compare_timing() {
-    // 陽性の対照: 早く抜ける比較は、先頭で違う組の方が速いはずで、
-    // t 値に差が出なければならない（出なければ計測の感度不足）。
-    let t_early = measure("cmp_early", CMP_EARLY);
-    println!("陽性の対照（早く抜ける比較）: t = {t_early:.2}");
-    assert!(
-        t_early.abs() >= 4.5,
-        "陽性の対照で差が出なかった（計測の感度不足）: t = {t_early:.2}"
-    );
-    // 本命: 定数時間の比較では差が出ないはず。
-    let t_ct = measure("cmp_ct", CMP_CT);
-    println!("定数時間の比較: t = {t_ct:.2}");
-    assert!(
-        t_ct.abs() < 4.5,
-        "定数時間の比較に時間の差が出た: t = {t_ct:.2}"
-    );
+    // 互換性のための全対象一括実行
+    ct_measure_positive_control();
+    ct_measure_ct_eq();
+    ct_measure_scram();
+    ct_measure_hmac();
+    ct_measure_bearer();
 }

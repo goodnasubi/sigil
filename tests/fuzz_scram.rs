@@ -7,7 +7,19 @@
 //!   - 解釈関数（respond / verify）はどの入力にもクラッシュ（panic、segfault）せず Ok/Err を返す。
 //!   - 評価器（ir_eval）とネイティブ（Linux x86-64）の出力が完全一致する。
 //!   - スタック上限（2 MiB）やメモリ上限を超えない。
-//! - 失敗入力は target/fuzz-failures/scram/ に保存。回帰は tests/fuzz/regress/scram/。
+//! - 失敗入力の保存と再現手順:
+//!   - 検査はネイティブプロセス起動の効率化のため最大 64 件（または 48 KB）ごとのバッチで実行される。
+//!   - バッチ実行前に `target/fuzz-failures/scram/batch`（1 行 1 入力の 16 進文字列）と
+//!     `batch.meta`（種・開始番号・件数および各行の index、method、mode）が出力され、バッチ成功時にのみ削除される。
+//!   - `flush` 内で検査が失敗した場合、枠側（`fuzz::run`）の `fail-<seed>-<index>` や `current` にはバッチを流し出した
+//!     時点の入力（多くはバッチ最後の 1 件）が記録されるため、実際の原因入力とは異なる場合がある。
+//!   - なお、`fuzz::run` 終了後の端数の最終 flush は枠の外で実行されるため、失敗時は `fail-*` は生成されず
+//!     `batch` と `batch.meta` だけが残る。
+//!   - 失敗時の再現・回帰登録手順:
+//!     1. `target/fuzz-failures/scram/batch.meta` から該当の行（index 等）を特定する。
+//!     2. `batch` ファイルの該当行の 16 進文字列をバイト列に復号する。
+//!     3. 生のバイト列として `tests/fuzz/regress/scram/` へ 1 ファイルずつ配置する（次回以降のファジングで先頭に自動再生される）。
+//! - 回帰テストは tests/fuzz/regress/scram/。
 mod common;
 #[path = "common/fuzz.rs"]
 mod fuzz;

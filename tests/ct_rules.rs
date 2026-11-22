@@ -113,6 +113,27 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.crypto.aes128_gcm_open", &["nonce", "aad", "sealed"]),
     ("from_secret", &[]),
     ("from_slice", &["b"]),
+    // X25519（ADR 0058 決定 3、段 1c）。スカラー、体演算の中間値、
+    // 共有値は秘密。相手の公開鍵、演算回数と添字は公開。
+    ("std.crypto.x25519_public_key", &[]),
+    ("std.crypto.x25519_shared_secret", &["peer"]),
+    ("std.crypto.x25519_scalar_mult", &["u"]),
+    ("std.crypto.x25519_fe_decode", &[]),
+    ("std.crypto.x25519_fe_encode", &[]),
+    ("std.crypto.x25519_fe_read", &["i"]),
+    ("std.crypto.x25519_fe_pack", &[]),
+    ("std.crypto.x25519_fe_reduce", &[]),
+    ("std.crypto.x25519_fe_add", &[]),
+    ("std.crypto.x25519_fe_sub", &[]),
+    ("std.crypto.x25519_fe_mul", &[]),
+    ("std.crypto.x25519_fe_square", &[]),
+    ("std.crypto.x25519_fe_square_n", &["count"]),
+    ("std.crypto.x25519_fe_invert", &[]),
+    ("std.crypto.x25519_fe_swap", &[]),
+    ("std.crypto.x25519_is_zero", &[]),
+    ("as_bytes", &[]),
+    ("is_invalid_key_length", &[]),
+    ("is_all_zero_shared_secret", &[]),
     // 塩・回数・出力の長さは公開（ADR 0020 決定 1 の対象表）。
     (
         "std.crypto.pbkdf2_sha256",
@@ -147,6 +168,7 @@ const CT_AHEAD: &[&str] = &[];
 const CT_PUBLIC_COMPARISONS: &[&str] = &[
     "std.crypto.verify_hmac_sha256",
     "std.crypto.aes128_gcm_tag_matches",
+    "std.crypto.x25519_is_zero",
     "std.web.ct_bearer_signature",
 ];
 
@@ -617,6 +639,42 @@ fn apply_builtin(
 // 対象表の検査（漏れの防止）
 // ---------------------------------------------------------------------------
 
+const X25519_PROBES: &str = r#"
+fn x25519_probe_public(b: &Bytes) -> Int
+  intent "X25519 の公開鍵導出を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  match X25519PrivateKey.from_secret(Secret.from_bytes(b.clone())) {
+    Err(error) => { return match error.is_invalid_key_length() { true => 0, false => 1 }; }
+    Ok(key) => { return x25519_public_key(&key).as_bytes().byte_len(); }
+  }
+}
+
+fn x25519_probe_shared(b: &Bytes) -> Int
+  intent "X25519 の共有値計算を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  match X25519PrivateKey.from_secret(Secret.from_bytes(b.clone())) {
+    Err(_) => { return 0; }
+    Ok(key) => {
+      match X25519PublicKey.from_bytes(b.clone()) {
+        Err(_) => { return 0; }
+        Ok(peer) => {
+          match x25519_shared_secret(&key, &peer) {
+            Err(error) => { return match error.is_all_zero_shared_secret() { true => 0, false => 1 }; }
+            Ok(shared) => { return shared.byte_len(); }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
 /// 標準ライブラリを含むプログラム（コーパス）を 1 つ組み立てる。
 /// 入口から届かない関数も含めて、標準ライブラリの関数がすべて SIR に現れる。
 fn corpus() -> Program {
@@ -639,11 +697,13 @@ fn probe() -> Int
   let prk = hkdf_extract_sha256(None, &s);
   let okm = hkdf_expand_sha256(&prk, &b, 32);
   let aead = aead_probe(&b);
+  let x25519_public = x25519_probe_public(&b);
+  let x25519_shared = x25519_probe_shared(&b);
   let reply = respond(&s, &b, &b);
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len() + aead; }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len() + aead + x25519_public + x25519_shared; }
   return 0;
 }
 
@@ -684,7 +744,10 @@ fn aead_probe(b: &Bytes) -> Int
     let opts = sigil::effects::Options {
         embedded_extra: vec![(
             "std.pg_scram".into(),
-            format!("{}\n{probe}", include_str!("../src/stdlib/pg_scram.sigil")),
+            format!(
+                "{}\n{probe}\n{X25519_PROBES}",
+                include_str!("../src/stdlib/pg_scram.sigil")
+            ),
         )],
         embedded_roots: vec!["std.pg_scram".into()],
         ..Default::default()
@@ -1386,6 +1449,28 @@ fn clif_aes_gcm_entries_cover_all_callees() {
             "{tag} の CLIF の除算 {} が SIR の {sir_div} を超えた: {delta:?}",
             delta.div
         );
+        assert!(
+            delta.branch <= budget,
+            "{tag} の CLIF 分岐 {} が SIR の予算 {budget} を超えた: {delta:?}",
+            delta.branch
+        );
+    }
+}
+
+/// 公開入口から届く体演算を含め、ネイティブ生成が SIR にない分岐と
+/// 除算・剰余を持ち込んでいないことを確認する。
+#[test]
+fn clif_x25519_entries_cover_all_callees() {
+    let program = corpus();
+    for (tag, probe) in [
+        ("x25519public", "x25519_probe_public"),
+        ("x25519shared", "x25519_probe_shared"),
+    ] {
+        let reach = reachable_funcs(&program, &format!("std.pg_scram.{probe}"));
+        let budget = reach_branch_budget(&program, &reach);
+        let delta = clif_delta(tag, X25519_PROBES, &format!("{probe}(&Bytes.new())"));
+        eprintln!("{tag}: funcs={} budget={budget} {delta:?}", reach.len());
+        assert_eq!(delta.div, 0, "{tag} の CLIF に除算・剰余がある");
         assert!(
             delta.branch <= budget,
             "{tag} の CLIF 分岐 {} が SIR の予算 {budget} を超えた: {delta:?}",

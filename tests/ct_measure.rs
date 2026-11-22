@@ -1,5 +1,5 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
-//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM）
+//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM、X25519）
 //! および陽性の対照（素の `cmp_early`、HMAC包み `verify_hmac_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
@@ -550,6 +550,143 @@ fn ct_measure_aes_gcm_fail() {
         t.abs() < 4.5,
         "AES-128-GCM の認証失敗にタグの不一致位置による時間の差が出た: t = {t:.2}"
     );
+}
+
+/// ADR 0058 決定 3。両組で同じネイティブ実行ファイルを使い、同じ長さの
+/// スカラーを環境変数で渡す。各半バイトを ASCII 0x40〜0x4f に写す。
+fn x25519_program(iters: usize) -> String {
+    format!(
+        r#"module {{MODULE}}
+  targets server
+  trust none
+
+fn main() -> Int
+  intent "X25519 の公開鍵導出と共有値計算を計測する"
+  requires none
+  ensures none
+  effects env
+{{
+  let scalar_env = env.get(&"SIGIL_CT_X25519_SCALAR");
+  let control_env = env.get(&"SIGIL_CT_X25519_CONTROL");
+  let encoded = scalar_env.unwrap_or("").as_bytes();
+  let control = control_env.unwrap_or("") == "1";
+  if encoded.byte_len() != 64 {{ return 1; }}
+  let mut raw_key = Bytes.new();
+  let mut base_point = Bytes.new();
+  let mut i = 0;
+  while i < 32 {{
+    let hi = encoded.get(2 * i).unwrap_or(0) & 15;
+    let lo = encoded.get(2 * i + 1).unwrap_or(0) & 15;
+    raw_key.push((hi << 4) | lo);
+    base_point.push(match i == 0 {{ true => 9, false => 0 }});
+    i = i + 1;
+  }}
+  // 陽性対照だけで、クランプで消えないスカラーのビットに仕事量を依存させる。
+  let extra = control && (raw_key.get(0).unwrap_or(0) & 8) != 0;
+  match X25519PrivateKey.from_secret(Secret.from_bytes(raw_key)) {{
+    Err(_) => {{ return 2; }}
+    Ok(key) => {{
+      match X25519PublicKey.from_bytes(base_point) {{
+        Err(_) => {{ return 3; }}
+        Ok(peer) => {{
+          let mut acc = 0;
+          let mut n = 0;
+          while n < {iters} {{
+            let public_key = x25519_public_key(&key);
+            acc = acc + public_key.as_bytes().byte_len();
+            match x25519_shared_secret(&key, &peer) {{
+              Err(_) => {{ return 4; }}
+              Ok(shared) => {{ acc = acc + shared.byte_len(); }}
+            }}
+            if extra {{
+              let repeated = x25519_public_key(&key);
+              acc = acc + repeated.as_bytes().byte_len() - 32;
+            }}
+            n = n + 1;
+          }}
+          return match acc == {iters} * 64 {{ true => 0, false => 5 }};
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+    )
+}
+
+fn x25519_scalar_env(scalar: &[u8; 32]) -> String {
+    scalar
+        .iter()
+        .flat_map(|&byte| [char::from(64 + (byte >> 4)), char::from(64 + (byte & 15))])
+        .collect()
+}
+
+fn measure_x25519(exe: &PathBuf, samples: usize, control: bool) -> f64 {
+    let fixed = x25519_scalar_env(&[0; 32]);
+    let mut state = 0x4478_51ed_8f26_893bu64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut a = Vec::with_capacity(samples);
+    let mut b = Vec::with_capacity(samples);
+    let timed = |scalar: &str, measurements: &mut Vec<f64>| {
+        let mut cmd = Command::new(exe);
+        cmd.env("SIGIL_CT_X25519_SCALAR", scalar)
+            .env("SIGIL_CT_X25519_CONTROL", if control { "1" } else { "0" });
+        let start = Instant::now();
+        let output = cmd.output().expect("X25519 計測用プログラムを実行できない");
+        measurements.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(
+            output.status.success() && output.stdout == b"0\n",
+            "X25519 計測用プログラムが失敗: {} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for _ in 0..samples {
+        let mut scalar = std::array::from_fn(|_| next() as u8);
+        if control {
+            scalar[0] |= 8;
+        }
+        let varied = x25519_scalar_env(&scalar);
+        if next() & 1 == 0 {
+            timed(&fixed, &mut a);
+            timed(&varied, &mut b);
+        } else {
+            timed(&varied, &mut b);
+            timed(&fixed, &mut a);
+        }
+    }
+    welch_t(&a, &b)
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0058 決定 3）。cargo test --release --test ct_measure ct_measure_x25519 -- --ignored --nocapture"]
+fn ct_measure_x25519() {
+    let iters = 1;
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let (dir, exe) = build_exe("x25519", &x25519_program(iters));
+    let control = measure_x25519(&exe, samples, true);
+    let t = measure_x25519(&exe, samples, false);
+    let _ = std::fs::remove_dir_all(&dir);
+    let cpu_info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let cpu = cpu_info
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| (key.trim() == "model name").then_some(value.trim()))
+        .unwrap_or("不明");
+    println!(
+        "X25519 ({cpu}, Cranelift opt_level=none, 各組 {samples} 標本 × {iters} 回): 陽性対照 t = {control:.2}, 対象 t = {t:.2}"
+    );
+    assert!(
+        control.abs() >= 4.5,
+        "X25519 の陽性対照で差が出なかった: t = {control:.2}"
+    );
+    assert!(t.abs() < 4.5, "X25519 に時間の差が出た: t = {t:.2}");
 }
 
 #[test]

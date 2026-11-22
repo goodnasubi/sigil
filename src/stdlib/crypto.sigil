@@ -1169,3 +1169,649 @@ pub fn aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed:
   }
   return Err(AeadError.AuthenticationFailed);
 }
+
+// ---------------------------------------------------------------------------
+// X25519 (RFC 7748 §5)。秘密鍵は std.os_random.bytes で用意して Secret に
+// 取り込む。相手の u 座標は最上位ビットを無視し、非正規表現も受け付ける。
+
+pub struct X25519PrivateKey {
+  key: Secret,
+}
+
+pub struct X25519PublicKey {
+  bytes: Bytes,
+}
+
+pub struct X25519Error {
+  invalid_key_length: Bool,
+}
+
+impl X25519Error {
+  pub fn is_invalid_key_length(self: &X25519Error) -> Bool
+    intent "鍵長の誤りか確かめる"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.invalid_key_length;
+  }
+
+  pub fn is_all_zero_shared_secret(self: &X25519Error) -> Bool
+    intent "共有値が全ゼロだったか確かめる"
+    requires none
+    ensures none
+    effects none
+  {
+    return !self.invalid_key_length;
+  }
+}
+
+impl X25519PrivateKey {
+  pub fn from_secret(key: Secret) -> Result<X25519PrivateKey, X25519Error>
+    intent "32 バイトの秘密を X25519 秘密鍵に取り込む"
+    requires none
+    ensures none
+    effects none
+  {
+    if key.byte_len() != 32 {
+      return Err(X25519Error { invalid_key_length: true });
+    }
+    return Ok(X25519PrivateKey { key: key });
+  }
+}
+
+impl X25519PublicKey {
+  pub fn from_bytes(bytes: Bytes) -> Result<X25519PublicKey, X25519Error>
+    intent "32 バイトのバイト列を X25519 公開鍵に取り込む"
+    requires none
+    ensures none
+    effects none
+  {
+    if bytes.byte_len() != 32 {
+      return Err(X25519Error { invalid_key_length: true });
+    }
+    return Ok(X25519PublicKey { bytes: bytes });
+  }
+
+  pub fn as_bytes(self: &X25519PublicKey) -> Bytes
+    intent "X25519 公開鍵の 32 バイトを返す"
+    requires none
+    ensures result.byte_len() == 32
+    effects none
+  {
+    return self.bytes.clone();
+  }
+}
+
+// 体の元は 26, 25 ビット交互の 10 語で持つ（重みは 2^ceil(25.5*i)）。
+// 演算間の作業領域は各語を 4 バイトで Secret に収め、破棄時に消去する。
+fn x25519_fe_read(value: &Secret, i: Int) -> Int
+  intent "作業領域の指定した体の語を読む"
+  requires none
+  ensures none
+  effects none
+{
+  return value.data.read_u32_be(i * 4).unwrap_or(0);
+}
+
+fn x25519_fe_pack(h0: Int, h1: Int, h2: Int, h3: Int, h4: Int, h5: Int, h6: Int, h7: Int, h8: Int, h9: Int) -> Secret
+  intent "体の 10 語を消去される作業領域へ格納する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.with_capacity(40);
+  out.push_u32_be(h0);
+  out.push_u32_be(h1);
+  out.push_u32_be(h2);
+  out.push_u32_be(h3);
+  out.push_u32_be(h4);
+  out.push_u32_be(h5);
+  out.push_u32_be(h6);
+  out.push_u32_be(h7);
+  out.push_u32_be(h8);
+  out.push_u32_be(h9);
+  return Secret.from_bytes(out);
+}
+
+// 非負の積和を固定回数の桁上げで各語のビット幅に収める。
+// 2^255 は 19 と合同。初回の折り返し後は語 0 だけが広くなり、
+// 次の折り返しで全桁に桁上げが伝わっても 3 回目で収まる。
+fn x25519_fe_reduce(h0: Int, h1: Int, h2: Int, h3: Int, h4: Int, h5: Int, h6: Int, h7: Int, h8: Int, h9: Int) -> Secret
+  intent "桁上げを行い体の元に簡約する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut r0 = h0;
+  let mut r1 = h1;
+  let mut r2 = h2;
+  let mut r3 = h3;
+  let mut r4 = h4;
+  let mut r5 = h5;
+  let mut r6 = h6;
+  let mut r7 = h7;
+  let mut r8 = h8;
+  let mut r9 = h9;
+  let mut pass = 0;
+  while pass < 3 {
+    r1 = r1 + (r0 >> 26);
+    r0 = r0 & 0x3ffffff;
+    r2 = r2 + (r1 >> 25);
+    r1 = r1 & 0x1ffffff;
+    r3 = r3 + (r2 >> 26);
+    r2 = r2 & 0x3ffffff;
+    r4 = r4 + (r3 >> 25);
+    r3 = r3 & 0x1ffffff;
+    r5 = r5 + (r4 >> 26);
+    r4 = r4 & 0x3ffffff;
+    r6 = r6 + (r5 >> 25);
+    r5 = r5 & 0x1ffffff;
+    r7 = r7 + (r6 >> 26);
+    r6 = r6 & 0x3ffffff;
+    r8 = r8 + (r7 >> 25);
+    r7 = r7 & 0x1ffffff;
+    r9 = r9 + (r8 >> 26);
+    r8 = r8 & 0x3ffffff;
+    r0 = r0 + 19 * (r9 >> 25);
+    r9 = r9 & 0x1ffffff;
+    pass = pass + 1;
+  }
+  return x25519_fe_pack(r0, r1, r2, r3, r4, r5, r6, r7, r8, r9);
+}
+
+fn x25519_fe_add(left: &Secret, right: &Secret) -> Secret
+  intent "体の加算を行う"
+  requires none
+  ensures none
+  effects none
+{
+  let a0 = x25519_fe_read(&left, 0);
+  let a1 = x25519_fe_read(&left, 1);
+  let a2 = x25519_fe_read(&left, 2);
+  let a3 = x25519_fe_read(&left, 3);
+  let a4 = x25519_fe_read(&left, 4);
+  let a5 = x25519_fe_read(&left, 5);
+  let a6 = x25519_fe_read(&left, 6);
+  let a7 = x25519_fe_read(&left, 7);
+  let a8 = x25519_fe_read(&left, 8);
+  let a9 = x25519_fe_read(&left, 9);
+  let b0 = x25519_fe_read(&right, 0);
+  let b1 = x25519_fe_read(&right, 1);
+  let b2 = x25519_fe_read(&right, 2);
+  let b3 = x25519_fe_read(&right, 3);
+  let b4 = x25519_fe_read(&right, 4);
+  let b5 = x25519_fe_read(&right, 5);
+  let b6 = x25519_fe_read(&right, 6);
+  let b7 = x25519_fe_read(&right, 7);
+  let b8 = x25519_fe_read(&right, 8);
+  let b9 = x25519_fe_read(&right, 9);
+  let h0 = a0 + b0;
+  let h1 = a1 + b1;
+  let h2 = a2 + b2;
+  let h3 = a3 + b3;
+  let h4 = a4 + b4;
+  let h5 = a5 + b5;
+  let h6 = a6 + b6;
+  let h7 = a7 + b7;
+  let h8 = a8 + b8;
+  let h9 = a9 + b9;
+  return x25519_fe_reduce(h0, h1, h2, h3, h4, h5, h6, h7, h8, h9);
+}
+
+fn x25519_fe_sub(left: &Secret, right: &Secret) -> Secret
+  intent "体の減算を行う"
+  requires none
+  ensures none
+  effects none
+{
+  let a0 = x25519_fe_read(&left, 0);
+  let a1 = x25519_fe_read(&left, 1);
+  let a2 = x25519_fe_read(&left, 2);
+  let a3 = x25519_fe_read(&left, 3);
+  let a4 = x25519_fe_read(&left, 4);
+  let a5 = x25519_fe_read(&left, 5);
+  let a6 = x25519_fe_read(&left, 6);
+  let a7 = x25519_fe_read(&left, 7);
+  let a8 = x25519_fe_read(&left, 8);
+  let a9 = x25519_fe_read(&left, 9);
+  let b0 = x25519_fe_read(&right, 0);
+  let b1 = x25519_fe_read(&right, 1);
+  let b2 = x25519_fe_read(&right, 2);
+  let b3 = x25519_fe_read(&right, 3);
+  let b4 = x25519_fe_read(&right, 4);
+  let b5 = x25519_fe_read(&right, 5);
+  let b6 = x25519_fe_read(&right, 6);
+  let b7 = x25519_fe_read(&right, 7);
+  let b8 = x25519_fe_read(&right, 8);
+  let b9 = x25519_fe_read(&right, 9);
+  let h0 = a0 + 0x7ffffda - b0;
+  let h1 = a1 + 0x3fffffe - b1;
+  let h2 = a2 + 0x7fffffe - b2;
+  let h3 = a3 + 0x3fffffe - b3;
+  let h4 = a4 + 0x7fffffe - b4;
+  let h5 = a5 + 0x3fffffe - b5;
+  let h6 = a6 + 0x7fffffe - b6;
+  let h7 = a7 + 0x3fffffe - b7;
+  let h8 = a8 + 0x7fffffe - b8;
+  let h9 = a9 + 0x3fffffe - b9;
+  return x25519_fe_reduce(h0, h1, h2, h3, h4, h5, h6, h7, h8, h9);
+}
+
+// 畳み込みの重みは両添字が奇数の組で 2 倍し、桁 10 以降は 19 倍して折り返す。
+// 各項は 38 * 2^52 未満、各桁は高々 10 項であり Int の範囲に収まる。
+fn x25519_fe_mul(left: &Secret, right: &Secret) -> Secret
+  intent "体の乗算を行う"
+  requires none
+  ensures none
+  effects none
+{
+  let a0 = x25519_fe_read(&left, 0);
+  let a1 = x25519_fe_read(&left, 1);
+  let a2 = x25519_fe_read(&left, 2);
+  let a3 = x25519_fe_read(&left, 3);
+  let a4 = x25519_fe_read(&left, 4);
+  let a5 = x25519_fe_read(&left, 5);
+  let a6 = x25519_fe_read(&left, 6);
+  let a7 = x25519_fe_read(&left, 7);
+  let a8 = x25519_fe_read(&left, 8);
+  let a9 = x25519_fe_read(&left, 9);
+  let b0 = x25519_fe_read(&right, 0);
+  let b1 = x25519_fe_read(&right, 1);
+  let b2 = x25519_fe_read(&right, 2);
+  let b3 = x25519_fe_read(&right, 3);
+  let b4 = x25519_fe_read(&right, 4);
+  let b5 = x25519_fe_read(&right, 5);
+  let b6 = x25519_fe_read(&right, 6);
+  let b7 = x25519_fe_read(&right, 7);
+  let b8 = x25519_fe_read(&right, 8);
+  let b9 = x25519_fe_read(&right, 9);
+  let h0 = a0 * b0 + a1 * b9 * 38 + a2 * b8 * 19
+    + a3 * b7 * 38 + a4 * b6 * 19 + a5 * b5 * 38
+    + a6 * b4 * 19 + a7 * b3 * 38 + a8 * b2 * 19
+    + a9 * b1 * 38;
+  let h1 = a0 * b1 + a1 * b0 + a2 * b9 * 19
+    + a3 * b8 * 19 + a4 * b7 * 19 + a5 * b6 * 19
+    + a6 * b5 * 19 + a7 * b4 * 19 + a8 * b3 * 19
+    + a9 * b2 * 19;
+  let h2 = a0 * b2 + a1 * b1 * 2 + a2 * b0
+    + a3 * b9 * 38 + a4 * b8 * 19 + a5 * b7 * 38
+    + a6 * b6 * 19 + a7 * b5 * 38 + a8 * b4 * 19
+    + a9 * b3 * 38;
+  let h3 = a0 * b3 + a1 * b2 + a2 * b1
+    + a3 * b0 + a4 * b9 * 19 + a5 * b8 * 19
+    + a6 * b7 * 19 + a7 * b6 * 19 + a8 * b5 * 19
+    + a9 * b4 * 19;
+  let h4 = a0 * b4 + a1 * b3 * 2 + a2 * b2
+    + a3 * b1 * 2 + a4 * b0 + a5 * b9 * 38
+    + a6 * b8 * 19 + a7 * b7 * 38 + a8 * b6 * 19
+    + a9 * b5 * 38;
+  let h5 = a0 * b5 + a1 * b4 + a2 * b3
+    + a3 * b2 + a4 * b1 + a5 * b0
+    + a6 * b9 * 19 + a7 * b8 * 19 + a8 * b7 * 19
+    + a9 * b6 * 19;
+  let h6 = a0 * b6 + a1 * b5 * 2 + a2 * b4
+    + a3 * b3 * 2 + a4 * b2 + a5 * b1 * 2
+    + a6 * b0 + a7 * b9 * 38 + a8 * b8 * 19
+    + a9 * b7 * 38;
+  let h7 = a0 * b7 + a1 * b6 + a2 * b5
+    + a3 * b4 + a4 * b3 + a5 * b2
+    + a6 * b1 + a7 * b0 + a8 * b9 * 19
+    + a9 * b8 * 19;
+  let h8 = a0 * b8 + a1 * b7 * 2 + a2 * b6
+    + a3 * b5 * 2 + a4 * b4 + a5 * b3 * 2
+    + a6 * b2 + a7 * b1 * 2 + a8 * b0
+    + a9 * b9 * 38;
+  let h9 = a0 * b9 + a1 * b8 + a2 * b7
+    + a3 * b6 + a4 * b5 + a5 * b4
+    + a6 * b3 + a7 * b2 + a8 * b1
+    + a9 * b0;
+  return x25519_fe_reduce(h0, h1, h2, h3, h4, h5, h6, h7, h8, h9);
+}
+
+fn x25519_fe_square(value: &Secret) -> Secret
+  intent "体の二乗を行う"
+  requires none
+  ensures none
+  effects none
+{
+  return x25519_fe_mul(&value, &value);
+}
+
+// RFC 7748 の復号。255 ビットを読み、簡約は後続の体演算に任せる。
+fn x25519_fe_decode(data: &Bytes) -> Secret
+  intent "リトルエンディアンの u 座標を読む"
+  requires none
+  ensures none
+  effects none
+{
+  let b0 = data.get(0).map(|b| b + 0).unwrap_or(0);
+  let b1 = data.get(1).map(|b| b + 0).unwrap_or(0);
+  let b2 = data.get(2).map(|b| b + 0).unwrap_or(0);
+  let b3 = data.get(3).map(|b| b + 0).unwrap_or(0);
+  let b4 = data.get(4).map(|b| b + 0).unwrap_or(0);
+  let b5 = data.get(5).map(|b| b + 0).unwrap_or(0);
+  let b6 = data.get(6).map(|b| b + 0).unwrap_or(0);
+  let b7 = data.get(7).map(|b| b + 0).unwrap_or(0);
+  let b8 = data.get(8).map(|b| b + 0).unwrap_or(0);
+  let b9 = data.get(9).map(|b| b + 0).unwrap_or(0);
+  let b10 = data.get(10).map(|b| b + 0).unwrap_or(0);
+  let b11 = data.get(11).map(|b| b + 0).unwrap_or(0);
+  let b12 = data.get(12).map(|b| b + 0).unwrap_or(0);
+  let b13 = data.get(13).map(|b| b + 0).unwrap_or(0);
+  let b14 = data.get(14).map(|b| b + 0).unwrap_or(0);
+  let b15 = data.get(15).map(|b| b + 0).unwrap_or(0);
+  let b16 = data.get(16).map(|b| b + 0).unwrap_or(0);
+  let b17 = data.get(17).map(|b| b + 0).unwrap_or(0);
+  let b18 = data.get(18).map(|b| b + 0).unwrap_or(0);
+  let b19 = data.get(19).map(|b| b + 0).unwrap_or(0);
+  let b20 = data.get(20).map(|b| b + 0).unwrap_or(0);
+  let b21 = data.get(21).map(|b| b + 0).unwrap_or(0);
+  let b22 = data.get(22).map(|b| b + 0).unwrap_or(0);
+  let b23 = data.get(23).map(|b| b + 0).unwrap_or(0);
+  let b24 = data.get(24).map(|b| b + 0).unwrap_or(0);
+  let b25 = data.get(25).map(|b| b + 0).unwrap_or(0);
+  let b26 = data.get(26).map(|b| b + 0).unwrap_or(0);
+  let b27 = data.get(27).map(|b| b + 0).unwrap_or(0);
+  let b28 = data.get(28).map(|b| b + 0).unwrap_or(0);
+  let b29 = data.get(29).map(|b| b + 0).unwrap_or(0);
+  let b30 = data.get(30).map(|b| b + 0).unwrap_or(0);
+  let b31 = data.get(31).map(|b| b + 0).unwrap_or(0);
+  let h0 = (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 0x3ffffff;
+  let h1 = ((b3 >> 2) | (b4 << 6) | (b5 << 14) | (b6 << 22)) & 0x1ffffff;
+  let h2 = ((b6 >> 3) | (b7 << 5) | (b8 << 13) | (b9 << 21)) & 0x3ffffff;
+  let h3 = ((b9 >> 5) | (b10 << 3) | (b11 << 11) | (b12 << 19)) & 0x1ffffff;
+  let h4 = ((b12 >> 6) | (b13 << 2) | (b14 << 10) | (b15 << 18)) & 0x3ffffff;
+  let h5 = (b16 | (b17 << 8) | (b18 << 16) | (b19 << 24)) & 0x1ffffff;
+  let h6 = ((b19 >> 1) | (b20 << 7) | (b21 << 15) | (b22 << 23)) & 0x3ffffff;
+  let h7 = ((b22 >> 3) | (b23 << 5) | (b24 << 13) | (b25 << 21)) & 0x1ffffff;
+  let h8 = ((b25 >> 4) | (b26 << 4) | (b27 << 12) | (b28 << 20)) & 0x3ffffff;
+  let h9 = ((b28 >> 6) | (b29 << 2) | (b30 << 10) | (b31 << 18)) & 0x1ffffff;
+  return x25519_fe_pack(h0, h1, h2, h3, h4, h5, h6, h7, h8, h9);
+}
+
+// 各語の桁上げから h + 19 が 2^255 に達するか調べる。達した時だけ
+// 19 を加え、最後の桁上げを捨てると、h − (2^255 − 19) になる。
+fn x25519_fe_encode(value: &Secret) -> Bytes
+  intent "体の元から正規化した 32 バイトを返す"
+  requires none
+  ensures result.byte_len() == 32
+  effects none
+{
+  let a0 = x25519_fe_read(&value, 0);
+  let a1 = x25519_fe_read(&value, 1);
+  let a2 = x25519_fe_read(&value, 2);
+  let a3 = x25519_fe_read(&value, 3);
+  let a4 = x25519_fe_read(&value, 4);
+  let a5 = x25519_fe_read(&value, 5);
+  let a6 = x25519_fe_read(&value, 6);
+  let a7 = x25519_fe_read(&value, 7);
+  let a8 = x25519_fe_read(&value, 8);
+  let a9 = x25519_fe_read(&value, 9);
+  let mut carry = (a0 + 19) >> 26;
+  carry = (a1 + carry) >> 25;
+  carry = (a2 + carry) >> 26;
+  carry = (a3 + carry) >> 25;
+  carry = (a4 + carry) >> 26;
+  carry = (a5 + carry) >> 25;
+  carry = (a6 + carry) >> 26;
+  carry = (a7 + carry) >> 25;
+  carry = (a8 + carry) >> 26;
+  carry = (a9 + carry) >> 25;
+  let r0 = a0 + 19 * carry;
+  let r1 = a1 + (r0 >> 26);
+  let r2 = a2 + (r1 >> 25);
+  let r3 = a3 + (r2 >> 26);
+  let r4 = a4 + (r3 >> 25);
+  let r5 = a5 + (r4 >> 26);
+  let r6 = a6 + (r5 >> 25);
+  let r7 = a7 + (r6 >> 26);
+  let r8 = a8 + (r7 >> 25);
+  let r9 = a9 + (r8 >> 26);
+  let h0 = r0 & 0x3ffffff;
+  let h1 = r1 & 0x1ffffff;
+  let h2 = r2 & 0x3ffffff;
+  let h3 = r3 & 0x1ffffff;
+  let h4 = r4 & 0x3ffffff;
+  let h5 = r5 & 0x1ffffff;
+  let h6 = r6 & 0x3ffffff;
+  let h7 = r7 & 0x1ffffff;
+  let h8 = r8 & 0x3ffffff;
+  let h9 = r9 & 0x1ffffff;
+  let mut out = Bytes.with_capacity(32);
+  out.push((h0) & 255);
+  out.push(((h0 >> 8)) & 255);
+  out.push(((h0 >> 16)) & 255);
+  out.push(((h0 >> 24) | (h1 << 2)) & 255);
+  out.push(((h1 >> 6)) & 255);
+  out.push(((h1 >> 14)) & 255);
+  out.push(((h1 >> 22) | (h2 << 3)) & 255);
+  out.push(((h2 >> 5)) & 255);
+  out.push(((h2 >> 13)) & 255);
+  out.push(((h2 >> 21) | (h3 << 5)) & 255);
+  out.push(((h3 >> 3)) & 255);
+  out.push(((h3 >> 11)) & 255);
+  out.push(((h3 >> 19) | (h4 << 6)) & 255);
+  out.push(((h4 >> 2)) & 255);
+  out.push(((h4 >> 10)) & 255);
+  out.push(((h4 >> 18)) & 255);
+  out.push((h5) & 255);
+  out.push(((h5 >> 8)) & 255);
+  out.push(((h5 >> 16)) & 255);
+  out.push(((h5 >> 24) | (h6 << 1)) & 255);
+  out.push(((h6 >> 7)) & 255);
+  out.push(((h6 >> 15)) & 255);
+  out.push(((h6 >> 23) | (h7 << 3)) & 255);
+  out.push(((h7 >> 5)) & 255);
+  out.push(((h7 >> 13)) & 255);
+  out.push(((h7 >> 21) | (h8 << 4)) & 255);
+  out.push(((h8 >> 4)) & 255);
+  out.push(((h8 >> 12)) & 255);
+  out.push(((h8 >> 20) | (h9 << 6)) & 255);
+  out.push(((h9 >> 2)) & 255);
+  out.push(((h9 >> 10)) & 255);
+  out.push(((h9 >> 18)) & 255);
+  return out;
+}
+
+struct X25519FieldPair {
+  left: Secret,
+  right: Secret,
+}
+
+fn x25519_fe_swap(left: &Secret, right: &Secret, bit: Int) -> X25519FieldPair
+  intent "秘密分岐を使わずに体の元を条件付きで交換する"
+  requires none
+  ensures none
+  effects none
+{
+  let mask = 0 - bit;
+  let a0 = x25519_fe_read(&left, 0);
+  let a1 = x25519_fe_read(&left, 1);
+  let a2 = x25519_fe_read(&left, 2);
+  let a3 = x25519_fe_read(&left, 3);
+  let a4 = x25519_fe_read(&left, 4);
+  let a5 = x25519_fe_read(&left, 5);
+  let a6 = x25519_fe_read(&left, 6);
+  let a7 = x25519_fe_read(&left, 7);
+  let a8 = x25519_fe_read(&left, 8);
+  let a9 = x25519_fe_read(&left, 9);
+  let b0 = x25519_fe_read(&right, 0);
+  let b1 = x25519_fe_read(&right, 1);
+  let b2 = x25519_fe_read(&right, 2);
+  let b3 = x25519_fe_read(&right, 3);
+  let b4 = x25519_fe_read(&right, 4);
+  let b5 = x25519_fe_read(&right, 5);
+  let b6 = x25519_fe_read(&right, 6);
+  let b7 = x25519_fe_read(&right, 7);
+  let b8 = x25519_fe_read(&right, 8);
+  let b9 = x25519_fe_read(&right, 9);
+  let d0 = (a0 ^ b0) & mask;
+  let d1 = (a1 ^ b1) & mask;
+  let d2 = (a2 ^ b2) & mask;
+  let d3 = (a3 ^ b3) & mask;
+  let d4 = (a4 ^ b4) & mask;
+  let d5 = (a5 ^ b5) & mask;
+  let d6 = (a6 ^ b6) & mask;
+  let d7 = (a7 ^ b7) & mask;
+  let d8 = (a8 ^ b8) & mask;
+  let d9 = (a9 ^ b9) & mask;
+  let next_left = x25519_fe_pack(a0 ^ d0, a1 ^ d1, a2 ^ d2, a3 ^ d3, a4 ^ d4, a5 ^ d5, a6 ^ d6, a7 ^ d7, a8 ^ d8, a9 ^ d9);
+  let next_right = x25519_fe_pack(b0 ^ d0, b1 ^ d1, b2 ^ d2, b3 ^ d3, b4 ^ d4, b5 ^ d5, b6 ^ d6, b7 ^ d7, b8 ^ d8, b9 ^ d9);
+  return X25519FieldPair { left: next_left, right: next_right };
+}
+
+fn x25519_fe_square_n(value: &Secret, count: Int) -> Secret
+  intent "公開の固定回数だけ体の元を二乗する"
+  requires count >= 1
+  ensures none
+  effects none
+{
+  let mut out = x25519_fe_square(&value);
+  let mut i = 1;
+  while i < count {
+    out = x25519_fe_square(&out);
+    i = i + 1;
+  }
+  return out;
+}
+
+// Fermat の小定理による反転。2^n − 1 の累乗を合成し、最後に
+// 5 回二乗して x^11 を掛けると、指数は 2^255 − 21 になる。
+fn x25519_fe_invert(value: &Secret) -> Secret
+  intent "固定の指数で体の元を反転する"
+  requires none
+  ensures none
+  effects none
+{
+  let x2 = x25519_fe_square(&value);
+  let x8 = x25519_fe_square_n(&x2, 2);
+  let x9 = x25519_fe_mul(&x8, &value);
+  let x11 = x25519_fe_mul(&x9, &x2);
+  let x22 = x25519_fe_square(&x11);
+  let p5 = x25519_fe_mul(&x22, &x9);
+  let shifted10 = x25519_fe_square_n(&p5, 5);
+  let p10 = x25519_fe_mul(&shifted10, &p5);
+  let shifted20 = x25519_fe_square_n(&p10, 10);
+  let p20 = x25519_fe_mul(&shifted20, &p10);
+  let shifted40 = x25519_fe_square_n(&p20, 20);
+  let p40 = x25519_fe_mul(&shifted40, &p20);
+  let shifted50 = x25519_fe_square_n(&p40, 10);
+  let p50 = x25519_fe_mul(&shifted50, &p10);
+  let shifted100 = x25519_fe_square_n(&p50, 50);
+  let p100 = x25519_fe_mul(&shifted100, &p50);
+  let shifted200 = x25519_fe_square_n(&p100, 100);
+  let p200 = x25519_fe_mul(&shifted200, &p100);
+  let shifted250 = x25519_fe_square_n(&p200, 50);
+  let p250 = x25519_fe_mul(&shifted250, &p50);
+  let shifted255 = x25519_fe_square_n(&p250, 5);
+  return x25519_fe_mul(&shifted255, &x11);
+}
+
+// RFC 7748 §5 の Montgomery ladder。スカラーは借用し、読んだビットだけを
+// clamp する。最上位ビット 255 は処理せず、254 は 1、0..2 は 0 にする。
+fn x25519_scalar_mult(private: &X25519PrivateKey, u: &Bytes) -> Bytes
+  intent "X25519 スカラー倍算を固定 255 回の反復で行う"
+  requires none
+  ensures result.byte_len() == 32
+  effects none
+{
+  let x1 = x25519_fe_decode(&u);
+  let mut x2 = x25519_fe_pack(1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  let mut z2 = x25519_fe_pack(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  let mut x3 = x25519_fe_decode(&u);
+  let mut z3 = x25519_fe_pack(1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  let a24 = x25519_fe_pack(121665, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  let mut swap = 0;
+  let mut i = 254;
+  while i >= 0 {
+    let scalar_byte = private.key.data.get(i >> 3).map(|byte| byte + 0).unwrap_or(0);
+    let mut bit = (scalar_byte >> (i & 7)) & 1;
+    if i == 254 {
+      bit = 1;
+    }
+    if i < 3 {
+      bit = 0;
+    }
+    let x_pair = x25519_fe_swap(&x2, &x3, swap ^ bit);
+    x2 = x_pair.left;
+    x3 = x_pair.right;
+    let z_pair = x25519_fe_swap(&z2, &z3, swap ^ bit);
+    z2 = z_pair.left;
+    z3 = z_pair.right;
+    swap = bit;
+
+    let a = x25519_fe_add(&x2, &z2);
+    let aa = x25519_fe_square(&a);
+    let b = x25519_fe_sub(&x2, &z2);
+    let bb = x25519_fe_square(&b);
+    let e = x25519_fe_sub(&aa, &bb);
+    let c = x25519_fe_add(&x3, &z3);
+    let d = x25519_fe_sub(&x3, &z3);
+    let da = x25519_fe_mul(&d, &a);
+    let cb = x25519_fe_mul(&c, &b);
+    let da_plus_cb = x25519_fe_add(&da, &cb);
+    let da_minus_cb = x25519_fe_sub(&da, &cb);
+    x3 = x25519_fe_square(&da_plus_cb);
+    let cross = x25519_fe_square(&da_minus_cb);
+    z3 = x25519_fe_mul(&x1, &cross);
+    x2 = x25519_fe_mul(&aa, &bb);
+    let scaled = x25519_fe_mul(&a24, &e);
+    let aa_plus_scaled = x25519_fe_add(&aa, &scaled);
+    z2 = x25519_fe_mul(&e, &aa_plus_scaled);
+    i = i - 1;
+  }
+  let x_pair = x25519_fe_swap(&x2, &x3, swap);
+  x2 = x_pair.left;
+  x3 = x_pair.right;
+  let z_pair = x25519_fe_swap(&z2, &z3, swap);
+  z2 = z_pair.left;
+  z3 = z_pair.right;
+  let inv = x25519_fe_invert(&z2);
+  let coordinate = x25519_fe_mul(&x2, &inv);
+  return x25519_fe_encode(&coordinate);
+}
+
+fn x25519_is_zero(value: &Bytes) -> Bool
+  intent "32 バイトすべてを処理して全ゼロか調べる"
+  requires none
+  ensures none
+  effects none
+{
+  let mut bits = 0;
+  let mut i = 0;
+  while i < 32 {
+    bits = bits | value.get(i).map(|byte| byte + 0).unwrap_or(0);
+    i = i + 1;
+  }
+  return bits == 0;
+}
+
+pub fn x25519_public_key(private: &X25519PrivateKey) -> X25519PublicKey
+  intent "X25519 の秘密鍵から公開鍵を導出する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut base = Bytes.with_capacity(32);
+  base.push(9);
+  let mut i = 1;
+  while i < 32 {
+    base.push(0);
+    i = i + 1;
+  }
+  return X25519PublicKey { bytes: x25519_scalar_mult(&private, &base) };
+}
+
+pub fn x25519_shared_secret(private: &X25519PrivateKey, peer: &X25519PublicKey) -> Result<Secret, X25519Error>
+  intent "X25519 の共有値を導出し、全ゼロなら失敗する"
+  requires none
+  ensures none
+  effects none
+{
+  let secret = Secret.from_bytes(x25519_scalar_mult(&private, &peer.bytes));
+  if x25519_is_zero(&secret.data) {
+    return Err(X25519Error { invalid_key_length: false });
+  }
+  return Ok(secret);
+}

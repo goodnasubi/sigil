@@ -22,7 +22,7 @@ ADR 0020 では以下の重要論点が各段階の ADR（特に ADR 6-1）へ�
 4. **協調的マルチタスク（協調的スケジューリング）**:
    - PBKDF2 の反復ループにおける `task.yield` 呼び出し契機。
 5. **テストベクタとファジング**:
-   - NIST テストベクタ（RFC 6234, RFC 4231, RFC 6070）による検証と property-based / fuzz テスト。
+   - 公的テストベクタ（SHA-256 は RFC 6234、HMAC-SHA-256 は RFC 4231）による検証と property-based / fuzz テスト。PBKDF2-HMAC-SHA-256 のベクタは、独立した実装で生成した値を使う（決定 4 の 1。RFC 6070 は PBKDF2-HMAC-SHA-1 用のため、期待値には使えない）。
 
 ---
 
@@ -135,7 +135,7 @@ fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool
 
 ### 5. PBKDF2-HMAC-SHA-256
 
-RFC 2898 / RFC 6070 に準拠したパスワードベース鍵導出関数。PostgreSQL SCRAM-SHA-256（RFC 7677）の鍵生成に用いる。
+RFC 2898（PKCS #5 v2.0）に準拠したパスワードベース鍵導出関数（疑似乱数関数に HMAC-SHA-256 を用いる）。PostgreSQL SCRAM-SHA-256（RFC 7677）の鍵生成に用いる。
 
 ```sigil
 fn pbkdf2_sha256(
@@ -272,7 +272,7 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
 以下の公的標準テストベクタを `tests/crypto_vectors.rs` に組み込み、1 ビットの狂いもなく一致することを検証する：
 - **SHA-256**: RFC 6234 / NIST CAVP テストベクタ（空文字列、"abc"、100 万回の "a"、多ブロックメッセージ）。
 - **HMAC-SHA-256**: RFC 4231 テストベクタ（テストケース 1〜7：各種キー長、データ長）。
-- **PBKDF2-HMAC-SHA-256**: RFC 6070 テストベクタ（短パスワード、長ソルト、反復回数 4096 回）。
+- **PBKDF2-HMAC-SHA-256**: 入力の組（短パスワード、長ソルト、反復回数 4096 回）は RFC 6070 の入力を土台にするが、**期待値は RFC 6070 のものを使わない**。RFC 6070 のテストベクタは PBKDF2-HMAC-SHA-1 用で、SHA-256 の期待値ではない。期待値は独立した実装（Python の `hashlib.pbkdf2_hmac('sha256', …)`）で生成した値とする。SHA-256 用の公開ベクタ（RFC 7914 §11 の `passwd` / `salt`、反復回数 1）は、本実装の反復回数の範囲（4096 以上、決定 1 の 5）の外なので直接は使えない。
 
 ### 2. Property-Based テストとファジング
 

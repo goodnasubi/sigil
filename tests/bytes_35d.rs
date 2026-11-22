@@ -649,7 +649,7 @@ fn churn() -> String {
     a.extend(&c);
     match e.slice(1, 3) {
       Ok(x) => {
-        total = total + x.len() - 2;
+        total = total + x.byte_len() - 2;
       }
       Err(m) => {
         total = total + 1000;
@@ -664,7 +664,7 @@ fn churn() -> String {
     let s = "héllo".as_bytes();
     match s.to_string_utf8() {
       Ok(t) => {
-        total = total + t.len() - 6;
+        total = total + t.char_count() - 6;
       }
       Err(m) => {
         total = total + 1000;
@@ -675,7 +675,7 @@ fn churn() -> String {
     l.push(255);
     match Bytes.from_list(&l) {
       Ok(x) => {
-        total = total + x.len() - 2;
+        total = total + x.byte_len() - 2;
       }
       Err(m) => {
         total = total + 1000;
@@ -685,7 +685,7 @@ fn churn() -> String {
       Ok(x) => {
         let mut y = x.clone();
         let r = y.set(0, 300);
-        total = total + y.len() - 2;
+        total = total + y.byte_len() - 2;
       }
       Err(m) => {
         total = total + 1000;

@@ -307,7 +307,7 @@ fn churn() -> String {
     l.push(255);
     match Bytes.from_list(&l) {
       Ok(x) => {
-        total = total + x.len() - 2;
+        total = total + x.byte_len() - 2;
       }
       Err(m) => {
         total = total + 1000;
@@ -323,13 +323,13 @@ fn churn() -> String {
         total = total + 1000;
       }
       Err(m) => {
-        total = total + m.len() - 12;
+        total = total + m.char_count() - 12;
       }
     }
     let mut el = List.new();
     match Bytes.from_list(&el) {
       Ok(x) => {
-        total = total + x.len();
+        total = total + x.byte_len();
       }
       Err(m) => {
         total = total + 1000;
@@ -352,7 +352,7 @@ fn churn() -> String {
         total = total + 1000;
       }
       Err(m) => {
-        total = total + m.len() - 46;
+        total = total + m.char_count() - 46;
       }
     }
     let mut c = Bytes.new();
@@ -365,13 +365,13 @@ fn churn() -> String {
         total = total + 1000;
       }
       Err(m) => {
-        total = total + m.len() - 43;
+        total = total + m.char_count() - 43;
       }
     }
     let e = Bytes.new();
     match e.to_string_utf8() {
       Ok(s) => {
-        total = total + s.len();
+        total = total + s.char_count();
       }
       Err(m) => {
         total = total + 1000;
@@ -380,14 +380,14 @@ fn churn() -> String {
     let ok = "héllo".as_bytes();
     match ok.to_string_utf8() {
       Ok(s) => {
-        total = total + s.len() - 5;
+        total = total + s.char_count() - 5;
       }
       Err(m) => {
         total = total + 1000;
       }
     }
     let z = "".as_bytes();
-    total = total + z.len();
+    total = total + z.byte_len();
     i = i + 1;
   }
   return total;

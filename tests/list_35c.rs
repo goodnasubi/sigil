@@ -62,7 +62,7 @@ while i < n {
     ss.push("c");
     ss.push("zz");
     let ss2 = ss.clone();
-    total = total + ss2.max().len() + ss2.min().len() - 3;
+    total = total + ss2.max().char_count() + ss2.min().char_count() - 3;
     let ls = "a\nb\r\nc".lines();
     total = total + ls.len();
     let mut nest = List.new();
@@ -80,7 +80,7 @@ while i < n {
     bs.push(255);
     match Bytes.from_list(&bs) {
         Ok(b) => {
-            total = total + b.len() - 1;
+            total = total + b.byte_len() - 1;
         }
         Err(e) => {
             total = total + 1000;

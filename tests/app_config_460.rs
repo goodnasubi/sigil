@@ -26,7 +26,7 @@ fn decimal(value: Int) -> String
     n = n / 10;
   }
   let mut digits = Bytes.new();
-  let mut i = reverse.len();
+  let mut i = reverse.byte_len();
   while i > 0 {
     i = i - 1;
     digits.push(reverse.get(i).unwrap_or(48));

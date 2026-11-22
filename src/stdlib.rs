@@ -63,6 +63,9 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // 見せない型として登録して実装の構造体と名前で結ぶ（秘密ではないので、
     // 破棄時ゼロ化や表示不可の性質は持たない）。
     ("Sha256", 0, Layer::Core),
+    // HKDF-SHA-256 の擬似乱数鍵 PRK（ADR 0058 決定 2、段 1a）。`Secret` を
+    // 1 つ持つ型で、中身は `std.crypto` の Sigil 実装が持つ（`Sha256` と同じ作法）。
+    ("HkdfSha256Prk", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -449,6 +452,18 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
         "pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret",
         "task.suspend",
     ),
+    // HKDF-SHA-256（ADR 0058 決定 2、段 1a）。RFC 5869。実体は `std.crypto` の
+    // Sigil 実装（埋め込み）。
+    (
+        Layer::Core,
+        "hkdf_extract_sha256(salt: Option<Secret>, ikm: &Secret) -> HkdfSha256Prk",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret",
+        "none",
+    ),
 ];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
@@ -691,6 +706,11 @@ pub const REQUIRES: &[(&str, &str)] = &[
     (
         "pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: Int) -> Secret",
         "iterations >= 4096 && iterations <= 100000 && dk_len > 0",
+    ),
+    // HKDF の出力長（ADR 0058 決定 2）: 0 <= out_len <= 255 * HashLen(32)。
+    (
+        "hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret",
+        "out_len >= 0 && out_len <= 8160",
     ),
 ];
 

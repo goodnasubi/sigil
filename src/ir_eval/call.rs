@@ -1417,13 +1417,14 @@ impl<'p> M<'p> {
             // ソケット系（ADR 0031 決定 3-4・判断点 D の案 B、PR 6-3e）。`std.os.net` が使う形だけを通す。
             // 番地を渡す引数は、生きた塊の範囲に収まることを確かめる。カーネルが書く長さは、検査した大きさを超えない。
             SYS_SOCKET => {
-                if (a[0] != AF_INET && a[0] != AF_INET6)
-                    || a[1] != SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC
-                    || a[2] != 0
-                {
+                // TCP（AF_INET/AF_INET6 の SOCK_STREAM）と、UDP（AF_INET の SOCK_DGRAM。ADR 0057 決定 4）の組だけを通す。
+                let tcp = (a[0] == AF_INET || a[0] == AF_INET6)
+                    && a[1] == SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
+                let udp = a[0] == AF_INET && a[1] == SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
+                if !(tcp || udp) || a[2] != 0 {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall socket: AF_INET/AF_INET6・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0 のみ許可",
+                        "raw.syscall socket: AF_INET/AF_INET6・SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC、または AF_INET・SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC（protocol 0）のみ許可",
                     ));
                 }
             }
@@ -1537,27 +1538,104 @@ impl<'p> M<'p> {
                     ));
                 }
             }
+            // TCP の形（相手のアドレスを渡さない: addr・addrlen が 0）と、UDP の形（ADR 0057 決定 4: 相手のアドレスを渡す）を
+            // 区別する。包括的には許さず、UDP の形は 16 バイトの sockaddr_in だけを通す。
             SYS_RECVFROM | SYS_SENDTO => {
                 let name = if n == SYS_RECVFROM {
                     "recvfrom"
                 } else {
                     "sendto"
                 };
-                let flags = if n == SYS_RECVFROM { 0 } else { MSG_NOSIGNAL };
                 if a[2] < 0 {
                     return Err(self.syscall_stop(loc, &format!("raw.syscall {name}: len >= 0")));
                 }
-                if a[3] != flags || a[4] != 0 || a[5] != 0 {
-                    return Err(self.syscall_stop(
-                        loc,
-                        &format!(
-                            "raw.syscall {name}: flags は {flags} のみ、相手のアドレスは渡さない（0 のみ許可）"
-                        ),
-                    ));
-                }
-                if a[2] > 0 {
+                if a[4] == 0 {
+                    // TCP の形。
+                    let flags = if n == SYS_RECVFROM { 0 } else { MSG_NOSIGNAL };
+                    if a[3] != flags || a[5] != 0 {
+                        return Err(self.syscall_stop(
+                            loc,
+                            &format!(
+                                "raw.syscall {name}: flags は {flags} のみ、相手のアドレスは渡さない（0 のみ許可）"
+                            ),
+                        ));
+                    }
+                    if a[2] > 0 {
+                        let buf = addr_of(a[1], "buf")?;
+                        self.check_raw_access(buf, a[2] as usize, loc)?;
+                    }
+                } else if n == SYS_SENDTO {
+                    // UDP の送信: MSG_NOSIGNAL、0〜65507 バイト、長さ 16 の AF_INET 宛先。
+                    if a[3] != MSG_NOSIGNAL || a[5] != SOCKADDR_IN_SIZE as i64 {
+                        return Err(self.syscall_stop(
+                            loc,
+                            "raw.syscall sendto: UDP は flags が MSG_NOSIGNAL、宛先の長さが 16 のみ許可",
+                        ));
+                    }
+                    if a[2] > UDP_MAX_PAYLOAD {
+                        return Err(self.syscall_stop(
+                            loc,
+                            "raw.syscall sendto: UDP のペイロードは 65507 バイト以下",
+                        ));
+                    }
+                    if a[2] > 0 {
+                        let buf = addr_of(a[1], "buf")?;
+                        self.check_raw_access(buf, a[2] as usize, loc)?;
+                    }
+                    let dest = addr_of(a[4], "dest_addr")?;
+                    self.check_raw_access(dest, SOCKADDR_IN_SIZE, loc)?;
+                    let family = u16::from_le_bytes([
+                        self.peek_u8(dest, loc)?,
+                        self.peek_u8(dest + 1, loc)?,
+                    ]);
+                    if i64::from(family) != AF_INET {
+                        return Err(
+                            self.syscall_stop(loc, "raw.syscall sendto: 宛先は AF_INET のみ許可")
+                        );
+                    }
+                } else {
+                    // UDP の受信: MSG_TRUNC、1〜65507 バイトの受信バッファ、16 バイトの送信元領域、
+                    // 16 に初期化した 4 バイトの長さ領域。三領域の生存・境界・非重複を syscall の前に確かめる。
+                    if a[3] != MSG_TRUNC {
+                        return Err(self.syscall_stop(
+                            loc,
+                            "raw.syscall recvfrom: UDP は flags が MSG_TRUNC のみ許可",
+                        ));
+                    }
+                    if !(1..=UDP_MAX_PAYLOAD).contains(&a[2]) {
+                        return Err(self.syscall_stop(
+                            loc,
+                            "raw.syscall recvfrom: UDP の受信バッファは 1 以上 65507 以下",
+                        ));
+                    }
                     let buf = addr_of(a[1], "buf")?;
-                    self.check_raw_access(buf, a[2] as usize, loc)?;
+                    let src = addr_of(a[4], "src_addr")?;
+                    let alen = addr_of(a[5], "addrlen")?;
+                    let (buf_len, src_len, alen_len) = (a[2] as usize, SOCKADDR_IN_SIZE, 4usize);
+                    self.check_raw_access(buf, buf_len, loc)?;
+                    self.check_raw_access(src, src_len, loc)?;
+                    self.check_raw_access(alen, alen_len, loc)?;
+                    let regions = [(buf, buf_len), (src, src_len), (alen, alen_len)];
+                    for (i, &(s1, l1)) in regions.iter().enumerate() {
+                        for &(s2, l2) in &regions[i + 1..] {
+                            if s1 < s2 + l2 && s2 < s1 + l1 {
+                                return Err(self.syscall_stop(
+                                    loc,
+                                    "raw.syscall recvfrom: 受信バッファ・送信元領域・長さ領域は重ならない",
+                                ));
+                            }
+                        }
+                    }
+                    let mut lb = [0u8; 4];
+                    for (i, b) in lb.iter_mut().enumerate() {
+                        *b = self.peek_u8(alen + i, loc)?;
+                    }
+                    if u32::from_le_bytes(lb) as usize != SOCKADDR_IN_SIZE {
+                        return Err(self.syscall_stop(
+                            loc,
+                            "raw.syscall recvfrom: *addrlen は 16 に初期化したものだけ許可",
+                        ));
+                    }
                 }
             }
             SYS_SHUTDOWN => {
@@ -2395,6 +2473,7 @@ const SOCKADDR_IN6_SIZE: usize = 28;
 const AF_INET: i64 = 2;
 const AF_INET6: i64 = 10;
 const SOCK_STREAM: i64 = 1;
+const SOCK_DGRAM: i64 = 2;
 const SOCK_NONBLOCK: i64 = 0o4000;
 const SOCK_CLOEXEC: i64 = 0o2000000;
 const SOL_SOCKET: i64 = 1;
@@ -2403,6 +2482,9 @@ const SO_ERROR: i64 = 4;
 const IPPROTO_IPV6: i64 = 41;
 const IPV6_V6ONLY: i64 = 26;
 const MSG_NOSIGNAL: i64 = 0x4000;
+const MSG_TRUNC: i64 = 0x20;
+/// UDP のペイロードの上限（IPv4 の最小 IP ヘッダと UDP ヘッダを引いた値。ADR 0057 決定 1）。
+const UDP_MAX_PAYLOAD: i64 = 65507;
 const SHUT_WR: i64 = 1;
 const PROT_READ: i64 = 1;
 const PROT_WRITE: i64 = 2;

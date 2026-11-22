@@ -23,7 +23,7 @@ sigil-atlas-dns（DNS）と sigil-hourglass-time（NTP）が必要とするデ�
 | `UdpSocket.recv_from` | `recv_from(self: &mut UdpSocket, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>` | `net.server, task.suspend` |
 | `UdpClient.recv_from` | `recv_from(self: &mut UdpClient, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>` | `net.client, task.suspend` |
 
-- `udp_bind` の契約は `0 <= port && port <= 65535`。0 は OS に割り当てを任せる。`udp_open` は IPv4 ワイルドカードのポート 0 に bind する。`local_port` は割り当て済みのポートを返す。生成時に取得して保持し、取得に失敗した場合は fd を閉じて `NetError` を返す。
+- `udp_bind` の契約は `0 <= port && port <= 65535`。0 は OS に割り当てを任せる。`udp_open` は IPv4 ワイルドカードのポート 0 に bind する。`local_port` は割り当て済みのポートを返す。生成時（bind 直後）に `getsockname` で取得して検査し、取得に失敗した場合（読めない、または番号が 0）は fd を閉じて `NetError` を返す。値には番号を保持せず、`local_port` は同じ `getsockname` を読んで返す（bind 後の番号は変わらないので、観測できる結果は保持する場合と同じ）。保持しないのは、表の `local_port` が `net.server`／`net.client` の効果を持ち、効果検査（ADR 0004 の規則 3。宣言した効果は本体が起こすものと一致する）では、効果を起こす `raw.syscall` を本体で呼ぶ関数だけがそれを宣言できるためである。保持した整数を返すだけの関数は効果を宣言できない。TCP の `local_port`（`port_of`）も同じ作法である。
 - `send_to` の契約は `1 <= port && port <= 65535 && data.byte_len() <= 65507`。`recv_from` の契約は `1 <= max && max <= 65507`。65,507 は IPv4 の最小 IP ヘッダと UDP ヘッダを差し引いたペイロードの上限であり、OS や経路はそれより小さいサイズでも送信を拒否しうる。
 - ホストは既存の IPv4 ドット 10 進表記だけを受け付け、パースに失敗したら `NetError.Other` を返す。受信成功値はペイロード、通常のドット 10 進表記の送信元アドレス、送信元ポートの順とする。送信元ポート 0 も受信値には表現できる。
 - どちらの型も中身を公開せず、fd を所有する。既存の TCP 資源と同様に `Sendable` とし、`Copyable`・複製・`Shareable`・型間の変換は提供しない。送受信は排他的な借用を取る。寿命を終えた所有値の破棄は fd を 1 回閉じる。確保後、所有値になる前の失敗経路でも fd を閉じる。

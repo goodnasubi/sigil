@@ -362,7 +362,9 @@ pub fn hmac_sha256(key: &Secret, message: &Bytes) -> Secret
 {
   let mut kb = key.expose();
   if kb.byte_len() > 64 {
-    kb = sha256(&kb);
+    let hashed = sha256(&kb);
+    let old_kb_wipe = Secret.from_bytes(kb);
+    kb = hashed;
   }
   while kb.byte_len() < 64 {
     kb.push(0);
@@ -381,7 +383,12 @@ pub fn hmac_sha256(key: &Secret, message: &Bytes) -> Secret
   let inner_hash = sha256(&inner);
   let mut outer = opad;
   outer.extend(&inner_hash);
-  return Secret.from_bytes(sha256(&outer));
+  let ret = Secret.from_bytes(sha256(&outer));
+  let kb_wipe = Secret.from_bytes(kb);
+  let in_wipe = Secret.from_bytes(inner);
+  let out_wipe = Secret.from_bytes(outer);
+  let ih_wipe = Secret.from_bytes(inner_hash);
+  return ret;
 }
 
 // 範囲: HMAC の照合。計算した値を `ct_eq`（定数時間比較）で比べ、結果を
@@ -395,7 +402,9 @@ pub fn verify_hmac_sha256(key: &Secret, message: &Bytes, expected: &Bytes) -> Bo
 {
   let mac = hmac_sha256(&key, &message);
   let got = mac.expose();
-  return ct_eq(&got, &expected);
+  let ok = ct_eq(&got, &expected);
+  let got_wipe = Secret.from_bytes(got);
+  return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +466,8 @@ fn hmac_from_pads(ist: &List<Int>, ost: &List<Int>, message: &Bytes) -> Bytes
   out.push_u32_be(oh.get(5).map(|x| x + 0).unwrap_or(0));
   out.push_u32_be(oh.get(6).map(|x| x + 0).unwrap_or(0));
   out.push_u32_be(oh.get(7).map(|x| x + 0).unwrap_or(0));
+  let inner_wipe = Secret.from_bytes(inner);
+  let outer_wipe = Secret.from_bytes(outer);
   return out;
 }
 
@@ -473,7 +484,9 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
   // 1 回だけ求め、反復ごとに使い回す（`hmac_from_pads`）。
   let mut kb = password.expose();
   if kb.byte_len() > 64 {
-    kb = sha256(&kb);
+    let hashed = sha256(&kb);
+    let old_kb_wipe = Secret.from_bytes(kb);
+    kb = hashed;
   }
   while kb.byte_len() < 64 {
     kb.push(0);
@@ -498,16 +511,21 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
   init.push(0x5be0cd19);
   let ist = sha256_compress(&init, &ipad, 1);
   let ost = sha256_compress(&init, &opad, 1);
+  let ipad_wipe = Secret.from_bytes(ipad);
+  let opad_wipe = Secret.from_bytes(opad);
+  let kb_wipe = Secret.from_bytes(kb);
   let blocks = (dk_len + 31) / 32;
   let mut blk = 1;
   while blk <= blocks {
     let mut msg = salt.clone();
     msg.push_u32_be(blk);
     let mut u = hmac_from_pads(&ist, &ost, &msg);
+    let msg_wipe = Secret.from_bytes(msg);
     let mut t = u.clone();
     let mut j = 1;
     while j < iterations {
       let nu = hmac_from_pads(&ist, &ost, &u);
+      let old_u_wipe = Secret.from_bytes(u);
       u = nu;
       let mut nt = Bytes.new();
       let mut i = 0;
@@ -517,17 +535,22 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
         nt.push(tb ^ ub);
         i = i + 1;
       }
+      let old_t_wipe = Secret.from_bytes(t);
       t = nt;
       if j % 1024 == 0 {
         task.yield();
       }
       j = j + 1;
     }
+    let u_wipe = Secret.from_bytes(u);
     out.extend(&t);
+    let t_wipe = Secret.from_bytes(t);
     blk = blk + 1;
   }
   let key = out.slice(0, dk_len).unwrap_or(Bytes.new());
-  return Secret.from_bytes(key);
+  let ret = Secret.from_bytes(key);
+  let out_wipe = Secret.from_bytes(out);
+  return ret;
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +585,9 @@ fn hmac_any_key(key: &Bytes, message: &Bytes) -> Bytes
 {
   let mut kb = key.clone();
   if kb.byte_len() > 64 {
-    kb = sha256(&kb);
+    let hashed = sha256(&kb);
+    let old_kb_wipe = Secret.from_bytes(kb);
+    kb = hashed;
   }
   while kb.byte_len() < 64 {
     kb.push(0);
@@ -581,7 +606,12 @@ fn hmac_any_key(key: &Bytes, message: &Bytes) -> Bytes
   let inner_hash = sha256(&inner);
   let mut outer = opad;
   outer.extend(&inner_hash);
-  return sha256(&outer);
+  let out = sha256(&outer);
+  let kb_wipe = Secret.from_bytes(kb);
+  let in_wipe = Secret.from_bytes(inner);
+  let out_wipe = Secret.from_bytes(outer);
+  let ih_wipe = Secret.from_bytes(inner_hash);
+  return out;
 }
 
 pub fn hkdf_extract_sha256(salt: Option<Secret>, ikm: &Secret) -> HkdfSha256Prk
@@ -594,8 +624,12 @@ pub fn hkdf_extract_sha256(salt: Option<Secret>, ikm: &Secret) -> HkdfSha256Prk
   // ので、空の鍵と HashLen 個のゼロは同じ鍵（RFC 5869 §2.2 と同値）。
   // こうすると、salt の有無による分岐が要らない（対象表の規則 R1）。
   let sb = salt.map(|s| s.expose()).unwrap_or(Bytes.new());
-  let prk = hmac_any_key(&sb, &ikm.expose());
-  return HkdfSha256Prk { key: Secret.from_bytes(prk) };
+  let ikm_b = ikm.expose();
+  let prk = hmac_any_key(&sb, &ikm_b);
+  let ret = HkdfSha256Prk { key: Secret.from_bytes(prk) };
+  let sb_wipe = Secret.from_bytes(sb);
+  let ikm_wipe = Secret.from_bytes(ikm_b);
+  return ret;
 }
 
 pub fn hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret
@@ -613,10 +647,17 @@ pub fn hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Se
     let mut msg = t.clone();
     msg.extend(&info);
     msg.push(n);
-    t = hmac_any_key(&kb, &msg);
+    let next_t = hmac_any_key(&kb, &msg);
+    let msg_wipe = Secret.from_bytes(msg);
+    let old_t_wipe = Secret.from_bytes(t);
+    t = next_t;
     okm.extend(&t);
     n = n + 1;
   }
   let out = okm.slice(0, out_len).unwrap_or(Bytes.new());
-  return Secret.from_bytes(out);
+  let ret = Secret.from_bytes(out);
+  let t_wipe = Secret.from_bytes(t);
+  let okm_wipe = Secret.from_bytes(okm);
+  let kb_wipe = Secret.from_bytes(kb);
+  return ret;
 }

@@ -23,4 +23,4 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc libc6-dev
       - run: cargo test --release --test ct_measure --no-run
-      - run: cargo test --release --test ct_measure ct_diag_674 -- --ignored --nocapture --test-threads=1
+      - run: cargo test --release --test ct_measure -- --ignored --nocapture --test-threads=1

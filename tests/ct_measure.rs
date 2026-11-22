@@ -238,36 +238,6 @@ fn measure_pair(exe_a: &PathBuf, exe_b: &PathBuf, samples: usize) -> (Vec<f64>, 
     (a, b)
 }
 
-/// 実行順を毎回入れ替えて（A,B / B,A / A,B …）集める。
-/// 固定順（常に A の直後に B）だと、「直前に別のプロセスが動いた」ことによる系統差が B にだけ乗り、
-/// 実際の差のように見える。順を入れ替えると、その差は A と B に等しく乗って相殺される（Issue #674）。
-fn measure_pair_alternating(
-    exe_a: &PathBuf,
-    exe_b: &PathBuf,
-    samples: usize,
-) -> (Vec<f64>, Vec<f64>) {
-    let run = |exe: &PathBuf, label: &str| -> f64 {
-        let start = Instant::now();
-        let out = Command::new(exe)
-            .output()
-            .unwrap_or_else(|_| panic!("計測用プログラム {label} を実行できない"));
-        assert!(out.status.success(), "計測用プログラム {label} が失敗");
-        start.elapsed().as_secs_f64() * 1000.0
-    };
-    let mut a = Vec::with_capacity(samples);
-    let mut b = Vec::with_capacity(samples);
-    for i in 0..samples {
-        if i % 2 == 0 {
-            a.push(run(exe_a, "A"));
-            b.push(run(exe_b, "B"));
-        } else {
-            b.push(run(exe_b, "B"));
-            a.push(run(exe_a, "A"));
-        }
-    }
-    (a, b)
-}
-
 const DEFAULT_SAMPLES: usize = 25;
 const DEFAULT_ITERS: usize = 40_000;
 
@@ -293,9 +263,47 @@ fn get_samples(default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// 組 A（先頭側）と組 B（末尾側）で違うバイトの位置。
+///
+/// 位置 0 は使わない。`set(0, …)` などの添字 0 はコンパイラが別の命令に畳むため、位置 0 の実行ファイルだけ
+/// 関数の配置がずれる。HMAC の圧縮関数のような熱い部分の配置（アラインメント）が変わると、比較とは無関係に
+/// 実行時間が約 1% 変わり、定数時間の比較でも |t| が 10 前後に出る（Issue #674、CI の実測）。
+/// 位置 1 と 31 の実行ファイルは配置が同じで、違うのは数バイトの即値だけ。
+const DIFF_FIRST: usize = 1;
+const DIFF_LAST: usize = 31;
+
+/// 2 つの実行ファイルの違うバイト数（長さが違えば None）。
+fn differing_bytes(a: &PathBuf, b: &PathBuf) -> Option<usize> {
+    let (x, y) = (std::fs::read(a).ok()?, std::fs::read(b).ok()?);
+    if x.len() != y.len() {
+        return None;
+    }
+    Some(x.iter().zip(&y).filter(|(p, q)| p != q).count())
+}
+
+/// 組 A と組 B の実行ファイルの配置が同じであること（違うのは入力の即値だけ）を確かめる。
+/// 配置が違うと、比較の中身と関係のない系統差が t に出て、計測が無効になる（Issue #674）。
+/// 同じ配置のときの差は 100 バイト足らず（位置 1 と 31 で 22 バイト）。配置がずれると数万バイト違う。
+const MAX_LAYOUT_DIFF_BYTES: usize = 1000;
+
+fn assert_same_layout(name: &str, a: &PathBuf, b: &PathBuf) {
+    let d = differing_bytes(a, b);
+    assert!(
+        matches!(d, Some(n) if n <= MAX_LAYOUT_DIFF_BYTES),
+        "[{name}] 組 A と組 B の実行ファイルの配置が違う（違うバイト数: {d:?}）。配置の差が t に混ざるため計測が無効"
+    );
+}
+
 fn measure_target(target: CmpTarget, name: &str, iters: usize, samples: usize) -> f64 {
-    let (dir_a, exe_a) = build_exe(&format!("{name}_a"), &measure_program(target, 0, iters));
-    let (dir_b, exe_b) = build_exe(&format!("{name}_b"), &measure_program(target, 31, iters));
+    let (dir_a, exe_a) = build_exe(
+        &format!("{name}_a"),
+        &measure_program(target, DIFF_FIRST, iters),
+    );
+    let (dir_b, exe_b) = build_exe(
+        &format!("{name}_b"),
+        &measure_program(target, DIFF_LAST, iters),
+    );
+    assert_same_layout(name, &exe_a, &exe_b);
     let (a, b) = measure_pair(&exe_a, &exe_b, samples);
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
@@ -394,52 +402,4 @@ fn dudect_compare_timing() {
     ct_measure_scram();
     ct_measure_hmac();
     ct_measure_bearer();
-}
-
-#[test]
-#[ignore = "切り分け用（Issue #674）"]
-fn ct_diag_674() {
-    let iters = get_iters(DEFAULT_HMAC_ITERS);
-    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
-    for (target, name) in [(CmpTarget::Hmac, "hmac"), (CmpTarget::CtEq, "cteq")] {
-        let (iters, samples) = if matches!(target, CmpTarget::CtEq) {
-            (get_iters(DEFAULT_ITERS), get_samples(DEFAULT_SAMPLES))
-        } else {
-            (iters, samples)
-        };
-        let (d1, a1) = build_exe(&format!("{name}_a1"), &measure_program(target, 0, iters));
-        let (d2, a2) = build_exe(&format!("{name}_a2"), &measure_program(target, 0, iters));
-        let (d3, b1) = build_exe(&format!("{name}_b1"), &measure_program(target, 31, iters));
-        let (d4, b2) = build_exe(&format!("{name}_b2"), &measure_program(target, 31, iters));
-        let rep = |label: &str, x: &PathBuf, y: &PathBuf| {
-            let (a, b) = measure_pair(x, y, samples);
-            let ma = a.iter().sum::<f64>() / a.len() as f64;
-            let mb = b.iter().sum::<f64>() / b.len() as f64;
-            println!(
-                "DIAG {name} {label}: x {ma:.2} ms, y {mb:.2} ms, t = {:.2}",
-                welch_t(&a, &b)
-            );
-        };
-        let rep_alt = |label: &str, x: &PathBuf, y: &PathBuf| {
-            let (a, b) = measure_pair_alternating(x, y, samples);
-            let ma = a.iter().sum::<f64>() / a.len() as f64;
-            let mb = b.iter().sum::<f64>() / b.len() as f64;
-            println!(
-                "DIAG {name} ALT {label}: x {ma:.2} ms, y {mb:.2} ms, t = {:.2}",
-                welch_t(&a, &b)
-            );
-        };
-        rep_alt("same-exe(a1,a1)", &a1, &a1);
-        rep_alt("A/B(a1,b1)", &a1, &b1);
-        rep_alt("B/A swapped(b1,a1)", &b1, &a1);
-        rep("same-exe(a1,a1)", &a1, &a1);
-        rep("same-src(a1,a2)", &a1, &a2);
-        rep("same-src(b1,b2)", &b1, &b2);
-        rep("A/B(a1,b1)", &a1, &b1);
-        rep("B/A swapped(b1,a1)", &b1, &a1);
-        rep("A/B(a2,b2)", &a2, &b2);
-        for d in [d1, d2, d3, d4] {
-            let _ = std::fs::remove_dir_all(d);
-        }
-    }
 }

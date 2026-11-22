@@ -77,3 +77,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0055](0055-string-bytes-length-names.md) | String・Bytes の長さの名前（単位を名前で分ける） | 提案（予約: Issue #631、正式判定を ADR 内に記録） |
 | [0056](0056-sigix-web-server.md) | sigix: Web サーバー（段階 1 静的配信・段階 2 リバースプロキシ） | 提案（予約: Issue #647） |
 | [0057](0057-udp-sockets.md) | UDP ソケットの追加（ADR 0031 の範囲変更） | 提案（予約: Issue #677、正式判定を ADR 内に記録） |
+| [0058](0058-tls13-crypto-primitives.md) | TLS 1.3 のための暗号部品 | 提案（予約: Issue #676、正式判定を ADR 内に記録） |

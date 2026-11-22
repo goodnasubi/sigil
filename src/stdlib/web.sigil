@@ -248,6 +248,7 @@ pub fn error_response(status: Int) -> HttpResponse
     413 => 413,
     414 => 414,
     417 => 417,
+    429 => 429,
     431 => 431,
     500 => 500,
     501 => 501,
@@ -265,6 +266,7 @@ pub fn error_response(status: Int) -> HttpResponse
     413 => "content too large",
     414 => "uri too long",
     417 => "expectation failed",
+    429 => "too many requests",
     431 => "request header fields too large",
     500 => "internal server error",
     501 => "not implemented",
@@ -1044,7 +1046,11 @@ impl Router {
                       Ok(identity) => {
                         request.app_identity = Some(identity);
                       }
-                      Err(_) => {
+                      Err(response) => {
+                        // レート制限の429だけは検証器の応答を通す。それ以外は理由を隠して固定401にする。
+                        if response.status() == 429 {
+                          return Some(response);
+                        }
                         return Some(bearer_unauthorized());
                       }
                     }
@@ -1169,32 +1175,116 @@ impl BearerConfig {
       Some(_) => {}
     }
     let config = self;
-    return Ok(AuthVerifier { verify: move |req| bearer_request(&config, &req) });
+    let rate = SyncShared.new(Lock.new(BearerRate { rate_start: -1, rate_count: 0 }));
+    return Ok(AuthVerifier { verify: move |req| bearer_request(&config, &rate, &req) });
   }
 }
 
-fn bearer_request(config: &BearerConfig, req: &AppRequest) -> Result<AuthIdentity, HttpResponse>
-  intent "単一の Bearer を抽出し要求時の一回の時計取得で検証する"
+// ADR 0037 / Issue #659: 外部公開前の最低限の対策としてのレート制限の状態。
+// キーは検証器全体の認証失敗回数だけにする。接続元アドレスは要求型に無く、
+// 署名検証前の未検証クレームはキーにできない（ADR 0037 決定3）ため。
+// 閾値（60秒で失敗100回）は判断の手順（typesafe-ai 正式判定、2026-11-22）で
+// 確定した定数で、設定面（環境変数等）は広げない。状態はプロセス内のみ。
+struct BearerRate {
+  rate_start: Int,
+  rate_count: Int,
+}
+
+fn bearer_rate_limited(rate: &BearerRate, now: Int) -> Option<Int>
+  intent "制限中なら再試行までの秒数を返す。ウィンドウ外か上限未満なら None"
   requires none
   ensures none
-  effects clock
+  effects none
+{
+  if rate.rate_start < 0 || now >= rate.rate_start + 60 { return None; }
+  if rate.rate_count < 100 { return None; }
+  return Some(rate.rate_start + 60 - now);
+}
+
+fn bearer_rate_note_failure(rate: &mut BearerRate, now: Int)
+  intent "認証失敗を数える。最初の失敗でウィンドウを開き、経過後は数え直す"
+  requires none
+  ensures none
+  effects none
+{
+  if rate.rate_start < 0 || now >= rate.rate_start + 60 {
+    rate.rate_start = now;
+    rate.rate_count = 1;
+    return;
+  }
+  rate.rate_count = rate.rate_count + 1;
+}
+
+fn bearer_rate_gate(rate: &SyncShared<Lock<BearerRate>>, now: Int) -> Option<Int>
+  intent "共有状態を読み、制限中なら再試行までの秒数を返す。ロックが壊れていれば制限しない"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let lock = rate.borrow();
+  match lock.acquire() {
+    Err(_) => { return None; }
+    Ok(g) => { return bearer_rate_limited(g.get(), now); }
+  }
+}
+
+fn bearer_rate_record(rate: &SyncShared<Lock<BearerRate>>, now: Int)
+  intent "共有状態へ認証失敗を一回分記録する。ロックが壊れていれば記録しない"
+  requires none
+  ensures none
+  effects task.share, task.suspend
+{
+  let lock = rate.borrow();
+  match lock.acquire() {
+    Err(_) => {}
+    Ok(g0) => {
+      let mut g = g0;
+      bearer_rate_note_failure(g.get_mut(), now);
+    }
+  }
+}
+
+fn bearer_request(config: &BearerConfig, rate: &SyncShared<Lock<BearerRate>>, req: &AppRequest) -> Result<AuthIdentity, HttpResponse>
+  intent "要求時の一回の時計取得でレート制限を確認し、単一の Bearer を検証する。失敗は数え、成功は数えず戻しもしない"
+  requires none
+  ensures none
+  effects clock, task.share, task.suspend
 {
   // 不正ヘッダでも時計を一回だけ取得する。公開経路では呼ばれない。
   let now = clock.unix_seconds();
+  match now {
+    None => { return Err(bearer_unauthorized()); }
+    Some(sec) => {
+      match bearer_rate_gate(&rate, sec) {
+        Some(retry) => { return Err(bearer_too_many(retry)); }
+        None => {}
+      }
+      match bearer_attempt(&config, &req, sec) {
+        Ok(identity) => { return Ok(identity); }
+        Err(response) => {
+          bearer_rate_record(&rate, sec);
+          return Err(response);
+        }
+      }
+    }
+  }
+}
+
+fn bearer_attempt(config: &BearerConfig, req: &AppRequest, sec: Int) -> Result<AuthIdentity, HttpResponse>
+  intent "単一の Bearer を抽出し、取得済みの時刻で検証する"
+  requires none
+  ensures none
+  effects none
+{
   if req.header_count(&"authorization") != 1 { return Err(bearer_unauthorized()); }
   let value = req.header(&"authorization").unwrap_or(Bytes.new());
   if value.byte_len() < 8 { return Err(bearer_unauthorized()); }
   let prefix = value.slice(0, 7).unwrap_or(Bytes.new());
   if !bearer_scheme(&prefix) { return Err(bearer_unauthorized()); }
   let token = value.slice(7, value.byte_len()).unwrap_or(Bytes.new());
-  match now {
-    None => { return Err(bearer_unauthorized()); }
-    Some(sec) => {
-      match verify_bearer(&config.bearer_key, &config.bearer_audience, &token, sec) {
-        Ok(identity) => { return Ok(identity); }
-        Err(_) => { return Err(bearer_unauthorized()); }
-      }
-    }
+  match verify_bearer(&config.bearer_key, &config.bearer_audience, &token, sec) {
+    Ok(identity) => { return Ok(identity); }
+    Err(_) => { return Err(bearer_unauthorized()); }
   }
 }
 
@@ -1223,6 +1313,15 @@ fn bearer_unauthorized() -> HttpResponse
   effects none
 {
   return error_response(401).with_header(&"www-authenticate", &"Bearer".as_bytes()).with_header(&"cache-control", &"no-store".as_bytes());
+}
+
+fn bearer_too_many(retry_after: Int) -> HttpResponse
+  intent "レート制限中は理由にかかわらず固定の429と再試行までの秒数だけを返す"
+  requires none
+  ensures none
+  effects none
+{
+  return error_response(429).with_header(&"retry-after", &decimal(retry_after).as_bytes()).with_header(&"cache-control", &"no-store".as_bytes());
 }
 
 // ADR 0037 / Issue #507: 純粋な検証核。設定読込・HTTP・時計取得は行わない。

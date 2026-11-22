@@ -689,3 +689,483 @@ pub fn hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Se
   let kb_wipe = Secret.from_bytes(kb);
   return ret;
 }
+
+// ---------------------------------------------------------------------------
+// AES-128-GCM（ADR 0058 決定 2・3、段 1b）。FIPS 197・NIST SP 800-38D。
+//
+// 公開するのは鍵型 `Aes128GcmKey`・12 バイトの nonce 型 `Nonce96`・誤りの列挙
+// `AeadError` と、`aes128_gcm_seal`・`aes128_gcm_open` の 2 関数だけ。AES の
+// ブロック演算・鍵展開と GHASH は内部部品で、汎用ブロック API は公開しない。
+//
+// 定数時間（ADR 0058 決定 3）: S-box は表引きをせず、GF(2^8) の逆元
+// （x^254、0 は 0 のまま）とアフィン変換を固定の演算列で計算する。GF(2^8) と
+// GF(2^128) の乗算は、ビットごとにマスク（0 か全ビット 1）で足し込むだけで、
+// 秘密による分岐・添字・シフト量・除算を持たない。ループの回数と添字はブロック数・
+// ラウンド数などの公開の長さだけから決まる。公開なのは、データの長さ、nonce、
+// AAD、受信した暗号文とタグ、鍵の長さ。タグの照合は `ct_eq` で全バイトを処理し、
+// 成功・失敗の 1 ビットだけを公開する。認証に成功したときだけ平文を復号して返す。
+//
+// 長さの上限（NIST SP 800-38D §5.2.1.1）: 平文は 2^36 − 32 バイト（カウンタが
+// 32 ビットで折り返さない上限）、AAD は 2^61 − 1 バイトまで。超えると
+// `InputTooLong`。短すぎる入力（タグ 16 バイト未満）は `InputTooShort`、鍵・nonce の
+// 長さ違反は型を作る入口が `InvalidKeyLength`・`InvalidNonceLength` で返す。
+//
+// nonce の一意性の契約: `seal` は nonce の値の所有権を取る。同じ鍵で同じ nonce を
+// 2 回使うと機密性・認証が壊れるため、同一鍵で nonce を重ねないことは呼び出し側
+// （TLS 側ではシーケンス番号からの構成）の契約。
+
+pub enum AeadError {
+  InvalidKeyLength,
+  InvalidNonceLength,
+  InputTooShort,
+  InputTooLong,
+  AuthenticationFailed,
+}
+
+pub struct Aes128GcmKey {
+  key: Secret,
+}
+
+pub struct Nonce96 {
+  bytes: Bytes,
+}
+
+impl Aes128GcmKey {
+  // 範囲: 16 バイトの秘密を鍵として取り込む（所有権を取る）。長さが違えば誤り。
+  pub fn from_secret(key: Secret) -> Result<Aes128GcmKey, AeadError>
+    intent "16 バイトの秘密から AES-128-GCM の鍵を作る"
+    requires none
+    ensures none
+    effects none
+  {
+    if key.byte_len() != 16 {
+      return Err(AeadError.InvalidKeyLength);
+    }
+    return Ok(Aes128GcmKey { key: key });
+  }
+}
+
+impl Nonce96 {
+  // 範囲: 12 バイトの nonce（公開の値）を作る。長さが違えば誤り。
+  pub fn from_slice(b: &Bytes) -> Result<Nonce96, AeadError>
+    intent "12 バイトのバイト列から nonce を作る"
+    requires none
+    ensures none
+    effects none
+  {
+    if b.byte_len() != 12 {
+      return Err(AeadError.InvalidNonceLength);
+    }
+    return Ok(Nonce96 { bytes: b.clone() });
+  }
+}
+
+// 範囲: GF(2^8) での 2 倍（xtime）。既約多項式 x^8 + x^4 + x^3 + x + 1。
+fn aes_xtime(v: Int) -> Int
+  intent "GF(2^8) で 2 を掛ける（定数時間）"
+  requires none
+  ensures none
+  effects none
+{
+  let hi = (v >> 7) & 1;
+  return ((v << 1) & 0xFF) ^ ((0 - hi) & 0x1B);
+}
+
+// 範囲: GF(2^8) の乗算。8 回固定で、乗数の各ビットをマスクにして足し込む。
+fn aes_gmul(a: Int, b: Int) -> Int
+  intent "GF(2^8) で a と b を掛ける（定数時間）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut p = 0;
+  let mut x = a;
+  let mut y = b;
+  let mut i = 0;
+  while i < 8 {
+    let m = (0 - (y & 1)) & 0xFF;
+    p = p ^ (x & m);
+    x = aes_xtime(x);
+    y = y >> 1;
+    i = i + 1;
+  }
+  return p;
+}
+
+// 範囲: S-box。逆元 x^254（x^2 から x^128 までの積。0 は 0）にアフィン変換を
+// かける。表引きはしない。
+fn aes_sbox(x: Int) -> Int
+  intent "AES の S-box を表引きなしで計算する（定数時間）"
+  requires none
+  ensures none
+  effects none
+{
+  let x2 = aes_gmul(x, x);
+  let x4 = aes_gmul(x2, x2);
+  let x8 = aes_gmul(x4, x4);
+  let x16 = aes_gmul(x8, x8);
+  let x32 = aes_gmul(x16, x16);
+  let x64 = aes_gmul(x32, x32);
+  let x128 = aes_gmul(x64, x64);
+  let mut inv = aes_gmul(x2, x4);
+  inv = aes_gmul(inv, x8);
+  inv = aes_gmul(inv, x16);
+  inv = aes_gmul(inv, x32);
+  inv = aes_gmul(inv, x64);
+  inv = aes_gmul(inv, x128);
+  let r1 = ((inv << 1) | (inv >> 7)) & 0xFF;
+  let r2 = ((inv << 2) | (inv >> 6)) & 0xFF;
+  let r3 = ((inv << 3) | (inv >> 5)) & 0xFF;
+  let r4 = ((inv << 4) | (inv >> 4)) & 0xFF;
+  return inv ^ r1 ^ r2 ^ r3 ^ r4 ^ 0x63;
+}
+
+// 範囲: 鍵展開。16 バイトの鍵から、11 個のラウンド鍵（16 バイトずつ、計 176 バイト）を
+// 並べた一覧を作る。
+fn aes_expand_key(key: &Bytes) -> List<Int>
+  intent "AES-128 の鍵展開（ラウンド鍵 176 バイトの一覧）を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut w = List.new();
+  let mut i = 0;
+  while i < 16 {
+    w.push(key.get(i).map(|x| x + 0).unwrap_or(0));
+    i = i + 1;
+  }
+  let mut rc = 1;
+  let mut n = 4;
+  while n < 44 {
+    let p = (n - 1) * 4;
+    let mut t0 = w.get(p).map(|x| x + 0).unwrap_or(0);
+    let mut t1 = w.get(p + 1).map(|x| x + 0).unwrap_or(0);
+    let mut t2 = w.get(p + 2).map(|x| x + 0).unwrap_or(0);
+    let mut t3 = w.get(p + 3).map(|x| x + 0).unwrap_or(0);
+    if n % 4 == 0 {
+      let u0 = aes_sbox(t1) ^ rc;
+      let u1 = aes_sbox(t2);
+      let u2 = aes_sbox(t3);
+      let u3 = aes_sbox(t0);
+      t0 = u0;
+      t1 = u1;
+      t2 = u2;
+      t3 = u3;
+      rc = aes_xtime(rc);
+    }
+    let q = (n - 4) * 4;
+    let n0 = w.get(q).map(|x| x + 0).unwrap_or(0) ^ t0;
+    let n1 = w.get(q + 1).map(|x| x + 0).unwrap_or(0) ^ t1;
+    let n2 = w.get(q + 2).map(|x| x + 0).unwrap_or(0) ^ t2;
+    let n3 = w.get(q + 3).map(|x| x + 0).unwrap_or(0) ^ t3;
+    w.push(n0);
+    w.push(n1);
+    w.push(n2);
+    w.push(n3);
+    n = n + 1;
+  }
+  return w;
+}
+
+// 範囲: 16 バイトのブロックを 1 つ暗号化する（ラウンド鍵は `aes_expand_key` の結果）。
+// 状態の並びは FIPS 197 のとおり（列優先、入力の並びのまま）。
+fn aes_encrypt_block(rk: &List<Int>, block: &Bytes) -> Bytes
+  intent "AES-128 で 16 バイトのブロックを暗号化する"
+  requires none
+  ensures result.byte_len() == 16
+  effects none
+{
+  let mut s = List.new();
+  let mut i = 0;
+  while i < 16 {
+    s.push(block.get(i).map(|x| x + 0).unwrap_or(0) ^ rk.get(i).map(|x| x + 0).unwrap_or(0));
+    i = i + 1;
+  }
+  let mut round = 1;
+  while round < 11 {
+    let mut t = List.new();
+    let mut c = 0;
+    while c < 4 {
+      let mut r = 0;
+      while r < 4 {
+        let idx = r + 4 * ((c + r) % 4);
+        t.push(aes_sbox(s.get(idx).map(|x| x + 0).unwrap_or(0)));
+        r = r + 1;
+      }
+      c = c + 1;
+    }
+    let mut u = t.clone();
+    if round < 10 {
+      let mut m = List.new();
+      let mut col = 0;
+      while col < 4 {
+        let a0 = t.get(col * 4).map(|x| x + 0).unwrap_or(0);
+        let a1 = t.get(col * 4 + 1).map(|x| x + 0).unwrap_or(0);
+        let a2 = t.get(col * 4 + 2).map(|x| x + 0).unwrap_or(0);
+        let a3 = t.get(col * 4 + 3).map(|x| x + 0).unwrap_or(0);
+        m.push(aes_xtime(a0) ^ aes_xtime(a1) ^ a1 ^ a2 ^ a3);
+        m.push(a0 ^ aes_xtime(a1) ^ aes_xtime(a2) ^ a2 ^ a3);
+        m.push(a0 ^ a1 ^ aes_xtime(a2) ^ aes_xtime(a3) ^ a3);
+        m.push(aes_xtime(a0) ^ a0 ^ a1 ^ a2 ^ aes_xtime(a3));
+        col = col + 1;
+      }
+      u = m;
+    }
+    let mut next = List.new();
+    let mut k = 0;
+    while k < 16 {
+      next.push(u.get(k).map(|x| x + 0).unwrap_or(0) ^ rk.get(round * 16 + k).map(|x| x + 0).unwrap_or(0));
+      k = k + 1;
+    }
+    s = next;
+    round = round + 1;
+  }
+  let mut out = Bytes.new();
+  let mut j = 0;
+  while j < 16 {
+    out.push(s.get(j).map(|x| x + 0).unwrap_or(0));
+    j = j + 1;
+  }
+  return out;
+}
+
+// 範囲: GF(2^128) の乗算（GHASH の「・」）。4 語 × 32 ビットの 128 回固定（除算を使わない二重ループ）で、x の各ビットをマスクに
+// して v（h を 1 ビットずつ右へ送ったもの）を足し込む。128 ビットは 32 ビットの 4 語
+// （先頭の語が上位）で持つ。簡約定数は 0xE1 を先頭の語の上位へ置く形。
+fn ghash_mul(xv: &List<Int>, hv: &List<Int>) -> List<Int>
+  intent "GF(2^128) で x と h を掛ける（定数時間）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut z0 = 0;
+  let mut z1 = 0;
+  let mut z2 = 0;
+  let mut z3 = 0;
+  let mut v0 = hv.get(0).map(|x| x + 0).unwrap_or(0);
+  let mut v1 = hv.get(1).map(|x| x + 0).unwrap_or(0);
+  let mut v2 = hv.get(2).map(|x| x + 0).unwrap_or(0);
+  let mut v3 = hv.get(3).map(|x| x + 0).unwrap_or(0);
+  let mut wi = 0;
+  while wi < 4 {
+    let xl = xv.get(wi).map(|x| x + 0).unwrap_or(0);
+    let mut bi = 0;
+    while bi < 32 {
+      let bit = (xl >> (31 - bi)) & 1;
+      let m = (0 - bit) & 0xFFFFFFFF;
+      z0 = z0 ^ (v0 & m);
+      z1 = z1 ^ (v1 & m);
+      z2 = z2 ^ (v2 & m);
+      z3 = z3 ^ (v3 & m);
+      let red = (0 - (v3 & 1)) & 0xE1000000;
+      v3 = ((v3 >> 1) | ((v2 & 1) << 31)) & 0xFFFFFFFF;
+      v2 = ((v2 >> 1) | ((v1 & 1) << 31)) & 0xFFFFFFFF;
+      v1 = ((v1 >> 1) | ((v0 & 1) << 31)) & 0xFFFFFFFF;
+      v0 = ((v0 >> 1) ^ red) & 0xFFFFFFFF;
+      bi = bi + 1;
+    }
+    wi = wi + 1;
+  }
+  let mut out = List.new();
+  out.push(z0);
+  out.push(z1);
+  out.push(z2);
+  out.push(z3);
+  return out;
+}
+
+// 範囲: `data` の `off` バイト目から 16 バイトを、足りない分は 0 で埋めて 4 語にする。
+fn ghash_words(data: &Bytes, off: Int) -> List<Int>
+  intent "16 バイト（不足は 0 埋め）を 32 ビットの 4 語へ読む"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = List.new();
+  let mut k = 0;
+  while k < 4 {
+    let b0 = data.get(off + k * 4).map(|x| x + 0).unwrap_or(0);
+    let b1 = data.get(off + k * 4 + 1).map(|x| x + 0).unwrap_or(0);
+    let b2 = data.get(off + k * 4 + 2).map(|x| x + 0).unwrap_or(0);
+    let b3 = data.get(off + k * 4 + 3).map(|x| x + 0).unwrap_or(0);
+    out.push((b0 << 24) | (b1 << 16) | (b2 << 8) | b3);
+    k = k + 1;
+  }
+  return out;
+}
+
+// 範囲: GHASH の 1 ブロック分の更新 y = (y ^ blk) ・ h。
+fn ghash_step(y: &List<Int>, blk: &List<Int>, hv: &List<Int>) -> List<Int>
+  intent "GHASH の状態を 1 ブロック分更新する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut xr = List.new();
+  let mut j = 0;
+  while j < 4 {
+    xr.push(y.get(j).map(|x| x + 0).unwrap_or(0) ^ blk.get(j).map(|x| x + 0).unwrap_or(0));
+    j = j + 1;
+  }
+  return ghash_mul(&xr, &hv);
+}
+
+// 範囲: GHASH(h, aad, ct)。AAD と暗号文をそれぞれ 16 バイトに 0 埋めして
+// 順に畳み込み、最後に両方のビット長の 64 ビット並び（長さのブロック）を畳む。
+// 結果は 16 バイト。
+fn ghash(hv: &List<Int>, aad: &Bytes, ct: &Bytes) -> Bytes
+  intent "GHASH を計算する（16 バイト）"
+  requires none
+  ensures result.byte_len() == 16
+  effects none
+{
+  let mut y = List.new();
+  y.push(0);
+  y.push(0);
+  y.push(0);
+  y.push(0);
+  let na = (aad.byte_len() + 15) / 16;
+  let mut b = 0;
+  while b < na {
+    let blk = ghash_words(&aad, b * 16);
+    y = ghash_step(&y, &blk, &hv);
+    b = b + 1;
+  }
+  let nc = (ct.byte_len() + 15) / 16;
+  let mut c = 0;
+  while c < nc {
+    let blk = ghash_words(&ct, c * 16);
+    y = ghash_step(&y, &blk, &hv);
+    c = c + 1;
+  }
+  let abits = aad.byte_len() * 8;
+  let cbits = ct.byte_len() * 8;
+  let mut lens = List.new();
+  lens.push((abits >> 32) & 0xFFFFFFFF);
+  lens.push(abits & 0xFFFFFFFF);
+  lens.push((cbits >> 32) & 0xFFFFFFFF);
+  lens.push(cbits & 0xFFFFFFFF);
+  y = ghash_step(&y, &lens, &hv);
+  let mut out = Bytes.new();
+  out.push_u32_be(y.get(0).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(y.get(1).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(y.get(2).map(|x| x + 0).unwrap_or(0));
+  out.push_u32_be(y.get(3).map(|x| x + 0).unwrap_or(0));
+  return out;
+}
+
+// 範囲: CTR モード。カウンタ領域の 32 ビット値はブロック番号 + 2（J0 の次から）。
+// `data` の各バイトにキーストリームを XOR する。出力の長さは入力と同じ。
+fn gcm_ctr_xor(rk: &List<Int>, nonce: &Bytes, data: &Bytes) -> Bytes
+  intent "AES-GCM の CTR 部（カウンタは 2 から）で data へキーストリームを掛ける"
+  requires none
+  ensures result.byte_len() == data.byte_len()
+  effects none
+{
+  let mut out = Bytes.new();
+  let blocks = (data.byte_len() + 15) / 16;
+  let mut b = 0;
+  while b < blocks {
+    let mut cb = nonce.clone();
+    cb.push_u32_be(b + 2);
+    let ks = aes_encrypt_block(&rk, &cb);
+    let mut j = 0;
+    while j < 16 {
+      let idx = b * 16 + j;
+      if idx < data.byte_len() {
+        out.push(data.get(idx).map(|x| x + 0).unwrap_or(0) ^ ks.get(j).map(|x| x + 0).unwrap_or(0));
+      }
+      j = j + 1;
+    }
+    b = b + 1;
+  }
+  return out;
+}
+
+// 範囲: 認証タグ = GHASH(h, aad, ct) ^ E(K, J0)。h = E(K, 0^128)、J0 = nonce || 0x00000001。
+fn gcm_tag(rk: &List<Int>, nonce: &Bytes, aad: &Bytes, ct: &Bytes) -> Bytes
+  intent "AES-GCM の認証タグ（16 バイト）を計算する"
+  requires none
+  ensures result.byte_len() == 16
+  effects none
+{
+  let mut zero = Bytes.new();
+  let mut z = 0;
+  while z < 16 {
+    zero.push(0);
+    z = z + 1;
+  }
+  let hb = aes_encrypt_block(&rk, &zero);
+  let hv = ghash_words(&hb, 0);
+  let gh = ghash(&hv, &aad, &ct);
+  let mut j0 = nonce.clone();
+  j0.push_u32_be(1);
+  let ek = aes_encrypt_block(&rk, &j0);
+  let mut tag = Bytes.new();
+  let mut i = 0;
+  while i < 16 {
+    tag.push(gh.get(i).map(|x| x + 0).unwrap_or(0) ^ ek.get(i).map(|x| x + 0).unwrap_or(0));
+    i = i + 1;
+  }
+  return tag;
+}
+
+// 範囲: タグの照合。全バイトを処理する定数時間比較の結果（1 ビット）だけを返す。
+fn aes128_gcm_tag_matches(expected: &Bytes, got: &Bytes) -> Bool
+  intent "AES-GCM のタグを定数時間で照合する"
+  requires none
+  ensures none
+  effects none
+{
+  return ct_eq(&expected, &got);
+}
+
+pub fn aes128_gcm_seal(key: &Aes128GcmKey, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>
+  intent "AES-128-GCM で暗号化し、暗号文にタグ 16 バイトを連結して返す"
+  requires none
+  ensures none
+  effects none
+{
+  if plaintext.byte_len() > 68719476704 {
+    return Err(AeadError.InputTooLong);
+  }
+  if aad.byte_len() > 2305843009213693951 {
+    return Err(AeadError.InputTooLong);
+  }
+  let kb = key.key.expose();
+  let rk = aes_expand_key(&kb);
+  let pt = plaintext.expose();
+  let ct = gcm_ctr_xor(&rk, &nonce.bytes, &pt);
+  let tag = gcm_tag(&rk, &nonce.bytes, &aad, &ct);
+  let mut out = ct;
+  out.extend(&tag);
+  return Ok(out);
+}
+
+pub fn aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>
+  intent "AES-128-GCM のタグを検証し、成功したときだけ復号した平文を返す"
+  requires none
+  ensures none
+  effects none
+{
+  if sealed.byte_len() < 16 {
+    return Err(AeadError.InputTooShort);
+  }
+  let ct_len = sealed.byte_len() - 16;
+  if ct_len > 68719476704 {
+    return Err(AeadError.InputTooLong);
+  }
+  if aad.byte_len() > 2305843009213693951 {
+    return Err(AeadError.InputTooLong);
+  }
+  let ct = sealed.slice(0, ct_len).unwrap_or(Bytes.new());
+  let got = sealed.slice(ct_len, sealed.byte_len()).unwrap_or(Bytes.new());
+  let kb = key.key.expose();
+  let rk = aes_expand_key(&kb);
+  let want = gcm_tag(&rk, &nonce.bytes, &aad, &ct);
+  if aes128_gcm_tag_matches(&want, &got) {
+    let pt = gcm_ctr_xor(&rk, &nonce.bytes, &ct);
+    return Ok(Secret.from_bytes(pt));
+  }
+  return Err(AeadError.AuthenticationFailed);
+}

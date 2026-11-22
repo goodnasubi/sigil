@@ -92,6 +92,27 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.crypto.hmac_any_key", &[]),
     ("std.crypto.hkdf_extract_sha256", &[]),
     ("std.crypto.hkdf_expand_sha256", &["info", "out_len"]),
+    // AES-128-GCM（ADR 0058 決定 3、段 1b）。鍵・平文・鍵展開・GHASH の状態・認証タグの
+    // 計算途中の値は秘密。公開は nonce・AAD・受信した暗号文とタグ・データの長さ・
+    // 固定の処理回数。S-box と GHASH は表引きをせず、固定した演算列でマスクを使う。
+    // AES の内部部品は、引数をすべて秘密として検査する（ラウンド数・ブロック数は
+    // 定数と長さから決まり、引数には現れない）。
+    ("std.crypto.aes_xtime", &[]),
+    ("std.crypto.aes_gmul", &[]),
+    ("std.crypto.aes_sbox", &[]),
+    ("std.crypto.aes_expand_key", &[]),
+    ("std.crypto.aes_encrypt_block", &[]),
+    ("std.crypto.ghash_mul", &[]),
+    ("std.crypto.ghash_words", &["off"]),
+    ("std.crypto.ghash_step", &[]),
+    ("std.crypto.ghash", &["aad", "ct"]),
+    ("std.crypto.gcm_ctr_xor", &["nonce"]),
+    ("std.crypto.gcm_tag", &["nonce", "aad", "ct"]),
+    ("std.crypto.aes128_gcm_tag_matches", &["got"]),
+    ("std.crypto.aes128_gcm_seal", &["nonce", "aad"]),
+    ("std.crypto.aes128_gcm_open", &["nonce", "aad", "sealed"]),
+    ("from_secret", &[]),
+    ("from_slice", &["b"]),
     // 塩・回数・出力の長さは公開（ADR 0020 決定 1 の対象表）。
     (
         "std.crypto.pbkdf2_sha256",
@@ -125,6 +146,7 @@ const CT_AHEAD: &[&str] = &[];
 // 一般の Bool 戻り値や検証器全体を除外しない。関数本体は引き続き検査する。
 const CT_PUBLIC_COMPARISONS: &[&str] = &[
     "std.crypto.verify_hmac_sha256",
+    "std.crypto.aes128_gcm_tag_matches",
     "std.web.ct_bearer_signature",
 ];
 
@@ -616,12 +638,46 @@ fn probe() -> Int
   let p = pbkdf2_sha256(&s, &b, 4096, 32);
   let prk = hkdf_extract_sha256(None, &s);
   let okm = hkdf_expand_sha256(&prk, &b, 32);
+  let aead = aead_probe(&b);
   let reply = respond(&s, &b, &b);
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len(); }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len() + aead; }
   return 0;
+}
+
+fn aead_probe(b: &Bytes) -> Int
+  intent "AES-128-GCM の入口を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  let s = Secret.from_bytes(b.clone());
+  match Aes128GcmKey.from_secret(Secret.from_bytes(s.expose())) {
+    Err(e) => { return 0; }
+    Ok(key) => {
+      match Nonce96.from_slice(&b) {
+        Err(e) => { return 0; }
+        Ok(nonce) => {
+          match Nonce96.from_slice(&b) {
+            Err(e) => { return 0; }
+            Ok(nonce2) => {
+              match aes128_gcm_seal(&key, nonce, &b, &s) {
+                Err(e) => { return 0; }
+                Ok(sealed) => {
+                  match aes128_gcm_open(&key, &nonce2, &b, &sealed) {
+                    Err(e) => { return 0; }
+                    Ok(opened) => { return opened.byte_len(); }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 "#;
     let src = "module ctprobe\n  targets server\n  trust none\npub fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects none\n{ return 0; }\n";
@@ -1129,4 +1185,211 @@ fn clif_bearer_signature_adds_only_public_contract_branches() {
         wrapped.branch <= direct.branch + sir_branch_budget(wrapper) + 1,
         "説明できない CLIF 分岐: {wrapped:?}, {direct:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AES-128-GCM（ADR 0058 決定 3、段 1b）の CLIF 検査
+// ---------------------------------------------------------------------------
+
+/// S-box と GF(2^128) の乗算は、除算命令を持たず、条件分岐の数が SIR の項（ループの
+/// 公開の継続条件と、検査つき演算・呼び出しの異常停止）で説明できる範囲に収まる。
+/// 表引きがあれば番地計算に現れるが、SIR のテイント検査（`static_real_targets_are_clean`）が
+/// 秘密による添字を R2 として拒否するため、ここでは分岐と除算の増えなさを見る。
+#[test]
+fn clif_aes_sbox_and_ghash_mul_have_no_division_and_bounded_branches() {
+    let source = include_str!("../src/stdlib/crypto.sigil");
+    let program = corpus();
+    // SIR の項から見積もる分岐の上限。分岐・検査つき演算・表明は 1 つ、呼び出しは
+    // 呼び出し後の異常停止の伝播の確認を含めて 2 つ、各関数の入口に guard_stack の
+    // 公開スタック境界分岐が 1 つ、入口の main からの呼び出しが 2 つ。
+    let budget = |names: &[&str]| -> usize {
+        2 + names
+            .iter()
+            .map(|n| {
+                let f = program
+                    .funcs
+                    .iter()
+                    .find(|f| f.name == format!("std.crypto.{n}"))
+                    .unwrap_or_else(|| panic!("{n} がコーパスにない"));
+                1 + f
+                    .blocks
+                    .iter()
+                    .map(|b| match b.term {
+                        Term::Branch(..)
+                        | Term::Switch(..)
+                        | Term::CheckedOp { .. }
+                        | Term::Assert { .. } => 1,
+                        Term::Call { .. } => 2,
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .sum::<usize>()
+    };
+    let slice = |from: &str, to: &str| -> String {
+        let a = source.find(from).unwrap();
+        let b = source[a..].find(to).unwrap() + a;
+        source[a..b].to_string()
+    };
+    let sbox_defs = slice("fn aes_xtime(", "fn aes_expand_key(");
+    let ghash_defs = slice("fn ghash_mul(", "fn ghash_words(");
+    // GHASH の乗算は `List` の読み書き（組み込みの部品）を呼ぶため、その展開の分岐を
+    // `reach_branch_budget` の組み込み呼び出しの許容で見積もる（以前は見積もれず無効だった）。
+    for (tag, defs, call, names, check_branches) in [
+        (
+            "aessbox",
+            sbox_defs,
+            "aes_sbox(3)".to_string(),
+            vec!["aes_xtime", "aes_gmul", "aes_sbox"],
+            true,
+        ),
+        (
+            "ghashmul",
+            ghash_defs,
+            "ghash_mul(&List.new(), &List.new()).len()".to_string(),
+            vec!["ghash_mul"],
+            true,
+        ),
+    ] {
+        let delta = clif_delta(tag, &defs, &call);
+        assert_eq!(delta.div, 0, "{tag} の CLIF に除算命令がある: {delta:?}");
+        let limit = if tag == "ghashmul" {
+            2 + reach_branch_budget(&program, &reachable_funcs(&program, "std.crypto.ghash_mul"))
+        } else {
+            budget(&names)
+        };
+        assert!(
+            !check_branches || delta.branch <= limit,
+            "{tag} の CLIF 分岐 {} が SIR の予算 {limit} を超えた: {delta:?}",
+            delta.branch
+        );
+    }
+}
+
+/// 入口の関数から `Callee::Func` の呼び出しで推移的に届く関数の番号（入口を含む）。
+fn reachable_funcs(program: &Program, entry: &str) -> Vec<usize> {
+    let root = program
+        .funcs
+        .iter()
+        .position(|f| f.name == entry)
+        .unwrap_or_else(|| panic!("{entry} がコーパスにない"));
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for b in &program.funcs[id].blocks {
+            if let Term::Call {
+                func: Callee::Func(callee),
+                ..
+            } = &b.term
+            {
+                stack.push(*callee);
+            }
+            for st in &b.stmts {
+                if let Stmt::Assign(_, Rvalue::MakeClosure(callee, _)) = st {
+                    stack.push(*callee);
+                }
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// 届く関数すべての、SIR の項から説明できる条件分岐の数の上限。関数ごとに入口の公開
+/// スタック境界分岐が 1 つ、分岐・検査つき演算・表明は 1 つ、呼び出しは異常停止の
+/// 伝播を含めて 2 つ、破棄は 1 つ（`src/codegen/func/drop.rs`）。
+fn reach_branch_budget(program: &Program, reach: &[usize]) -> usize {
+    reach
+        .iter()
+        .map(|id| {
+            1 + program.funcs[*id]
+                .blocks
+                .iter()
+                .map(|b| {
+                    let drops = b
+                        .stmts
+                        .iter()
+                        .filter(|s| matches!(s, Stmt::Drop(_)))
+                        .count();
+                    drops
+                        + match &b.term {
+                            Term::Branch(..)
+                            | Term::Switch(..)
+                            | Term::CheckedOp { .. }
+                            | Term::Assert { .. } => 1,
+                            // 標準ライブラリの部品（`List` の読み書きなど）は、呼び出し先の本体が
+                            // CLIF へ展開され、添字の範囲検査と拡張の分岐を伴う。
+                            Term::Call {
+                                func: Callee::Builtin(_),
+                                ..
+                            } => 4,
+                            Term::Call { .. } => 2,
+                            _ => 0,
+                        }
+                })
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// AES-128-GCM の公開入口（seal・open）から呼ばれる関数すべて（鍵展開・ブロック暗号化・
+/// CTR・GHASH・タグ生成・照合・標準ライブラリの部品）を、ネイティブ生成した CLIF で検査する。
+/// 差分の方法（入口を呼ぶ版と呼ばない版の CLIF の差）は、入口が推移的に呼ぶ全命令を数える。
+/// 見るのは次の 3 つ。
+/// 1. SIR で、入口から届く除算・剰余の除数がすべて定数（秘密を除数にしない）。
+/// 2. CLIF の除算・剰余命令の数が、SIR の除算・剰余の数を超えない（生成が足さない）。
+/// 3. CLIF の条件分岐の数が、届く関数すべての SIR の項から説明できる範囲に収まる
+///    （関数ごとに入口の公開スタック境界分岐が 1 つ、分岐・検査つき演算・表明は 1 つ、
+///    呼び出しは 2 つ、破棄は 1 つ）。
+#[test]
+fn clif_aes_gcm_entries_cover_all_callees() {
+    let program = corpus();
+    let key = "match Aes128GcmKey.from_secret(Secret.from_bytes(Bytes.new())) { Err(e) => 0, Ok(key) => match Nonce96.from_slice(&Bytes.new()) { Err(e) => 0, Ok(nonce) => ";
+    let seal = format!("{key}match aes128_gcm_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
+    let open = format!("{key}match aes128_gcm_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
+    for (tag, entry, call) in [
+        ("aesgcmseal", "std.crypto.aes128_gcm_seal", seal),
+        ("aesgcmopen", "std.crypto.aes128_gcm_open", open),
+    ] {
+        let reach = reachable_funcs(&program, entry);
+        let mut sir_div = 0usize;
+        let budget = reach_branch_budget(&program, &reach);
+        for id in &reach {
+            let f = &program.funcs[*id];
+            for b in &f.blocks {
+                if let Term::CheckedOp {
+                    op: ArithOp::Div | ArithOp::Rem,
+                    b: divisor,
+                    ..
+                } = &b.term
+                {
+                    sir_div += 1;
+                    if f.name.starts_with("std.crypto.") {
+                        assert!(
+                            matches!(divisor, Operand::Const(_)),
+                            "{} に定数でない除数の除算・剰余がある",
+                            f.name
+                        );
+                    }
+                }
+            }
+        }
+        let delta = clif_delta(tag, "", &call);
+        eprintln!(
+            "{tag}: funcs={} sir_div={sir_div} budget={budget} {delta:?}",
+            reach.len()
+        );
+        assert!(
+            delta.div <= sir_div,
+            "{tag} の CLIF の除算 {} が SIR の {sir_div} を超えた: {delta:?}",
+            delta.div
+        );
+        assert!(
+            delta.branch <= budget,
+            "{tag} の CLIF 分岐 {} が SIR の予算 {budget} を超えた: {delta:?}",
+            delta.branch
+        );
+    }
 }

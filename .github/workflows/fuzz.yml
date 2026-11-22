@@ -132,7 +132,7 @@ jobs:
             echo "tests/ct_measure.rs がまだない（ADR 6-1 で加わる）。飛ばす。"
           fi
 
-      # 計測本体 8 件は #[ignore] なので --ignored が要る（Issue #670）。付けないと sanity 2 件だけが走り、0 秒で成功表示になる。
+      # 計測本体 12 件は #[ignore] なので --ignored が要る（Issue #670）。付けないと sanity 2 件だけが走り、0 秒で成功表示になる。
       # 計測テスト間の CPU 競合による感度低下を防ぐため --test-threads=1 で直列実行する（Issue #672）。
       - name: 定数時間の計測（ct_measure）
         continue-on-error: true

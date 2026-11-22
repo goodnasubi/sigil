@@ -66,6 +66,12 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // HKDF-SHA-256 の擬似乱数鍵 PRK（ADR 0058 決定 2、段 1a）。`Secret` を
     // 1 つ持つ型で、中身は `std.crypto` の Sigil 実装が持つ（`Sha256` と同じ作法）。
     ("HkdfSha256Prk", 0, Layer::Core),
+    // AES-128-GCM の鍵・nonce・誤り（ADR 0058 決定 2、段 1b）。中身は `std.crypto` の Sigil 実装が
+    // 持つ。`AeadError` は腕を `match` できる列挙で、検査器はこの行を列挙として登録し直す
+    // （`AEAD_ERROR_ARMS`）。
+    ("Aes128GcmKey", 0, Layer::Core),
+    ("Nonce96", 0, Layer::Core),
+    ("AeadError", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -203,6 +209,15 @@ pub const PG_ERROR_ARMS: &[&str] = &[
 
 /// `std.json` が実体を宣言する、平坦な JSON 表の型（ADR 0033、Issue #455）。
 pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
+
+/// `AeadError` の腕（ADR 0058 決定 2）。並びは `std.crypto` の宣言と同じ。
+pub const AEAD_ERROR_ARMS: &[&str] = &[
+    "InvalidKeyLength",
+    "InvalidNonceLength",
+    "InputTooShort",
+    "InputTooLong",
+    "AuthenticationFailed",
+];
 
 /// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ。
 pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
@@ -477,6 +492,17 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (
         Layer::Core,
         "hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret",
+        "none",
+    ),
+    // AES-128-GCM（ADR 0058 決定 2、段 1b）。実体は `std.crypto` の Sigil 実装（埋め込み）。
+    (
+        Layer::Core,
+        "aes128_gcm_seal(key: &Aes128GcmKey, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>",
         "none",
     ),
 ];
@@ -822,6 +848,16 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("expose(self: &Secret) -> Bytes", "none"),
             ("byte_len(self: &Secret) -> Int", "none"),
         ],
+    ),
+    (
+        Layer::Core,
+        "Aes128GcmKey",
+        &[("from_secret(key: Secret) -> Result<Aes128GcmKey, AeadError>", "none")],
+    ),
+    (
+        Layer::Core,
+        "Nonce96",
+        &[("from_slice(b: &Bytes) -> Result<Nonce96, AeadError>", "none")],
     ),
     (
         Layer::Core,

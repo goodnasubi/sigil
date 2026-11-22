@@ -1,150 +1,26 @@
-# 定期の長い実行（ADR 0020 の決定 2・W1 の C1）。
-# 長いファジング、release ビルドの depth_limit、定数時間の計測を走らせる。
-# PR では走らせない（schedule と workflow_dispatch だけ）。権限は読み取りだけで、秘密は使わない。
+# 一時（Issue #674 の切り分け。この commit は PR に含めない）
 name: Fuzz
-
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       seed:
-        description: "乱数の種（空なら日付から決める）"
         required: false
         default: ""
       scale:
-        description: "反復回数の倍率（既定 1）"
         required: false
         default: "1"
-
 permissions:
   contents: read
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Rust stable
-        id: rust
-        run: |
+      - run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustc --version
-          echo "rustc=$(rustc -V | tr ' ()' '-' | tr -s '-')" >> "$GITHUB_OUTPUT"
-
-      # ネイティブ出力のリンクに cc と glibc の静的ライブラリ(libc.a)が要る。
-      - name: ネイティブ出力の前提
-        run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc libc6-dev
-
-      - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: fuzz-${{ runner.os }}-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            fuzz-${{ runner.os }}-
-
-      # 種は日ごとに変える（探す範囲を広げる）。失敗したときに同じ種で再現できるよう、ここで表示する。
-      # 入力はシェルに埋め込まず、環境変数で渡して数だけを受ける。
-      - name: 種と回数を決める
-        env:
-          SEED_IN: ${{ github.event.inputs.seed }}
-          SCALE_IN: ${{ github.event.inputs.scale }}
-        run: |
-          SEED="${SEED_IN:-$(date -u +%Y%m%d)}"
-          SCALE="${SCALE_IN:-1}"
-          case "$SEED$SCALE" in *[!0-9]*) echo "種と倍率は数字だけ"; exit 1;; esac
-          if [ "${#SEED}" -gt 18 ] || [ "${#SCALE}" -gt 3 ]; then echo "種は 18 桁以下、倍率は 3 桁以下"; exit 1; fi
-          echo "SIGIL_FUZZ_SEED=$SEED" >> "$GITHUB_ENV"
-          echo "SCALE=$SCALE" >> "$GITHUB_ENV"
-          echo "種: $SEED、倍率: $SCALE"
-
-      # 失敗したら、種と入力（target/fuzz-failures/）を残してジョブを失敗にする。
-      - name: fuzz_json（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((1000000 * SCALE)) cargo test --test fuzz_json fuzz_json -- --nocapture
-        timeout-minutes: 12
-
-      - name: fuzz_parse（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((300000 * SCALE)) cargo test --test fuzz_parse fuzz_parse -- --nocapture
-        timeout-minutes: 20
-
-      # ADR 0037 6-6d（Issue #512）。同じ入口で SIGIL_FUZZ_SEED（上で設定）と SIGIL_FUZZ_ITERS を受ける。
-      # 実測（ローカル、nativeビルド込み）: 3000 件 33 秒（約 100 件/秒）。基準 15000 件は約 2.5 分で、
-      # 共用 runner が 2 倍遅くても 10 分の枠に収まる。native は一度だけビルドして 64 件ずつ実行する。
-      # 失敗した入力は target/fuzz-failures/bearer_token/ に残り、下の artifact に含まれる。
-      - name: fuzz_bearer_token（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((15000 * SCALE)) cargo test --test fuzz_bearer_token fuzz_bearer_token -- --nocapture
-        timeout-minutes: 10
-
-      # ADR 0020 決定 2・4（Issue #551）。LSP 枠読み取り（fuzz_lsp_frame）。
-      # 実測: 300,000 件 約 37 秒。共用 runner でも 1〜2 分で完了する。
-      - name: fuzz_lsp_frame（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((300000 * SCALE)) cargo test --test fuzz_lsp_frame fuzz_lsp_frame -- --nocapture
-        timeout-minutes: 5
-
-      # ADR 0020 決定 2、ADR 0032 決定 7（Issue #551）。HTTP 要求の増分解釈器（fuzz_http_request）。
-      # 評価器を BATCH=64 でまとめて実行。実測: 5,000 件 約 46 秒。共用 runner でも 2 分前後に収まる。
-      - name: fuzz_http_request（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((5000 * SCALE)) cargo test --test fuzz_http_request fuzz_http_request -- --nocapture
-        timeout-minutes: 8
-
-      # ADR 0020 決定 2・4・5、ADR 0033 判断点 G（Issue #551）。Sigil 製 std.json の評価器・ネイティブ突き合わせ（fuzz_app_json）。
-      # ネイティブビルド（約 45 秒）+ 評価器・ネイティブ実行。実測: 500 件 約 69 秒。共用 runner でも 3 分以内に収まる。
-      - name: fuzz_app_json（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((500 * SCALE)) cargo test --test fuzz_app_json fuzz_matches_eval_and_native -- --nocapture
-        timeout-minutes: 8
-
-      # ADR 0020 決定 2、ADR 0034 6-5b（Issue #463、Issue #551）。PostgreSQL 通信文の断片化・変異（short_fuzz_fragmentation）。
-      # 評価器で 1 入力ごとに run_with を呼ぶため他より遅い。実測: 128 件 約 71 秒。共用 runner でも 3 分前後に収まる。
-      - name: pg_protocol_463 short_fuzz_fragmentation（長い実行）
-        run: |
-          SIGIL_FUZZ_ITERS=$((128 * SCALE)) cargo test --test pg_protocol_463 short_fuzz_fragmentation -- --nocapture
-        timeout-minutes: 8
-
-      - name: depth_limit（release）
-        timeout-minutes: 10
-        run: cargo test --release --test depth_limit
-
-      # 計測の結果（t 値）は記録として出すだけで、ジョブを失敗にしない（共用の機械の雑音で偽の失敗が出るため）。
-      # ただしビルドの失敗は本物の失敗なので、ビルドと実行の 2 段に分けてビルドだけを失敗として扱う（ADR 0020、Issue #178）。
-      # ct_measure は ADR 6-1 で加わる。まだなければ飛ばす。
-      - name: 定数時間の計測のビルド（ct_measure）
-        run: |
-          if [ -f tests/ct_measure.rs ]; then
-            cargo test --release --test ct_measure --no-run
-          else
-            echo "tests/ct_measure.rs がまだない（ADR 6-1 で加わる）。飛ばす。"
-          fi
-
-      # 計測本体 7 件は #[ignore] なので --ignored が要る（Issue #670）。付けないと sanity 2 件だけが走り、0 秒で成功表示になる。
-      - name: 定数時間の計測（ct_measure）
-        continue-on-error: true
-        run: |
-          if [ -f tests/ct_measure.rs ]; then
-            cargo test --release --test ct_measure -- --ignored --nocapture
-          fi
-
-      - name: 失敗した入力を残す
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: fuzz-failures
-          path: target/fuzz-failures/
-          if-no-files-found: ignore
-          retention-days: 30
+      - run: cargo test --release --test ct_measure --no-run
+      - run: cargo test --release --test ct_measure ct_diag_674 -- --ignored --nocapture --test-threads=1

@@ -108,7 +108,7 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.crypto.ghash", &["aad", "ct"]),
     ("std.crypto.gcm_ctr_xor", &["nonce"]),
     ("std.crypto.gcm_tag", &["nonce", "aad", "ct"]),
-    ("std.crypto.aes128_gcm_tag_matches", &["expected", "got"]),
+    ("std.crypto.aes128_gcm_tag_matches", &["got"]),
     ("std.crypto.aes128_gcm_seal", &["nonce", "aad"]),
     ("std.crypto.aes128_gcm_open", &["nonce", "aad", "sealed"]),
     ("from_secret", &[]),

@@ -27,14 +27,14 @@ P-256/P-384 の ECDHE、RSA-PSS・ECDSA などの署名、X.509 の読み取り�
 
 | 部品 | API の形 |
 |---|---|
-| HKDF | `hkdf_extract_sha256(salt: Option<&Secret>, ikm: &Secret) -> HkdfSha256Prk` と `hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret`。SHA-384 も対応する関数と PRK 型を用いる。 |
+| HKDF | `hkdf_extract_sha256(salt: Option<Secret>, ikm: &Secret) -> HkdfSha256Prk` と `hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret`。SHA-384 も対応する関数と PRK 型を用いる。 |
 | AES-128-GCM、AES-256-GCM、ChaCha20-Poly1305 | アルゴリズム別の鍵型と関数名を使う。各方式に `seal(key: &Key, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>` と `open(key: &Key, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>` を設ける。 |
 | X25519 | `x25519_public_key(private: &X25519PrivateKey) -> X25519PublicKey` と `x25519_shared_secret(private: &X25519PrivateKey, peer: &X25519PublicKey) -> Result<Secret, X25519Error>`。秘密鍵を用意する側は `std.os_random.bytes` を使う。 |
 | SHA-384 | `Sha384.new`、`update(&mut Sha384, &Bytes)`、`finalize(&mut Sha384) -> Bytes` と `sha384(&Bytes) -> Bytes`。`Sha256` にそろえ、出力は 48 バイト。 |
 
 演算は `effects none` とする。秘密鍵の生成入口は `Secret` の所有権を取り、AES-128 は 16 バイト、AES-256・ChaCha20・X25519 は 32 バイトに限定する。X25519 の公開鍵は 32 バイト、AEAD の nonce は 12 バイトの公開型とする。外部入力の長さ違反は型を作る入口で `Result` にする。信頼済みの呼び出し側が指定する HKDF の `out_len` は `0 <= out_len <= 255 * HashLen` を `requires` に置く。出力の長さは `ensures` に置き、外部入力に由来する長さは呼び出し側で事前に検査する。
 
-HKDF は [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869) に従って任意長の salt と IKM を受け付け、salt の省略時は HashLen バイトのゼロ列を使う。既存の公開 `hmac_sha256` は鍵長 32 バイト以上を要求するため、Extract は任意長の鍵を扱う内部 HMAC を使う。既存の公開契約は維持する。`HKDF-Expand-Label` の TLS 固有の符号化は `sigil-shield-tls` が担う。
+HKDF は [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869) に従って任意長の salt と IKM を受け付け、salt の省略時は HashLen バイトのゼロ列を使う。`salt` は `Option<Secret>`（所有権を取る）とする。言語は `Option<&T>` を戻り値の位置にしか許さず（[ADR 0012](0012-ownership-check-and-stdlib.md) 決定 1）、`Option<&Secret>` は引数に書けない。salt は使い終えたら破棄・ゼロ化され、同じ salt を再び使う呼び出し側は `expose()` と `Secret.from_bytes` で新しい `Secret` を作る。省略（`None`）は空の鍵として扱う。HMAC は鍵を HashLen を超えるブロック長へゼロ詰めするので、空の鍵と HashLen バイトのゼロ列は同じ鍵になり、RFC 5869 §2.2 と同値である。既存の公開 `hmac_sha256` は鍵長 32 バイト以上を要求するため、Extract は任意長の鍵を扱う内部 HMAC を使う。既存の公開契約は維持する。`HKDF-Expand-Label` の TLS 固有の符号化は `sigil-shield-tls` が担う。
 
 AEAD の出力は暗号文に 16 バイトのタグを連結する。短い入力・公開長上限の超過・認証失敗は `Result` で返し、認証が成功した場合にだけ平文を渡す。割り当てと暗号演算に先立ち、[NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final) と [RFC 8439](https://www.rfc-editor.org/rfc/rfc8439) の方式別の入力長上限を検査する。`seal` は nonce の値の所有権を取り、呼び出し側が同一鍵で同じ nonce を生成しないことを契約とする。`sigil-shield-tls` は方向別のシーケンス番号、上限に達する前の鍵更新、更新できない場合の接続終了でこの契約を守る。[RFC 8446 §5.3・§5.5](https://www.rfc-editor.org/rfc/rfc8446#section-5.3) の nonce 構成と鍵ごとの利用上限は TLS 側の契約に置く。
 

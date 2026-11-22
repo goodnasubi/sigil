@@ -263,9 +263,47 @@ fn get_samples(default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// 組 A（先頭側）と組 B（末尾側）で違うバイトの位置。
+///
+/// 位置 0 は使わない。`set(0, …)` などの添字 0 はコンパイラが別の命令に畳むため、位置 0 の実行ファイルだけ
+/// 関数の配置がずれる。HMAC の圧縮関数のような熱い部分の配置（アラインメント）が変わると、比較とは無関係に
+/// 実行時間が約 1% 変わり、定数時間の比較でも |t| が 10 前後に出る（Issue #674、CI の実測）。
+/// 位置 1 と 31 の実行ファイルは配置が同じで、違うのは数バイトの即値だけ。
+const DIFF_FIRST: usize = 1;
+const DIFF_LAST: usize = 31;
+
+/// 2 つの実行ファイルの違うバイト数（長さが違えば None）。
+fn differing_bytes(a: &PathBuf, b: &PathBuf) -> Option<usize> {
+    let (x, y) = (std::fs::read(a).ok()?, std::fs::read(b).ok()?);
+    if x.len() != y.len() {
+        return None;
+    }
+    Some(x.iter().zip(&y).filter(|(p, q)| p != q).count())
+}
+
+/// 組 A と組 B の実行ファイルの配置が同じであること（違うのは入力の即値だけ）を確かめる。
+/// 配置が違うと、比較の中身と関係のない系統差が t に出て、計測が無効になる（Issue #674）。
+/// 同じ配置のときの差は 100 バイト足らず（位置 1 と 31 で 22 バイト）。配置がずれると数万バイト違う。
+const MAX_LAYOUT_DIFF_BYTES: usize = 1000;
+
+fn assert_same_layout(name: &str, a: &PathBuf, b: &PathBuf) {
+    let d = differing_bytes(a, b);
+    assert!(
+        matches!(d, Some(n) if n <= MAX_LAYOUT_DIFF_BYTES),
+        "[{name}] 組 A と組 B の実行ファイルの配置が違う（違うバイト数: {d:?}）。配置の差が t に混ざるため計測が無効"
+    );
+}
+
 fn measure_target(target: CmpTarget, name: &str, iters: usize, samples: usize) -> f64 {
-    let (dir_a, exe_a) = build_exe(&format!("{name}_a"), &measure_program(target, 0, iters));
-    let (dir_b, exe_b) = build_exe(&format!("{name}_b"), &measure_program(target, 31, iters));
+    let (dir_a, exe_a) = build_exe(
+        &format!("{name}_a"),
+        &measure_program(target, DIFF_FIRST, iters),
+    );
+    let (dir_b, exe_b) = build_exe(
+        &format!("{name}_b"),
+        &measure_program(target, DIFF_LAST, iters),
+    );
+    assert_same_layout(name, &exe_a, &exe_b);
     let (a, b) = measure_pair(&exe_a, &exe_b, samples);
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);

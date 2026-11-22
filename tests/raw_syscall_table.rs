@@ -231,11 +231,11 @@ fn normal_socket_bind_listen_getsockname_accept_close() {
 
 #[test]
 fn socket_shape_is_restricted() {
-    // ブロッキングのソケット、AF_UNIX、SOCK_DGRAM、protocol の指定は通さない。
+    // ブロッキングのソケット、AF_UNIX、protocol の指定は通さない。非ブロッキングでない SOCK_DGRAM も通さない。
+    // （AF_INET の SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0 は ADR 0057 で追加。下の UDP のテストで確かめる。）
     for call in [
         "raw.syscall(41, 2, 1, 0, 0, 0, 0)",
         "raw.syscall(41, 1, 526337, 0, 0, 0, 0)",
-        "raw.syscall(41, 2, 526338, 0, 0, 0, 0)",
         "raw.syscall(41, 2, 526337, 6, 0, 0, 0)",
     ] {
         stops(&format!("  return {call};"), "socket");
@@ -339,9 +339,10 @@ fn recvfrom_and_sendto_buffers_and_flags_are_checked() {
         "  let p = raw.alloc(8, 8);\n  return raw.syscall(45, 3, raw.addr_to_int(p), 8, 0, raw.addr_to_int(p), 0);",
         "recvfrom",
     );
+    // 宛先を渡す形は UDP の形（ADR 0057）。8 バイトしかない領域を 16 バイトの宛先として渡すと範囲外で止まる。
     stops(
         "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 3, raw.addr_to_int(p), 8, 16384, raw.addr_to_int(p), 16);",
-        "sendto",
+        "範囲外",
     );
     // ソケットでない fd への正しい形の呼び出しは、カーネルの errno（ENOTSOCK = -88）がそのまま返る。
     let r = run(
@@ -544,5 +545,236 @@ fn readlinkat_path_buffer_and_unused_args_checked() {
     stops(
         "  let p = raw.alloc(4, 1);\n  raw.set(p, 65, 4);\n  let b = raw.alloc(64, 1);\n  return raw.syscall(267, -100, raw.addr_to_int(p), raw.addr_to_int(b), 64, 0, 0);",
         "NUL 終端",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UDP（ADR 0057 決定 4、UDP 実装 PR 1）。TCP の形（相手のアドレスを渡さない）とは別の形だけを通す。
+// ---------------------------------------------------------------------------
+
+/// AF_INET・SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0。
+const UDP_SOCK: &str = "raw.syscall(41, 2, 526338, 0, 0, 0, 0)";
+const MSG_NOSIGNAL: i64 = 0x4000;
+const MSG_TRUNC: i64 = 0x20;
+
+/// AF_INET の宛先（16 バイト）を `dst` に作る（アドレスは 127.0.0.1、ポート 9）。
+const DST: &str = "  let dst = raw.alloc(16, 8);\n  raw.set(dst, 0, 16);\n  raw.store_u8(dst, 2);\n  raw.store_u8(raw.offset(dst, 3), 9);\n  raw.store_u8(raw.offset(dst, 4), 127);\n  raw.store_u8(raw.offset(dst, 7), 1);\n";
+
+/// 受信用の三領域（受信バッファ 64 バイト `buf`、送信元 16 バイト `src`、長さ 4 バイト `al` を 16 に初期化）。
+const RECV_AREAS: &str = "  let buf = raw.alloc(64, 8);\n  raw.set(buf, 0, 64);\n  let src = raw.alloc(16, 8);\n  raw.set(src, 0, 16);\n  let al = raw.alloc(8, 8);\n  raw.store_i64(al, 16);\n";
+
+/// 送信の呼び出し（`sendto(fd, buf, len, flags, dst, 16)`）。fd 1 は標準出力でソケットではなく、
+/// 許可表を通った呼び出しはカーネルの errno（ENOTSOCK = -88）がそのまま返る。
+fn udp_send(fd: i64, len: i64, flags: i64, dlen: i64) -> String {
+    format!(
+        "{DST}  let p = raw.alloc(16, 8);\n  raw.set(p, 0, 16);\n  return raw.syscall(44, {fd}, raw.addr_to_int(p), {len}, {flags}, raw.addr_to_int(dst), {dlen});"
+    )
+}
+
+/// 受信の呼び出し（`recvfrom(fd, buf, len, flags, src, &al)`）。
+fn udp_recv(fd: i64, len: i64, flags: i64) -> String {
+    format!(
+        "{RECV_AREAS}  return raw.syscall(45, {fd}, raw.addr_to_int(buf), {len}, {flags}, raw.addr_to_int(src), raw.addr_to_int(al));"
+    )
+}
+
+#[test]
+fn udp_socket_shape_is_allowed_and_others_stay_denied() {
+    // 許す形: AF_INET の SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC・protocol 0。fd が返る。
+    let r = run(&format!(
+        "  let fd = {UDP_SOCK};\n  if fd < 3 {{ return 0 - 1; }}\n  let c = raw.syscall(3, fd, 0, 0, 0, 0, 0);\n  return c;"
+    ));
+    assert_eq!(r.unwrap(), "0");
+    // 拒否する形: AF_INET6 の DGRAM、SOCK_RAW、非ブロッキングでない DGRAM、AF_UNIX、protocol の指定、CLOEXEC なし。
+    for call in [
+        "raw.syscall(41, 10, 526338, 0, 0, 0, 0)",
+        "raw.syscall(41, 2, 526339, 0, 0, 0, 0)",
+        "raw.syscall(41, 2, 2, 0, 0, 0, 0)",
+        "raw.syscall(41, 1, 526338, 0, 0, 0, 0)",
+        "raw.syscall(41, 2, 526338, 17, 0, 0, 0)",
+        "raw.syscall(41, 2, 2050, 0, 0, 0, 0)",
+        "raw.syscall(41, 2, 526338 + 1048576, 0, 0, 0, 0)",
+    ] {
+        stops(&format!("  return {call};"), "socket");
+    }
+}
+
+#[test]
+fn udp_loopback_roundtrip_with_bind_getsockname_sendto_recvfrom() {
+    // 実際に 127.0.0.1 へ送って受け取る。bind と getsockname は既存の IPv4 形のまま使える。
+    // recvfrom は MSG_TRUNC で、返り値は元のデータグラムの長さ（5）。送信元のポートは bind したポート。
+    let r = run(&format!(
+        "  let fd = {UDP_SOCK};\n  if fd < 3 {{ return 0 - 1; }}\n{SOCKADDR}  let r1 = raw.syscall(49, fd, raw.addr_to_int(sa), 16, 0, 0, 0);\n  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 16);\n  let r2 = raw.syscall(51, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);\n  if r1 != 0 || r2 != 0 {{ return 0 - 2; }}\n  let port = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));\n  let pay = raw.alloc(8, 8);\n  raw.store_u8(pay, 7);\n  raw.store_u8(raw.offset(pay, 1), 8);\n  raw.store_u8(raw.offset(pay, 2), 9);\n  raw.store_u8(raw.offset(pay, 3), 10);\n  raw.store_u8(raw.offset(pay, 4), 11);\n  let s = raw.syscall(44, fd, raw.addr_to_int(pay), 5, 16384, raw.addr_to_int(sa), 16);\n{RECV_AREAS}  let n = raw.syscall(45, fd, raw.addr_to_int(buf), 64, 32, raw.addr_to_int(src), raw.addr_to_int(al));\n  let sport = raw.load_u8(raw.offset(src, 2)) * 256 + raw.load_u8(raw.offset(src, 3));\n  let a0 = raw.load_u8(buf);\n  let a4 = raw.load_u8(raw.offset(buf, 4));\n  let alv = raw.load_u8(al);\n  let c = raw.syscall(3, fd, 0, 0, 0, 0, 0);\n  if port <= 0 {{ return 0 - 3; }}\n  if s != 5 {{ return 0 - 4; }}\n  if sport != port {{ return 0 - 5; }}\n  if alv != 16 {{ return 0 - 6; }}\n  if c != 0 {{ return 0 - 7; }}\n  return n * 10000 + a0 * 100 + a4;"
+    ));
+    assert_eq!(r.unwrap(), "50711");
+}
+
+#[test]
+fn udp_sendto_shape_is_checked() {
+    // 許す形（ENOTSOCK = -88 が返れば、表と領域の検査を通っている）: 空、1 バイト、上限ちょうどの 65507 バイト。
+    for len in [0, 1, 16] {
+        assert_eq!(
+            run(&udp_send(1, len, MSG_NOSIGNAL, 16)).unwrap(),
+            "-88",
+            "len={len}"
+        );
+    }
+    let big = run(&format!(
+        "{DST}  let p = raw.alloc(65507, 8);\n  raw.set(p, 0, 65507);\n  let r = raw.syscall(44, 1, raw.addr_to_int(p), 65507, 16384, raw.addr_to_int(dst), 16);\n  raw.free(p, 65507, 8);\n  return r;"
+    ));
+    assert_eq!(big.unwrap(), "-88");
+    // 拒否: フラグ（0、MSG_NOSIGNAL 以外の組み合わせ）、宛先の長さ（0、8、28）、上限超過、負の長さ。
+    for flags in [0, MSG_NOSIGNAL | 1, MSG_NOSIGNAL | MSG_TRUNC, MSG_TRUNC] {
+        stops(&udp_send(1, 1, flags, 16), "sendto");
+    }
+    for dlen in [0, 8, 28] {
+        stops(&udp_send(1, 1, MSG_NOSIGNAL, dlen), "sendto");
+    }
+    stops(&udp_send(1, 65508, MSG_NOSIGNAL, 16), "sendto");
+    stops(&udp_send(1, -1, MSG_NOSIGNAL, 16), "sendto");
+}
+
+#[test]
+fn udp_sendto_destination_family_and_ranges_are_checked() {
+    // 家族が AF_INET でない宛先（AF_INET6 = 10、0）は拒否する。
+    for fam in [10, 0, 1] {
+        stops(
+            &format!(
+                "{DST}  raw.store_u8(dst, {fam});\n  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 1, raw.addr_to_int(p), 4, 16384, raw.addr_to_int(dst), 16);"
+            ),
+            "AF_INET",
+        );
+    }
+    // 宛先が 16 バイトに満たない・解放済み・範囲外。
+    stops(
+        "  let dst = raw.alloc(8, 8);\n  raw.set(dst, 0, 8);\n  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 1, raw.addr_to_int(p), 4, 16384, raw.addr_to_int(dst), 16);",
+        "範囲外",
+    );
+    stops(
+        &format!(
+            "{DST}  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  let d = raw.addr_to_int(dst);\n  raw.free(dst, 16, 8);\n  return raw.syscall(44, 1, raw.addr_to_int(p), 4, 16384, d, 16);"
+        ),
+        "範囲外",
+    );
+    stops(
+        "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 1, raw.addr_to_int(p), 4, 16384, 4096, 16);",
+        "範囲外",
+    );
+    // 送信バッファが範囲外・解放済み。
+    stops(
+        &format!(
+            "{DST}  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 1, raw.addr_to_int(p), 9, 16384, raw.addr_to_int(dst), 16);"
+        ),
+        "範囲外",
+    );
+    stops(
+        &format!(
+            "{DST}  let p = raw.alloc(8, 8);\n  let a = raw.addr_to_int(p);\n  raw.free(p, 8, 8);\n  return raw.syscall(44, 1, a, 4, 16384, raw.addr_to_int(dst), 16);"
+        ),
+        "範囲外",
+    );
+}
+
+#[test]
+fn udp_recvfrom_shape_is_checked() {
+    // 許す形（ENOTSOCK = -88）: 1 バイト、上限ちょうどの 65507 バイト。
+    assert_eq!(run(&udp_recv(1, 1, MSG_TRUNC)).unwrap(), "-88");
+    let big = run(
+        "  let buf = raw.alloc(65507, 8);\n  let src = raw.alloc(16, 8);\n  raw.set(src, 0, 16);\n  let al = raw.alloc(8, 8);\n  raw.store_i64(al, 16);\n  let r = raw.syscall(45, 1, raw.addr_to_int(buf), 65507, 32, raw.addr_to_int(src), raw.addr_to_int(al));\n  raw.free(buf, 65507, 8);\n  return r;",
+    );
+    assert_eq!(big.unwrap(), "-88");
+    // 拒否: フラグ（0、MSG_TRUNC 以外、MSG_TRUNC との組み合わせ）、バッファの長さ（0、上限超過、負）。
+    for flags in [0, 2, MSG_TRUNC | 2, MSG_NOSIGNAL] {
+        stops(&udp_recv(1, 4, flags), "recvfrom");
+    }
+    for len in [0, 65508, -1] {
+        stops(&udp_recv(1, len, MSG_TRUNC), "recvfrom");
+    }
+    // 長さ領域は 16 に初期化したものだけ（0、28、17）。
+    for v in [0, 28, 17] {
+        stops(
+            &format!(
+                "{RECV_AREAS}  raw.store_i64(al, {v});\n  return raw.syscall(45, 1, raw.addr_to_int(buf), 4, 32, raw.addr_to_int(src), raw.addr_to_int(al));"
+            ),
+            "addrlen",
+        );
+    }
+    // 送信元の領域を渡さない形（NULL）は TCP の形で、フラグが MSG_TRUNC なら拒否する。
+    stops(
+        &format!(
+            "{RECV_AREAS}  return raw.syscall(45, 1, raw.addr_to_int(buf), 4, 32, 0, raw.addr_to_int(al));"
+        ),
+        "recvfrom",
+    );
+}
+
+#[test]
+fn udp_recvfrom_regions_must_be_live_in_range_and_disjoint() {
+    // 三領域それぞれの範囲外（小さすぎる）と解放済み。
+    stops(
+        "  let buf = raw.alloc(8, 8);\n  let src = raw.alloc(16, 8);\n  let al = raw.alloc(8, 8);\n  raw.store_i64(al, 16);\n  return raw.syscall(45, 1, raw.addr_to_int(buf), 9, 32, raw.addr_to_int(src), raw.addr_to_int(al));",
+        "範囲外",
+    );
+    stops(
+        "  let buf = raw.alloc(8, 8);\n  let src = raw.alloc(8, 8);\n  let al = raw.alloc(8, 8);\n  raw.store_i64(al, 16);\n  return raw.syscall(45, 1, raw.addr_to_int(buf), 8, 32, raw.addr_to_int(src), raw.addr_to_int(al));",
+        "範囲外",
+    );
+    stops(
+        "  let buf = raw.alloc(8, 8);\n  let src = raw.alloc(16, 8);\n  let al = raw.alloc(2, 1);\n  return raw.syscall(45, 1, raw.addr_to_int(buf), 8, 32, raw.addr_to_int(src), raw.addr_to_int(al));",
+        "範囲外",
+    );
+    for freed in ["buf", "src", "al"] {
+        stops(
+            &format!(
+                "{RECV_AREAS}  let b = raw.addr_to_int(buf);\n  let s = raw.addr_to_int(src);\n  let a = raw.addr_to_int(al);\n  raw.free({freed}, 64, 8);\n  return raw.syscall(45, 1, b, 4, 32, s, a);"
+            )
+            .replace("raw.free(src, 64, 8)", "raw.free(src, 16, 8)")
+            .replace("raw.free(al, 64, 8)", "raw.free(al, 8, 8)"),
+            "範囲外",
+        );
+    }
+    // 範囲外の番地（小さい整数）。
+    stops(
+        &format!("{RECV_AREAS}  return raw.syscall(45, 1, raw.addr_to_int(buf), 4, 32, 4096, raw.addr_to_int(al));"),
+        "範囲外",
+    );
+    // 非重複: 三領域が同じ塊の中で重なるときは、それぞれが範囲内で生きていても拒否する。
+    // 各組は (受信バッファの位置, 長さ, 送信元の位置, 長さ領域の位置)。長さ領域には 16 を書いてから呼ぶ。
+    let recv_in_big = |buf_off: i64, len: i64, src_off: i64, al_off: i64| {
+        format!(
+            "  let big = raw.alloc(256, 8);\n  raw.set(big, 0, 256);\n  raw.store_u8(raw.offset(big, {al_off}), 16);\n  return raw.syscall(45, 1, raw.addr_to_int(raw.offset(big, {buf_off})), {len}, 32, raw.addr_to_int(raw.offset(big, {src_off})), raw.addr_to_int(raw.offset(big, {al_off})));"
+        )
+    };
+    for (buf_off, len, src_off, al_off) in [
+        (0, 32, 0, 64),   // 送信元が受信バッファと同じ番地
+        (0, 32, 16, 64),  // 送信元の先頭が受信バッファの内側
+        (8, 4, 0, 64),    // 受信バッファが送信元の内側
+        (0, 32, 64, 8),   // 長さ領域が受信バッファの内側
+        (64, 8, 96, 100), // 長さ領域が送信元の内側
+        (64, 8, 96, 64),  // 長さ領域が受信バッファの先頭と同じ
+        (0, 33, 32, 100), // 受信バッファの末尾 1 バイトが送信元の先頭に入る
+    ] {
+        stops(&recv_in_big(buf_off, len, src_off, al_off), "重ならない");
+    }
+    // 隣り合うだけ（重ならない）なら通る。同じ塊に並べた 3 領域。
+    assert_eq!(run(&recv_in_big(0, 32, 32, 48)).unwrap(), "-88");
+    assert_eq!(run(&recv_in_big(100, 32, 0, 16)).unwrap(), "-88");
+}
+
+#[test]
+fn tcp_forms_of_sendto_and_recvfrom_are_kept() {
+    // 相手のアドレスを渡さない TCP の形は、UDP の追加後も同じ条件で通る（ENOTSOCK = -88）。
+    let r = run(
+        "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  let a = raw.syscall(44, 1, raw.addr_to_int(p), 8, 16384, 0, 0);\n  let b = raw.syscall(45, 1, raw.addr_to_int(p), 8, 0, 0, 0);\n  raw.free(p, 8, 8);\n  return a * 1000 + b;",
+    );
+    assert_eq!(r.unwrap(), "-88088");
+    // 宛先の長さだけを渡す、送信元の長さだけを渡す形（片方だけ）は TCP の形ではない。
+    stops(
+        "  let p = raw.alloc(8, 8);\n  raw.set(p, 0, 8);\n  return raw.syscall(44, 1, raw.addr_to_int(p), 8, 16384, 0, 16);",
+        "sendto",
+    );
+    stops(
+        "  let p = raw.alloc(8, 8);\n  return raw.syscall(45, 1, raw.addr_to_int(p), 8, 0, 0, 4096);",
+        "recvfrom",
     );
 }

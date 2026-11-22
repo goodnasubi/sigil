@@ -1,8 +1,9 @@
-//! Issue #687: 暗号部品の作業コピーを破棄時にゼロ化する（HMAC・PBKDF2・HKDF）
+//! Issue #687 / #692: 暗号部品の作業コピーを破棄時にゼロ化する（HMAC・PBKDF2・HKDF・SHA-256）
 //!
 //! hmac_sha256・verify_hmac_sha256・pbkdf2_sha256・hkdf_sha256（Extract / Expand）
-//! および内部 HMAC（hmac_any_key・hmac_from_pads）において、Secret.expose() の複製と
-//! 導出途中の作業バッファ（kb, ipad, opad, inner_hash, msg, u, t, okm 等）が
+//! および内部 HMAC（hmac_any_key・hmac_from_pads）、sha256 において、
+//! Secret.expose() の複製と導出途中の作業バッファ（kb, ipad, opad, inner_hash, msg, u, t, okm 等）、
+//! SHA-256 メッセージスケジュール w、パディングバッファ padded、および中間・最終状態（done, ih, oh, ist, ost）が
 //! 破棄時に Secret として取り込まれ、確実にゼロ化されることを検証する。
 
 mod common;
@@ -12,6 +13,21 @@ use sigil::exec::Arg;
 const HEAD: &str = "module crypto_erasure.t\n  targets server\n  trust none\n\n";
 
 #[test]
+fn sha256_working_copies_erased_as_secret() {
+    let src = format!(
+        "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let mut msg = Bytes.new();\n  msg.push(0x61);\n  let h = sha256(&msg);\n  return h.byte_len();\n}}\n"
+    );
+    let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+    let secret_drops = drops.iter().filter(|d| *d == "Secret(***)").count();
+    // sha256 内部で w_wipe（各ブロック）、done_wipe、padded_wipe が Secret としてゼロ化・破棄される
+    assert!(
+        secret_drops >= 3,
+        "sha256 の作業コピー（w, padded, done）が Secret(***) として破棄されていない: count={secret_drops}, drops={drops:?}"
+    );
+}
+
+#[test]
 fn hmac_working_copies_erased_as_secret() {
     let src = format!(
         "{HEAD}fn main() -> Int\n  intent \"x\"\n  requires none\n  ensures none\n  effects none\n{{\n  let mut kb = Bytes.new();\n  let mut i = 0;\n  while i < 32 {{\n    kb.push(i + 1);\n    i = i + 1;\n  }}\n  let key = Secret.from_bytes(kb);\n  let mut msg = Bytes.new();\n  msg.push(0x61);\n  let mac = hmac_sha256(&key, &msg);\n  return mac.byte_len();\n}}\n"
@@ -19,9 +35,9 @@ fn hmac_working_copies_erased_as_secret() {
     let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
     assert_eq!(got.code, Some(0), "{}", got.stderr);
     let secret_drops = drops.iter().filter(|d| *d == "Secret(***)").count();
-    // key, mac に加えて、作業コピー（kb, inner, outer, inner_hash）が Secret としてゼロ化・破棄される
+    // key, mac に加えて、作業コピー（kb, inner, outer, inner_hash）および sha256 内部の作業バッファ（w, padded, done）が Secret としてゼロ化・破棄される
     assert!(
-        secret_drops >= 5,
+        secret_drops >= 10,
         "hmac_sha256 の作業コピーが Secret(***) として破棄されていない: count={secret_drops}, drops={drops:?}"
     );
 }
@@ -34,9 +50,9 @@ fn verify_hmac_working_copies_erased_as_secret() {
     let (got, drops) = common::native::native_drops(&[&src], "main", &[] as &[Arg]);
     assert_eq!(got.code, Some(0), "{}", got.stderr);
     let secret_drops = drops.iter().filter(|d| *d == "Secret(***)").count();
-    // key, verify 内の mac, 作業コピー群, got_wipe が Secret としてゼロ化・破棄される
+    // key, verify 内の mac, 作業コピー群, sha256 内部バッファ, got_wipe が Secret としてゼロ化・破棄される
     assert!(
-        secret_drops >= 6,
+        secret_drops >= 11,
         "verify_hmac_sha256 の作業コピーが Secret(***) として破棄されていない: count={secret_drops}, drops={drops:?}"
     );
 }
@@ -66,9 +82,10 @@ fn pbkdf2_working_copies_erased_as_secret() {
     assert_eq!(got.code, Some(0), "{}", got.stderr);
     let secret_drops = drops.iter().filter(|d| *d == "Secret(***)").count();
     // password, dk に加え、ipad_wipe, opad_wipe, kb_wipe, msg_wipe, 反復ごとの old_u_wipe / old_t_wipe,
-    // 終了時の u_wipe, t_wipe, out_wipe など多数の作業コピーが Secret としてゼロ化・破棄される
+    // hmac_from_pads 内の ih_wipe / oh_wipe / inner_wipe / outer_wipe / w_wipe、終了時の ist_wipe / ost_wipe / u_wipe / t_wipe / out_wipe
+    // など多数の作業コピーが Secret としてゼロ化・破棄される
     assert!(
-        secret_drops >= 100,
+        secret_drops >= 1000,
         "pbkdf2 の作業コピーが Secret(***) として破棄されていない: count={secret_drops}"
     );
 }

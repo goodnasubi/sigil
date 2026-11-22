@@ -189,15 +189,18 @@ pub fn sha256(data: &Bytes) -> Bytes
   st.push(0x1f83d9ab);
   st.push(0x5be0cd19);
   let done = sha256_compress(&st, &padded, padded.byte_len() / 64);
-  let mut out = Bytes.new();
-  out.push_u32_be(done.get(0).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(1).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(2).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(3).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(4).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(5).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(6).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(done.get(7).map(|x| x + 0).unwrap_or(0));
+  let mut done_b = Bytes.new();
+  done_b.push_u32_be(done.get(0).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(1).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(2).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(3).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(4).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(5).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(6).map(|x| x + 0).unwrap_or(0));
+  done_b.push_u32_be(done.get(7).map(|x| x + 0).unwrap_or(0));
+  let out = done_b.clone();
+  let done_wipe = Secret.from_bytes(done_b);
+  let padded_wipe = Secret.from_bytes(padded);
   return out;
 }
 
@@ -338,6 +341,7 @@ pub fn sha256_compress(st: &List<Int>, data: &Bytes, block_count: Int) -> List<I
     next.push((cur.get(6).map(|x| x + 0).unwrap_or(0) + g) & 0xFFFFFFFF);
     next.push((cur.get(7).map(|x| x + 0).unwrap_or(0) + h) & 0xFFFFFFFF);
     cur = next;
+    let w_wipe = Secret.from_bytes(w);
     blk = blk + 1;
   }
   return cur;
@@ -442,32 +446,36 @@ fn hmac_from_pads(ist: &List<Int>, ost: &List<Int>, message: &Bytes) -> Bytes
   }
   inner.push_u64_be((64 + message.byte_len()) * 8);
   let ih = sha256_compress(&ist, &inner, inner.byte_len() / 64);
-  let mut outer = Bytes.new();
-  outer.push_u32_be(ih.get(0).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(1).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(2).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(3).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(4).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(5).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(6).map(|x| x + 0).unwrap_or(0));
-  outer.push_u32_be(ih.get(7).map(|x| x + 0).unwrap_or(0));
+  let mut ih_b = Bytes.new();
+  ih_b.push_u32_be(ih.get(0).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(1).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(2).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(3).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(4).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(5).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(6).map(|x| x + 0).unwrap_or(0));
+  ih_b.push_u32_be(ih.get(7).map(|x| x + 0).unwrap_or(0));
+  let mut outer = ih_b.clone();
   outer.push(0x80);
   while outer.byte_len() % 64 != 56 {
     outer.push(0);
   }
   outer.push_u64_be((64 + 32) * 8);
   let oh = sha256_compress(&ost, &outer, outer.byte_len() / 64);
-  let mut out = Bytes.new();
-  out.push_u32_be(oh.get(0).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(1).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(2).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(3).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(4).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(5).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(6).map(|x| x + 0).unwrap_or(0));
-  out.push_u32_be(oh.get(7).map(|x| x + 0).unwrap_or(0));
+  let mut oh_b = Bytes.new();
+  oh_b.push_u32_be(oh.get(0).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(1).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(2).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(3).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(4).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(5).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(6).map(|x| x + 0).unwrap_or(0));
+  oh_b.push_u32_be(oh.get(7).map(|x| x + 0).unwrap_or(0));
+  let out = oh_b.clone();
   let inner_wipe = Secret.from_bytes(inner);
   let outer_wipe = Secret.from_bytes(outer);
+  let ih_wipe = Secret.from_bytes(ih_b);
+  let oh_wipe = Secret.from_bytes(oh_b);
   return out;
 }
 
@@ -548,8 +556,28 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
     blk = blk + 1;
   }
   let key = out.slice(0, dk_len).unwrap_or(Bytes.new());
+  let mut ist_b = Bytes.new();
+  ist_b.push_u32_be(ist.get(0).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(1).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(2).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(3).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(4).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(5).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(6).map(|x| x + 0).unwrap_or(0));
+  ist_b.push_u32_be(ist.get(7).map(|x| x + 0).unwrap_or(0));
+  let mut ost_b = Bytes.new();
+  ost_b.push_u32_be(ost.get(0).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(1).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(2).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(3).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(4).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(5).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(6).map(|x| x + 0).unwrap_or(0));
+  ost_b.push_u32_be(ost.get(7).map(|x| x + 0).unwrap_or(0));
   let ret = Secret.from_bytes(key);
   let out_wipe = Secret.from_bytes(out);
+  let ist_wipe = Secret.from_bytes(ist_b);
+  let ost_wipe = Secret.from_bytes(ost_b);
   return ret;
 }
 

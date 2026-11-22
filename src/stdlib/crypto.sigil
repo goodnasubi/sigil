@@ -529,3 +529,94 @@ pub fn pbkdf2_sha256(password: &Secret, salt: &Bytes, iterations: Int, dk_len: I
   let key = out.slice(0, dk_len).unwrap_or(Bytes.new());
   return Secret.from_bytes(key);
 }
+
+// ---------------------------------------------------------------------------
+// HKDF-SHA-256（ADR 0058 決定 2・3、段 1a）。RFC 5869。
+//
+// 引数の型について: ADR 0058 決定 2 のとおり `salt: Option<Secret>`
+// （所有権を取り、使い終えたら破棄時にゼロ化される）。言語は `Option<&T>` を
+// 戻り値の位置にしか許さない（ADR 0012 決定 1）ため、借用の形にはできない。
+//
+// Extract は任意長の salt と IKM を受け付け、salt の省略（`None`）は
+// HashLen（32）バイトのゼロ列として扱う（RFC 5869 §2.2）。公開の
+// `hmac_sha256` は鍵 32 バイト以上を要求する（ADR 0024 決定 2）ため
+// 使わず、任意長の鍵を扱う内部の `hmac_any_key` を使う。`hmac_sha256` の
+// 公開契約と実装は変えない。PRK は `Secret` を 1 つ持つ型に包み、破棄時の
+// ゼロ化は中の `Secret` に任せる。表示の性質は持たせない。
+//
+// 秘密は salt・IKM・PRK・出力。公開は info・out_len・各長さ（ADR 0058
+// 決定 3）。ループの回数と添字は out_len と各長さだけから決まる。
+
+pub struct HkdfSha256Prk {
+  key: Secret,
+}
+
+// 範囲: 任意長の鍵（0 バイトを含む）による HMAC-SHA-256（RFC 2104）。
+// ブロック長 64 バイトを超える鍵は SHA-256 で圧縮し、足りなければゼロで
+// 詰める。分岐は鍵の長さ（公開）にだけ依存する。
+fn hmac_any_key(key: &Bytes, message: &Bytes) -> Bytes
+  intent "任意長の鍵で HMAC-SHA-256 を計算する（HKDF の内部用）"
+  requires none
+  ensures result.byte_len() == 32
+  effects none
+{
+  let mut kb = key.clone();
+  if kb.byte_len() > 64 {
+    kb = sha256(&kb);
+  }
+  while kb.byte_len() < 64 {
+    kb.push(0);
+  }
+  let mut ipad = Bytes.new();
+  let mut opad = Bytes.new();
+  let mut i = 0;
+  while i < 64 {
+    let b = kb.get(i).map(|x| x + 0).unwrap_or(0);
+    ipad.push(b ^ 0x36);
+    opad.push(b ^ 0x5C);
+    i = i + 1;
+  }
+  let mut inner = ipad;
+  inner.extend(&message);
+  let inner_hash = sha256(&inner);
+  let mut outer = opad;
+  outer.extend(&inner_hash);
+  return sha256(&outer);
+}
+
+pub fn hkdf_extract_sha256(salt: Option<Secret>, ikm: &Secret) -> HkdfSha256Prk
+  intent "HKDF-SHA-256 の Extract で擬似乱数鍵 PRK を作る"
+  requires none
+  ensures none
+  effects none
+{
+  // 省略（`None`）は空の鍵として扱う。HMAC は鍵を 64 バイトへゼロ詰めする
+  // ので、空の鍵と HashLen 個のゼロは同じ鍵（RFC 5869 §2.2 と同値）。
+  // こうすると、salt の有無による分岐が要らない（対象表の規則 R1）。
+  let sb = salt.map(|s| s.expose()).unwrap_or(Bytes.new());
+  let prk = hmac_any_key(&sb, &ikm.expose());
+  return HkdfSha256Prk { key: Secret.from_bytes(prk) };
+}
+
+pub fn hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret
+  intent "HKDF-SHA-256 の Expand で出力鍵素材 OKM を作る"
+  requires out_len >= 0 && out_len <= 8160
+  ensures result.byte_len() == out_len
+  effects none
+{
+  let kb = prk.key.expose();
+  let blocks = (out_len + 31) / 32;
+  let mut okm = Bytes.new();
+  let mut t = Bytes.new();
+  let mut n = 1;
+  while n <= blocks {
+    let mut msg = t.clone();
+    msg.extend(&info);
+    msg.push(n);
+    t = hmac_any_key(&kb, &msg);
+    okm.extend(&t);
+    n = n + 1;
+  }
+  let out = okm.slice(0, out_len).unwrap_or(Bytes.new());
+  return Secret.from_bytes(out);
+}

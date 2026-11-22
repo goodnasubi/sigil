@@ -86,6 +86,12 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     // 引数の状態・メッセージはすべて秘密、長さは公開。
     ("std.crypto.hmac_from_pads", &[]),
     ("std.crypto.verify_hmac_sha256", &[]),
+    // HKDF-SHA-256（ADR 0058 決定 3、段 1a）。salt・IKM・PRK・出力が秘密、
+    // info と out_len は公開。内部の `hmac_any_key` は任意長の鍵による
+    // HMAC で、鍵・メッセージとも秘密、長さは公開。
+    ("std.crypto.hmac_any_key", &[]),
+    ("std.crypto.hkdf_extract_sha256", &[]),
+    ("std.crypto.hkdf_expand_sha256", &["info", "out_len"]),
     // 塩・回数・出力の長さは公開（ADR 0020 決定 1 の対象表）。
     (
         "std.crypto.pbkdf2_sha256",
@@ -608,6 +614,8 @@ fn probe() -> Int
   let h = hmac_sha256(&s, &b);
   let ok = verify_hmac_sha256(&s, &b, &d);
   let p = pbkdf2_sha256(&s, &b, 4096, 32);
+  let prk = hkdf_extract_sha256(None, &s);
+  let okm = hkdf_expand_sha256(&prk, &b, 32);
   let reply = respond(&s, &b, &b);
   let checked = verify(&s, &b);
   let initial = first(&b);

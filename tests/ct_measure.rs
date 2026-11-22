@@ -1,5 +1,5 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
-//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合）
+//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256）
 //! および陽性の対照（素の `cmp_early`、HMAC包み `verify_hmac_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
@@ -84,6 +84,7 @@ enum CmpTarget {
     Scram,
     Hmac,
     Bearer,
+    Hkdf,
 }
 
 const CMP_EARLY: &str = "\
@@ -178,6 +179,16 @@ fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
             msg = pushes("msg", &MSG),
             diff_at = diff_at,
         ),
+        // HKDF-SHA-256（ADR 0058 決定 3、段 1a）。IKM が秘密の入力（組 A は
+        // 先頭、組 B は末尾のバイトだけ反転）、salt は固定の秘密、info と
+        // out_len（42）と各長さは公開で組の間で同じ。Extract と Expand の
+        // 両方を通す。
+        CmpTarget::Hkdf => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_salt}{raw_ikm}{info}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let salt = Secret.from_bytes(raw_salt.clone());\n    let ikm = Secret.from_bytes(raw_ikm.clone());\n    let prk = hkdf_extract_sha256(Some(salt), &ikm);\n    let okm = hkdf_expand_sha256(&prk, &info, 42);\n    acc = acc + okm.byte_len();\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            raw_salt = pushes("raw_salt", &KEY),
+            raw_ikm = pushes("raw_ikm", &input),
+            info = pushes("info", &MSG),
+        ),
     }
 }
 
@@ -246,6 +257,8 @@ const DEFAULT_ITERS: usize = 40_000;
 // 陽性の対照（verify_hmac_early）で感度確保を目的とした設定（実測での検証対象。定数時間側の差の調査は Issue #674）。
 const DEFAULT_HMAC_SAMPLES: usize = 80;
 const DEFAULT_HMAC_ITERS: usize = 1_250;
+/// HKDF（Extract + 2 ブロックの Expand）は HMAC 約 3 回分の計算なので、反復を絞る。
+const DEFAULT_HKDF_ITERS: usize = 400;
 
 fn get_iters(default: usize) -> usize {
     std::env::var("SIGIL_CT_ITERS")
@@ -394,6 +407,19 @@ fn ct_measure_bearer() {
 
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_hkdf() {
+    let iters = get_iters(DEFAULT_HKDF_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::Hkdf, "hkdf", iters, samples);
+    println!(
+        "HKDF-SHA-256 (std.crypto.hkdf_extract_sha256 + hkdf_expand_sha256, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(t.abs() < 4.5, "HKDF に時間の差が出た: t = {t:.2}");
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn dudect_compare_timing() {
     // 互換性のための全対象一括実行
     ct_measure_positive_control();
@@ -402,4 +428,5 @@ fn dudect_compare_timing() {
     ct_measure_scram();
     ct_measure_hmac();
     ct_measure_bearer();
+    ct_measure_hkdf();
 }

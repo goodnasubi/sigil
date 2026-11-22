@@ -708,6 +708,8 @@ impl<'a> L<'a> {
                 if r.name == "net.listen"
                     || r.name == "net.connect"
                     || r.name == "net.shutdown_signal"
+                    || r.name == "net.udp_bind"
+                    || r.name == "net.udp_open"
                     || r.name == "random.bytes"
                     || r.name == "clock.unix_seconds"
                 {
@@ -1039,7 +1041,7 @@ impl<'a> L<'a> {
             // 単相化の後でしか分からないので、ここでも止める（複製すると 1 つの fd を 2 回閉じる）。
             if self.owns_fd(&ty, &mut Vec::new()) {
                 return bail(
-                    "`TcpListener`・`TcpStream` を中に持つ値は `clone` できない（1 つの値が 1 つの接続を所有する。ADR 0031 決定 3-1）",
+                    "`TcpListener`・`TcpStream`・`UdpSocket`・`UdpClient` など fd を所有する値を中に持つ値は `clone` できない（1 つの値が 1 つの fd を所有する。ADR 0031 決定 3-1、ADR 0057 決定 1）",
                 );
             }
             return Ok(self.fresh(Rvalue::Clone(Operand::Copy(p), ty.clone()), ty));

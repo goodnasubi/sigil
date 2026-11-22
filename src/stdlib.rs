@@ -92,6 +92,11 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // ADR 0034 決定 4: 接続側専用の所有型。
     ("TcpClient", 0, Layer::Os),
     ("NetError", 0, Layer::Os),
+    // UDP（ADR 0057 決定 1）。`UdpSocket`・`UdpClient` は 1 つの値が 1 つの fd を所有し、破棄で閉じる（`TcpClient` と同じ性質）。
+    // `UdpReceiveError` は腕を `match` できる列挙（`UDP_RECEIVE_ERROR_ARMS`）。
+    ("UdpSocket", 0, Layer::Os),
+    ("UdpClient", 0, Layer::Os),
+    ("UdpReceiveError", 0, Layer::Os),
     // HTTP/1.1 の解釈と型（ADR 0032 決定 2、PR 6-3g-b）。中身は `std.http`・`std.http.limits` の Sigil 実装が持つ（`TcpStream` と
     // 同じ作法）。型の名前は平らな名前空間（ADR 0021）で利用者の型と衝突しないよう `Http` で始め、前置きの名前にする
     // （利用者は宣言できない）。`HttpError`・`HttpProgress` は腕を `match` できる列挙で、検査器はこの行を列挙として登録し直す
@@ -201,6 +206,14 @@ pub const JSON_TYPES: &[&str] = &["JsonValue", "JsonNode", "JsonField"];
 
 /// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ。
 pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
+/// `UdpReceiveError` の腕（ADR 0057 決定 2）。並びは `std.os.net` の宣言と同じ。
+pub const UDP_RECEIVE_ERROR_ARMS: &[&str] = &[
+    "DatagramTooLarge",
+    "AddrInUse",
+    "PermissionDenied",
+    "Closed",
+    "Other",
+];
 /// fd を所有する型（結合後の名前。`std.os.net` と `std.os.fs`）。値の破棄で `close(2)` を 1 回呼ぶ
 /// （ネイティブは破棄の関数が `NET_CLOSE_FN` を呼び、評価器は値の破棄で閉じる）。
 pub const FD_TYPES: &[&str] = &[
@@ -208,6 +221,8 @@ pub const FD_TYPES: &[&str] = &[
     "std.os.net.ShutdownSignal",
     "std.os.net.TcpStream",
     "std.os.net.TcpClient",
+    "std.os.net.UdpSocket",
+    "std.os.net.UdpClient",
     "std.os.fs.File",
     "std.os.fs.Dir",
 ];
@@ -564,6 +579,9 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "net", "shutdown_signal() -> Result<ShutdownSignal, NetError>", "net.server"),
     // ADR 0034 決定 4: 実効果を接続側と乱数で分ける。既存サーバー側 API の意味は変えない。
     (Layer::Os, "net", "connect(host: &String, port: Int) -> Result<TcpClient, NetError>", "net.client, task.suspend"),
+    // UDP（ADR 0057 決定 1）。実体は `std.os.net.udp_bind`・`udp_open`（lower が名前で結ぶ）。
+    (Layer::Os, "net", "udp_bind(host: &String, port: Int) -> Result<UdpSocket, NetError>", "net.server"),
+    (Layer::Os, "net", "udp_open() -> Result<UdpClient, NetError>", "net.client"),
     (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
     // ADR 0037 段階 6-6a: 最小壁時計入口。
     (Layer::Os, "clock", "unix_seconds() -> Option<Int>", "clock"),
@@ -608,6 +626,27 @@ pub const REQUIRES: &[(&str, &str)] = &[
     (
         "read(self: &mut TcpClient, max: Int) -> Result<Bytes, NetError>",
         "1 <= max && max <= 65536",
+    ),
+    // UDP の契約（ADR 0057 決定 1）。65507 は IPv4 の UDP ペイロードの上限。
+    (
+        "udp_bind(host: &String, port: Int) -> Result<UdpSocket, NetError>",
+        "0 <= port && port <= 65535",
+    ),
+    (
+        "send_to(self: &mut UdpSocket, data: &Bytes, host: &String, port: Int) -> Result<Unit, NetError>",
+        "1 <= port && port <= 65535 && data.byte_len() <= 65507",
+    ),
+    (
+        "send_to(self: &mut UdpClient, data: &Bytes, host: &String, port: Int) -> Result<Unit, NetError>",
+        "1 <= port && port <= 65535 && data.byte_len() <= 65507",
+    ),
+    (
+        "recv_from(self: &mut UdpSocket, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>",
+        "1 <= max && max <= 65507",
+    ),
+    (
+        "recv_from(self: &mut UdpClient, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>",
+        "1 <= max && max <= 65507",
     ),
     (
         "bytes(len: Int) -> Option<Bytes>",
@@ -1088,6 +1127,17 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         ("read(self: &mut TcpClient, max: Int) -> Result<Bytes, NetError>", "net.client, task.suspend"),
         ("write_all(self: &mut TcpClient, data: &Bytes) -> Result<Unit, NetError>", "net.client, task.suspend"),
     ]),
+    // UDP のソケットの操作（ADR 0057 決定 1）。実体は `std.os.net` の `impl`。
+    (Layer::Os, "UdpSocket", &[
+        ("local_port(self: &UdpSocket) -> Int", "net.server"),
+        ("send_to(self: &mut UdpSocket, data: &Bytes, host: &String, port: Int) -> Result<Unit, NetError>", "net.server, task.suspend"),
+        ("recv_from(self: &mut UdpSocket, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>", "net.server, task.suspend"),
+    ]),
+    (Layer::Os, "UdpClient", &[
+        ("local_port(self: &UdpClient) -> Int", "net.client"),
+        ("send_to(self: &mut UdpClient, data: &Bytes, host: &String, port: Int) -> Result<Unit, NetError>", "net.client, task.suspend"),
+        ("recv_from(self: &mut UdpClient, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>", "net.client, task.suspend"),
+    ]),
     // HTTP の型（ADR 0032 決定 2-2・2-3、PR 6-3g-b）。実体は `std.http`・`std.http.limits` の `impl`。取り出す関数は写しを返す。
     (
         Layer::Os,
@@ -1456,6 +1506,18 @@ mod tests {
             "TcpClient",
             "TcpClient.read",
             "TcpClient.write_all",
+            // ADR 0057 決定 1。
+            "net.udp_bind",
+            "net.udp_open",
+            "UdpSocket",
+            "UdpSocket.local_port",
+            "UdpSocket.send_to",
+            "UdpSocket.recv_from",
+            "UdpClient",
+            "UdpClient.local_port",
+            "UdpClient.send_to",
+            "UdpClient.recv_from",
+            "UdpReceiveError",
             "random.bytes",
             // ADR 0037 段階 6-6a。
             "clock.unix_seconds",
@@ -1784,6 +1846,9 @@ mod tests {
                         | "TcpListener"
                         | "TcpStream"
                         | "TcpClient"
+                        | "UdpSocket"
+                        | "UdpClient"
+                        | "UdpReceiveError"
                         | "NetError"
                         | "PgConfig"
                         | "PgConnectLimits"

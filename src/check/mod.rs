@@ -241,6 +241,10 @@ const PRELUDE_TYPES: &[&str] = &[
     "TcpStream",
     "TcpClient",
     "NetError",
+    // UDP の型（ADR 0057 決定 1）。実体は `std.os.net`。
+    "UdpSocket",
+    "UdpClient",
+    "UdpReceiveError",
     // HTTP の型（ADR 0032 決定 2-2）。実体は埋め込みモジュール `std.http`・`std.http.limits` が持つ。`TcpStream` と同じ理由で
     // 前置きの名前にする（`crate::stdlib::HTTP_TYPES` と同じ並び）。
     "HttpLimits",
@@ -286,6 +290,9 @@ pub(crate) const NET_TYPES: &[&str] = &[
     "TcpStream",
     "TcpClient",
     "NetError",
+    "UdpSocket",
+    "UdpClient",
+    "UdpReceiveError",
 ];
 
 /// 埋め込みモジュール `mname` 自身の検査で、宣言と `impl` を許す前置きの型（実体を持つ型）。ほかのモジュールは空。

@@ -1,6 +1,6 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
 //! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合）
-//! および陽性の対照（`cmp_early`）に対して dudect 方式（Welch の t 検定）で計測する。
+//! および陽性の対照（素の `cmp_early`、HMAC包み `verify_hmac_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
 //!
@@ -9,10 +9,10 @@
 //! ```
 //!
 //! 方法（dudect）: 各比較関数について、入力の組を 2 つ用意する。
-//! 組 A は先頭のバイトだけが違い、組 B は末尾のバイトだけが違う。
-//! 2 組を交互に各組 1,000,000 回（既定値: 40,000 回ループ × 25 サンプル）実行し、
+//! 組 A は先頭のバイトだけが違い、組 B は末尾のバイトだけが違う（HMAC 系は実際の MAC の該当位置を反転）。
+//! 2 組を交互に各組実行し（素の比較は 1,000,000 回、HMAC 系は 80,000 回）、
 //! Welch の t 値で判定する（|t| < 4.5 なら差は見つからなかった）。
-//! 陽性の対照（`cmp_early`）では |t| >= 4.5 となり感度が確認される。
+//! 陽性の対照では |t| >= 4.5 となり感度が確認される。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -44,6 +44,20 @@ fn welch_t_math_sanity() {
     assert!(welch_t(&a, &c).abs() >= 4.5);
 }
 
+#[test]
+fn fixture_signatures_match_stdlib() {
+    let pg_scram = include_str!("../src/stdlib/pg_scram.sigil");
+    assert!(
+        pg_scram.contains(SCRAM_SIG.trim()),
+        "SCRAM_SIG が src/stdlib/pg_scram.sigil と一致していません"
+    );
+    let web = include_str!("../src/stdlib/web.sigil");
+    assert!(
+        web.contains(BEARER_SIG.trim()),
+        "BEARER_SIG が src/stdlib/web.sigil と一致していません"
+    );
+}
+
 const KEY: [i64; 32] = [
     3, 10, 17, 24, 31, 38, 45, 52, 59, 66, 73, 80, 87, 94, 101, 108, 115, 122, 129, 136, 143, 150,
     157, 164, 171, 178, 185, 192, 199, 206, 213, 220,
@@ -65,6 +79,7 @@ fn pushes(name: &str, bytes: &[i64]) -> String {
 #[derive(Clone, Copy, Debug)]
 enum CmpTarget {
     Early,
+    EarlyHmac,
     CtEq,
     Scram,
     Hmac,
@@ -86,6 +101,19 @@ fn cmp_early(a: &Bytes, b: &Bytes) -> Bool
     i = i + 1;
   }
   return true;
+}
+";
+
+const HMAC_EARLY: &str = "\
+fn verify_hmac_early(key: &Secret, message: &Bytes, expected: &Bytes) -> Bool
+  intent \"HMAC 計算後に早期リターンで比較する（陽性の対照）\"
+  requires key.byte_len() >= 32
+  ensures none
+  effects none
+{
+  let mac = hmac_sha256(&key, &message);
+  let got = mac.expose();
+  return cmp_early(&got, &expected);
 }
 ";
 
@@ -122,6 +150,12 @@ fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
             key = pushes("key", &KEY),
             input = pushes("input", &input),
         ),
+        CmpTarget::EarlyHmac => format!(
+            "module {{MODULE}}\n  targets server\n  trust none\n\n{CMP_EARLY}\n{HMAC_EARLY}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}  let mut input = hmac_sha256(&key, &msg).expose();\n  let b = input.get({diff_at}).unwrap_or(0);\n  let _ = input.set({diff_at}, b ^ 255);\n  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match verify_hmac_early(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            raw_key = pushes("raw_key", &KEY),
+            msg = pushes("msg", &MSG),
+            diff_at = diff_at,
+        ),
         CmpTarget::CtEq => format!(
             "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{key}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match ct_eq(&input, &key) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
             key = pushes("key", &KEY),
@@ -133,16 +167,16 @@ fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
             input = pushes("input", &input),
         ),
         CmpTarget::Hmac => format!(
-            "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match verify_hmac_sha256(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}  let mut input = hmac_sha256(&key, &msg).expose();\n  let b = input.get({diff_at}).unwrap_or(0);\n  let _ = input.set({diff_at}, b ^ 255);\n  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match verify_hmac_sha256(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
             raw_key = pushes("raw_key", &KEY),
             msg = pushes("msg", &MSG),
-            input = pushes("input", &input),
+            diff_at = diff_at,
         ),
         CmpTarget::Bearer => format!(
-            "module {{MODULE}}\n  targets server\n  trust none\n\n{BEARER_SIG}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}{input}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match ct_bearer_signature(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+            "module {{MODULE}}\n  targets server\n  trust none\n\n{BEARER_SIG}\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}  let key = Secret.from_bytes(raw_key);\n{msg}  let mut input = hmac_sha256(&key, &msg).expose();\n  let b = input.get({diff_at}).unwrap_or(0);\n  let _ = input.set({diff_at}, b ^ 255);\n  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    acc = acc + match ct_bearer_signature(&key, &msg, &input) {{ true => 1, false => 0 }};\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
             raw_key = pushes("raw_key", &KEY),
             msg = pushes("msg", &MSG),
-            input = pushes("input", &input),
+            diff_at = diff_at,
         ),
     }
 }
@@ -207,18 +241,26 @@ fn measure_pair(exe_a: &PathBuf, exe_b: &PathBuf, samples: usize) -> (Vec<f64>, 
 const DEFAULT_SAMPLES: usize = 25;
 const DEFAULT_ITERS: usize = 40_000;
 
-fn get_iters() -> usize {
+// HMAC 系の比較は純粋 Sigil 実装の SHA-256 圧縮関数（Cranelift opt_level: none）を伴い実行時間を要するため、
+// 既定では各組 80,000 回（1,000 回反復 × 80 サンプル）で測定する。
+// 陽性の対照（verify_hmac_early）で |t| >= 4.5 の感度が確認できる十分な回数となっている。
+const DEFAULT_HMAC_SAMPLES: usize = 80;
+const DEFAULT_HMAC_ITERS: usize = 1_000;
+
+fn get_iters(default: usize) -> usize {
     std::env::var("SIGIL_CT_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_ITERS)
+        .filter(|&v| v >= 100)
+        .unwrap_or(default)
 }
 
-fn get_samples() -> usize {
+fn get_samples(default: usize) -> usize {
     std::env::var("SIGIL_CT_SAMPLES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_SAMPLES)
+        .filter(|&v| v >= 5)
+        .unwrap_or(default)
 }
 
 fn measure_target(target: CmpTarget, name: &str, iters: usize, samples: usize) -> f64 {
@@ -227,14 +269,21 @@ fn measure_target(target: CmpTarget, name: &str, iters: usize, samples: usize) -
     let (a, b) = measure_pair(&exe_a, &exe_b, samples);
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
-    welch_t(&a, &b)
+    let ma: f64 = a.iter().sum::<f64>() / a.len() as f64;
+    let mb: f64 = b.iter().sum::<f64>() / b.len() as f64;
+    let t = welch_t(&a, &b);
+    println!(
+        "  [{name}] a mean: {ma:.3} ms, b mean: {mb:.3} ms, diff: {:.3} ms, t = {t:.2}",
+        ma - mb
+    );
+    t
 }
 
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_positive_control() {
-    let iters = get_iters();
-    let samples = get_samples();
+    let iters = get_iters(DEFAULT_ITERS);
+    let samples = get_samples(DEFAULT_SAMPLES);
     let total = iters * samples;
     let t = measure_target(CmpTarget::Early, "cmp_early", iters, samples);
     println!("陽性の対照 (cmp_early, 各組 {total} 回): t = {t:.2}");
@@ -246,9 +295,23 @@ fn ct_measure_positive_control() {
 
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_positive_control_hmac() {
+    let iters = get_iters(DEFAULT_HMAC_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::EarlyHmac, "hmac_early", iters, samples);
+    println!("陽性の対照（HMAC 包み, 各組 {total} 回): t = {t:.2}");
+    assert!(
+        t.abs() >= 4.5,
+        "HMAC 陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_ct_eq() {
-    let iters = get_iters();
-    let samples = get_samples();
+    let iters = get_iters(DEFAULT_ITERS);
+    let samples = get_samples(DEFAULT_SAMPLES);
     let total = iters * samples;
     let t = measure_target(CmpTarget::CtEq, "ct_eq", iters, samples);
     println!("ct_eq (std.core.bytes.ct_equal, 各組 {total} 回): t = {t:.2}");
@@ -258,8 +321,8 @@ fn ct_measure_ct_eq() {
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_scram() {
-    let iters = get_iters();
-    let samples = get_samples();
+    let iters = get_iters(DEFAULT_ITERS);
+    let samples = get_samples(DEFAULT_SAMPLES);
     let total = iters * samples;
     let t = measure_target(CmpTarget::Scram, "scram_sig", iters, samples);
     println!("SCRAM 照合 (std.pg_scram.ct_signature, 各組 {total} 回): t = {t:.2}");
@@ -269,8 +332,8 @@ fn ct_measure_scram() {
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_hmac() {
-    let iters = get_iters();
-    let samples = get_samples();
+    let iters = get_iters(DEFAULT_HMAC_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
     let total = iters * samples;
     let t = measure_target(CmpTarget::Hmac, "hmac_verify", iters, samples);
     println!("HMAC 照合 (std.crypto.verify_hmac_sha256, 各組 {total} 回): t = {t:.2}");
@@ -280,8 +343,8 @@ fn ct_measure_hmac() {
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_bearer() {
-    let iters = get_iters();
-    let samples = get_samples();
+    let iters = get_iters(DEFAULT_HMAC_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
     let total = iters * samples;
     let t = measure_target(CmpTarget::Bearer, "bearer_sig", iters, samples);
     println!("ベアラー署名照合 (std.web.ct_bearer_signature, 各組 {total} 回): t = {t:.2}");
@@ -296,6 +359,7 @@ fn ct_measure_bearer() {
 fn dudect_compare_timing() {
     // 互換性のための全対象一括実行
     ct_measure_positive_control();
+    ct_measure_positive_control_hmac();
     ct_measure_ct_eq();
     ct_measure_scram();
     ct_measure_hmac();

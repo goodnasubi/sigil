@@ -1,0 +1,290 @@
+module test.ratelimit659
+  targets server
+  trust none
+
+fn private_handler(req: &AppRequest) -> HttpResponse
+  intent "検証済み主体のみを返す"
+  requires none
+  ensures none
+  effects none
+{
+  match req.identity() {
+    Some(identity) => { return HttpResponse.new(200, identity.subject().as_bytes()); }
+    None => { return HttpResponse.new(500, "missing identity".as_bytes()); }
+  }
+}
+fn public_handler(req: &AppRequest) -> HttpResponse
+  intent "公開経路に主体を付けない"
+  requires none
+  ensures none
+  effects none
+{
+  match req.identity() {
+    Some(_) => { return HttpResponse.new(500, "unexpected identity".as_bytes()); }
+    None => { return HttpResponse.new(200, "public".as_bytes()); }
+  }
+}
+fn before(req: &AppRequest) -> Option<HttpResponse>
+  intent "成功後だけ前処理を実行する"
+  requires none
+  ensures none
+  effects console
+{ console.log(&"before"); return None; }
+fn after(req: &AppRequest, response: HttpResponse) -> HttpResponse
+  intent "成功応答にだけ印を付ける"
+  requires none
+  ensures none
+  effects console
+{ console.log(&"after"); return response.with_header(&"x-after", &"safe".as_bytes()); }
+fn configured() -> Result<Router, ConfigError>
+  intent "すべての起動確認を待受より前に行う"
+  requires none
+  ensures none
+  effects env, clock
+{
+  let config = web.load_bearer_config()?;
+  let verifier = config.into_verifier()?;
+  let mut router = Router.new().with_auth(verifier);
+  router = router.route("GET", "/private", RouteHandler { handle: private_handler }).unwrap_or(Router.new());
+  router = router.public_route("GET", "/public", RouteHandler { handle: public_handler }).unwrap_or(Router.new());
+  router = router.before(BeforeHook { run: before }).after(AfterHook { run: after });
+  return Ok(router);
+}
+fn describe(response: HttpResponse) -> String
+  intent "試験用の最終応答を全見出しと本文で比較する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut text = response.body();
+  let headers = response.headers();
+  let mut i = 0;
+  while i < headers.len() {
+    match headers.get(i) {
+      Some(h) => { text = text.concat(&"|".as_bytes()).concat(&h.name().as_bytes()).concat(&":".as_bytes()).concat(&h.value()); }
+      None => {}
+    }
+    i = i + 1;
+  }
+  return text.to_string_utf8().unwrap_or("invalid utf8");
+}
+fn wire(path: &String, auth: &String) -> String
+  intent "試験用の要求テキストを組み立てる"
+  requires none
+  ensures none
+  effects none
+{
+  let text = "GET ".as_bytes().concat(&path.as_bytes()).concat(&" HTTP/1.1\r\nHost: local\r\n".as_bytes()).concat(&auth.as_bytes()).concat(&"\r\n".as_bytes());
+  return text.to_string_utf8().unwrap_or("");
+}
+fn dispatch_text(router: &Router, text: &String) -> HttpResponse
+  intent "要求テキストを解釈して振り分ける"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let mut parser = http.parser(&http.default_limits());
+  match parser.feed(&text.as_bytes(), 0) {
+    Ok(progress) => {
+      match progress {
+        HttpProgress.Done(req, _) => { return router.dispatch(&req); }
+        HttpProgress.NeedMore => { return HttpResponse.new(500, "incomplete".as_bytes()); }
+      }
+    }
+    Err(_) => { return HttpResponse.new(500, "parse error".as_bytes()); }
+  }
+}
+fn bad_wire() -> String
+  intent "常に失敗する認証の要求"
+  requires none
+  ensures none
+  effects none
+{ return wire(&"/private", &"Authorization: Bearer invalid\r\n"); }
+fn good_wire(token: &String) -> String
+  intent "正しいトークンの要求"
+  requires none
+  ensures none
+  effects none
+{
+  let auth = "Authorization: Bearer ".as_bytes().concat(&token.as_bytes()).concat(&"\r\n".as_bytes());
+  return wire(&"/private", &auth.to_string_utf8().unwrap_or(""));
+}
+fn count_failures(router: &Router, n: Int) -> Int
+  intent "失敗する要求を n 回送り、401 の数を返す"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let bad = bad_wire();
+  let mut count = 0;
+  let mut i = 0;
+  while i < n {
+    if dispatch_text(&router, &bad).status() == 401 { count = count + 1; }
+    i = i + 1;
+  }
+  return count;
+}
+fn num(value: Int) -> String
+  intent "数を文字列にする"
+  requires none
+  ensures none
+  effects none
+{
+  let mut reverse = Bytes.new();
+  let mut n = value;
+  if n == 0 { reverse.push(48); }
+  while n > 0 {
+    reverse.push(48 + n % 10);
+    n = n / 10;
+  }
+  let mut digits = Bytes.new();
+  let mut i = reverse.byte_len();
+  while i > 0 {
+    i = i - 1;
+    digits.push(reverse.get(i).unwrap_or(48));
+  }
+  return digits.to_string_utf8().unwrap_or("");
+}
+fn scenario(token: String) -> String
+  intent "固定時刻: 100回まで401、101回目から429、正しいトークンも429、公開経路は200"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let count = count_failures(&router, 100);
+      let limited = describe(dispatch_text(&router, &bad_wire()));
+      let good = describe(dispatch_text(&router, &good_wire(&token)));
+      let public = describe(dispatch_text(&router, &wire(&"/public", &"")));
+      return num(count).as_bytes().concat(&";".as_bytes()).concat(&limited.as_bytes()).concat(&";".as_bytes()).concat(&good.as_bytes()).concat(&";".as_bytes()).concat(&public.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
+fn mixed(token: String) -> String
+  intent "成功は数えず戻しもしない: 失敗99回の後の成功は200、その後の失敗で100回目が401、次が429"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let count = count_failures(&router, 99);
+      let success = describe(dispatch_text(&router, &good_wire(&token)));
+      let hundredth = describe(dispatch_text(&router, &bad_wire()));
+      let limited = describe(dispatch_text(&router, &bad_wire()));
+      return num(count).as_bytes().concat(&";".as_bytes()).concat(&success.as_bytes()).concat(&";".as_bytes()).concat(&hundredth.as_bytes()).concat(&";".as_bytes()).concat(&limited.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
+fn window_edge(token: String) -> String
+  intent "差替え時計用: 100回失敗の後、開始+59秒では429（残り1秒）、+60秒では401へ戻る"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let count = count_failures(&router, 100);
+      let at59 = describe(dispatch_text(&router, &bad_wire()));
+      let at60 = describe(dispatch_text(&router, &bad_wire()));
+      return num(count).as_bytes().concat(&";".as_bytes()).concat(&at59.as_bytes()).concat(&";".as_bytes()).concat(&at60.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
+fn rewound(token: String) -> String
+  intent "差替え時計用: 100回失敗の後、時計が1時間戻っても新しいウィンドウで401が続く"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let count = count_failures(&router, 100);
+      let at_rewound = describe(dispatch_text(&router, &bad_wire()));
+      let next = describe(dispatch_text(&router, &bad_wire()));
+      return num(count).as_bytes().concat(&";".as_bytes()).concat(&at_rewound.as_bytes()).concat(&";".as_bytes()).concat(&next.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
+fn many_failures(token: String) -> String
+  intent "時計失敗時用: 150回失敗しても429にならず固定401のまま"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let count = count_failures(&router, 150);
+      let last = describe(dispatch_text(&router, &bad_wire()));
+      return num(count).as_bytes().concat(&";".as_bytes()).concat(&last.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
+fn shared_scenario(token: String) -> String
+  intent "SyncShared で共有した二つの持ち手からの失敗が合算され、合計100回で制限が効く"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let shared = SyncShared.new(router);
+      let first = shared.borrow();
+      let second = shared.borrow();
+      let a = count_failures(&first, 60);
+      let b = count_failures(&second, 40);
+      let limited = describe(dispatch_text(&first, &bad_wire()));
+      return num(a + b).as_bytes().concat(&";".as_bytes()).concat(&limited.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
+fn custom_429(token: String) -> String
+  intent "利用者定義の検証器が返した429はRouterがそのまま通す（意図した挙動）"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let verifier = AuthVerifier { verify: move |req| Err(web.error_response(429).with_header(&"retry-after", &"5".as_bytes())) };
+  let mut router = Router.new().with_auth(verifier);
+  router = router.route("GET", "/private", RouteHandler { handle: private_handler }).unwrap_or(Router.new());
+  return describe(dispatch_text(&router, &bad_wire()));
+}
+fn serve_two() -> Int
+  intent "実 serve 経路の形: 共有した Router を二つの接続で使い、制限の状態が接続をまたいで共有される"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task, net.server
+{
+  match configured() {
+    Err(e) => { console.log(&e.name()); return 1; }
+    Ok(router) => {
+      let shared = SyncShared.new(router);
+      match net.listen(&"127.0.0.1", 0, 4) {
+        Err(_) => { return 2; }
+        Ok(listener) => {
+          console.log(&listener.local_port());
+          let mut c = 0;
+          while c < 2 {
+            match listener.accept() {
+              Err(_) => { return 3; }
+              Ok(stream) => {
+                let conn = http.conn(stream);
+                let router_ref = shared.clone();
+                http.serve_conn(&conn, &http.default_limits(), move |req| { let r = router_ref.borrow(); return r.dispatch(&req); });
+              }
+            }
+            c = c + 1;
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}

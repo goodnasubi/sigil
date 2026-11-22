@@ -1233,8 +1233,8 @@ fn clif_aes_sbox_and_ghash_mul_have_no_division_and_bounded_branches() {
     };
     let sbox_defs = slice("fn aes_xtime(", "fn aes_expand_key(");
     let ghash_defs = slice("fn ghash_mul(", "fn ghash_words(");
-    // GHASH の乗算は `List` の読み書き（単相化された汎用の部品）を呼ぶため、差分に
-    // その部品の命令が入り、SIR の項だけでは分岐の上限を見積もれない。除算の不在だけを見る。
+    // GHASH の乗算は `List` の読み書き（組み込みの部品）を呼ぶため、その展開の分岐を
+    // `reach_branch_budget` の組み込み呼び出しの許容で見積もる（以前は見積もれず無効だった）。
     for (tag, defs, call, names, check_branches) in [
         (
             "aessbox",
@@ -1248,15 +1248,147 @@ fn clif_aes_sbox_and_ghash_mul_have_no_division_and_bounded_branches() {
             ghash_defs,
             "ghash_mul(&List.new(), &List.new()).len()".to_string(),
             vec!["ghash_mul"],
-            false,
+            true,
         ),
     ] {
         let delta = clif_delta(tag, &defs, &call);
         assert_eq!(delta.div, 0, "{tag} の CLIF に除算命令がある: {delta:?}");
-        let limit = budget(&names);
+        let limit = if tag == "ghashmul" {
+            2 + reach_branch_budget(&program, &reachable_funcs(&program, "std.crypto.ghash_mul"))
+        } else {
+            budget(&names)
+        };
         assert!(
             !check_branches || delta.branch <= limit,
             "{tag} の CLIF 分岐 {} が SIR の予算 {limit} を超えた: {delta:?}",
+            delta.branch
+        );
+    }
+}
+
+/// 入口の関数から `Callee::Func` の呼び出しで推移的に届く関数の番号（入口を含む）。
+fn reachable_funcs(program: &Program, entry: &str) -> Vec<usize> {
+    let root = program
+        .funcs
+        .iter()
+        .position(|f| f.name == entry)
+        .unwrap_or_else(|| panic!("{entry} がコーパスにない"));
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for b in &program.funcs[id].blocks {
+            if let Term::Call {
+                func: Callee::Func(callee),
+                ..
+            } = &b.term
+            {
+                stack.push(*callee);
+            }
+            for st in &b.stmts {
+                if let Stmt::Assign(_, Rvalue::MakeClosure(callee, _)) = st {
+                    stack.push(*callee);
+                }
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// 届く関数すべての、SIR の項から説明できる条件分岐の数の上限。関数ごとに入口の公開
+/// スタック境界分岐が 1 つ、分岐・検査つき演算・表明は 1 つ、呼び出しは異常停止の
+/// 伝播を含めて 2 つ、破棄は 1 つ（`src/codegen/func/drop.rs`）。
+fn reach_branch_budget(program: &Program, reach: &[usize]) -> usize {
+    reach
+        .iter()
+        .map(|id| {
+            1 + program.funcs[*id]
+                .blocks
+                .iter()
+                .map(|b| {
+                    let drops = b
+                        .stmts
+                        .iter()
+                        .filter(|s| matches!(s, Stmt::Drop(_)))
+                        .count();
+                    drops
+                        + match &b.term {
+                            Term::Branch(..)
+                            | Term::Switch(..)
+                            | Term::CheckedOp { .. }
+                            | Term::Assert { .. } => 1,
+                            // 標準ライブラリの部品（`List` の読み書きなど）は、呼び出し先の本体が
+                            // CLIF へ展開され、添字の範囲検査と拡張の分岐を伴う。
+                            Term::Call {
+                                func: Callee::Builtin(_),
+                                ..
+                            } => 4,
+                            Term::Call { .. } => 2,
+                            _ => 0,
+                        }
+                })
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// AES-128-GCM の公開入口（seal・open）から呼ばれる関数すべて（鍵展開・ブロック暗号化・
+/// CTR・GHASH・タグ生成・照合・標準ライブラリの部品）を、ネイティブ生成した CLIF で検査する。
+/// 差分の方法（入口を呼ぶ版と呼ばない版の CLIF の差）は、入口が推移的に呼ぶ全命令を数える。
+/// 見るのは次の 3 つ。
+/// 1. SIR で、入口から届く除算・剰余の除数がすべて定数（秘密を除数にしない）。
+/// 2. CLIF の除算・剰余命令の数が、SIR の除算・剰余の数を超えない（生成が足さない）。
+/// 3. CLIF の条件分岐の数が、届く関数すべての SIR の項から説明できる範囲に収まる
+///    （関数ごとに入口の公開スタック境界分岐が 1 つ、分岐・検査つき演算・表明は 1 つ、
+///    呼び出しは 2 つ、破棄は 1 つ）。
+#[test]
+fn clif_aes_gcm_entries_cover_all_callees() {
+    let program = corpus();
+    let key = "match Aes128GcmKey.from_secret(Secret.from_bytes(Bytes.new())) { Err(e) => 0, Ok(key) => match Nonce96.from_slice(&Bytes.new()) { Err(e) => 0, Ok(nonce) => ";
+    let seal = format!("{key}match aes128_gcm_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
+    let open = format!("{key}match aes128_gcm_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
+    for (tag, entry, call) in [
+        ("aesgcmseal", "std.crypto.aes128_gcm_seal", seal),
+        ("aesgcmopen", "std.crypto.aes128_gcm_open", open),
+    ] {
+        let reach = reachable_funcs(&program, entry);
+        let mut sir_div = 0usize;
+        let budget = reach_branch_budget(&program, &reach);
+        for id in &reach {
+            let f = &program.funcs[*id];
+            for b in &f.blocks {
+                if let Term::CheckedOp {
+                    op: ArithOp::Div | ArithOp::Rem,
+                    b: divisor,
+                    ..
+                } = &b.term
+                {
+                    sir_div += 1;
+                    if f.name.starts_with("std.crypto.") {
+                        assert!(
+                            matches!(divisor, Operand::Const(_)),
+                            "{} に定数でない除数の除算・剰余がある",
+                            f.name
+                        );
+                    }
+                }
+            }
+        }
+        let delta = clif_delta(tag, "", &call);
+        eprintln!(
+            "{tag}: funcs={} sir_div={sir_div} budget={budget} {delta:?}",
+            reach.len()
+        );
+        assert!(
+            delta.div <= sir_div,
+            "{tag} の CLIF の除算 {} が SIR の {sir_div} を超えた: {delta:?}",
+            delta.div
+        );
+        assert!(
+            delta.branch <= budget,
+            "{tag} の CLIF 分岐 {} が SIR の予算 {budget} を超えた: {delta:?}",
             delta.branch
         );
     }

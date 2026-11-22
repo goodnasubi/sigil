@@ -664,7 +664,7 @@ fn churn() -> String {
     let s = "héllo".as_bytes();
     match s.to_string_utf8() {
       Ok(t) => {
-        total = total + t.char_count() - 6;
+        total = total + t.byte_len() - 6;
       }
       Err(m) => {
         total = total + 1000;

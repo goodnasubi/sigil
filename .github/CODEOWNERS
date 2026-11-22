@@ -1,8 +1,41 @@
-# コードの所有者（ADR 0020 の W3 の O2。所有者承認 2026-10-26）。
+# コードの所有者（ADR 0018 判断 1 の T2/T3、ADR 0020 の W3 の O2）。
 # 守りの範囲を変えるファイルだけを対象にする。解釈のコードの正しさは、ファジングと上限のテストが確かめる。
 # まだないファイルは予定のパス。ファイルが加わった時点で効く。
+#
+# 所有者承認の運用: 全 PR の作者と所有者が同じ共有アカウント（goodnasubi）のため、
+# GitHub の正式な Code Owner レビュー承認は取得できない。所有者承認は AGENTS.md の
+# 「レビューとマージ」に従い、PR または Issue のコメントへの記録（先行承認を含む）で行う。
+# このファイルは「どのファイルが所有者承認を要するか」の範囲宣言である。
 
 # 定数時間の関数の表（tests/ct_rules.rs）は、所有者の決定（2026-11-03、#271）により対象から外した。
+
+# 原始操作の表（ADR 0018 判断 1 の T2）
+/src/stdlib.rs @goodnasubi
+
+# 許可の一覧（ADR 0018 判断 1 の T2）
+/trust-base.list @goodnasubi
+
+# 信頼基盤の標準ライブラリ（trust base を宣言するモジュール。個別列挙とする。
+# trust none の core_float.sigil / core_int.sigil を含めないため glob は使わない）
+/src/stdlib/core_bytes.sigil @goodnasubi
+/src/stdlib/core_list.sigil @goodnasubi
+/src/stdlib/core_path.sigil @goodnasubi
+/src/stdlib/core_string.sigil @goodnasubi
+/src/stdlib/core_sigil.rs @goodnasubi
+/src/stdlib/os_alloc.sigil @goodnasubi
+/src/stdlib/os_clock.sigil @goodnasubi
+/src/stdlib/os_console.sigil @goodnasubi
+/src/stdlib/os_env.sigil @goodnasubi
+/src/stdlib/os_fs.sigil @goodnasubi
+/src/stdlib/os_io.sigil @goodnasubi
+/src/stdlib/os_net.sigil @goodnasubi
+/src/stdlib/os_random.sigil @goodnasubi
+/src/stdlib/os_sched.sigil @goodnasubi
+/src/stdlib/os_thread.sigil @goodnasubi
+
+# 信頼基盤の強制・検査機構（改変されると検査自体を無力化できるため対象に含める）
+/src/project/trust_base.rs @goodnasubi
+/scripts/trust-base-diff.sh @goodnasubi
 
 # 上限の既定値の置き場所（ADR 0020 の決定 4。ADR 6-3・6-5 で加わる）
 /src/limits.rs @goodnasubi

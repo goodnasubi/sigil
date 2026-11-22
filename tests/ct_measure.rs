@@ -243,7 +243,7 @@ const DEFAULT_ITERS: usize = 40_000;
 
 // HMAC 系の比較は純粋 Sigil 実装の SHA-256 圧縮関数（Cranelift opt_level: none）を伴い実行時間を要するため、
 // 既定では各組 100,000 回（1,250 回反復 × 80 サンプル）で測定する（Issue #672 で共用 runner での感度確保のため 80,000 回から調整）。
-// 陽性の対照（verify_hmac_early）で感度確保を目的とした設定（実測での検証対象）。
+// 陽性の対照（verify_hmac_early）で感度確保を目的とした設定（実測での検証対象。定数時間側の差の調査は Issue #674）。
 const DEFAULT_HMAC_SAMPLES: usize = 80;
 const DEFAULT_HMAC_ITERS: usize = 1_250;
 

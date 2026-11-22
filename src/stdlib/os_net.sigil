@@ -930,3 +930,443 @@ impl TcpClient {
   }
 
 }
+
+// ---------------------------------------------------------------------------
+// UDP（ADR 0057 決定 1〜4）。非接続型。相手はデータグラムごとに指定する。
+//
+// - `UdpSocket`（`net.udp_bind`、`net.server`）と `UdpClient`（`net.udp_open`、`net.client`）は 1 つの値が 1 つの fd を所有する。
+//   fd の番号は見せない。値の破棄で `close_fd` が 1 回呼ばれる（`FD_TYPES` に載る。TCP の型と同じ経路）。
+// - `local_port` は bind した番号を返す。bind 直後に getsockname で読み、読めなければ（`0` なら）値の破棄が fd を閉じて `NetError` を返す。
+//   bind 後の番号は変わらないので、`local_port` は同じ getsockname を読む（TCP の `port_of` と同じ作法）。
+// - 効果は役割別に分ける（`net.server`・`net.client`）。システムコールを発行する補助の関数は、役割ごとに `_s`・`_c` で持つ
+//   （TCP の `recv_once` と `client_recv_once` と同じ作法）。ほかの処理（アドレスの変換・領域の写し・文字列化）は共用する。
+// - 送信は 1 回の `sendto`（`MSG_NOSIGNAL`）。受け付けた長さがペイロード全体と違えば `NetError.Other`。再送も残部の送信もしない。
+// - 受信は 1 回の `recvfrom`（`MSG_TRUNC`）で 1 データグラムを消費する。戻り長が `max` を超えたら、ペイロードは写さず
+//   `UdpReceiveError.DatagramTooLarge` にする。長さ 0 も成功。EAGAIN は `raw.io_wait_fd` で待ってやり直す。EINTR はやり直す。
+// - 生の領域（バッファ・アドレス）は、中断しない補助の関数の中で確保して返す。待機をまたがない。
+// - ホストは IPv4 のドット 10 進だけ（`parse_ipv4`）。それ以外は `NetError.Other`。名前解決はしない。
+// - システムコールの番号（x86-64）: socket 41、bind 49、getsockname 51、recvfrom 45、sendto 44、close 3。
+
+pub struct UdpSocket {
+  fd: Int,
+}
+
+// 接続しない問い合わせ側。IPv4 のワイルドカードの OS が選んだ番号に bind する。
+pub struct UdpClient {
+  fd: Int,
+}
+
+pub enum UdpReceiveError {
+  DatagramTooLarge,
+  AddrInUse,
+  PermissionDenied,
+  Closed,
+  Other,
+}
+
+struct UdpRecvInfo {
+  n: Int,
+  ip: Int,
+  port: Int,
+}
+
+fn udp_classify(r: Int) -> UdpReceiveError
+  intent "負の errno を UdpReceiveError の腕にする。`classify` と同じ分類（DatagramTooLarge は errno からは作らない）"
+  requires none
+  ensures none
+  effects none
+{
+  let e = classify(r);
+  return match e {
+    NetError.AddrInUse => UdpReceiveError.AddrInUse,
+    NetError.PermissionDenied => UdpReceiveError.PermissionDenied,
+    NetError.Closed => UdpReceiveError.Closed,
+    NetError.Other => UdpReceiveError.Other,
+  };
+}
+
+fn udp_bind_fd(fd: Int, ip: Int, port: Int) -> Int
+  intent "fd を IPv4 の ip・port に bind する。成功は 0、失敗は負の errno"
+  requires none
+  ensures none
+  effects none
+  unchecked "fd は呼び出し側が所有する開いた UDP ソケット。0 <= ip < 2^32、0 <= port <= 65535。sockaddr_in の 16 バイトは戻る前に返す。発行するのは bind（49）だけ"
+{
+  let sa = sockaddr(ip, port);
+  let r = raw.syscall(49, fd, raw.addr_to_int(sa), 16, 0, 0, 0);
+  raw.free(sa, 16, 8);
+  return r;
+}
+
+fn udp_recv_info(buf: Addr, src: Addr, alen: Addr, r: Int, max: Int, out: &mut Bytes) -> UdpRecvInfo
+  intent "recvfrom の後始末（共用）。送信元の長さとファミリーを確かめてから読み、n が 0 以上 max 以下のときだけ out へ写す。領域は返さない"
+  requires none
+  ensures none
+  effects none
+  unchecked "buf は max バイト、src は 16 バイト、alen は 8 バイトの生きた領域で、recvfrom は返っている。写すのは r <= max のときの r バイトだけ"
+{
+  let fam = raw.load_u8(src);
+  let l = raw.load_i64(alen) & 4294967295;
+  let port = raw.load_u8(raw.offset(src, 2)) * 256 + raw.load_u8(raw.offset(src, 3));
+  let ip = raw.load_u8(raw.offset(src, 4)) * 16777216 + raw.load_u8(raw.offset(src, 5)) * 65536 + raw.load_u8(raw.offset(src, 6)) * 256 + raw.load_u8(raw.offset(src, 7));
+  let mut n = r;
+  if r >= 0 && (fam != 2 || l != 16) {
+    n = -22;
+  }
+  if n >= 0 && n <= max {
+    append_buffer(buf, n, &mut out);
+  }
+  return UdpRecvInfo { n: n, ip: ip, port: port };
+}
+
+fn push_dec(out: &mut Bytes, v: Int)
+  intent "0〜255 の整数を 10 進の文字として out の末尾へ足す"
+  requires none
+  ensures none
+  effects none
+{
+  if v >= 100 {
+    out.push(48 + v / 100);
+  }
+  if v >= 10 {
+    out.push(48 + (v / 10) % 10);
+  }
+  out.push(48 + v % 10);
+}
+
+fn ipv4_string(ip: Int) -> String
+  intent "32 ビットの IPv4 アドレスを通常のドット 10 進表記にする"
+  requires none
+  ensures none
+  effects none
+{
+  let mut b = Bytes.new();
+  push_dec(&mut b, (ip >> 24) & 255);
+  b.push(46);
+  push_dec(&mut b, (ip >> 16) & 255);
+  b.push(46);
+  push_dec(&mut b, (ip >> 8) & 255);
+  b.push(46);
+  push_dec(&mut b, ip & 255);
+  return b.to_string_utf8().unwrap_or("");
+}
+
+pub fn udp_bind(host: &String, port: Int) -> Result<UdpSocket, NetError>
+  intent "host（IPv4 の数値表記）と port で UDP ソケットを bind する。port が 0 なら OS が空き番号を選ぶ。DNS は引かない"
+  requires 0 <= port && port <= 65535
+  ensures none
+  effects net.server
+  unchecked "socket（41）で得た fd は、すぐ UdpSocket に包む。以後の失敗では値の破棄が閉じる（ここで close を呼ばない）。発行するのは socket・bind・getsockname だけ"
+{
+  let ip = parse_ipv4(&host);
+  if ip < 0 {
+    return Err(NetError.Other);
+  }
+  let fd = raw.syscall(41, 2, 526338, 0, 0, 0, 0);
+  if fd < 0 {
+    return Err(classify(fd));
+  }
+  let s = UdpSocket { fd: fd };
+  let r = udp_bind_fd(s.fd, ip, port);
+  if r < 0 {
+    return Err(classify(r));
+  }
+  if udp_port_s(s.fd) == 0 {
+    return Err(NetError.Other);
+  }
+  return Ok(s);
+}
+
+pub fn udp_open() -> Result<UdpClient, NetError>
+  intent "IPv4 のワイルドカードのポート 0 に bind した UDP ソケットを作る（OS が番号を選ぶ）"
+  requires none
+  ensures none
+  effects net.client
+  unchecked "socket（41）で得た fd は、すぐ UdpClient に包む。以後の失敗では値の破棄が閉じる。発行するのは socket・bind・getsockname だけ"
+{
+  let fd = raw.syscall(41, 2, 526338, 0, 0, 0, 0);
+  if fd < 0 {
+    return Err(classify(fd));
+  }
+  let c = UdpClient { fd: fd };
+  let r = udp_bind_fd(c.fd, 0, 0);
+  if r < 0 {
+    return Err(classify(r));
+  }
+  if udp_port_c(c.fd) == 0 {
+    return Err(NetError.Other);
+  }
+  return Ok(c);
+}
+
+fn udp_port_s(fd: Int) -> Int
+  intent "bind 済みの UDP ソケットの番号を getsockname で読む。失敗・不正は 0（bind 後の番号は 1 以上）"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。sockaddr の 16 バイトと長さの語（16 を入れる）は確保した範囲で、戻る前に返す。発行するのは getsockname（51）だけ"
+{
+  let sa = raw.alloc(16, 8);
+  raw.set(sa, 0, 16);
+  let len = raw.alloc(8, 8);
+  raw.store_i64(len, 16);
+  let r = raw.syscall(51, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);
+  let fam = raw.load_u8(sa);
+  let p = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));
+  let l = raw.load_i64(len) & 4294967295;
+  raw.free(len, 8, 8);
+  raw.free(sa, 16, 8);
+  if r < 0 || fam != 2 || l != 16 {
+    return 0;
+  }
+  return p;
+}
+
+fn udp_send_once_s(fd: Int, data: &Bytes, ip: Int, port: Int) -> Int
+  intent "data 全体を 1 データグラムとして ip・port へ 1 回送る（sendto。MSG_NOSIGNAL）。送れた長さか負の errno。EINTR はやり直す"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いた UDP ソケット。0 <= data.byte_len() <= 65507。送信用領域（長さ 0 でも 1 バイト確保）と宛先の 16 バイトは、確保した範囲だけに書いて戻る前に返す。発行するのは sendto（44）だけ"
+{
+  let k = data.byte_len();
+  let mut cap = k;
+  if cap < 1 {
+    cap = 1;
+  }
+  let buf = raw.alloc(cap, 1);
+  fill_buffer(buf, &data, 0, k);
+  let sa = sockaddr(ip, port);
+  let mut r = -4;
+  while r == -4 {
+    r = raw.syscall(44, fd, raw.addr_to_int(buf), k, 16384, raw.addr_to_int(sa), 16);
+  }
+  raw.free(sa, 16, 8);
+  raw.free(buf, cap, 1);
+  return r;
+}
+
+fn udp_recv_once_s(fd: Int, max: Int, out: &mut Bytes) -> UdpRecvInfo
+  intent "1 データグラムを 1 回受ける（recvfrom。MSG_TRUNC）。n は元のデータグラムの長さか負の errno。n が 0 以上 max 以下のときだけ out へ写す。送信元の IPv4 アドレスと番号を返す"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いた UDP ソケット。1 <= max <= 65507。受信バッファ max バイト・送信元 16 バイト・長さの語 8 バイト（下位 4 バイトに 16 を入れる）は互いに重ならず、戻る前に返す。写すのは n <= max のときの n バイトだけ。発行するのは recvfrom（45）だけ"
+{
+  let buf = raw.alloc(max, 1);
+  let src = raw.alloc(16, 8);
+  raw.set(src, 0, 16);
+  let alen = raw.alloc(8, 8);
+  let mut r = -4;
+  while r == -4 {
+    raw.store_i64(alen, 16);
+    r = raw.syscall(45, fd, raw.addr_to_int(buf), max, 32, raw.addr_to_int(src), raw.addr_to_int(alen));
+  }
+  let info = udp_recv_info(buf, src, alen, r, max, &mut out);
+  raw.free(alen, 8, 8);
+  raw.free(src, 16, 8);
+  raw.free(buf, max, 1);
+  return info;
+}
+
+impl UdpSocket {
+  pub fn local_port(self: &UdpSocket) -> Int
+    intent "bind した番号を返す（getsockname）。bind 後は変わらない"
+    requires none
+    ensures none
+    effects net.server
+  {
+    return udp_port_s(self.fd);
+  }
+
+  pub fn send_to(self: &mut UdpSocket, data: &Bytes, host: &String, port: Int) -> Result<Unit, NetError>
+    intent "data を 1 データグラムとして host（IPv4 数値）の port へ送る。成功は OS が全体を受け付けたこと（配送は保証しない）。EAGAIN は書き込み可能まで待ってやり直す"
+    requires 1 <= port && port <= 65535 && data.byte_len() <= 65507
+    ensures none
+    effects net.server, task.suspend
+    unchecked "self.fd は self が所有する開いた UDP ソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは Int だけ"
+  {
+    let ip = parse_ipv4(&host);
+    if ip < 0 {
+      return Err(NetError.Other);
+    }
+    while true {
+      let r = udp_send_once_s(self.fd, &data, ip, port);
+      if r == data.byte_len() {
+        return Ok(unit());
+      }
+      if r == -11 {
+        if raw.io_wait_fd(self.fd, 4) < 0 {
+          return Err(NetError.Other);
+        }
+      } else if r < 0 {
+        return Err(classify(r));
+      } else {
+        return Err(NetError.Other);
+      }
+    }
+    return Err(NetError.Other);
+  }
+
+  pub fn recv_from(self: &mut UdpSocket, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>
+    intent "1 データグラムを受ける（ペイロード、送信元アドレス、送信元ポート）。来るまで中断する。max を超えるものは全体を消費して DatagramTooLarge（断片は渡さない）"
+    requires 1 <= max && max <= 65507
+    ensures none
+    effects net.server, task.suspend
+    unchecked "self.fd は self が所有する開いた UDP ソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは out（所有の規則に載る Bytes）だけ"
+  {
+    while true {
+      let mut out = Bytes.new();
+      let info = udp_recv_once_s(self.fd, max, &mut out);
+      if info.n > max {
+        return Err(UdpReceiveError.DatagramTooLarge);
+      }
+      if info.n >= 0 {
+        return Ok((out, ipv4_string(info.ip), info.port));
+      }
+      if info.n != -11 {
+        return Err(udp_classify(info.n));
+      }
+      if raw.io_wait_fd(self.fd, 1) < 0 {
+        return Err(UdpReceiveError.Other);
+      }
+    }
+    return Err(UdpReceiveError.Other);
+  }
+}
+
+fn udp_port_c(fd: Int) -> Int
+  intent "bind 済みの UDP ソケットの番号を getsockname で読む。失敗・不正は 0（bind 後の番号は 1 以上）"
+  requires none
+  ensures none
+  effects net.client
+  unchecked "fd は呼び出し側が所有する開いたソケット。sockaddr の 16 バイトと長さの語（16 を入れる）は確保した範囲で、戻る前に返す。発行するのは getsockname（51）だけ"
+{
+  let sa = raw.alloc(16, 8);
+  raw.set(sa, 0, 16);
+  let len = raw.alloc(8, 8);
+  raw.store_i64(len, 16);
+  let r = raw.syscall(51, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);
+  let fam = raw.load_u8(sa);
+  let p = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));
+  let l = raw.load_i64(len) & 4294967295;
+  raw.free(len, 8, 8);
+  raw.free(sa, 16, 8);
+  if r < 0 || fam != 2 || l != 16 {
+    return 0;
+  }
+  return p;
+}
+
+fn udp_send_once_c(fd: Int, data: &Bytes, ip: Int, port: Int) -> Int
+  intent "data 全体を 1 データグラムとして ip・port へ 1 回送る（sendto。MSG_NOSIGNAL）。送れた長さか負の errno。EINTR はやり直す"
+  requires none
+  ensures none
+  effects net.client
+  unchecked "fd は呼び出し側が所有する開いた UDP ソケット。0 <= data.byte_len() <= 65507。送信用領域（長さ 0 でも 1 バイト確保）と宛先の 16 バイトは、確保した範囲だけに書いて戻る前に返す。発行するのは sendto（44）だけ"
+{
+  let k = data.byte_len();
+  let mut cap = k;
+  if cap < 1 {
+    cap = 1;
+  }
+  let buf = raw.alloc(cap, 1);
+  fill_buffer(buf, &data, 0, k);
+  let sa = sockaddr(ip, port);
+  let mut r = -4;
+  while r == -4 {
+    r = raw.syscall(44, fd, raw.addr_to_int(buf), k, 16384, raw.addr_to_int(sa), 16);
+  }
+  raw.free(sa, 16, 8);
+  raw.free(buf, cap, 1);
+  return r;
+}
+
+fn udp_recv_once_c(fd: Int, max: Int, out: &mut Bytes) -> UdpRecvInfo
+  intent "1 データグラムを 1 回受ける（recvfrom。MSG_TRUNC）。n は元のデータグラムの長さか負の errno。n が 0 以上 max 以下のときだけ out へ写す。送信元の IPv4 アドレスと番号を返す"
+  requires none
+  ensures none
+  effects net.client
+  unchecked "fd は呼び出し側が所有する開いた UDP ソケット。1 <= max <= 65507。受信バッファ max バイト・送信元 16 バイト・長さの語 8 バイト（下位 4 バイトに 16 を入れる）は互いに重ならず、戻る前に返す。写すのは n <= max のときの n バイトだけ。発行するのは recvfrom（45）だけ"
+{
+  let buf = raw.alloc(max, 1);
+  let src = raw.alloc(16, 8);
+  raw.set(src, 0, 16);
+  let alen = raw.alloc(8, 8);
+  let mut r = -4;
+  while r == -4 {
+    raw.store_i64(alen, 16);
+    r = raw.syscall(45, fd, raw.addr_to_int(buf), max, 32, raw.addr_to_int(src), raw.addr_to_int(alen));
+  }
+  let info = udp_recv_info(buf, src, alen, r, max, &mut out);
+  raw.free(alen, 8, 8);
+  raw.free(src, 16, 8);
+  raw.free(buf, max, 1);
+  return info;
+}
+
+impl UdpClient {
+  pub fn local_port(self: &UdpClient) -> Int
+    intent "bind した番号を返す（getsockname）。bind 後は変わらない"
+    requires none
+    ensures none
+    effects net.client
+  {
+    return udp_port_c(self.fd);
+  }
+
+  pub fn send_to(self: &mut UdpClient, data: &Bytes, host: &String, port: Int) -> Result<Unit, NetError>
+    intent "data を 1 データグラムとして host（IPv4 数値）の port へ送る。成功は OS が全体を受け付けたこと（配送は保証しない）。EAGAIN は書き込み可能まで待ってやり直す"
+    requires 1 <= port && port <= 65535 && data.byte_len() <= 65507
+    ensures none
+    effects net.client, task.suspend
+    unchecked "self.fd は self が所有する開いた UDP ソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは Int だけ"
+  {
+    let ip = parse_ipv4(&host);
+    if ip < 0 {
+      return Err(NetError.Other);
+    }
+    while true {
+      let r = udp_send_once_c(self.fd, &data, ip, port);
+      if r == data.byte_len() {
+        return Ok(unit());
+      }
+      if r == -11 {
+        if raw.io_wait_fd(self.fd, 4) < 0 {
+          return Err(NetError.Other);
+        }
+      } else if r < 0 {
+        return Err(classify(r));
+      } else {
+        return Err(NetError.Other);
+      }
+    }
+    return Err(NetError.Other);
+  }
+
+  pub fn recv_from(self: &mut UdpClient, max: Int) -> Result<(Bytes, String, Int), UdpReceiveError>
+    intent "1 データグラムを受ける（ペイロード、送信元アドレス、送信元ポート）。来るまで中断する。max を超えるものは全体を消費して DatagramTooLarge（断片は渡さない）"
+    requires 1 <= max && max <= 65507
+    ensures none
+    effects net.client, task.suspend
+    unchecked "self.fd は self が所有する開いた UDP ソケットで、待っている間は借用が生きているので閉じられない。中断をまたいで持つのは out（所有の規則に載る Bytes）だけ"
+  {
+    while true {
+      let mut out = Bytes.new();
+      let info = udp_recv_once_c(self.fd, max, &mut out);
+      if info.n > max {
+        return Err(UdpReceiveError.DatagramTooLarge);
+      }
+      if info.n >= 0 {
+        return Ok((out, ipv4_string(info.ip), info.port));
+      }
+      if info.n != -11 {
+        return Err(udp_classify(info.n));
+      }
+      if raw.io_wait_fd(self.fd, 1) < 0 {
+        return Err(UdpReceiveError.Other);
+      }
+    }
+    return Err(UdpReceiveError.Other);
+  }
+}

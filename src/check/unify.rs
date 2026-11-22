@@ -269,6 +269,8 @@ impl Ck {
                             | "TcpListener"
                             | "TcpStream"
                             | "TcpClient"
+                            | "UdpSocket"
+                            | "UdpClient"
                             | "File"
                             | "Dir"
                     ) =>

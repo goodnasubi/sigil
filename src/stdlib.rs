@@ -72,6 +72,10 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("Aes128GcmKey", 0, Layer::Core),
     ("Nonce96", 0, Layer::Core),
     ("AeadError", 0, Layer::Core),
+    // X25519 の鍵と誤り（ADR 0058 決定 2、段 1c）。実体は `std.crypto` に置く。
+    ("X25519PrivateKey", 0, Layer::Core),
+    ("X25519PublicKey", 0, Layer::Core),
+    ("X25519Error", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -505,6 +509,16 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
         "aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>",
         "none",
     ),
+    (
+        Layer::Core,
+        "x25519_public_key(private: &X25519PrivateKey) -> X25519PublicKey",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "x25519_shared_secret(private: &X25519PrivateKey, peer: &X25519PublicKey) -> Result<Secret, X25519Error>",
+        "none",
+    ),
 ];
 
 /// 名前空間の関数（名前空間, シグネチャ, 効果）。読むだけの引数は `&T` で受ける。
@@ -858,6 +872,27 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         Layer::Core,
         "Nonce96",
         &[("from_slice(b: &Bytes) -> Result<Nonce96, AeadError>", "none")],
+    ),
+    (
+        Layer::Core,
+        "X25519PrivateKey",
+        &[("from_secret(key: Secret) -> Result<X25519PrivateKey, X25519Error>", "none")],
+    ),
+    (
+        Layer::Core,
+        "X25519PublicKey",
+        &[
+            ("from_bytes(bytes: Bytes) -> Result<X25519PublicKey, X25519Error>", "none"),
+            ("as_bytes(self: &X25519PublicKey) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "X25519Error",
+        &[
+            ("is_invalid_key_length(self: &X25519Error) -> Bool", "none"),
+            ("is_all_zero_shared_secret(self: &X25519Error) -> Bool", "none"),
+        ],
     ),
     (
         Layer::Core,

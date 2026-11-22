@@ -89,6 +89,34 @@ jobs:
           SIGIL_FUZZ_ITERS=$((15000 * SCALE)) cargo test --test fuzz_bearer_token fuzz_bearer_token -- --nocapture
         timeout-minutes: 10
 
+      # ADR 0020 決定 2・4（Issue #551）。LSP 枠読み取り（fuzz_lsp_frame）。
+      # 実測: 300,000 件 約 37 秒。共用 runner でも 1〜2 分で完了する。
+      - name: fuzz_lsp_frame（長い実行）
+        run: |
+          SIGIL_FUZZ_ITERS=$((300000 * SCALE)) cargo test --test fuzz_lsp_frame fuzz_lsp_frame -- --nocapture
+        timeout-minutes: 5
+
+      # ADR 0020 決定 2、ADR 0032 決定 7（Issue #551）。HTTP 要求の増分解釈器（fuzz_http_request）。
+      # 評価器を BATCH=64 でまとめて実行。実測: 5,000 件 約 46 秒。共用 runner でも 2 分前後に収まる。
+      - name: fuzz_http_request（長い実行）
+        run: |
+          SIGIL_FUZZ_ITERS=$((5000 * SCALE)) cargo test --test fuzz_http_request fuzz_http_request -- --nocapture
+        timeout-minutes: 8
+
+      # ADR 0020 決定 2・4・5、ADR 0033 判断点 G（Issue #551）。Sigil 製 std.json の評価器・ネイティブ突き合わせ（fuzz_app_json）。
+      # ネイティブビルド（約 45 秒）+ 評価器・ネイティブ実行。実測: 500 件 約 69 秒。共用 runner でも 3 分以内に収まる。
+      - name: fuzz_app_json（長い実行）
+        run: |
+          SIGIL_FUZZ_ITERS=$((500 * SCALE)) cargo test --test fuzz_app_json fuzz_matches_eval_and_native -- --nocapture
+        timeout-minutes: 8
+
+      # ADR 0020 決定 2、ADR 0034 6-5b（Issue #463、Issue #551）。PostgreSQL 通信文の断片化・変異（short_fuzz_fragmentation）。
+      # 評価器で 1 入力ごとに run_with を呼ぶため他より遅い。実測: 128 件 約 71 秒。共用 runner でも 3 分前後に収まる。
+      - name: pg_protocol_463 short_fuzz_fragmentation（長い実行）
+        run: |
+          SIGIL_FUZZ_ITERS=$((128 * SCALE)) cargo test --test pg_protocol_463 short_fuzz_fragmentation -- --nocapture
+        timeout-minutes: 8
+
       - name: depth_limit（release）
         timeout-minutes: 10
         run: cargo test --release --test depth_limit

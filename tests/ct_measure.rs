@@ -87,6 +87,8 @@ enum CmpTarget {
     Hkdf,
     AesGcm,
     AesGcmLeaky,
+    AesGcmFail,
+    AesGcmFailLeaky,
 }
 
 const CMP_EARLY: &str = "\
@@ -215,6 +217,41 @@ fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
             format!(
                 "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}{iv}{aad}{pt}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let key_opt = Aes128GcmKey.from_secret(Secret.from_bytes(raw_key.clone()));\n    match key_opt {{\n      Err(e) => {{ return 0 - 1; }}\n      Ok(key) => {{\n        match Nonce96.from_slice(&iv) {{\n          Err(e) => {{ return 0 - 1; }}\n          Ok(n1) => {{\n            match Nonce96.from_slice(&iv) {{\n              Err(e) => {{ return 0 - 1; }}\n              Ok(n2) => {{\n                match aes128_gcm_seal(&key, n1, &aad, &Secret.from_bytes(pt.clone())) {{\n                  Err(e) => {{ return 0 - 1; }}\n                  Ok(sealed) => {{\n                    match aes128_gcm_open(&key, &n2, &aad, &sealed) {{\n                      Err(e) => {{ return 0 - 1; }}\n                      Ok(o) => {{ acc = acc + o.byte_len(); }}\n                    }}\n{leak}                  }}\n                }}\n              }}\n            }}\n          }}\n        }}\n      }}\n    }}\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
                 raw_key = pushes("raw_key", &input[..16]),
+                iv = pushes("iv", &MSG[..12]),
+                aad = pushes("aad", &MSG[12..20]),
+                pt = pushes("pt", &MSG),
+            )
+        }
+        // AES-128-GCM の認証失敗（ADR 0058 決定 3 の「AEAD のタグ照合では同じ長さと同じ失敗結果で不一致の位置を変える」）。
+        // 鍵・nonce・AAD・平文は両組で同じ。seal が返した `sealed` のタグ（末尾 16 バイト）の 1 バイトだけを変えて open に渡す。
+        // 組 A はタグの先頭（位置 0）、組 B はタグの末尾（位置 15）を改変する。長さも結果（`AuthenticationFailed`）も同じで、
+        // 違うのは改変したタグの位置だけ。open が最初の不一致で打ち切る退行があれば、組の間の所要時間に差が出る。
+        // `AesGcmFailLeaky` は同じ形のまま、タグの末尾が違うとき（組 B）だけ暗号化をもう 1 回する陽性の対照（不一致の位置に依存する
+        // 仕事量の差）。1 バイトの比較の打ち切りそのものは、この計測の分解能（AES 1 回分の仕事量）より小さい。その構造的な
+        // 保証は ct_rules（タグの照合は ct_eq だけを通り、秘密に依存する分岐を持たない）が担い、この計測は「失敗の経路全体の
+        // 所要時間が不一致の位置に依存しないこと」を確かめる。
+        CmpTarget::AesGcmFail | CmpTarget::AesGcmFailLeaky => {
+            let tag_pos = if diff_at <= DIFF_FIRST { 0 } else { 15 };
+            let idx = 32 + tag_pos;
+            let leak = if matches!(target, CmpTarget::AesGcmFailLeaky) {
+                "        if bad.get(47).unwrap_or(0) != sealed.get(47).unwrap_or(0) {
+          match Nonce96.from_slice(&iv) {
+            Err(e) => { return 0 - 1; }
+            Ok(n3) => {
+              match aes128_gcm_seal(&key, n3, &aad, &Secret.from_bytes(pt.clone())) {
+                Err(e) => { return 0 - 1; }
+                Ok(extra) => { acc = acc + 1; }
+              }
+            }
+          }
+        }
+"
+            } else {
+                ""
+            };
+            format!(
+                "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}{iv}{aad}{pt}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let key_opt = Aes128GcmKey.from_secret(Secret.from_bytes(raw_key.clone()));\n    match key_opt {{\n      Err(e) => {{ return 0 - 1; }}\n      Ok(key) => {{\n        match Nonce96.from_slice(&iv) {{\n          Err(e) => {{ return 0 - 1; }}\n          Ok(n1) => {{\n            match Nonce96.from_slice(&iv) {{\n              Err(e) => {{ return 0 - 1; }}\n              Ok(n2) => {{\n                match aes128_gcm_seal(&key, n1, &aad, &Secret.from_bytes(pt.clone())) {{\n                  Err(e) => {{ return 0 - 1; }}\n                  Ok(sealed) => {{\n                    let mut bad = sealed.clone();\n                    let orig = bad.get({idx}).unwrap_or(0);\n                    match bad.set({idx}, (orig + 1) % 256) {{\n                      Err(e) => {{ return 0 - 1; }}\n                      Ok(u) => {{}}\n                    }}\n                    match aes128_gcm_open(&key, &n2, &aad, &bad) {{\n                      Err(e) => {{ acc = acc + 1; }}\n                      Ok(o) => {{ return 0 - 1; }}\n                    }}\n{leak}                  }}\n                }}\n              }}\n            }}\n          }}\n        }}\n      }}\n    }}\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+                raw_key = pushes("raw_key", &KEY[..16]),
                 iv = pushes("iv", &MSG[..12]),
                 aad = pushes("aad", &MSG[12..20]),
                 pt = pushes("pt", &MSG),
@@ -480,6 +517,43 @@ fn ct_measure_aes_gcm() {
 
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_positive_control_aes_gcm_fail() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(
+        CmpTarget::AesGcmFailLeaky,
+        "aes_gcm_fail_leaky",
+        iters,
+        samples,
+    );
+    println!(
+        "陽性の対照（AES-128-GCM 認証失敗の形, タグの不一致位置に依存する仕事量, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() >= 4.5,
+        "AES-128-GCM 認証失敗の陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_aes_gcm_fail() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::AesGcmFail, "aes_gcm_fail", iters, samples);
+    println!(
+        "AES-128-GCM 認証失敗（タグの先頭と末尾の改変, aes128_gcm_open, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() < 4.5,
+        "AES-128-GCM の認証失敗にタグの不一致位置による時間の差が出た: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn dudect_compare_timing() {
     // 互換性のための全対象一括実行
     ct_measure_positive_control();
@@ -491,4 +565,6 @@ fn dudect_compare_timing() {
     ct_measure_hkdf();
     ct_measure_positive_control_aes_gcm();
     ct_measure_aes_gcm();
+    ct_measure_positive_control_aes_gcm_fail();
+    ct_measure_aes_gcm_fail();
 }

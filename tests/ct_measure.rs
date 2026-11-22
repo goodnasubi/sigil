@@ -10,7 +10,7 @@
 //!
 //! 方法（dudect）: 各比較関数について、入力の組を 2 つ用意する。
 //! 組 A は先頭のバイトだけが違い、組 B は末尾のバイトだけが違う（HMAC 系は実際の MAC の該当位置を反転）。
-//! 2 組を交互に各組実行し（素の比較は 1,000,000 回、HMAC 系は 80,000 回）、
+//! 2 組を交互に各組実行し（素の比較は 1,000,000 回、HMAC 系は 100,000 回）、
 //! Welch の t 値で判定する（|t| < 4.5 なら差は見つからなかった）。
 //! 陽性の対照では |t| >= 4.5 となり感度が確認される。
 
@@ -242,10 +242,10 @@ const DEFAULT_SAMPLES: usize = 25;
 const DEFAULT_ITERS: usize = 40_000;
 
 // HMAC 系の比較は純粋 Sigil 実装の SHA-256 圧縮関数（Cranelift opt_level: none）を伴い実行時間を要するため、
-// 既定では各組 80,000 回（1,000 回反復 × 80 サンプル）で測定する。
-// 陽性の対照（verify_hmac_early）で |t| >= 4.5 の感度が確認できる十分な回数となっている。
+// 既定では各組 100,000 回（1,250 回反復 × 80 サンプル）で測定する（Issue #672 で共用 runner での感度確保のため 80,000 回から調整）。
+// 陽性の対照（verify_hmac_early）で感度確保を目的とした設定（実測での検証対象。定数時間側の差の調査は Issue #674）。
 const DEFAULT_HMAC_SAMPLES: usize = 80;
-const DEFAULT_HMAC_ITERS: usize = 1_000;
+const DEFAULT_HMAC_ITERS: usize = 1_250;
 
 fn get_iters(default: usize) -> usize {
     std::env::var("SIGIL_CT_ITERS")

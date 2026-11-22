@@ -1196,7 +1196,9 @@ fn bearer_rate_limited(rate: &BearerRate, now: Int) -> Option<Int>
   ensures none
   effects none
 {
-  if rate.rate_start < 0 || now >= rate.rate_start + 60 { return None; }
+  // 壁時計が巻き戻ったとき（now < rate_start）もウィンドウの外として扱う。
+  // 巻き戻しをウィンドウ内とみなすと、制限が巻き戻し分だけ長く続いてしまう。
+  if rate.rate_start < 0 || now < rate.rate_start || now >= rate.rate_start + 60 { return None; }
   if rate.rate_count < 100 { return None; }
   return Some(rate.rate_start + 60 - now);
 }
@@ -1207,7 +1209,8 @@ fn bearer_rate_note_failure(rate: &mut BearerRate, now: Int)
   ensures none
   effects none
 {
-  if rate.rate_start < 0 || now >= rate.rate_start + 60 {
+  // 壁時計の巻き戻し（now < rate_start）も新しいウィンドウを開く。
+  if rate.rate_start < 0 || now < rate.rate_start || now >= rate.rate_start + 60 {
     rate.rate_start = now;
     rate.rate_count = 1;
     return;

@@ -195,6 +195,22 @@ fn window_edge(token: String) -> String
     }
   }
 }
+fn rewound(token: String) -> String
+  intent "差替え時計用: 100回失敗の後、時計が1時間戻っても新しいウィンドウで401が続く"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task
+{
+  match configured() {
+    Err(e) => { return e.name(); }
+    Ok(router) => {
+      let count = count_failures(&router, 100);
+      let at_rewound = describe(dispatch_text(&router, &bad_wire()));
+      let next = describe(dispatch_text(&router, &bad_wire()));
+      return num(count).as_bytes().concat(&";".as_bytes()).concat(&at_rewound.as_bytes()).concat(&";".as_bytes()).concat(&next.as_bytes()).to_string_utf8().unwrap_or("");
+    }
+  }
+}
 fn many_failures(token: String) -> String
   intent "時計失敗時用: 150回失敗しても429にならず固定401のまま"
   requires none
@@ -228,4 +244,47 @@ fn shared_scenario(token: String) -> String
       return num(a + b).as_bytes().concat(&";".as_bytes()).concat(&limited.as_bytes()).to_string_utf8().unwrap_or("");
     }
   }
+}
+fn custom_429(token: String) -> String
+  intent "利用者定義の検証器が返した429はRouterがそのまま通す（意図した挙動）"
+  requires none
+  ensures none
+  effects clock, console, db, env, random, task
+{
+  let verifier = AuthVerifier { verify: move |req| Err(web.error_response(429).with_header(&"retry-after", &"5".as_bytes())) };
+  let mut router = Router.new().with_auth(verifier);
+  router = router.route("GET", "/private", RouteHandler { handle: private_handler }).unwrap_or(Router.new());
+  return describe(dispatch_text(&router, &bad_wire()));
+}
+fn serve_two() -> Int
+  intent "実 serve 経路の形: 共有した Router を二つの接続で使い、制限の状態が接続をまたいで共有される"
+  requires none
+  ensures none
+  effects env, clock, console, db, random, task, net.server
+{
+  match configured() {
+    Err(e) => { console.log(&e.name()); return 1; }
+    Ok(router) => {
+      let shared = SyncShared.new(router);
+      match net.listen(&"127.0.0.1", 0, 4) {
+        Err(_) => { return 2; }
+        Ok(listener) => {
+          console.log(&listener.local_port());
+          let mut c = 0;
+          while c < 2 {
+            match listener.accept() {
+              Err(_) => { return 3; }
+              Ok(stream) => {
+                let conn = http.conn(stream);
+                let router_ref = shared.clone();
+                http.serve_conn(&conn, &http.default_limits(), move |req| { let r = router_ref.borrow(); return r.dispatch(&req); });
+              }
+            }
+            c = c + 1;
+          }
+        }
+      }
+    }
+  }
+  return 0;
 }

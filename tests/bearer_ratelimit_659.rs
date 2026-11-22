@@ -1,6 +1,8 @@
 //! ADR 0037 / Issue #659: 認証レート制限（60秒で失敗100回まで、超過は429）。
 //! 閾値と方式は typesafe-ai 正式判定（2026-11-22）で計画案どおり確定。
 mod common;
+#[path = "common/serve.rs"]
+mod serve;
 use sigil::exec::Options;
 
 const KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
@@ -123,6 +125,80 @@ fn window_edge_native_shifting_clock() {
         "  if TEST_CALLS <= 101 { return Ok(1700000000); }\n  if TEST_CALLS == 102 { return Ok(1700000059); }\n  return Ok(1700000060);",
     );
     assert_eq!(run_native(&exe), format!("\"100;{LIMITED1};{DENIED}\"\n"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn custom_verifier_429_passes_through_eval() {
+    // 利用者定義の検証器が返した 429 は Router がそのまま通す（意図した挙動）。
+    // 401 などそれ以外は固定 401 に置き換えられる（web_router_478.rs で検証済み）。
+    eval(
+        "custom_429",
+        "too many requests|content-type:text/plain; charset=utf-8|retry-after:5",
+        "",
+    );
+}
+
+#[test]
+fn clock_rewind_opens_new_window_native() {
+    // 起動1回＋失敗100回まで基準時刻、その後の要求で時計が1時間戻る。
+    // 巻き戻しをウィンドウ内とみなす旧挙動なら429（Retry-After 3660）になるが、
+    // 新しいウィンドウとして扱うため401が続く。
+    let (dir, exe) = build_with_clock(
+        "rewound",
+        "bearer659-rewound",
+        "  if TEST_CALLS <= 101 { return Ok(1700000000); }\n  return Ok(1699996400);",
+    );
+    assert_eq!(run_native(&exe), format!("\"100;{DENIED};{DENIED}\"\n"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shared_rate_limit_across_connections_native() {
+    // 実 serve 経路の形: 06-service の serve と同じく、検証器を一度だけ作った
+    // Router を SyncShared で共有し、接続ごとに clone した持ち手で振り分ける。
+    // 接続1で60回、接続2で40回失敗した後の101回目が429なら、状態は接続を
+    // またいで共有されている。接続ごとに分かれていれば101回目は401になる。
+    let (dir, exe) = build_with_clock(
+        "serve_two",
+        "bearer659-serve-two",
+        "  return Ok(1700000000);",
+    );
+    let mut child = std::process::Command::new(&exe)
+        .env_clear()
+        .env("SIGIL_AUTH_HMAC_KEY_HEX", KEY)
+        .env("SIGIL_AUTH_AUDIENCE", "sigil.api")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut err_reader = std::io::BufReader::new(child.stderr.take().unwrap());
+    let err_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut s = String::new();
+        let _ = err_reader.read_to_string(&mut s);
+        s
+    });
+    let mut line = String::new();
+    use std::io::{BufRead, Read};
+    reader.read_line(&mut line).unwrap();
+    let port: u16 = line.trim().parse().unwrap();
+    let bad = "GET /private HTTP/1.1\r\nHost: local\r\nAuthorization: Bearer invalid\r\n\r\n";
+    let first = serve::exchange(port, bad.repeat(60).as_bytes(), 0);
+    assert_eq!(serve::statuses(&first), vec![401; 60]);
+    let second = serve::exchange(port, bad.repeat(41).as_bytes(), 0);
+    let mut want = vec![401; 40];
+    want.push(429);
+    assert_eq!(serve::statuses(&second), want);
+    // 標準出力の読み手を子の終了まで開けておく。先に閉じると子が SIGPIPE で死ぬ。
+    let status = child.wait().unwrap();
+    let stderr = err_thread.join().unwrap();
+    let mut rest = String::new();
+    reader.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "0\n");
+    assert!(status.success(), "status={status} stderr={stderr:?}");
+    assert!(stderr.is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

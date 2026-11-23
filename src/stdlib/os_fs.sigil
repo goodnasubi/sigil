@@ -858,6 +858,64 @@ impl File {
     return Ok(mode_raw & 511);
   }
 
+  pub fn byte_len(self: &File) -> Result<Int, IoError>
+    intent "開いているファイルの現在のバイト長（st_size）を取得する。ディレクトリは IsADirectory、通常ファイル以外は InvalidInput（ADR 0049 決定 8）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fstat(5) を発行し、stat 構造体（144バイト）から st_mode（+24）で種別を確認して st_size（+48、非負の 64 ビット）を読み取り解放する。fd は閉じない"
+  {
+    let stat_buf = raw.alloc(144, 8);
+    let mut st = -4;
+    while st == -4 {
+      st = raw.syscall(5, self.fd, raw.addr_to_int(stat_buf), 0, 0, 0, 0);
+    }
+    if st < 0 {
+      raw.free(stat_buf, 144, 8);
+      return Err(classify_io(st, &self.file_path));
+    }
+    let mode_raw = raw.load_i64(raw.offset(stat_buf, 24));
+    let value = raw.load_i64(raw.offset(stat_buf, 48));
+    raw.free(stat_buf, 144, 8);
+    let file_type = mode_raw & 61440;
+    if file_type == 16384 {
+      return Err(IoError.IsADirectory(self.file_path.clone()));
+    }
+    if file_type != 32768 {
+      return Err(IoError.InvalidInput(self.file_path.clone()));
+    }
+    return Ok(value);
+  }
+
+  pub fn mtime(self: &File) -> Result<Int, IoError>
+    intent "開いているファイルの最終更新時刻（st_mtime）を Unix 秒で取得する。ディレクトリは IsADirectory、通常ファイル以外は InvalidInput（ADR 0049 決定 8）"
+    requires none
+    ensures none
+    effects fs
+    unchecked "fstat(5) を発行し、stat 構造体（144バイト）から st_mode（+24）で種別を確認して st_mtime の秒（+88、64 ビット符号付き）を読み取り解放する。fd は閉じない"
+  {
+    let stat_buf = raw.alloc(144, 8);
+    let mut st = -4;
+    while st == -4 {
+      st = raw.syscall(5, self.fd, raw.addr_to_int(stat_buf), 0, 0, 0, 0);
+    }
+    if st < 0 {
+      raw.free(stat_buf, 144, 8);
+      return Err(classify_io(st, &self.file_path));
+    }
+    let mode_raw = raw.load_i64(raw.offset(stat_buf, 24));
+    let value = raw.load_i64(raw.offset(stat_buf, 88));
+    raw.free(stat_buf, 144, 8);
+    let file_type = mode_raw & 61440;
+    if file_type == 16384 {
+      return Err(IoError.IsADirectory(self.file_path.clone()));
+    }
+    if file_type != 32768 {
+      return Err(IoError.InvalidInput(self.file_path.clone()));
+    }
+    return Ok(value);
+  }
+
   pub fn set_mode(self: &File, mode: Int) -> Result<Unit, IoError>
     intent "既存ファイルの権限ビットを設定する。0o000〜0o777 のみ受け付け、ディレクトリは IsADirectory、通常ファイル以外は InvalidInput（ADR 0049 決定 7）"
     requires none

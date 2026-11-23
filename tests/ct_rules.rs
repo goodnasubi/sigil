@@ -92,6 +92,17 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.crypto.hmac_any_key", &[]),
     ("std.crypto.hkdf_extract_sha256", &[]),
     ("std.crypto.hkdf_expand_sha256", &["info", "out_len"]),
+    // SHA-384 と HKDF-SHA-384（ADR 0058 決定 3、段 2b）。`sha384` の入力、HMAC の鍵・メッセージ、
+    // salt・IKM・PRK・出力は秘密、info と out_len・各長さは公開。圧縮 `sha512_compress` の公開は
+    // ブロックの数 `block_count` だけ、語の読み `sha512_word` の公開は位置 `off` だけ（ラウンド番号と
+    // ブロック位置から決まる）。64 ビット語の加算 `sha512_add5` は引数をすべて秘密として検査する。
+    ("std.crypto.sha384", &[]),
+    ("std.crypto.sha512_compress", &["block_count"]),
+    ("std.crypto.sha512_add5", &[]),
+    ("std.crypto.sha512_word", &["off"]),
+    ("std.crypto.hmac_any_key_sha384", &[]),
+    ("std.crypto.hkdf_extract_sha384", &[]),
+    ("std.crypto.hkdf_expand_sha384", &["info", "out_len"]),
     // AES-128-GCM（ADR 0058 決定 3、段 1b）。鍵・平文・鍵展開・GHASH の状態・認証タグの
     // 計算途中の値は秘密。公開は nonce・AAD・受信した暗号文とタグ・データの長さ・
     // 固定の処理回数。S-box と GHASH は表引きをせず、固定した演算列でマスクを使う。
@@ -715,6 +726,9 @@ fn probe() -> Int
   let p = pbkdf2_sha256(&s, &b, 4096, 32);
   let prk = hkdf_extract_sha256(None, &s);
   let okm = hkdf_expand_sha256(&prk, &b, 32);
+  let d384 = sha384(&b);
+  let prk384 = hkdf_extract_sha384(None, &s);
+  let okm384 = hkdf_expand_sha384(&prk384, &b, 32);
   let aead = aead_probe(&b) + chacha_probe(&b);
   let x25519_public = x25519_probe_public(&b);
   let x25519_shared = x25519_probe_shared(&b);
@@ -722,7 +736,7 @@ fn probe() -> Int
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len() + aead + x25519_public + x25519_shared; }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + d384.byte_len() + okm384.byte_len() + h.byte_len() + p.byte_len() + aead + x25519_public + x25519_shared; }
   return 0;
 }
 
@@ -1464,8 +1478,8 @@ fn clif_aes_gcm_entries_cover_all_callees() {
     let seal = format!("{key}match aes128_gcm_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
     let open = format!("{key}match aes128_gcm_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
     check_aead_clif_entries(&[
-        ("aesgcmseal", "std.crypto.aes128_gcm_seal", seal),
-        ("aesgcmopen", "std.crypto.aes128_gcm_open", open),
+        ("aesgcmseal", &["std.crypto.aes128_gcm_seal"], seal),
+        ("aesgcmopen", &["std.crypto.aes128_gcm_open"], open),
     ]);
 }
 
@@ -1477,15 +1491,43 @@ fn clif_chacha20_poly1305_entries_cover_all_callees() {
     let seal = format!("{key}match chacha20_poly1305_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
     let open = format!("{key}match chacha20_poly1305_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
     check_aead_clif_entries(&[
-        ("chachaseal", "std.crypto.chacha20_poly1305_seal", seal),
-        ("chachaopen", "std.crypto.chacha20_poly1305_open", open),
+        ("chachaseal", &["std.crypto.chacha20_poly1305_seal"], seal),
+        ("chachaopen", &["std.crypto.chacha20_poly1305_open"], open),
     ]);
 }
 
-fn check_aead_clif_entries(cases: &[(&str, &str, String)]) {
+/// SHA-384 と HKDF-SHA-384（ADR 0058 段 2b）も同じ検査で、64 ビット語の加算・圧縮・HMAC・
+/// Extract・Expand まで、公開入口が推移的に呼ぶ全関数を覆う。
+#[test]
+fn clif_sha384_and_hkdf_entries_cover_all_callees() {
+    let extract = "hkdf_extract_sha384(None, &Secret.from_bytes(Bytes.new()))";
+    check_aead_clif_entries(&[
+        (
+            "sha384",
+            &["std.crypto.sha384"],
+            "sha384(&Bytes.new()).byte_len()".to_string(),
+        ),
+        (
+            "hkdf384",
+            &[
+                "std.crypto.hkdf_extract_sha384",
+                "std.crypto.hkdf_expand_sha384",
+            ],
+            format!("hkdf_expand_sha384(&{extract}, &Bytes.new(), 32).byte_len()"),
+        ),
+    ]);
+}
+
+fn check_aead_clif_entries(cases: &[(&str, &[&str], String)]) {
     let program = corpus();
-    for (tag, entry, call) in cases {
-        let reach = reachable_funcs(&program, entry);
+    for (tag, entries, call) in cases {
+        // 入口が複数のとき（Extract と Expand を 1 つの式で呼ぶ場合）は、届く関数の和集合を見る。
+        let mut reach: Vec<usize> = Vec::new();
+        for entry in entries.iter() {
+            reach.extend(reachable_funcs(&program, entry));
+        }
+        reach.sort_unstable();
+        reach.dedup();
         let mut sir_div = 0usize;
         let budget = reach_branch_budget(&program, &reach);
         for id in &reach {

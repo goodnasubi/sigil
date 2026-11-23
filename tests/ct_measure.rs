@@ -1,5 +1,5 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
-//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM、ChaCha20-Poly1305、X25519）
+//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM、ChaCha20-Poly1305、X25519、SHA-384、HKDF-SHA-384）
 //! および陽性の対照（素の `cmp_early`、HMAC包み `verify_hmac_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
@@ -791,6 +791,196 @@ fn ct_measure_chacha20_poly1305_fail() {
     );
 }
 
+/// ADR 0058 決定 3（段 2b）: SHA-384 と HKDF-SHA-384。同じ実行ファイルを環境変数で切り替える（秘密を変える計測を
+/// 2 つの実行ファイルに分けると、配置の差が t に混ざるため。ChaCha20-Poly1305 と同じ作り）。
+///
+/// - `SIGIL_CT_SHA384_SECRET`: 秘密の 32 バイトを、各半バイトを ASCII 0x40〜0x4f に写した 64 文字。
+/// - `SIGIL_CT_SHA384_MODE`: `sha`（`sha384`。秘密を 5 回繰り返した 160 バイトをメッセージにする）か、
+///   `hkdf`（`hkdf_extract_sha384` と `hkdf_expand_sha384`。秘密を salt と IKM にし、96 バイトを出力する）。
+/// - `SIGIL_CT_SHA384_CONTROL`: `1` のとき陽性対照。秘密の先頭バイトのビット 3 が立っているときだけ、同じ計算をもう 1 回
+///   行う（秘密に依存する仕事量の差）。
+///
+/// メッセージ・salt・IKM・info・出力の長さは両組で同じ（公開の入力長を固定する）。
+fn sha384_program(iters: usize) -> String {
+    format!(
+        r#"module {{MODULE}}
+  targets server
+  trust none
+
+fn main() -> Int
+  intent "SHA-384 と HKDF-SHA-384 を計測する"
+  requires none
+  ensures none
+  effects env
+{{
+  let secret_env = env.get(&"SIGIL_CT_SHA384_SECRET");
+  let mode_env = env.get(&"SIGIL_CT_SHA384_MODE");
+  let control_env = env.get(&"SIGIL_CT_SHA384_CONTROL");
+  let encoded = secret_env.unwrap_or("").as_bytes();
+  let hkdf_mode = mode_env.unwrap_or("") == "hkdf";
+  let control = control_env.unwrap_or("") == "1";
+  if encoded.byte_len() != 64 {{ return 1; }}
+  let mut sec = Bytes.new();
+  let mut i = 0;
+  while i < 32 {{
+    let hi = encoded.get(2 * i).unwrap_or(0) & 15;
+    let lo = encoded.get(2 * i + 1).unwrap_or(0) & 15;
+    sec.push((hi << 4) | lo);
+    i = i + 1;
+  }}
+  let mut msg = Bytes.new();
+  let mut r = 0;
+  while r < 5 {{
+    msg.extend(&sec);
+    r = r + 1;
+  }}
+  let mut info = Bytes.new();
+  let mut j = 0;
+  while j < 10 {{
+    info.push(j + 1);
+    j = j + 1;
+  }}
+  let extra = control && (sec.get(0).unwrap_or(0) & 8) != 0;
+  let mut acc = 0;
+  let mut n = 0;
+  while n < {iters} {{
+    if hkdf_mode {{
+      let prk = hkdf_extract_sha384(Some(Secret.from_bytes(sec.clone())), &Secret.from_bytes(sec.clone()));
+      let okm = hkdf_expand_sha384(&prk, &info, 96);
+      acc = acc + okm.byte_len();
+      if extra {{
+        let prk2 = hkdf_extract_sha384(Some(Secret.from_bytes(sec.clone())), &Secret.from_bytes(sec.clone()));
+        let okm2 = hkdf_expand_sha384(&prk2, &info, 96);
+        acc = acc + 0 * okm2.byte_len();
+      }}
+    }} else {{
+      let d = sha384(&msg);
+      acc = acc + d.byte_len();
+      if extra {{
+        let d2 = sha384(&msg);
+        acc = acc + 0 * d2.byte_len();
+      }}
+    }}
+    n = n + 1;
+  }}
+  let want = match hkdf_mode {{ true => {iters} * 96, false => {iters} * 48 }};
+  return match acc == want {{ true => 0, false => 7 }};
+}}
+"#
+    )
+}
+
+/// 同じ実行ファイルを、組 A（固定の秘密: 全ゼロ）と組 B（毎回違う乱数の秘密）の環境で交互（順序は乱数）に
+/// `samples` 回ずつ実行して Welch の t を返す。`mode` は `sha` か `hkdf`。
+fn measure_sha384(exe: &PathBuf, samples: usize, mode: &str, control: bool) -> f64 {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut a = Vec::with_capacity(samples);
+    let mut b = Vec::with_capacity(samples);
+    let timed = |secret: &str, measurements: &mut Vec<f64>| {
+        let mut cmd = Command::new(exe);
+        cmd.env("SIGIL_CT_SHA384_SECRET", secret)
+            .env("SIGIL_CT_SHA384_MODE", mode)
+            .env("SIGIL_CT_SHA384_CONTROL", if control { "1" } else { "0" });
+        let start = Instant::now();
+        let output = cmd
+            .output()
+            .expect("SHA-384 計測用プログラムを実行できない");
+        measurements.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(
+            output.status.success() && output.stdout == b"0\n",
+            "SHA-384 計測用プログラムが失敗: {} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for _ in 0..samples {
+        let mut varied: [u8; 32] = std::array::from_fn(|_| next() as u8);
+        if control {
+            varied[0] |= 8;
+        }
+        let secret_a = chacha_key_env(&[0; 32]);
+        let secret_b = chacha_key_env(&varied);
+        if next() & 1 == 0 {
+            timed(&secret_a, &mut a);
+            timed(&secret_b, &mut b);
+        } else {
+            timed(&secret_b, &mut b);
+            timed(&secret_a, &mut a);
+        }
+    }
+    welch_t(&a, &b)
+}
+
+/// SHA-384（160 バイト = 圧縮 2 回分）は 1 反復が SHA-256 の 3 倍ほど重い（64 ビット語を 32 ビットずつ足す）。
+const DEFAULT_SHA384_ITERS: usize = 100;
+/// HKDF-SHA-384（Extract + 2 ブロックの Expand）は HMAC-SHA-384 が 3 回分。
+const DEFAULT_HKDF384_ITERS: usize = 30;
+
+fn sha384_measure(mode: &str, control: bool) -> (f64, usize, usize) {
+    let iters = match mode {
+        "hkdf" => DEFAULT_HKDF384_ITERS,
+        _ => DEFAULT_SHA384_ITERS,
+    };
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let (dir, exe) = build_exe("sha384", &sha384_program(iters));
+    let t = measure_sha384(&exe, samples, mode, control);
+    let _ = std::fs::remove_dir_all(&dir);
+    (t, samples, iters)
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0058 決定 3）。cargo test --release --test ct_measure ct_measure_positive_control_sha384 -- --ignored --nocapture"]
+fn ct_measure_positive_control_sha384() {
+    let (t, samples, iters) = sha384_measure("sha", true);
+    println!(
+        "陽性の対照（SHA-384 形, 秘密に依存する仕事量, 同一実行ファイル, 各組 {samples} 標本 × {iters} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() >= 4.5,
+        "SHA-384 陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0058 決定 3）。cargo test --release --test ct_measure ct_measure_sha384 -- --ignored --nocapture"]
+fn ct_measure_sha384() {
+    let (t, samples, iters) = sha384_measure("sha", false);
+    println!(
+        "SHA-384 (sha384, 160 バイトのメッセージ, 固定の秘密と乱数の秘密, 同一実行ファイル, 各組 {samples} 標本 × {iters} 回): t = {t:.2}"
+    );
+    assert!(t.abs() < 4.5, "SHA-384 に時間の差が出た: t = {t:.2}");
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0058 決定 3）。cargo test --release --test ct_measure ct_measure_positive_control_hkdf_sha384 -- --ignored --nocapture"]
+fn ct_measure_positive_control_hkdf_sha384() {
+    let (t, samples, iters) = sha384_measure("hkdf", true);
+    println!(
+        "陽性の対照（HKDF-SHA-384 形, 秘密に依存する仕事量, 同一実行ファイル, 各組 {samples} 標本 × {iters} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() >= 4.5,
+        "HKDF-SHA-384 陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0058 決定 3）。cargo test --release --test ct_measure ct_measure_hkdf_sha384 -- --ignored --nocapture"]
+fn ct_measure_hkdf_sha384() {
+    let (t, samples, iters) = sha384_measure("hkdf", false);
+    println!(
+        "HKDF-SHA-384 (hkdf_extract_sha384 + hkdf_expand_sha384 の 96 バイト, 固定の秘密と乱数の秘密, 同一実行ファイル, 各組 {samples} 標本 × {iters} 回): t = {t:.2}"
+    );
+    assert!(t.abs() < 4.5, "HKDF-SHA-384 に時間の差が出た: t = {t:.2}");
+}
+
 /// ADR 0058 決定 3。両組で同じネイティブ実行ファイルを使い、同じ長さの
 /// スカラーを環境変数で渡す。各半バイトを ASCII 0x40〜0x4f に写す。
 fn x25519_program(iters: usize) -> String {
@@ -954,4 +1144,8 @@ fn dudect_compare_timing() {
     ct_measure_chacha20_poly1305();
     ct_measure_positive_control_chacha20_poly1305_fail();
     ct_measure_chacha20_poly1305_fail();
+    ct_measure_positive_control_sha384();
+    ct_measure_sha384();
+    ct_measure_positive_control_hkdf_sha384();
+    ct_measure_hkdf_sha384();
 }

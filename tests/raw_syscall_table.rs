@@ -281,10 +281,14 @@ fn bind_and_getsockname_addresses_must_be_in_range() {
         "  let sa = raw.alloc(16, 8);\n  raw.set(sa, 0, 16);\n  raw.store_u8(sa, 1);\n  return raw.syscall(49, 3, raw.addr_to_int(sa), 16, 0, 0, 0);",
         "AF_INET",
     );
-    // getsockname: カーネルが書く長さ（*addrlen）は、検査した 16 バイトを超えない。
+    // getsockname / getpeername: カーネルが書く長さ（*addrlen）は、検査した 16 または 28 バイトを超えない。
     stops(
         &format!("{SOCKADDR}  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 128);\n  return raw.syscall(51, 3, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);"),
         "getsockname",
+    );
+    stops(
+        &format!("{SOCKADDR}  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 128);\n  return raw.syscall(52, 3, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);"),
+        "getpeername",
     );
     stops(
         "  let sa = raw.alloc(8, 8);\n  let len = raw.alloc(8, 8);\n  raw.store_i64(len, 16);\n  return raw.syscall(51, 3, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);",

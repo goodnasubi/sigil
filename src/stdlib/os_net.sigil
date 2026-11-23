@@ -16,7 +16,7 @@ module std.os.net
 //   値に包んでいない fd は、中断しない補助の関数（`recv_once`・`send_once`・`accept_once`）の中で作って、戻る前に片付ける。
 //   待っているタスクが取り消されても、領域も fd も漏れない。
 // - 書きは `sendto`＋`MSG_NOSIGNAL`（閉じた接続への書き込みで `SIGPIPE` がプロセスを落とさない）。
-// - システムコールの番号（x86-64）: socket 41、connect 42、getsockopt 55、setsockopt 54、bind 49、listen 50、getsockname 51、accept4 288、
+// - システムコールの番号（x86-64）: socket 41、connect 42、getsockopt 55、setsockopt 54、bind 49、listen 50、getsockname 51、getpeername 52、accept4 288、
 //   recvfrom 45、sendto 44、shutdown 48、close 3。
 // 利用者のモジュールからは `use std.*` できない（ADR 0016 決定 3）。
 
@@ -658,6 +658,212 @@ impl TcpListener {
   }
 }
 
+fn push_dec(out: &mut Bytes, v: Int)
+  intent "0〜255 の整数を 10 進の文字として out の末尾へ足す"
+  requires none
+  ensures none
+  effects none
+{
+  if v >= 100 {
+    out.push(48 + v / 100);
+  }
+  if v >= 10 {
+    out.push(48 + (v / 10) % 10);
+  }
+  out.push(48 + v % 10);
+}
+
+fn hex_char(d: Int) -> Int
+  intent "0〜15 の値を 16 進の文字コード（0〜9・a〜f）にする"
+  requires none
+  ensures none
+  effects none
+{
+  if d < 10 {
+    return 48 + d;
+  }
+  return 87 + d;
+}
+
+fn push_hex(out: &mut Bytes, v: Int)
+  intent "0〜65535 の整数を 16 進の小文字（先頭の余分な 0 なし）として out の末尾へ足す"
+  requires none
+  ensures none
+  effects none
+{
+  if v == 0 {
+    out.push(48);
+    return;
+  }
+  let mut started = false;
+  let d0 = (v >> 12) & 15;
+  if d0 > 0 {
+    out.push(hex_char(d0));
+    started = true;
+  }
+  let d1 = (v >> 8) & 15;
+  if started || d1 > 0 {
+    out.push(hex_char(d1));
+    started = true;
+  }
+  let d2 = (v >> 4) & 15;
+  if started || d2 > 0 {
+    out.push(hex_char(d2));
+    started = true;
+  }
+  let d3 = v & 15;
+  out.push(hex_char(d3));
+}
+
+fn ipv4_string_from_sa(sa: Addr) -> String
+  intent "AF_INET の sockaddr_in（16 バイト）から IPv4 アドレスを通常のドット 10 進表記にする"
+  requires none
+  ensures none
+  effects none
+  unchecked "sa は少なくとも 16 バイト確保された sockaddr_in。offset 4〜7 に 4 バイトの IPv4 アドレスが格納されている"
+{
+  let mut b = Bytes.new();
+  push_dec(&mut b, raw.load_u8(raw.offset(sa, 4)));
+  b.push(46);
+  push_dec(&mut b, raw.load_u8(raw.offset(sa, 5)));
+  b.push(46);
+  push_dec(&mut b, raw.load_u8(raw.offset(sa, 6)));
+  b.push(46);
+  push_dec(&mut b, raw.load_u8(raw.offset(sa, 7)));
+  return b.to_string_utf8().unwrap_or("");
+}
+
+fn ipv6_string(sa: Addr) -> String
+  intent "AF_INET6 の sockaddr_in6（28 バイト）から IPv6 アドレスを RFC 5952 準拠の文字列にする"
+  requires none
+  ensures none
+  effects none
+  unchecked "sa は 28 バイトの sockaddr_in6。offset 8〜23 に 16 バイトの IPv6 アドレスが格納されている"
+{
+  let mut is_v4_mapped = true;
+  let mut m = 0;
+  while m < 10 {
+    if raw.load_u8(raw.offset(sa, 8 + m)) != 0 {
+      is_v4_mapped = false;
+    }
+    m = m + 1;
+  }
+  if raw.load_u8(raw.offset(sa, 18)) != 255 || raw.load_u8(raw.offset(sa, 19)) != 255 {
+    is_v4_mapped = false;
+  }
+  if is_v4_mapped {
+    let mut out = Bytes.new();
+    out.push(58);
+    out.push(58);
+    out.push(102);
+    out.push(102);
+    out.push(102);
+    out.push(102);
+    out.push(58);
+    push_dec(&mut out, raw.load_u8(raw.offset(sa, 20)));
+    out.push(46);
+    push_dec(&mut out, raw.load_u8(raw.offset(sa, 21)));
+    out.push(46);
+    push_dec(&mut out, raw.load_u8(raw.offset(sa, 22)));
+    out.push(46);
+    push_dec(&mut out, raw.load_u8(raw.offset(sa, 23)));
+    return out.to_string_utf8().unwrap_or("");
+  }
+  let mut best_start = -1;
+  let mut best_len = 0;
+  let mut cur_start = -1;
+  let mut cur_len = 0;
+  let mut i = 0;
+  while i < 8 {
+    let w = raw.load_u8(raw.offset(sa, 8 + i * 2)) * 256 + raw.load_u8(raw.offset(sa, 8 + i * 2 + 1));
+    if w == 0 {
+      if cur_start < 0 {
+        cur_start = i;
+        cur_len = 1;
+      } else {
+        cur_len = cur_len + 1;
+      }
+      if cur_len > best_len {
+        best_start = cur_start;
+        best_len = cur_len;
+      }
+    } else {
+      cur_start = -1;
+      cur_len = 0;
+    }
+    i = i + 1;
+  }
+  if best_len < 2 {
+    best_len = 0;
+  }
+  let mut out = Bytes.new();
+  i = 0;
+  while i < 8 {
+    let w = raw.load_u8(raw.offset(sa, 8 + i * 2)) * 256 + raw.load_u8(raw.offset(sa, 8 + i * 2 + 1));
+    if best_len >= 2 && i >= best_start && i < best_start + best_len {
+      if i == best_start {
+        out.push(58);
+        out.push(58);
+      }
+    } else {
+      if best_len >= 2 {
+        if i < best_start && i > 0 {
+          out.push(58);
+        } else if i > best_start + best_len {
+          out.push(58);
+        }
+      } else {
+        if i > 0 {
+          out.push(58);
+        }
+      }
+      push_hex(&mut out, w);
+    }
+    i = i + 1;
+  }
+  return out.to_string_utf8().unwrap_or("");
+}
+
+fn stream_addr(fd: Int, is_peer: Bool) -> Result<(String, Int), NetError>
+  intent "ソケット fd の相手側（is_peer が true）または自分側（is_peer が false）のアドレス文字列とポート番号を返す（getpeername または getsockname）"
+  requires none
+  ensures none
+  effects net.server
+  unchecked "fd は呼び出し側が所有する開いたソケット。sockaddr の 28 バイトと長さの語（28 を入れる）は確保した範囲で、戻る前に返す。発行するのは getsockname（51）または getpeername（52）だけ"
+{
+  let sa = raw.alloc(28, 8);
+  raw.set(sa, 0, 28);
+  let len = raw.alloc(8, 8);
+  raw.store_i64(len, 28);
+  let mut sys_nr = 51;
+  if is_peer {
+    sys_nr = 52;
+  }
+  let r = raw.syscall(sys_nr, fd, raw.addr_to_int(sa), raw.addr_to_int(len), 0, 0, 0);
+  if r < 0 {
+    raw.free(len, 8, 8);
+    raw.free(sa, 28, 8);
+    return Err(classify(r));
+  }
+  let family = raw.load_u8(sa) + raw.load_u8(raw.offset(sa, 1)) * 256;
+  let port = raw.load_u8(raw.offset(sa, 2)) * 256 + raw.load_u8(raw.offset(sa, 3));
+  if family == 2 {
+    let host = ipv4_string_from_sa(sa);
+    raw.free(len, 8, 8);
+    raw.free(sa, 28, 8);
+    return Ok((host, port));
+  }
+  if family == 10 {
+    let host = ipv6_string(sa);
+    raw.free(len, 8, 8);
+    raw.free(sa, 28, 8);
+    return Ok((host, port));
+  }
+  raw.free(len, 8, 8);
+  raw.free(sa, 28, 8);
+  return Err(NetError.Other);
+}
+
 impl TcpStream {
   pub fn read(self: &TcpStream, max: Int) -> Result<Bytes, NetError>
     intent "1 バイト以上読めるか、相手が書き込みを終えるまで中断して、最大 max バイトを返す。空の Bytes は相手の終了（EOF）"
@@ -720,6 +926,24 @@ impl TcpStream {
       return Err(classify(r));
     }
     return Ok(unit());
+  }
+
+  pub fn peer_addr(self: &TcpStream) -> Result<(String, Int), NetError>
+    intent "接続相手のアドレス（数値表記の文字列）とポート番号を返す（getpeername）"
+    requires none
+    ensures none
+    effects net.server
+  {
+    return stream_addr(self.fd, true);
+  }
+
+  pub fn local_addr(self: &TcpStream) -> Result<(String, Int), NetError>
+    intent "接続自身のローカルアドレス（数値表記の文字列）とポート番号を返す（getsockname）"
+    requires none
+    ensures none
+    effects net.server
+  {
+    return stream_addr(self.fd, false);
   }
 }
 
@@ -1019,20 +1243,6 @@ fn udp_recv_info(buf: Addr, src: Addr, alen: Addr, r: Int, max: Int, out: &mut B
   return UdpRecvInfo { n: n, ip: ip, port: port };
 }
 
-fn push_dec(out: &mut Bytes, v: Int)
-  intent "0〜255 の整数を 10 進の文字として out の末尾へ足す"
-  requires none
-  ensures none
-  effects none
-{
-  if v >= 100 {
-    out.push(48 + v / 100);
-  }
-  if v >= 10 {
-    out.push(48 + (v / 10) % 10);
-  }
-  out.push(48 + v % 10);
-}
 
 fn ipv4_string(ip: Int) -> String
   intent "32 ビットの IPv4 アドレスを通常のドット 10 進表記にする"

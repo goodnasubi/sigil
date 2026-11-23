@@ -1508,7 +1508,12 @@ impl<'p> M<'p> {
                 }
             }
             SYS_LISTEN => {}
-            SYS_GETSOCKNAME => {
+            SYS_GETSOCKNAME | SYS_GETPEERNAME => {
+                let name = if n == SYS_GETSOCKNAME {
+                    "getsockname"
+                } else {
+                    "getpeername"
+                };
                 let lp = addr_of(a[2], "addrlen")?;
                 self.check_raw_access(lp, 4, loc)?;
                 let mut lb = [0u8; 4];
@@ -1519,7 +1524,7 @@ impl<'p> M<'p> {
                 if len != SOCKADDR_IN_SIZE && len != SOCKADDR_IN6_SIZE {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall getsockname: *addrlen は 16 または 28（検査した領域の大きさ）のみ許可",
+                        &format!("raw.syscall {name}: *addrlen は 16 または 28（検査した領域の大きさ）のみ許可"),
                     ));
                 }
                 self.check_raw_access(addr_of(a[1], "addr")?, len, loc)?;
@@ -2505,6 +2510,7 @@ const SYS_SHUTDOWN: i64 = 48;
 const SYS_BIND: i64 = 49;
 const SYS_LISTEN: i64 = 50;
 const SYS_GETSOCKNAME: i64 = 51;
+const SYS_GETPEERNAME: i64 = 52;
 const SYS_SETSOCKOPT: i64 = 54;
 const SYS_ACCEPT4: i64 = 288;
 const SOCKADDR_IN_SIZE: usize = 16;

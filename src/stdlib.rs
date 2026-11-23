@@ -1231,6 +1231,14 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
                 "shutdown(self: &TcpStream) -> Result<Unit, NetError>",
                 "net.server",
             ),
+            (
+                "peer_addr(self: &TcpStream) -> Result<(String, Int), NetError>",
+                "net.server",
+            ),
+            (
+                "local_addr(self: &TcpStream) -> Result<(String, Int), NetError>",
+                "net.server",
+            ),
         ],
     ),
     (Layer::Os, "PgPoolLimits", &[
@@ -1648,6 +1656,8 @@ mod tests {
             "TcpStream.read",
             "TcpStream.write_all",
             "TcpStream.shutdown",
+            "TcpStream.peer_addr",
+            "TcpStream.local_addr",
             "NetError",
             // ADR 0034 決定 4。
             "net.connect",

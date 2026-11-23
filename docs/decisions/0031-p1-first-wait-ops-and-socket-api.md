@@ -95,10 +95,12 @@ TCP の待ち受けとバイト列の読み書きだけを決める。HTTP の�
 | `TcpStream.read` | `read(self: &TcpStream, max: Int) -> Result<Bytes, NetError>` | `net.server, task.suspend` | 1 バイト以上読めるか、相手が書き込みを終えるまで中断する。**空の `Bytes` は相手の終了（EOF）**。`requires 1 <= max && max <= 65536`（1 回の読みの大きさの上限。ADR 0020 決定 4 の上限を、API の側で破れなくする） |
 | `TcpStream.write_all` | `write_all(self: &TcpStream, data: &Bytes) -> Result<Unit, NetError>` | `net.server, task.suspend` | 全部書き終えるまで繰り返し、書けないときは中断する。書き込みが戻るのは、全部をカーネルに渡したとき |
 | `TcpStream.shutdown` | `shutdown(self: &TcpStream) -> Result<Unit, NetError>` | `net.server` | 中断しない。書き込み側を閉じる（`SHUT_WR`）。読み込み側は開いたまま |
+| `TcpStream.peer_addr` | `peer_addr(&self) -> Result<(String, Int), NetError>` | `net.server` | 中断しない。接続相手の生アドレス（数値のアドレス文字列とポート、IPv4/IPv6 とも、`getpeername`） |
+| `TcpStream.local_addr` | `local_addr(&self) -> Result<(String, Int), NetError>` | `net.server` | 中断しない。接続自身の生アドレス（数値のアドレス文字列とポート、IPv4/IPv6 とも、`getsockname`） |
 
 - `read` の戻り値が `Bytes` なのは ADR 0023（`Bytes` 型）による。HTTP の解釈は `Bytes` の上で行う。
 - `write` は部分書き込みを返さず `write_all` にそろえる（部分書き込みの続きを間違える誤りを、利用者に書かせない）。
-- `TcpStream` の相手のアドレスの取得、`TCP_NODELAY` などの調整、`TcpListener` のクローズの明示は持たない（必要になった段階の ADR で足す。閉じるのは破棄）。
+- `TcpStream` の接続相手および自身のアドレス取得（`peer_addr` / `local_addr`）を持つ。`TCP_NODELAY` などの調整、`TcpListener` のクローズの明示は持たない（必要になった段階の ADR で足す。閉じるのは破棄）。
 - 読み書きを時間で打ち切る引数は持たない（決定 1-2）。
 
 ### 3-3. エラー — 判断点 B

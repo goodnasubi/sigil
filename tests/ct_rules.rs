@@ -122,6 +122,12 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.crypto.aes128_gcm_tag_matches", &["got"]),
     ("std.crypto.aes128_gcm_seal", &["nonce", "aad"]),
     ("std.crypto.aes128_gcm_open", &["nonce", "aad", "sealed"]),
+    // AES-256-GCM（ADR 0058 決定 3、段 2c）。鍵展開・ブロック暗号化・GHASH は AES-128-GCM と
+    // 共通の関数（鍵長はラウンド鍵の長さで決まり、秘密に依存しない）。公開は nonce・AAD・
+    // 受信した暗号文とタグ・データの長さ。
+    ("std.crypto.aes256_gcm_tag_matches", &["got"]),
+    ("std.crypto.aes256_gcm_seal", &["nonce", "aad"]),
+    ("std.crypto.aes256_gcm_open", &["nonce", "aad", "sealed"]),
     // ChaCha20-Poly1305（ADR 0058 決定 3、段 2a）。鍵・一回限りの Poly1305 鍵・キーストリーム・
     // Poly1305 の作業領域（h・r・s）・平文は秘密。公開は nonce・AAD・受信した暗号文とタグ・メッセージ・
     // データの長さ・ブロックの位置と固定の処理回数。ChaCha20 は加算・排他的論理和・回転だけ、
@@ -197,6 +203,7 @@ const CT_AHEAD: &[&str] = &[];
 const CT_PUBLIC_COMPARISONS: &[&str] = &[
     "std.crypto.verify_hmac_sha256",
     "std.crypto.aes128_gcm_tag_matches",
+    "std.crypto.aes256_gcm_tag_matches",
     "std.crypto.chacha20_poly1305_tag_matches",
     "std.crypto.x25519_is_zero",
     "std.web.ct_bearer_signature",
@@ -729,7 +736,7 @@ fn probe() -> Int
   let d384 = sha384(&b);
   let prk384 = hkdf_extract_sha384(None, &s);
   let okm384 = hkdf_expand_sha384(&prk384, &b, 32);
-  let aead = aead_probe(&b) + chacha_probe(&b);
+  let aead = aead_probe(&b) + aead256_probe(&b) + chacha_probe(&b);
   let x25519_public = x25519_probe_public(&b);
   let x25519_shared = x25519_probe_shared(&b);
   let reply = respond(&s, &b, &b);
@@ -793,6 +800,39 @@ fn aead_probe(b: &Bytes) -> Int
                 Err(e) => { return 0; }
                 Ok(sealed) => {
                   match aes128_gcm_open(&key, &nonce2, &b, &sealed) {
+                    Err(e) => { return 0; }
+                    Ok(opened) => { return opened.byte_len(); }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn aead256_probe(b: &Bytes) -> Int
+  intent "AES-256-GCM の入口を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  let s = Secret.from_bytes(b.clone());
+  match Aes256GcmKey.from_secret(Secret.from_bytes(s.expose())) {
+    Err(e) => { return 0; }
+    Ok(key) => {
+      match Nonce96.from_slice(&b) {
+        Err(e) => { return 0; }
+        Ok(nonce) => {
+          match Nonce96.from_slice(&b) {
+            Err(e) => { return 0; }
+            Ok(nonce2) => {
+              match aes256_gcm_seal(&key, nonce, &b, &s) {
+                Err(e) => { return 0; }
+                Ok(sealed) => {
+                  match aes256_gcm_open(&key, &nonce2, &b, &sealed) {
                     Err(e) => { return 0; }
                     Ok(opened) => { return opened.byte_len(); }
                   }
@@ -1480,6 +1520,20 @@ fn clif_aes_gcm_entries_cover_all_callees() {
     check_aead_clif_entries(&[
         ("aesgcmseal", &["std.crypto.aes128_gcm_seal"], seal),
         ("aesgcmopen", &["std.crypto.aes128_gcm_open"], open),
+    ]);
+}
+
+/// AES-256-GCM（ADR 0058 段 2c）も同じ検査。鍵展開・ブロック暗号化・GHASH は AES-128-GCM と
+/// 共通の関数で、14 ラウンドと 15 本のラウンド鍵（`nk = 8` の追加 SubWord を含む）まで、
+/// 公開入口が推移的に呼ぶ全関数を覆う。
+#[test]
+fn clif_aes256_gcm_entries_cover_all_callees() {
+    let key = "match Aes256GcmKey.from_secret(Secret.from_bytes(Bytes.new())) { Err(e) => 0, Ok(key) => match Nonce96.from_slice(&Bytes.new()) { Err(e) => 0, Ok(nonce) => ";
+    let seal = format!("{key}match aes256_gcm_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
+    let open = format!("{key}match aes256_gcm_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
+    check_aead_clif_entries(&[
+        ("aes256seal", &["std.crypto.aes256_gcm_seal"], seal),
+        ("aes256open", &["std.crypto.aes256_gcm_open"], open),
     ]);
 }
 

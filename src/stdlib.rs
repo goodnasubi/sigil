@@ -74,6 +74,8 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // 持つ。`AeadError` は腕を `match` できる列挙で、検査器はこの行を列挙として登録し直す
     // （`AEAD_ERROR_ARMS`）。
     ("Aes128GcmKey", 0, Layer::Core),
+    // AES-256-GCM の鍵（ADR 0058 決定 2、段 2c）。`Nonce96`・`AeadError` は AES-128-GCM と共用する。
+    ("Aes256GcmKey", 0, Layer::Core),
     ("Nonce96", 0, Layer::Core),
     ("AeadError", 0, Layer::Core),
     // ChaCha20-Poly1305 の鍵（ADR 0058 決定 2、段 2a）。nonce と誤りは AES-128-GCM と共用する。
@@ -528,6 +530,16 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
         "aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>",
         "none",
     ),
+    (
+        Layer::Core,
+        "aes256_gcm_seal(key: &Aes256GcmKey, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "aes256_gcm_open(key: &Aes256GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>",
+        "none",
+    ),
     // ChaCha20-Poly1305（ADR 0058 決定 2、段 2a）。実体は `std.crypto` の Sigil 実装（埋め込み）。
     (
         Layer::Core,
@@ -902,6 +914,11 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         Layer::Core,
         "Aes128GcmKey",
         &[("from_secret(key: Secret) -> Result<Aes128GcmKey, AeadError>", "none")],
+    ),
+    (
+        Layer::Core,
+        "Aes256GcmKey",
+        &[("from_secret(key: Secret) -> Result<Aes256GcmKey, AeadError>", "none")],
     ),
     (
         Layer::Core,

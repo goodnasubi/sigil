@@ -105,6 +105,19 @@ pub fn build_project_for(
     build_program_for(&p, opts, target, out)
 }
 
+/// 生の起動引数を受け取る Linux x86-64 実行ファイルを作る（ADR 0015 追補）。
+pub fn build_project_raw_argv(
+    root: &Path,
+    entry: &Path,
+    func: &str,
+    opts: &Opts,
+    out: &Path,
+) -> Result<(), BuildError> {
+    let p = crate::ir_eval::lower_project(root, entry, func, &opts.trust_base)
+        .map_err(BuildError::Run)?;
+    build_program_with(&p, opts, Target::LinuxX86_64, out, true)
+}
+
 /// 入口のファイルから `use` を `root` で辿って結び、x86-64 freestanding の静的 ELF を作る。
 pub fn build_project_freestanding(
     root: &Path,
@@ -128,12 +141,27 @@ pub fn build_program_for(
     target: Target,
     out: &Path,
 ) -> Result<(), BuildError> {
+    build_program_with(p, opts, target, out, false)
+}
+
+fn build_program_with(
+    p: &Program,
+    opts: &Opts,
+    target: Target,
+    out: &Path,
+    raw_argv: bool,
+) -> Result<(), BuildError> {
     if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
         return Err(BuildError::Toolchain(
             "ネイティブ出力は Linux x86_64 のみ対応".into(),
         ));
     }
-    let obj = codegen::compile_for(p, opts, target).map_err(|e| match e {
+    let obj = if raw_argv {
+        codegen::compile_linux(p, opts, true)
+    } else {
+        codegen::compile_for(p, opts, target)
+    };
+    let obj = obj.map_err(|e| match e {
         CgError::Entry(m) => BuildError::Run(RunError::Entry(m)),
         CgError::Unsupported(m) => BuildError::Run(RunError::Unsupported(m)),
         CgError::Internal(m) => BuildError::Internal(m),

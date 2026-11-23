@@ -9,9 +9,9 @@ use std::rc::Rc;
 
 use super::value::{
     cmp_val, compare, deref_val, list_of, shadow, show_val, types, with_val, with_val_mut, Agg,
-    Ptr, Tag, Val,
+    Ptr, Tag, Val, DROP_LOG,
 };
-use super::{Chunk, Origin, Slot, E, M};
+use super::{Chunk, Escape, Origin, Slot, E, M};
 
 /// 実行時の `fs.read` が読むファイルの大きさの上限（バイト）。`lsp::MAX_DEP_BYTES` に揃えた暫定の定数。
 /// ADR 0020 6-3 で `src/limits.rs` ができたら、そちらへ移す。
@@ -73,7 +73,7 @@ fn read_file_bounded(path: &str) -> std::io::Result<String> {
 }
 
 impl<'p> M<'p> {
-    pub(super) fn call_val(&mut self, f: &Val, args: Vec<Val>, loc: StopId) -> Result<Val, E> {
+    pub(super) fn call_val(&mut self, f: &Val, args: Vec<Val>, loc: StopId) -> Result<Val, Escape> {
         match self.resolve_callee(f, args) {
             Some((g, a)) => self.run_func(g, a, loc),
             None => Ok(Val::Unit),
@@ -138,13 +138,17 @@ impl<'p> M<'p> {
         }
     }
 
+    fn builtin_stop(&self, loc: StopId, kind: Option<StopKind>, detail: Option<&str>) -> Escape {
+        self.stop_at(loc, kind, detail).into()
+    }
+
     pub(super) fn builtin(
         &mut self,
         locals: &[Slot],
         b: Builtin,
         args: &[Operand],
         loc: StopId,
-    ) -> Result<Val, E> {
+    ) -> Result<Val, Escape> {
         use Builtin::*;
         Ok(match b {
             ListNew => list_of(vec![]),
@@ -189,7 +193,9 @@ impl<'p> M<'p> {
                 for x in it {
                     match acc.checked_add(x) {
                         Some(n) => acc = n,
-                        None => return Err(self.stop_at(loc, Some(StopKind::Overflow), Some(""))),
+                        None => {
+                            return Err(self.builtin_stop(loc, Some(StopKind::Overflow), Some("")))
+                        }
                     }
                 }
                 Val::Int(acc)
@@ -221,7 +227,7 @@ impl<'p> M<'p> {
                 let n = self.list_len(&s, &p);
                 if n == 0 {
                     let name = if b == ListMin { "min" } else { "max" };
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some(&format!("List.{name} は self.len() > 0 を要求する")),
@@ -795,14 +801,27 @@ impl<'p> M<'p> {
                     None => self.none(),
                 }
             }
-            EnvArgs | ProcessExit => unreachable!("{b:?} は未実装（ADR 0015 追補、#711）"),
+            EnvArgs => list_of(
+                self.argv
+                    .iter()
+                    .map(|arg| Val::Str(arg.as_str().into()))
+                    .collect(),
+            ),
+            ProcessExit => {
+                let code = self.read_int(locals, &args[0]) as u8;
+                // 以降は Rust の管理領域の回収だけを行う。終了前に記録した破棄は残す。
+                self.exit_drops = DROP_LOG
+                    .with(|log| log.borrow_mut().take())
+                    .unwrap_or_default();
+                return Err(Escape::Exit(code));
+            }
             SyncSharedBorrow => {
                 let (s, p) = self.view(locals, &args[0]);
                 let slot = with_val(&s, &p, |v| super::sched::shared_cell(v).cloned());
                 match slot {
                     Some(slot) => Val::Ref(Ptr { slot, path: vec![] }),
                     None => {
-                        return Err(self.stop_at(
+                        return Err(self.builtin_stop(
                             loc,
                             Some(StopKind::StdRequiresViolated),
                             Some("SyncShared でない値への borrow"),
@@ -944,7 +963,7 @@ impl<'p> M<'p> {
             RawIntToAddr => {
                 let v = self.read_int(locals, &args[0]);
                 if v < 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.int_to_addr: v >= 0"),
@@ -979,7 +998,7 @@ impl<'p> M<'p> {
                 };
                 let v = self.read_int(locals, &args[1]);
                 if !(0..=255).contains(&v) {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.store_u8: 0 <= v <= 255"),
@@ -995,7 +1014,7 @@ impl<'p> M<'p> {
                     _ => 0,
                 };
                 if a % 8 != 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.load_i64: 8バイト境界違反"),
@@ -1012,7 +1031,7 @@ impl<'p> M<'p> {
                 };
                 let v = self.read_int(locals, &args[1]);
                 if a % 8 != 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.store_i64: 8バイト境界違反"),
@@ -1028,7 +1047,7 @@ impl<'p> M<'p> {
                     _ => 0,
                 };
                 if a % 8 != 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.load_addr: 8バイト境界違反"),
@@ -1048,7 +1067,7 @@ impl<'p> M<'p> {
                     _ => 0,
                 };
                 if a % 8 != 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.store_addr: 8バイト境界違反"),
@@ -1069,7 +1088,7 @@ impl<'p> M<'p> {
                 };
                 let n = self.read_int(locals, &args[2]);
                 if n < 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.copy: n >= 0"),
@@ -1093,7 +1112,7 @@ impl<'p> M<'p> {
                 let byte = self.read_int(locals, &args[1]);
                 let n = self.read_int(locals, &args[2]);
                 if n < 0 || !(0..=255).contains(&byte) {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.set: n >= 0 && 0 <= byte <= 255"),
@@ -1112,7 +1131,7 @@ impl<'p> M<'p> {
                 let size = self.read_int(locals, &args[0]);
                 let align = self.read_int(locals, &args[1]);
                 if size <= 0 || align <= 0 || !(align as usize).is_power_of_two() {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.alloc: size > 0 && align は 2の累乗"),
@@ -1120,7 +1139,7 @@ impl<'p> M<'p> {
                 }
                 // 上限は Sigil 製の確保器と同じ（ADR 0025 補足 A-4: align <= 4096、size <= 2^46）。
                 if align > 4096 || size > (1i64 << 46) {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.alloc: align <= 4096 && size <= 2^46"),
@@ -1137,7 +1156,7 @@ impl<'p> M<'p> {
                 })?;
                 let ptr = unsafe { std::alloc::alloc(layout) };
                 if ptr.is_null() {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::Overflow),
                         Some("raw.alloc: メモリ枯渇"),
@@ -1162,21 +1181,21 @@ impl<'p> M<'p> {
                 let size = self.read_int(locals, &args[1]);
                 let align = self.read_int(locals, &args[2]);
                 if a == 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.free: ヌル番地解放"),
                     ));
                 }
                 let Some(&chunk) = self.chunks.get(&a) else {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.free: 二重解放または未確保の番地"),
                     ));
                 };
                 if chunk.origin != Origin::Alloc {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.free: raw.alloc 由来でない塊（mmap 由来）は解放できない"),
@@ -1184,7 +1203,7 @@ impl<'p> M<'p> {
                 }
                 let (stored_sz, stored_al) = (chunk.size, chunk.align);
                 if stored_sz != size as usize || stored_al != align as usize {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some("raw.free: 確保時と異なるサイズまたはアライメント"),
@@ -1288,7 +1307,7 @@ impl<'p> M<'p> {
                     0
                 };
                 if a % 8 != 0 {
-                    return Err(self.stop_at(
+                    return Err(self.builtin_stop(
                         loc,
                         Some(StopKind::StdRequiresViolated),
                         Some(&format!("{name}: 8バイト境界違反")),
@@ -1322,6 +1341,25 @@ impl<'p> M<'p> {
                 unreachable!("タスク関連の組み込み操作はスケジューラ側で特別に処理される")
             }
         })
+    }
+
+    /// 明示終了後、Sigil の値が保持していた資源を放したあとに、ホスト側の残存領域を回収する。
+    pub(super) fn reclaim_exit_chunks(&mut self) {
+        for (addr, chunk) in std::mem::take(&mut self.chunks) {
+            match chunk.origin {
+                Origin::Alloc => {
+                    // SAFETY: 生きている領域の番地と確保時のレイアウトを管理表から取り出した。
+                    unsafe {
+                        let layout =
+                            std::alloc::Layout::from_size_align_unchecked(chunk.size, chunk.align);
+                        std::alloc::dealloc(addr as *mut u8, layout);
+                    }
+                }
+                Origin::Mmap => {
+                    let _ = issue_syscall(SYS_MUNMAP, [addr as i64, chunk.size as i64, 0, 0, 0, 0]);
+                }
+            }
+        }
     }
 
     /// 番地 `a` の 1 バイトを、生きた確保領域の中であることを確かめてから読む（`raw.load_u8` と、許可表の引数検証が使う）。

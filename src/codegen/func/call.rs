@@ -595,10 +595,10 @@ impl<'a, 'p> Fx<'a, 'p> {
                 );
                 (r, u)
             }
-            EnvArgs | ProcessExit => {
-                let v = self.unsupported(&format!("{b:?} は未実装（ADR 0015 追補、#711）"));
-                (v, u)
-            }
+            EnvArgs => (self.env_args(), Ty::List(Box::new(Ty::Str))),
+            // SIR の組み込み呼び出しは Term::Call で表す。Fx::term の ProcessExit 専用分岐が
+            // 通常の組み込み処理へ渡す前に start_exit を生成する。
+            ProcessExit => unreachable!("明示終了は呼び出しの終端で処理する"),
             FsRead => {
                 let (path, _) = self.val(&args[0]);
                 let (pp, pl) = (self.rt("str_data", &[path]), self.rt("str_bytes", &[path]));

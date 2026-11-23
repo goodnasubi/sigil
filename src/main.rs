@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （--root の既定は現在のディレクトリ。trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する（利用者のモジュールだけ。埋め込みの std は出さない）\n  sigil spec [--json] --std        処理系に埋め込んだ標準モジュール（確保器 std.os.alloc など）の仕様を表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        （--root の既定は現在のディレクトリ。`use` を辿る）構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--root <根>] [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] `use` で辿れるモジュールを結んで検査のあと関数を実行する（--root の既定は現在のディレクトリ。引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70\n  sigil build [--root <根>] [--trace-drops] [--trust-base <モジュール>]... <ファイル> <関数> -o <出力> `use` で辿れるモジュールを結んでネイティブの実行ファイルを作る（--root の既定は現在のディレクトリ。cc が要る）";
+const USAGE: &str = "使い方:\n  sigil parse <ファイル>...        字句解析と構文解析だけを行い、最初のエラーを表示する\n  sigil fmt [--check] <ファイル>... 正規形に整形する（--check は書き換えず、最初の違反を表示して 1 で終わる）\n  sigil spec [--json] [--root <根>] <ファイル>    （--root の既定は現在のディレクトリ。trust base の許可は検査しない）仕様（モジュール・型・関数のシグネチャと 4 節）を日本語で表示する（利用者のモジュールだけ。埋め込みの std は出さない）\n  sigil spec [--json] --std        処理系に埋め込んだ標準モジュール（確保器 std.os.alloc など）の仕様を表示する\n  sigil check [--json] [--root <根>] [--trust-base <モジュール>]... <ファイル>...        （--root の既定は現在のディレクトリ。`use` を辿る）構文解析のあと型検査を行い、最初の型エラー・効果のエラー・移動のエラー・借用のエラー・クロージャと契約の式のエラーを表示する\n  sigil lsp [--trust-base <モジュール>]...        言語サーバー（LSP）を標準入出力で動かし、診断を返す\n  sigil run [--root <根>] [--raw-argv] [--trace-drops] [--trust-base <モジュール>]... [--fs-double 仮のパス=実ファイル]... <ファイル> <関数> [引数...] `use` で辿れるモジュールを結んで検査のあと関数を実行する（--root の既定は現在のディレクトリ。引数は true/false・整数・小数・[a,b,...]・それ以外は文字列）。異常停止は終了コード 70。--raw-argv は仮引数のない入口で、引数を型変換せず env.args() に渡す\n  sigil build [--root <根>] [--raw-argv] [--trace-drops] [--trust-base <モジュール>]... <ファイル> <関数> -o <出力> `use` で辿れるモジュールを結んでネイティブの実行ファイルを作る（--root の既定は現在のディレクトリ。cc が要る）";
 
 fn read_text(path: &str) -> Result<String, String> {
     sigil::modpath::read_source(std::path::Path::new(path))
@@ -31,7 +31,10 @@ fn done(failed: bool) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     match args.first().map(String::as_str) {
         Some("parse") if args.len() > 1 => {
             let mut failed = false;
@@ -337,13 +340,19 @@ fn main() -> ExitCode {
             // `fs.read(&仮のパス)` が実ファイルの内容を返す。指定がなければ実ファイルを読み書きする。同じ仮のパスの重複指定は使い方の誤り（終了コード 2）。
             let mut doubles: Vec<(String, String)> = vec![];
             let mut trace = false;
+            let mut raw_argv = false;
             let mut trust_base: Vec<String> = vec![];
             let mut root: Option<String> = None;
             let mut i = 1;
             while matches!(
                 args.get(i).map(String::as_str),
-                Some("--fs-double" | "--trace-drops" | "--trust-base" | "--root")
+                Some("--fs-double" | "--trace-drops" | "--trust-base" | "--root" | "--raw-argv")
             ) {
+                if args[i] == "--raw-argv" {
+                    raw_argv = true;
+                    i += 1;
+                    continue;
+                }
                 if args[i] == "--root" {
                     let Some(r) = args.get(i + 1) else {
                         eprintln!("--root にはディレクトリが要る");
@@ -378,13 +387,10 @@ fn main() -> ExitCode {
                 doubles.push((k.to_string(), v.to_string()));
                 i += 2;
             }
-            if args.len() < i + 2 {
+            let [path, func, argv @ ..] = &args[i..] else {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
-            }
-            let args: Vec<String> = std::iter::once(args[0].clone())
-                .chain(args[i..].iter().cloned())
-                .collect();
+            };
             let root_dir = root_dir(root.as_deref());
             match sigil::project::load_trust_base_file(&root_dir) {
                 Ok(modules) => {
@@ -402,6 +408,8 @@ fn main() -> ExitCode {
             let mut opts = sigil::exec::Options {
                 trace_drops: trace,
                 trust_base,
+                argv: argv.to_vec(),
+                raw_argv,
                 ..Default::default()
             };
             if !doubles.is_empty() {
@@ -414,16 +422,19 @@ fn main() -> ExitCode {
                 }
                 opts.fs_files = Some(m);
             }
-            let path = &args[1];
-            let call = match args[3..]
-                .iter()
-                .map(|a| parse_arg(a))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(c) => c,
-                Err(m) => {
-                    eprintln!("{path}: 入口の指定が誤り: {m}");
-                    return ExitCode::FAILURE;
+            let call = if raw_argv {
+                vec![]
+            } else {
+                match argv
+                    .iter()
+                    .map(|a| parse_arg(a))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    Ok(c) => c,
+                    Err(m) => {
+                        eprintln!("{path}: 入口の指定が誤り: {m}");
+                        return ExitCode::FAILURE;
+                    }
                 }
             };
             // 実行は SIR の評価器で行う（ADR 0017）。`sigil build` の実行ファイルと同じ lowering を通る。
@@ -435,7 +446,7 @@ fn main() -> ExitCode {
             match sigil::ir_eval::run_project_with(
                 &root_dir,
                 std::path::Path::new(path),
-                &args[2],
+                func,
                 &call,
                 &opts,
             ) {
@@ -446,6 +457,10 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(f) => match f.error {
+                    sigil::exec::RunError::Exit(code) => {
+                        show_drops(&f.drops);
+                        ExitCode::from(code)
+                    }
                     sigil::exec::RunError::Stop(s) => {
                         show_drops(&f.drops);
                         eprintln!("{path}: {s}");
@@ -464,11 +479,16 @@ fn main() -> ExitCode {
         }
         Some("build") if args.len() >= 4 => {
             let mut trace = false;
+            let mut raw_argv = false;
             let mut trust_base: Vec<String> = vec![];
             let mut root: Option<String> = None;
             let mut rest: Vec<&String> = args[1..].iter().collect();
             loop {
                 match rest.first().map(|s| s.as_str()) {
+                    Some("--raw-argv") => {
+                        raw_argv = true;
+                        rest.remove(0);
+                    }
                     Some("--trace-drops") => {
                         trace = true;
                         rest.remove(0);
@@ -510,7 +530,12 @@ fn main() -> ExitCode {
                 trace_drops: trace,
                 trust_base,
             };
-            match sigil::native::build_project(
+            let build = if raw_argv {
+                sigil::native::build_project_raw_argv
+            } else {
+                sigil::native::build_project
+            };
+            match build(
                 &root_dir,
                 std::path::Path::new(file),
                 &func,

@@ -26,11 +26,23 @@ use std::rc::Rc;
 
 use value::{
     list_of, locate, new_slot, show_val, stack_addr, types, with_val_mut, Agg, Ptr, Tag, Val, DEEP,
-    DROP_LOG, STACK_LIMIT, TYPES,
+    DROP_LOG, LOCK_EVENTS, ROOT_EVENTS, STACK_LIMIT, TYPES,
 };
 
 type Slot = Rc<RefCell<Val>>;
 type E = Box<Stop>;
+
+/// 組み込みの中からの関数呼び出しでも、終了コードは異常停止と別に伝える。
+enum Escape {
+    Stop(E),
+    Exit(u8),
+}
+
+impl From<E> for Escape {
+    fn from(stop: E) -> Self {
+        Self::Stop(stop)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 評価器
@@ -64,6 +76,8 @@ struct M<'p> {
     /// 差し替え下のハンドル用の影の実ファイル層（Issue #590、ADR 0049 補足 B）。
     fs_shadow: shadow::Shadow,
     env: Option<BTreeMap<String, String>>,
+    argv: &'p [String],
+    exit_drops: Vec<String>,
     canon: Vec<usize>,
     opt: usize,
     res: usize,
@@ -370,6 +384,11 @@ fn execute_roots(
     let Some(decl) = decl else {
         return Err(fail(RunError::Entry(format!("関数 {func} がない"))));
     };
+    if opts.raw_argv && !decl.params.is_empty() {
+        return Err(fail(RunError::Entry(
+            "--raw-argv を指定する入口には仮引数を宣言できない".into(),
+        )));
+    }
     let is_lock = |t: &Type| {
         let t = match t {
             Type::Ref { inner, .. } => inner,
@@ -449,6 +468,8 @@ fn execute_roots(
         fs_dirs: BTreeSet::new(),
         fs_shadow: shadow::Shadow::default(),
         env: opts.env_vars.clone(),
+        argv: &opts.argv,
+        exit_drops: Vec::new(),
         wall_clock: opts.wall_clock,
         opt: find("Option"),
         res: find("Result"),
@@ -535,7 +556,7 @@ fn execute_roots(
                 });
             }
             if let Some(e) = deep {
-                Err(e)
+                Err(Escape::Stop(e))
             } else {
                 // 隔離した異常停止の報告は、従来どおり標準エラーに出す（複数のルートタスクのとき。
                 // 1 つのときは呼び出し側が失敗として報告する）。
@@ -551,7 +572,8 @@ fn execute_roots(
     };
     // テスト用: 環境変数 `SIGIL_RT_LIVE` があれば、終わった時点で生きている枠と確保済みの塊の数を
     // 標準エラーに出す（ネイティブのランタイムと同じ流儀。停止の経路での漏れの確認に使う）。
-    if std::env::var_os("SIGIL_RT_LIVE").is_some() {
+    let exited = matches!(res, Err(Escape::Exit(_)));
+    if !exited && std::env::var_os("SIGIL_RT_LIVE").is_some() {
         eprintln!(
             "live: frames={} chunks={}",
             m.sch.live_frames(),
@@ -560,17 +582,31 @@ fn execute_roots(
     }
     m.globals.clear();
     m.sch.clear_handles();
+    if exited {
+        m.reclaim_exit_chunks();
+    }
     drop(_chunks_scope);
+    let exit_drops = std::mem::take(&mut m.exit_drops);
     drop(m);
-    let drops = DROP_LOG.with(|l| l.borrow_mut().take()).unwrap_or_default();
+    if exited {
+        // 破棄で残った通知は、この実行のロックとルートの番号を持つ。
+        LOCK_EVENTS.with(|events| events.borrow_mut().clear());
+        ROOT_EVENTS.with(|events| events.borrow_mut().clear());
+    }
+    let drops = DROP_LOG
+        .with(|l| l.borrow_mut().take())
+        .unwrap_or(exit_drops);
     match res {
         Ok(roots) => Ok(RootsOutcome {
             roots,
             output,
             drops,
         }),
-        Err(s) => Err(Failure {
-            error: RunError::Stop(s),
+        Err(escape) => Err(Failure {
+            error: match escape {
+                Escape::Stop(s) => RunError::Stop(s),
+                Escape::Exit(code) => RunError::Exit(code),
+            },
             output,
             drops: drops.into_boxed_slice(),
         }),

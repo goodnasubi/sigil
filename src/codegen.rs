@@ -21,7 +21,7 @@ mod start;
 mod task;
 
 use crate::exec::StopKind;
-use crate::ir::{Func, GlobalInit, Program, Ty};
+use crate::ir::{Builtin, Callee, Func, GlobalInit, Program, Term, Ty};
 use cranelift_codegen::ir::{types, AbiParam, Function, Signature, UserFuncName};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -62,7 +62,7 @@ pub fn compile_for(p: &Program, opts: &Opts, target: Target) -> Result<Vec<u8>, 
     if target == Target::X86_64Freestanding {
         return freestanding::compile(p, opts);
     }
-    compile_linux(p, opts)
+    compile_linux(p, opts, false)
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +261,8 @@ pub(crate) struct Cg<'p> {
     pub msg_table: DataId,
     /// 大域ごとの静的データ（8 バイトの語。`Program.globals` と同じ添字）。
     pub gids: Vec<DataId>,
+    /// `env.args` を使う場合の Linux 初期スタック上の `argc` と `argv`。起動時に一度だけ書く。
+    pub argv: Option<DataId>,
     /// 生存数のシム `sigil_rt_sigil_live_blocks`（確保器を結んだときだけ。補足 B-5）。
     pub live_shim: Option<FuncId>,
     /// 文字列の関数表に登録するシム（new・free・clone・data・bytes。補足 D-3）。
@@ -702,8 +704,14 @@ fn supported_param(t: &Ty) -> bool {
 }
 
 /// `p` をオブジェクトのバイト列にする。
-fn compile_linux(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
+pub(crate) fn compile_linux(p: &Program, opts: &Opts, raw_argv: bool) -> Result<Vec<u8>, CgError> {
     let entry: &Func = &p.funcs[p.entry];
+    if raw_argv && !entry.params.is_empty() {
+        return Err(CgError::Entry(format!(
+            "--raw-argv では入口の関数 {} は仮引数を持てない",
+            entry.name
+        )));
+    }
     for &pi in &entry.params {
         if !supported_param(&entry.locals[pi].ty) {
             // 参照型・Lock の入口引数は仕様上ビルドで止める（Issue #366）。突き合わせの報告が他の理由と区別できるよう、印を付ける。
@@ -759,6 +767,24 @@ fn compile_linux(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         );
     }
     let msg_table = m.declare_anonymous_data(false, false).map_err(internal)?;
+    let argv = if p.funcs.iter().flat_map(|f| &f.blocks).any(|b| {
+        matches!(
+            b.term,
+            Term::Call {
+                func: Callee::Builtin(Builtin::EnvArgs),
+                ..
+            }
+        )
+    }) {
+        let id = m.declare_anonymous_data(true, false).map_err(internal)?;
+        let mut dd = DataDescription::new();
+        dd.define_zeroinit(16);
+        dd.set_align(8);
+        m.define_data(id, &dd).map_err(internal)?;
+        Some(id)
+    } else {
+        None
+    };
     // 大域: 語 1 つの静的データ。スカラーは初期値をそのまま置き、組・構造体は起動時に作る塊への番地を
     // 入れる場所（0 で始める。入口の thunk が初期化する）。単一スレッド前提（ADR 0025 補足 A-5）。
     let mut gids = Vec::with_capacity(p.globals.len());
@@ -793,6 +819,7 @@ fn compile_linux(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fids,
         msg_table,
         gids,
+        argv,
         live_shim: None,
         str_ops: None,
         list_ops: None,
@@ -885,7 +912,7 @@ fn compile_linux(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
             s
         },
         vec![],
-        |fx| fx.thunk(),
+        |fx| fx.thunk(raw_argv),
     )?;
     start::define(&mut cg, thunk)?;
 

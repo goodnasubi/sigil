@@ -424,6 +424,8 @@ sigil build --raw-argv server.sigil main -o server
 
 通常の `return` は `Int` を含めて従来どおり標準出力に値を表示し、終了コード 0 になる。契約違反や算術エラーによる異常停止の表示と終了コード 70 は、[ADR 0013](0013-termination-stdlib-and-function-values.md) および [ADR 0015](0015-m5-native-output.md) に従う。
 
+`process.exit(70)` と `process.exit(1)` は、それぞれ異常停止（70）と入口引数のエラー（1）と同じ終了コードを返す。呼び出し側は終了コードだけでは終了理由を区別できない。
+
 ### 確認
 
 - 評価器の CLI と生成した実行ファイルで、空の引数一覧、空文字列、空白を含む文字列、数値や一覧に見える文字列、先頭にハイフンのある引数の取得結果を比べる。

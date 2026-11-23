@@ -595,6 +595,10 @@ impl<'a, 'p> Fx<'a, 'p> {
                 );
                 (r, u)
             }
+            EnvArgs | ProcessExit => {
+                let v = self.unsupported(&format!("{b:?} は未実装（ADR 0015 追補、#711）"));
+                (v, u)
+            }
             FsRead => {
                 let (path, _) = self.val(&args[0]);
                 let (pp, pl) = (self.rt("str_data", &[path]), self.rt("str_bytes", &[path]));

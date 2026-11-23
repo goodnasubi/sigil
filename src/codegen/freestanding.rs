@@ -297,6 +297,9 @@ fn check_builtin(
         RawSyscall => Err(CgError::Unsupported(format!(
             "freestanding 出力ではホスト OS のシステムコール（raw.syscall、関数 {fname}）を使えない"
         ))),
+        EnvArgs | ProcessExit => Err(CgError::Unsupported(format!(
+            "{b:?} は未実装（ADR 0015 追補、#711、関数 {fname}）"
+        ))),
         ConsoleLog | EnvGet | FsRead | FsWrite | FsReadBytes | FsWriteBytes | PathNew
         | PathIsEmpty | PathJoin | PathFileName | PathParent | IoWaitFd | RootsScope
         | RootReserve | RootStart | TaskScope | TaskAllOk | TaskRace | TaskTimeout | TaskYield

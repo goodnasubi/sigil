@@ -164,6 +164,28 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.block_params(done)[0]
     }
 
+    /// Linux の起動引数を型推論せず、呼び出しごとに所有できる一覧にする。
+    pub(super) fn env_args(&mut self) -> Value {
+        let saved = self.data_addr(self.cg.argv.expect("起動引数の保存領域"));
+        let argc = self.ld(saved, 0);
+        let argv = self.ld(saved, 8);
+        // argv[0] は実行ファイル名。残りは既存の UTF-8 置換を通す。
+        let count = self.b.ins().iadd_imm_s(argc, -1);
+        let size = self.ic(8);
+        let list = self.rt("list_new", &[size]);
+        let item = self.zero_tmp(8);
+        self.loop_range(count, |s, i| {
+            let offset = s.b.ins().imul_imm_s(i, 8);
+            let slot = s.b.ins().iadd(argv, offset);
+            let ptr = s.ld(slot, 8);
+            let len = s.cstr_len(ptr);
+            let string = s.rt("str_new", &[ptr, len]);
+            s.st(string, item, 0);
+            s.rt("list_push", &[list, item]);
+        });
+        list
+    }
+
     /// UTF-8 の継続バイトか（0/1）。
     fn cont_b(&mut self, x: Value) -> Value {
         let lo = self

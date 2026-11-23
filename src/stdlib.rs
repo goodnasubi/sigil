@@ -584,6 +584,8 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
         "get(name: &String) -> Option<String>",
         "env",
     ),
+    (Layer::Os, "env", "args() -> List<String>", "env"),
+    (Layer::Os, "process", "exit(code: Int) -> Unit", "process"),
     (
         Layer::Os,
         "fs",
@@ -1568,6 +1570,8 @@ mod tests {
         let want: BTreeSet<String> = [
             "console.log",
             "env.get",
+            "env.args",
+            "process.exit",
             "fs.read",
             "fs.write",
             "fs.read_bytes",

@@ -365,6 +365,30 @@ impl<'a> Fn<'a> {
                         }
                     },
                     Callee::Indirect(o) => self.operands_in_range(bb, &[o]),
+                    Callee::Builtin(Builtin::EnvArgs) => {
+                        if !args.is_empty() {
+                            self.err(bb, "env.args は引数を取らない".into());
+                        }
+                        self.expect(
+                            bb,
+                            "env.args の戻り値",
+                            Some(Ty::List(Box::new(Ty::Str))),
+                            self.place_ty(dest),
+                        );
+                    }
+                    Callee::Builtin(Builtin::ProcessExit) => {
+                        if let [code] = args.as_slice() {
+                            self.expect(bb, "process.exit の引数", Some(Ty::Int), self.op_ty(code));
+                        } else {
+                            self.err(bb, "process.exit は終了コードを一つ取る".into());
+                        }
+                        self.expect(
+                            bb,
+                            "process.exit の宣言上の戻り値",
+                            Some(Ty::Unit),
+                            self.place_ty(dest),
+                        );
+                    }
                     Callee::Builtin(_) => {}
                 }
             }
@@ -669,9 +693,12 @@ impl<'a> Fn<'a> {
                 for a in args {
                     self.mv(bb, st, a);
                 }
-                out.push((*cleanup, st.clone()));
-                self.write(st, dest);
-                out.push((*next, st.clone()));
+                // 明示終了の呼び出しは戻らず、異常停止の巻き戻しにも進まない。
+                if !matches!(func, Callee::Builtin(Builtin::ProcessExit)) {
+                    out.push((*cleanup, st.clone()));
+                    self.write(st, dest);
+                    out.push((*next, st.clone()));
+                }
             }
             Term::CheckedOp {
                 a,

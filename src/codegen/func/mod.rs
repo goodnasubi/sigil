@@ -586,18 +586,8 @@ impl<'a, 'p> Fx<'a, 'p> {
         self.b.ins().return_(&[]);
     }
 
-    pub fn thunk(&mut self) {
-        let p = self.cg.p;
-        let f = &p.funcs[p.entry];
-        let entry = self.b.create_block();
-        self.b.append_block_params_for_function_params(entry);
-        self.b.switch_to_block(entry);
-        let arg = self.b.block_params(entry)[0];
-        let argc = self.ld(arg, 0);
-        let argv = self.ld(arg, 8);
+    fn bind_entry_args(&mut self, f: &Func, argc: Value, argv: Value, out: Value) {
         let n = f.params.len();
-        let out = self.zero_tmp(8 * std::cmp::max(n, 1) as u32);
-
         // 入口の引数は生成側で扱う（ADR 0025 補足 I-2・I-4）: 全部をリテラル値に読み、
         // 個数を確かめ、宣言の型へ合わせ込む。誤りの文言・順序・終了コード 1 は
         // 移行前の `sigil_rt_entry_args` と同じ。
@@ -640,6 +630,28 @@ impl<'a, 'p> Fx<'a, 'p> {
         // リテラル値の塊は入口の間だけ生きる（補足 I-1）。合わせ込みは塊を借りない
         // （数値はコピー、文字列・一覧は新しく作られる）ので、ここで全部片づける。
         self.entry_free_args(lits, given);
+    }
+
+    pub fn thunk(&mut self, raw_argv: bool) {
+        let p = self.cg.p;
+        let f = &p.funcs[p.entry];
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        let arg = self.b.block_params(entry)[0];
+        let argc = self.ld(arg, 0);
+        let argv = self.ld(arg, 8);
+        let n = f.params.len();
+        let out = self.zero_tmp(8 * std::cmp::max(n, 1) as u32);
+
+        if let Some(data) = self.cg.argv {
+            let saved = self.data_addr(data);
+            self.st(argc, saved, 0);
+            self.st(argv, saved, 8);
+        }
+        if !raw_argv {
+            self.bind_entry_args(f, argc, argv, out);
+        }
         self.init_globals();
         let mut vs = vec![];
         for (i, &pl) in f.params.iter().enumerate() {

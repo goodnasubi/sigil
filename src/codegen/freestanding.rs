@@ -435,6 +435,7 @@ pub(super) fn compile(p: &Program, opts: &Opts) -> Result<Vec<u8>, CgError> {
         fids,
         msg_table,
         gids,
+        argv: None,
         live_shim: None,
         str_ops: None,
         list_ops: None,

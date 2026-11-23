@@ -26,6 +26,7 @@ fn verify(srcs: &[&str], func: &str) {
         Ok(_) => {}
         Err(RunError::Check(_) | RunError::Module { .. } | RunError::Entry(_)) => return,
         Err(RunError::Stop(s)) => panic!("lowering が停止を返した: {func}: {s}"),
+        Err(RunError::Exit(code)) => panic!("lowering が終了コードを返した: {func}: {code}"),
         Err(RunError::Unsupported(m)) => {
             let n = UNSUPPORTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             eprintln!("SIR の検証を飛ばす（未対応 {n} 件目）: {func}: {m}");

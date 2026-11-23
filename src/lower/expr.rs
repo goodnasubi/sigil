@@ -794,6 +794,14 @@ impl<'a> L<'a> {
                         self.core_only = false;
                         Builtin::EnvGet
                     }
+                    "env.args" => {
+                        self.core_only = false;
+                        Builtin::EnvArgs
+                    }
+                    "process.exit" => {
+                        self.core_only = false;
+                        Builtin::ProcessExit
+                    }
                     "fs.read" => {
                         self.core_only = false;
                         Builtin::FsRead

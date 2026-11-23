@@ -79,6 +79,8 @@ pub enum RunError {
         error: Error,
     },
     Stop(Box<Stop>),
+    /// プログラムが指定した終了コード。ホストのプロセスは終了しない。
+    Exit(u8),
     /// 現在の範囲にない機能（`fs`・`Shared` など）。
     Unsupported(String),
     /// 入口の指定の誤り（関数がない・引数の数が違う）。
@@ -91,6 +93,7 @@ impl fmt::Display for RunError {
             RunError::Check(e) => write!(f, "{e}"),
             RunError::Module { file, error } => write!(f, "{}:{error}", file.display()),
             RunError::Stop(s) => write!(f, "{s}"),
+            RunError::Exit(code) => write!(f, " 終了コード {code}"),
             RunError::Unsupported(m) => write!(f, " 未対応: {m}"),
             RunError::Entry(m) => write!(f, " 入口の指定が誤り: {m}"),
         }
@@ -106,12 +109,12 @@ pub struct Outcome {
     pub drops: Vec<String>,
 }
 
-/// 実行の失敗。異常停止の前に出力があれば `output` に残る。
+/// 戻り値を得ずに終了した実行。実行中に捕捉した出力があれば `output` に残る。
 #[derive(Debug)]
 pub struct Failure {
     pub error: RunError,
     pub output: String,
-    /// `Outcome::drops` と同じ。異常停止の前に破棄した値も含む。
+    /// `Outcome::drops` と同じ。明示終了や異常停止までに破棄した値も含む。
     pub drops: Box<[String]>,
 }
 
@@ -135,6 +138,10 @@ pub struct Options {
     pub fs_bytes: Option<std::collections::BTreeMap<String, Vec<u8>>>,
     /// `env.get` の差し替え。`Some` ならこの表だけを読み、`None` なら実行環境を読む。
     pub env_vars: Option<std::collections::BTreeMap<String, String>>,
+    /// 実行ファイル名を除いた、型付き入口へ合わせ込む前の起動引数。
+    pub argv: Vec<String>,
+    /// 型付きの仮引数を持たない入口で、生の起動引数だけを受け取る。
+    pub raw_argv: bool,
     /// `console.log` の出力を `Outcome::output` に溜める（テスト用）。偽（既定）なら本物の標準出力へ書き、`output` は空。
     pub capture_console: bool,
     /// `trust base` の宣言を許すモジュール名（`--trust-base`。ADR 0016）。
@@ -170,6 +177,8 @@ impl Default for Options {
             fs_files: None,
             fs_bytes: None,
             env_vars: None,
+            argv: Vec::new(),
+            raw_argv: false,
             capture_console: false,
             trust_base: Vec::new(),
             schedule_seed: None,

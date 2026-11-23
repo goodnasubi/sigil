@@ -1,6 +1,6 @@
 use super::{aggregate, norm, strip, Cur, Fx, NOARGS};
 use crate::exec::StopKind;
-use crate::ir::{ArithOp, Callee, Stmt, Term, Ty};
+use crate::ir::{ArithOp, Builtin, Callee, Stmt, Term, Ty};
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::InstBuilder;
 
@@ -163,6 +163,16 @@ impl<'a, 'p> Fx<'a, 'p> {
                 let (da, _) = self.place(dest);
                 self.st(r, da, 0);
                 self.b.ins().jump(self.blocks[*next], NOARGS);
+            }
+            Term::Call {
+                func: Callee::Builtin(Builtin::ProcessExit),
+                args,
+                ..
+            } => {
+                // 終了要求は専用の OS 経路へ送り、通常の続き・巻き戻しには進まない。
+                let (code, _) = self.val(&args[0]);
+                let code = self.b.ins().band_imm_u(code, 255);
+                self.start_exit(code);
             }
             Term::Call {
                 func,

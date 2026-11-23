@@ -19,7 +19,7 @@ use super::value::{
     list_of, new_slot, shadow, with_val, Agg, CapacityPermitTok, CapacityState, GuardTok, Ptr,
     RootSlotTok, Tag, Val, LOCK_EVENTS, ROOT_EVENTS, UNWINDING,
 };
-use super::{Slot, E, M};
+use super::{Escape, Slot, E, M};
 
 #[cfg(unix)]
 #[repr(C)]
@@ -62,6 +62,7 @@ pub(super) enum Run {
     Done(Val),
     Suspend,
     Fail(E),
+    Exit(u8),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -513,16 +514,24 @@ impl<'p> M<'p> {
     }
 
     /// 入れ子の呼び出し（組み込みの中からの関数の呼び出し）。中断点は持てない。
-    pub(super) fn run_func(&mut self, fid: FuncId, args: Vec<Val>, loc: StopId) -> Result<Val, E> {
+    pub(super) fn run_func(
+        &mut self,
+        fid: FuncId,
+        args: Vec<Val>,
+        loc: StopId,
+    ) -> Result<Val, Escape> {
         let (base, budget) = super::value::STACK_LIMIT.with(|c| c.get());
         if base.abs_diff(super::value::stack_addr()) > budget || self.sch.live >= self.sch.max_depth
         {
-            return Err(self.stop_at(loc, Some(StopKind::StackExhausted), Some("")));
+            return Err(self
+                .stop_at(loc, Some(StopKind::StackExhausted), Some(""))
+                .into());
         }
         let mut frames = vec![self.new_frame(fid, args, loc, None)];
         match self.drive(&mut frames, false) {
             Run::Done(v) => Ok(v),
-            Run::Fail(e) => Err(e),
+            Run::Fail(e) => Err(e.into()),
+            Run::Exit(code) => Err(Escape::Exit(code)),
             Run::Suspend => unreachable!("入れ子の呼び出しは中断しない"),
         }
     }
@@ -582,7 +591,7 @@ impl<'p> M<'p> {
                     } => {
                         let mut push: Option<(FuncId, Vec<Val>)> = None;
                         let mut block = false;
-                        let r: Option<Result<Val, E>> = match func {
+                        let r: Option<Result<Val, Escape>> = match func {
                             Callee::Func(g) => {
                                 let argv: Vec<Val> =
                                     args.iter().map(|a| self.read(locals, a)).collect();
@@ -604,11 +613,13 @@ impl<'p> M<'p> {
                             }
                             Callee::Builtin(b) if is_task_op(*b) => {
                                 if !top {
-                                    Some(Err(self.stop_at(
-                                        *stop,
-                                        Some(StopKind::StdRequiresViolated),
-                                        Some("関数値の呼び出しの中ではタスクを中断できない"),
-                                    )))
+                                    Some(Err(self
+                                        .stop_at(
+                                            *stop,
+                                            Some(StopKind::StdRequiresViolated),
+                                            Some("関数値の呼び出しの中ではタスクを中断できない"),
+                                        )
+                                        .into()))
                                 } else {
                                     match self.task_op(locals, *b, args, *stop) {
                                         Op::Val(v) => Some(Ok(v)),
@@ -621,7 +632,7 @@ impl<'p> M<'p> {
                                             block = true;
                                             None
                                         }
-                                        Op::Fail(e) => Some(Err(e)),
+                                        Op::Fail(e) => Some(Err(e.into())),
                                     }
                                 }
                             }
@@ -637,10 +648,12 @@ impl<'p> M<'p> {
                                     self.write(locals, dest, v);
                                     fr.bb = *next;
                                 }
-                                Err(e) => {
+                                Err(Escape::Stop(e)) => {
                                     fr.pending = Some(e);
                                     fr.bb = *cleanup;
                                 }
+                                // 終了要求は next・cleanup のどちらにも進まず、全体の評価を打ち切る。
+                                Err(Escape::Exit(code)) => return Run::Exit(code),
                             }
                             Act::Continue
                         }
@@ -1701,11 +1714,11 @@ impl<'p> M<'p> {
     }
 
     /// プロセス全体の停止。全ルートタスクを取り消して、元の停止を返す。
-    fn stop_all(&mut self, e: E) -> Result<Vec<Result<Val, E>>, E> {
+    fn stop_all(&mut self, e: E) -> Result<Vec<Result<Val, E>>, Escape> {
         self.cancel_all();
         self.settle_locks();
         self.take_deep();
-        Err(e)
+        Err(e.into())
     }
 
     /// `LockGuard` の破棄の知らせを反映する。解放なら次の待機者へ渡し、異常停止の巻き戻しでの破棄なら
@@ -2020,12 +2033,12 @@ impl<'p> M<'p> {
     ///
     /// ルートタスクごとに結果を返す。ルートタスクの異常停止は、そのルートタスクと子のタスクだけを止める
     /// （他のルートタスクは止めない）。スタックの枯渇と、確保器の枠の中の異常停止は、プロセス全体の停止として
-    /// 外側の `Err` で返す（ADR 0026 決定 4）。
+    /// 外側の `Err` で返す（ADR 0026 決定 4）。明示終了も全体を打ち切り、終了コードを返す。
     pub(super) fn run_roots(
         &mut self,
         fid: FuncId,
         arg_sets: Vec<Vec<Val>>,
-    ) -> Result<Vec<Result<Val, E>>, E> {
+    ) -> Result<Vec<Result<Val, E>>, Escape> {
         for args in arg_sets {
             let frame = self.new_frame(fid, args, 0, None);
             let tid = self.sch.tasks.len();
@@ -2052,7 +2065,7 @@ impl<'p> M<'p> {
                 self.cancel_all();
                 self.settle_locks();
                 self.take_deep();
-                return Err(e);
+                return Err(e.into());
             }
             if self.sch.results.iter().all(Option::is_some) {
                 return Ok(std::mem::take(&mut self.sch.results)
@@ -2130,6 +2143,7 @@ impl<'p> M<'p> {
             }
             match run {
                 Run::Suspend => {}
+                Run::Exit(code) => return Err(Escape::Exit(code)),
                 Run::Done(v) => {
                     self.sch.ver += 1;
                     if let Some(i) = self.sch.roots.iter().position(|&r| r == t) {

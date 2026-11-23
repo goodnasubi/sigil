@@ -537,6 +537,8 @@ fn check_impl(
             fs_files: opts.fs_files.clone(),
             fs_bytes: opts.fs_bytes.clone(),
             env_vars: opts.env_vars.clone(),
+            argv: opts.argv.clone(),
+            raw_argv: opts.raw_argv,
             capture_console: opts.capture_console,
             trust_base: opts.trust_base.clone(),
             schedule_seed: opts.schedule_seed,

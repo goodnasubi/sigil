@@ -66,6 +66,10 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     // HKDF-SHA-256 の擬似乱数鍵 PRK（ADR 0058 決定 2、段 1a）。`Secret` を
     // 1 つ持つ型で、中身は `std.crypto` の Sigil 実装が持つ（`Sha256` と同じ作法）。
     ("HkdfSha256Prk", 0, Layer::Core),
+    // SHA-384 のストリーミング文脈と HKDF-SHA-384 の PRK（ADR 0058 決定 2、段 2b）。
+    // `Sha256`・`HkdfSha256Prk` と同じ作法（中身は `std.crypto` の Sigil 実装が持つ）。
+    ("Sha384", 0, Layer::Core),
+    ("HkdfSha384Prk", 0, Layer::Core),
     // AES-128-GCM の鍵・nonce・誤り（ADR 0058 決定 2、段 1b）。中身は `std.crypto` の Sigil 実装が
     // 持つ。`AeadError` は腕を `match` できる列挙で、検査器はこの行を列挙として登録し直す
     // （`AEAD_ERROR_ARMS`）。
@@ -500,6 +504,19 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
         "hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret",
         "none",
     ),
+    // SHA-384 と HKDF-SHA-384（ADR 0058 決定 2、段 2b）。RFC 6234・RFC 5869。実体は
+    // `std.crypto` の Sigil 実装（埋め込み）。
+    (Layer::Core, "sha384(data: &Bytes) -> Bytes", "none"),
+    (
+        Layer::Core,
+        "hkdf_extract_sha384(salt: Option<Secret>, ikm: &Secret) -> HkdfSha384Prk",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "hkdf_expand_sha384(prk: &HkdfSha384Prk, info: &Bytes, out_len: Int) -> Secret",
+        "none",
+    ),
     // AES-128-GCM（ADR 0058 決定 2、段 1b）。実体は `std.crypto` の Sigil 実装（埋め込み）。
     (
         Layer::Core,
@@ -804,6 +821,11 @@ pub const REQUIRES: &[(&str, &str)] = &[
         "hkdf_expand_sha256(prk: &HkdfSha256Prk, info: &Bytes, out_len: Int) -> Secret",
         "out_len >= 0 && out_len <= 8160",
     ),
+    // HKDF-SHA-384 の出力長: 0 <= out_len <= 255 * HashLen(48)。
+    (
+        "hkdf_expand_sha384(prk: &HkdfSha384Prk, info: &Bytes, out_len: Int) -> Secret",
+        "out_len >= 0 && out_len <= 12240",
+    ),
 ];
 
 /// `impl` の見出し（例: `<T> List<T>`）と、その中の関数。
@@ -922,6 +944,15 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("new() -> Sha256", "none"),
             ("update(self: &mut Sha256, data: &Bytes)", "none"),
             ("finalize(self: &mut Sha256) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "Sha384",
+        &[
+            ("new() -> Sha384", "none"),
+            ("update(self: &mut Sha384, data: &Bytes)", "none"),
+            ("finalize(self: &mut Sha384) -> Bytes", "none"),
         ],
     ),
     (

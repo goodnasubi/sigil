@@ -367,6 +367,10 @@ pub enum Builtin {
     ConsoleLog,
     /// 環境変数を読む（`&String -> Option<String>`、効果 `env`）。
     EnvGet,
+    /// 型変換前の起動引数を順番どおりに取得する `env.args() -> List<String>`（ADR 0015 追補 A-1、効果 `env`）。
+    EnvArgs,
+    /// `process.exit(code: Int) -> Unit` は `code` の下位 8 ビットを終了コードに使い、プログラム全体を終了する（ADR 0015 追補 A-2、効果 `process`）。
+    ProcessExit,
     FsRead,
     FsWrite,
     FsReadBytes,

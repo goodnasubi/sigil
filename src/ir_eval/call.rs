@@ -795,6 +795,7 @@ impl<'p> M<'p> {
                     None => self.none(),
                 }
             }
+            EnvArgs | ProcessExit => unreachable!("{b:?} は未実装（ADR 0015 追補、#711）"),
             SyncSharedBorrow => {
                 let (s, p) = self.view(locals, &args[0]);
                 let slot = with_val(&s, &p, |v| super::sched::shared_cell(v).cloned());

@@ -47,6 +47,16 @@ fn finish(code: Int) -> Int
   return 789;
 }
 
+fn finish_with_output(message: String)
+  intent "パイプに長い文字列を出力して終了する"
+  requires none
+  ensures none
+  effects console, process
+{
+  console.log(&message);
+  stop(2);
+}
+
 fn ordinary() -> Int
   intent "通常の戻り値を返す"
   requires none
@@ -262,10 +272,20 @@ mod cli {
     fn explicit_exit_keeps_prior_output_and_uses_the_low_byte() {
         let cli = Cli::new();
         let exe = cli.executable("finish", false);
-        for (arg, code) in [("70", 70), ("-1", 255), ("256", 0)] {
+        for (arg, code) in [("70", 70), ("1", 1), ("-1", 255), ("256", 0)] {
             assert_output(cli.run("finish", false, &[arg]), code, "123\n");
             assert_output(Command::new(&exe).arg(arg).output().unwrap(), code, "123\n");
         }
+    }
+
+    #[test]
+    fn explicit_exit_keeps_large_piped_output() {
+        let cli = Cli::new();
+        let exe = cli.executable("finish_with_output", false);
+        let message = "x".repeat(32 * 1024);
+        let want = format!("{message}\n");
+        assert_output(cli.run("finish_with_output", false, &[&message]), 2, &want);
+        assert_output(Command::new(exe).arg(&message).output().unwrap(), 2, &want);
     }
 
     #[test]

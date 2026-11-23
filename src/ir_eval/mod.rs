@@ -26,7 +26,7 @@ use std::rc::Rc;
 
 use value::{
     list_of, locate, new_slot, show_val, stack_addr, types, with_val_mut, Agg, Ptr, Tag, Val, DEEP,
-    DROP_LOG, STACK_LIMIT, TYPES,
+    DROP_LOG, LOCK_EVENTS, ROOT_EVENTS, STACK_LIMIT, TYPES,
 };
 
 type Slot = Rc<RefCell<Val>>;
@@ -588,6 +588,11 @@ fn execute_roots(
     drop(_chunks_scope);
     let exit_drops = std::mem::take(&mut m.exit_drops);
     drop(m);
+    if exited {
+        // 破棄で残った通知は、この実行のロックとルートの番号を持つ。
+        LOCK_EVENTS.with(|events| events.borrow_mut().clear());
+        ROOT_EVENTS.with(|events| events.borrow_mut().clear());
+    }
     let drops = DROP_LOG
         .with(|l| l.borrow_mut().take())
         .unwrap_or(exit_drops);

@@ -171,6 +171,10 @@ impl<'a, 'p> Fx<'a, 'p> {
         let argv = self.ld(saved, 8);
         // argv[0] は実行ファイル名。残りは既存の UTF-8 置換を通す。
         let count = self.b.ins().iadd_imm_s(argc, -1);
+        // argv[0] 自体がない場合も、空の一覧を返す。
+        let zero = self.ic(0);
+        let negative = self.b.ins().icmp(IntCC::SignedLessThan, count, zero);
+        let count = self.b.ins().select(negative, zero, count);
         let size = self.ic(8);
         let list = self.rt("list_new", &[size]);
         let item = self.zero_tmp(8);

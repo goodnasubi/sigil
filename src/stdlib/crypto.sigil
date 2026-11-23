@@ -1310,29 +1310,35 @@ fn aes_sbox(x: Int) -> Int
   return inv ^ r1 ^ r2 ^ r3 ^ r4 ^ 0x63;
 }
 
-// 範囲: 鍵展開。16 バイトの鍵から、11 個のラウンド鍵（16 バイトずつ、計 176 バイト）を
-// 並べた一覧を作る。
+// 範囲: 鍵展開（FIPS 197 §5.2）。16 バイト（AES-128、ラウンド鍵 11 個）または 32 バイト（AES-256、
+// ラウンド鍵 15 個）の鍵から、ラウンド鍵（16 バイトずつ）を並べた一覧を作る。鍵の語数 `nk` は鍵の長さ（公開）
+// から決まり、語の数は 4 * (nk + 7)（176 バイトまたは 240 バイト）。`ctr` は語を `nk` 個進むたびに 0 へ戻る
+// カウンタで、0 のとき RotWord・SubWord・ラウンド定数、AES-256（nk = 8）で 4 のとき SubWord だけをかける。
+// 除数が定数になるよう、`n % nk` は使わずカウンタで数える。
 fn aes_expand_key(key: &Bytes) -> List<Int>
-  intent "AES-128 の鍵展開（ラウンド鍵 176 バイトの一覧）を返す"
+  intent "AES の鍵展開（128 ビット鍵と 256 ビット鍵）で、ラウンド鍵の並びを返す"
   requires none
   ensures none
   effects none
 {
+  let nk = key.byte_len() / 4;
+  let total = 4 * (nk + 7);
   let mut w = List.new();
   let mut i = 0;
-  while i < 16 {
+  while i < nk * 4 {
     w.push(key.get(i).map(|x| x + 0).unwrap_or(0));
     i = i + 1;
   }
   let mut rc = 1;
-  let mut n = 4;
-  while n < 44 {
+  let mut n = nk;
+  let mut ctr = 0;
+  while n < total {
     let p = (n - 1) * 4;
     let mut t0 = w.get(p).map(|x| x + 0).unwrap_or(0);
     let mut t1 = w.get(p + 1).map(|x| x + 0).unwrap_or(0);
     let mut t2 = w.get(p + 2).map(|x| x + 0).unwrap_or(0);
     let mut t3 = w.get(p + 3).map(|x| x + 0).unwrap_or(0);
-    if n % 4 == 0 {
+    if ctr == 0 {
       let u0 = aes_sbox(t1) ^ rc;
       let u1 = aes_sbox(t2);
       let u2 = aes_sbox(t3);
@@ -1343,7 +1349,17 @@ fn aes_expand_key(key: &Bytes) -> List<Int>
       t3 = u3;
       rc = aes_xtime(rc);
     }
-    let q = (n - 4) * 4;
+    if nk == 8 && ctr == 4 {
+      let v0 = aes_sbox(t0);
+      let v1 = aes_sbox(t1);
+      let v2 = aes_sbox(t2);
+      let v3 = aes_sbox(t3);
+      t0 = v0;
+      t1 = v1;
+      t2 = v2;
+      t3 = v3;
+    }
+    let q = (n - nk) * 4;
     let n0 = w.get(q).map(|x| x + 0).unwrap_or(0) ^ t0;
     let n1 = w.get(q + 1).map(|x| x + 0).unwrap_or(0) ^ t1;
     let n2 = w.get(q + 2).map(|x| x + 0).unwrap_or(0) ^ t2;
@@ -1352,15 +1368,20 @@ fn aes_expand_key(key: &Bytes) -> List<Int>
     w.push(n1);
     w.push(n2);
     w.push(n3);
+    ctr = ctr + 1;
+    if ctr == nk {
+      ctr = 0;
+    }
     n = n + 1;
   }
   return w;
 }
 
 // 範囲: 16 バイトのブロックを 1 つ暗号化する（ラウンド鍵は `aes_expand_key` の結果）。
-// 状態の並びは FIPS 197 のとおり（列優先、入力の並びのまま）。
+// 状態の並びは FIPS 197 のとおり（列優先、入力の並びのまま）。ラウンド数はラウンド鍵の
+// 数（公開の長さ）から決まる: 128 ビット鍵は 10、256 ビット鍵は 14。
 fn aes_encrypt_block(rk: &List<Int>, block: &Bytes) -> Bytes
-  intent "AES-128 で 16 バイトのブロックを暗号化する"
+  intent "AES（128 ビット鍵と 256 ビット鍵）で 16 バイトのブロックを暗号化する"
   requires none
   ensures result.byte_len() == 16
   effects none
@@ -1371,8 +1392,9 @@ fn aes_encrypt_block(rk: &List<Int>, block: &Bytes) -> Bytes
     s.push(block.get(i).map(|x| x + 0).unwrap_or(0) ^ rk.get(i).map(|x| x + 0).unwrap_or(0));
     i = i + 1;
   }
+  let nr = rk.len() / 16 - 1;
   let mut round = 1;
-  while round < 11 {
+  while round <= nr {
     let mut t = List.new();
     let mut c = 0;
     while c < 4 {
@@ -1385,7 +1407,7 @@ fn aes_encrypt_block(rk: &List<Int>, block: &Bytes) -> Bytes
       c = c + 1;
     }
     let mut u = t.clone();
-    if round < 10 {
+    if round < nr {
       let mut m = List.new();
       let mut col = 0;
       while col < 4 {
@@ -1654,6 +1676,94 @@ pub fn aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed:
   let rk = aes_expand_key(&kb);
   let want = gcm_tag(&rk, &nonce.bytes, &aad, &ct);
   if aes128_gcm_tag_matches(&want, &got) {
+    let pt = gcm_ctr_xor(&rk, &nonce.bytes, &ct);
+    return Ok(Secret.from_bytes(pt));
+  }
+  return Err(AeadError.AuthenticationFailed);
+}
+
+// ---------------------------------------------------------------------------
+// AES-256-GCM（ADR 0058 決定 2・3、段 2c）。FIPS 197・NIST SP 800-38D。
+//
+// AES-128-GCM の内部部品（鍵展開・ブロック暗号化・GHASH・CTR・タグ）をそのまま使い、鍵だけが
+// 32 バイトになる。鍵展開とブロック暗号化は鍵の長さ・ラウンド鍵の数（公開の長さ）から、14 ラウンドと
+// 240 バイトのラウンド鍵を決める。公開するのは鍵型 `Aes256GcmKey` と `aes256_gcm_seal`・
+// `aes256_gcm_open` の 2 関数だけで、`Nonce96`・`AeadError` は AES-128-GCM と共用する。
+// 長さの上限・nonce の一意性の契約・定数時間の方針は AES-128-GCM と同じ。
+//
+// 鍵と平文は `Secret` の中身を `Bytes` へ複製せず、`data` を直接借りる（ChaCha20-Poly1305 と同じ）。
+// 展開したラウンド鍵（`List<Int>`）は `Int` の一覧で、破棄時に消せない（X25519 と同じ限界）。
+
+pub struct Aes256GcmKey {
+  key: Secret,
+}
+
+impl Aes256GcmKey {
+  // 範囲: 32 バイトの秘密を鍵として取り込む（所有権を取る）。長さが違えば誤り。
+  pub fn from_secret(key: Secret) -> Result<Aes256GcmKey, AeadError>
+    intent "32 バイトの秘密から AES-256-GCM の鍵を作る"
+    requires none
+    ensures none
+    effects none
+  {
+    if key.byte_len() != 32 {
+      return Err(AeadError.InvalidKeyLength);
+    }
+    return Ok(Aes256GcmKey { key: key });
+  }
+}
+
+// 範囲: タグの照合。全バイトを処理する定数時間比較の結果（1 ビット）だけを返す。
+fn aes256_gcm_tag_matches(expected: &Bytes, got: &Bytes) -> Bool
+  intent "AES-256-GCM のタグを定数時間で照合する"
+  requires none
+  ensures none
+  effects none
+{
+  return ct_eq(&expected, &got);
+}
+
+pub fn aes256_gcm_seal(key: &Aes256GcmKey, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>
+  intent "AES-256-GCM で暗号化し、暗号文にタグ 16 バイトを連結して返す"
+  requires none
+  ensures none
+  effects none
+{
+  if plaintext.byte_len() > 68719476704 {
+    return Err(AeadError.InputTooLong);
+  }
+  if aad.byte_len() > 2305843009213693951 {
+    return Err(AeadError.InputTooLong);
+  }
+  let rk = aes_expand_key(&key.key.data);
+  let ct = gcm_ctr_xor(&rk, &nonce.bytes, &plaintext.data);
+  let tag = gcm_tag(&rk, &nonce.bytes, &aad, &ct);
+  let mut out = ct;
+  out.extend(&tag);
+  return Ok(out);
+}
+
+pub fn aes256_gcm_open(key: &Aes256GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>
+  intent "AES-256-GCM のタグを検証し、成功したときだけ復号した平文を返す"
+  requires none
+  ensures none
+  effects none
+{
+  if sealed.byte_len() < 16 {
+    return Err(AeadError.InputTooShort);
+  }
+  let ct_len = sealed.byte_len() - 16;
+  if ct_len > 68719476704 {
+    return Err(AeadError.InputTooLong);
+  }
+  if aad.byte_len() > 2305843009213693951 {
+    return Err(AeadError.InputTooLong);
+  }
+  let ct = sealed.slice(0, ct_len).unwrap_or(Bytes.new());
+  let got = sealed.slice(ct_len, sealed.byte_len()).unwrap_or(Bytes.new());
+  let rk = aes_expand_key(&key.key.data);
+  let want = gcm_tag(&rk, &nonce.bytes, &aad, &ct);
+  if aes256_gcm_tag_matches(&want, &got) {
     let pt = gcm_ctr_xor(&rk, &nonce.bytes, &ct);
     return Ok(Secret.from_bytes(pt));
   }

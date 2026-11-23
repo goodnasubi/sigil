@@ -1,5 +1,5 @@
 //! 定数時間の統計的計測（ADR 0024 決定 3-4、ADR 0020 決定 1 の「計測」）。
-//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM、X25519）
+//! `std.crypto` の実物の比較（`ct_eq`、HMAC照合、SCRAM照合、ベアラー署名照合、HKDF-SHA-256、AES-128-GCM、ChaCha20-Poly1305、X25519）
 //! および陽性の対照（素の `cmp_early`、HMAC包み `verify_hmac_early`）に対して dudect 方式（Welch の t 検定）で計測する。
 //!
 //! 通常の `cargo test` では走らない（`#[ignore]`）。実行するには:
@@ -89,6 +89,10 @@ enum CmpTarget {
     AesGcmLeaky,
     AesGcmFail,
     AesGcmFailLeaky,
+    ChaChaPoly,
+    ChaChaPolyLeaky,
+    ChaChaPolyFail,
+    ChaChaPolyFailLeaky,
 }
 
 const CMP_EARLY: &str = "\
@@ -252,6 +256,70 @@ fn measure_program(target: CmpTarget, diff_at: usize, iters: usize) -> String {
             format!(
                 "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}{iv}{aad}{pt}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let key_opt = Aes128GcmKey.from_secret(Secret.from_bytes(raw_key.clone()));\n    match key_opt {{\n      Err(e) => {{ return 0 - 1; }}\n      Ok(key) => {{\n        match Nonce96.from_slice(&iv) {{\n          Err(e) => {{ return 0 - 1; }}\n          Ok(n1) => {{\n            match Nonce96.from_slice(&iv) {{\n              Err(e) => {{ return 0 - 1; }}\n              Ok(n2) => {{\n                match aes128_gcm_seal(&key, n1, &aad, &Secret.from_bytes(pt.clone())) {{\n                  Err(e) => {{ return 0 - 1; }}\n                  Ok(sealed) => {{\n                    let mut bad = sealed.clone();\n                    let orig = bad.get({idx}).unwrap_or(0);\n                    match bad.set({idx}, (orig + 1) % 256) {{\n                      Err(e) => {{ return 0 - 1; }}\n                      Ok(u) => {{}}\n                    }}\n                    match aes128_gcm_open(&key, &n2, &aad, &bad) {{\n                      Err(e) => {{ acc = acc + 1; }}\n                      Ok(o) => {{ return 0 - 1; }}\n                    }}\n{leak}                  }}\n                }}\n              }}\n            }}\n          }}\n        }}\n      }}\n    }}\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
                 raw_key = pushes("raw_key", &KEY[..16]),
+                iv = pushes("iv", &MSG[..12]),
+                aad = pushes("aad", &MSG[12..20]),
+                pt = pushes("pt", &MSG),
+            )
+        }
+        // ChaCha20-Poly1305（ADR 0058 決定 3、段 2a）。鍵（32 バイト）が秘密の入力（組 A は先頭、組 B は末尾の
+        // バイトだけ反転）、nonce・AAD・平文の長さは公開で組の間で同じ。暗号化と
+        // 復号（タグの照合を含む）の両方を通す。`ChaChaPolyLeaky` は同じ形のまま、鍵の末尾のバイトが
+        // 元の値と違うとき（組 B）だけ暗号化をもう 1 回する陽性の対照（秘密に依存する仕事量の差）。
+        CmpTarget::ChaChaPoly | CmpTarget::ChaChaPolyLeaky => {
+            let leak = if matches!(target, CmpTarget::ChaChaPolyLeaky) {
+                "    if raw_key.get(31).unwrap_or(0) != 220 {
+      match Nonce96.from_slice(&iv) {
+        Err(e) => { return 0 - 1; }
+        Ok(n3) => {
+          match chacha20_poly1305_seal(&key, n3, &aad, &Secret.from_bytes(pt.clone())) {
+            Err(e) => { return 0 - 1; }
+            Ok(extra) => { acc = acc + 1; }
+          }
+        }
+      }
+    }
+"
+            } else {
+                ""
+            };
+            format!(
+                "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}{iv}{aad}{pt}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let key_opt = ChaCha20Poly1305Key.from_secret(Secret.from_bytes(raw_key.clone()));\n    match key_opt {{\n      Err(e) => {{ return 0 - 1; }}\n      Ok(key) => {{\n        match Nonce96.from_slice(&iv) {{\n          Err(e) => {{ return 0 - 1; }}\n          Ok(n1) => {{\n            match Nonce96.from_slice(&iv) {{\n              Err(e) => {{ return 0 - 1; }}\n              Ok(n2) => {{\n                match chacha20_poly1305_seal(&key, n1, &aad, &Secret.from_bytes(pt.clone())) {{\n                  Err(e) => {{ return 0 - 1; }}\n                  Ok(sealed) => {{\n                    match chacha20_poly1305_open(&key, &n2, &aad, &sealed) {{\n                      Err(e) => {{ return 0 - 1; }}\n                      Ok(o) => {{ acc = acc + o.byte_len(); }}\n                    }}\n{leak}                  }}\n                }}\n              }}\n            }}\n          }}\n        }}\n      }}\n    }}\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+                raw_key = pushes("raw_key", &input),
+                iv = pushes("iv", &MSG[..12]),
+                aad = pushes("aad", &MSG[12..20]),
+                pt = pushes("pt", &MSG),
+            )
+        }
+        // ChaCha20-Poly1305 の認証失敗（ADR 0058 決定 3 の「AEAD のタグ照合では同じ長さと同じ失敗結果で不一致の位置を変える」）。
+        // 鍵・nonce・AAD・平文は両組で同じ。seal が返した `sealed` のタグ（末尾 16 バイト）の 1 バイトだけを変えて open に渡す。
+        // 組 A はタグの先頭（位置 0）、組 B はタグの末尾（位置 15）を改変する。長さも結果（`AuthenticationFailed`）も同じで、
+        // 違うのは改変したタグの位置だけ。open が最初の不一致で打ち切る退行があれば、組の間の所要時間に差が出る。
+        // `ChaChaPolyFailLeaky` は同じ形のまま、タグの末尾が違うとき（組 B）だけ暗号化をもう 1 回する陽性の対照（不一致の位置に依存する
+        // 仕事量の差）。1 バイトの比較の打ち切りそのものは、この計測の分解能（暗号化 1 回分の仕事量）より小さい。その構造的な
+        // 保証は ct_rules（タグの照合は ct_eq だけを通り、秘密に依存する分岐を持たない）が担い、この計測は「失敗の経路全体の
+        // 所要時間が不一致の位置に依存しないこと」を確かめる。
+        CmpTarget::ChaChaPolyFail | CmpTarget::ChaChaPolyFailLeaky => {
+            let tag_pos = if diff_at <= DIFF_FIRST { 0 } else { 15 };
+            let idx = 32 + tag_pos;
+            let leak = if matches!(target, CmpTarget::ChaChaPolyFailLeaky) {
+                "        if bad.get(47).unwrap_or(0) != sealed.get(47).unwrap_or(0) {
+          match Nonce96.from_slice(&iv) {
+            Err(e) => { return 0 - 1; }
+            Ok(n3) => {
+              match chacha20_poly1305_seal(&key, n3, &aad, &Secret.from_bytes(pt.clone())) {
+                Err(e) => { return 0 - 1; }
+                Ok(extra) => { acc = acc + 1; }
+              }
+            }
+          }
+        }
+"
+            } else {
+                ""
+            };
+            format!(
+                "module {{MODULE}}\n  targets server\n  trust none\n\nfn main() -> Int\n  intent \"計測\"\n  requires none\n  ensures none\n  effects none\n{{\n{raw_key}{iv}{aad}{pt}  let mut acc = 0;\n  let mut i = 0;\n  while i < {iters} {{\n    let key_opt = ChaCha20Poly1305Key.from_secret(Secret.from_bytes(raw_key.clone()));\n    match key_opt {{\n      Err(e) => {{ return 0 - 1; }}\n      Ok(key) => {{\n        match Nonce96.from_slice(&iv) {{\n          Err(e) => {{ return 0 - 1; }}\n          Ok(n1) => {{\n            match Nonce96.from_slice(&iv) {{\n              Err(e) => {{ return 0 - 1; }}\n              Ok(n2) => {{\n                match chacha20_poly1305_seal(&key, n1, &aad, &Secret.from_bytes(pt.clone())) {{\n                  Err(e) => {{ return 0 - 1; }}\n                  Ok(sealed) => {{\n                    let mut bad = sealed.clone();\n                    let orig = bad.get({idx}).unwrap_or(0);\n                    match bad.set({idx}, (orig + 1) % 256) {{\n                      Err(e) => {{ return 0 - 1; }}\n                      Ok(u) => {{}}\n                    }}\n                    match chacha20_poly1305_open(&key, &n2, &aad, &bad) {{\n                      Err(e) => {{ acc = acc + 1; }}\n                      Ok(o) => {{ return 0 - 1; }}\n                    }}\n{leak}                  }}\n                }}\n              }}\n            }}\n          }}\n        }}\n      }}\n    }}\n    i = i + 1;\n  }}\n  return acc;\n}}\n",
+                raw_key = pushes("raw_key", &KEY),
                 iv = pushes("iv", &MSG[..12]),
                 aad = pushes("aad", &MSG[12..20]),
                 pt = pushes("pt", &MSG),
@@ -552,6 +620,83 @@ fn ct_measure_aes_gcm_fail() {
     );
 }
 
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_positive_control_chacha20_poly1305() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(
+        CmpTarget::ChaChaPolyLeaky,
+        "chacha_poly_leaky",
+        iters,
+        samples,
+    );
+    println!("陽性の対照（ChaCha20-Poly1305 形, 鍵に依存する仕事量, 各組 {total} 回): t = {t:.2}");
+    assert!(
+        t.abs() >= 4.5,
+        "ChaCha20-Poly1305 陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_chacha20_poly1305() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(CmpTarget::ChaChaPoly, "chacha_poly", iters, samples);
+    println!(
+        "ChaCha20-Poly1305 (std.crypto.chacha20_poly1305_seal + chacha20_poly1305_open, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() < 4.5,
+        "ChaCha20-Poly1305 に時間の差が出た: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_positive_control_chacha20_poly1305_fail() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(
+        CmpTarget::ChaChaPolyFailLeaky,
+        "chacha_poly_fail_leaky",
+        iters,
+        samples,
+    );
+    println!(
+        "陽性の対照（ChaCha20-Poly1305 認証失敗の形, タグの不一致位置に依存する仕事量, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() >= 4.5,
+        "ChaCha20-Poly1305 認証失敗の陽性の対照で差が出なかった（計測の感度不足）: t = {t:.2}"
+    );
+}
+
+#[test]
+#[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
+fn ct_measure_chacha20_poly1305_fail() {
+    let iters = get_iters(DEFAULT_AEAD_ITERS);
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let total = iters * samples;
+    let t = measure_target(
+        CmpTarget::ChaChaPolyFail,
+        "chacha_poly_fail",
+        iters,
+        samples,
+    );
+    println!(
+        "ChaCha20-Poly1305 認証失敗（タグの先頭と末尾の改変, chacha20_poly1305_open, 各組 {total} 回): t = {t:.2}"
+    );
+    assert!(
+        t.abs() < 4.5,
+        "ChaCha20-Poly1305 の認証失敗にタグの不一致位置による時間の差が出た: t = {t:.2}"
+    );
+}
+
 /// ADR 0058 決定 3。両組で同じネイティブ実行ファイルを使い、同じ長さの
 /// スカラーを環境変数で渡す。各半バイトを ASCII 0x40〜0x4f に写す。
 fn x25519_program(iters: usize) -> String {
@@ -711,4 +856,8 @@ fn dudect_compare_timing() {
     ct_measure_aes_gcm();
     ct_measure_positive_control_aes_gcm_fail();
     ct_measure_aes_gcm_fail();
+    ct_measure_positive_control_chacha20_poly1305();
+    ct_measure_chacha20_poly1305();
+    ct_measure_positive_control_chacha20_poly1305_fail();
+    ct_measure_chacha20_poly1305_fail();
 }

@@ -202,10 +202,15 @@ fn rejects_wrong_key_lengths() {
 #[test]
 fn rejects_all_zero_shared_secret() {
     // §6.1 の全ゼロ共有値。§5 の非正規表現 p も 0 として処理する。
+    // 低位数の点（位数 8 の点、p-1、p+1 など）も全ゼロ共有値となり拒否されることを確認する。
     for point in [
         "0000000000000000000000000000000000000000000000000000000000000000",
         "0100000000000000000000000000000000000000000000000000000000000000",
         "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+        "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
     ] {
         assert_eq!(
             run(

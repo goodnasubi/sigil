@@ -231,7 +231,8 @@ impl Ck {
         self.register_std()?;
         self.register_raw()?;
         self.register_primitives()?;
-        for item in &all {
+        let n_externs = self.externs.len();
+        for (idx, item) in all.iter().enumerate() {
             match item {
                 Item::Fn(f) => {
                     self.span = f.span;
@@ -322,7 +323,7 @@ impl Ck {
                     {
                         self.core = false;
                     }
-                    let r = self.register_impl(i, false);
+                    let r = self.register_impl(i, idx >= n_externs, false);
                     self.core = core;
                     r?;
                 }
@@ -336,7 +337,6 @@ impl Ck {
                 self.register_trait(t)?;
             }
         }
-        let n_externs = self.externs.len();
         for (idx, item) in all.iter().enumerate() {
             if let Item::ImplFor(i) = item {
                 // 同じ実装が複数の `use` の経路で届いても、登録は 1 回だけ（二重の実装ではない）。

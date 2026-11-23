@@ -243,7 +243,7 @@ impl Ck {
         )
     }
 
-    pub(super) fn register_impl(&mut self, i: &ImplDecl, std: bool) -> R<()> {
+    pub(super) fn register_impl(&mut self, i: &ImplDecl, own: bool, std: bool) -> R<()> {
         self.span = i.span;
         let (outer, outer_tb) = self.generics(&i.generics, true)?;
         self.tparams = outer.iter().map(|(n, _)| n.clone()).collect();
@@ -275,11 +275,19 @@ impl Ck {
             // 先に登録した宣言の「実体」である（二重宣言ではない。ADR 0024、PR 6-1b:
             // `Secret` のメソッドは表で利用者へ見せ、実体は `std.crypto` が持つ）。
             // 置き換えを許すのは埋め込みモジュールの検査のときだけに限る。
-            if self.methods.contains_key(&key) && !self.embedded {
-                return self.err(
-                    ErrorKind::DuplicateDefinition,
-                    format!("`{tn}` のメソッド `{}` が二重に宣言されている", f.name),
-                );
+            // また、同じ公開型をシグネチャに含む複数の関数を同時に `use` した場合など、
+            // 取り込んだ実装（`!own`）が複数の経路で重複して届いた場合は二重宣言と
+            // みなさない（トレイトの `register_impl_for` と同様。Issue #728）。
+            if self.methods.contains_key(&key) {
+                if !own {
+                    continue;
+                }
+                if !self.embedded {
+                    return self.err(
+                        ErrorKind::DuplicateDefinition,
+                        format!("`{tn}` のメソッド `{}` が二重に宣言されている", f.name),
+                    );
+                }
             }
             if let Some(TypeDef::Struct { fields, .. }) = self.types.get(&tn) {
                 if fields.iter().any(|(n, _)| *n == f.name) {
@@ -449,7 +457,7 @@ impl Ck {
         for (layer, head, fns) in crate::stdlib::IMPLS {
             let file = self.std_parse(&crate::stdlib::impl_source(*layer, head, fns))?;
             if let Some(Item::Impl(i)) = file.items.first() {
-                self.register_impl(i, true)?;
+                self.register_impl(i, false, true)?;
                 if *layer == crate::stdlib::Layer::Os {
                     let tn = self.impl_type_name(i);
                     for f in &i.fns {
@@ -575,7 +583,7 @@ impl Ck {
                 fns,
             ))?;
             if let Some(Item::Impl(i)) = file.items.first() {
-                self.register_impl(i, true)?;
+                self.register_impl(i, false, true)?;
             }
         }
         self.core = core;

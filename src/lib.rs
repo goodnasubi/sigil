@@ -6,6 +6,7 @@ pub mod ast;
 pub mod borrow;
 pub mod check;
 pub mod codegen;
+pub mod ct;
 pub mod effects;
 pub mod error;
 pub mod exec;

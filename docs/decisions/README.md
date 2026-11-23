@@ -80,3 +80,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0058](0058-tls13-crypto-primitives.md) | TLS 1.3 のための暗号部品 | 提案（予約: Issue #676、正式判定を ADR 内に記録） |
 | [0059](0059-kv-store.md) | KV ストア（sigil-stash-kv） | 提案（予約: Issue #723、正式判定を ADR 内に記録） |
 | [0060](0060-rune-auth.md) | 認証・セッション管理（sigil-rune-auth） | 提案（予約: Issue #725、正式判定は未実施・問いを ADR 内に記録） |
+| [0061](0061-ct-eq-external-registration.md) | 外部モジュールの定数時間検査（ct_eq）の登録方法 | 提案（予約: Issue #727、正式判定は未実施・問いを ADR 内に記録） |

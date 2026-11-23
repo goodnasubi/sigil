@@ -1171,6 +1171,498 @@ pub fn aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed:
 }
 
 // ---------------------------------------------------------------------------
+// ChaCha20-Poly1305（RFC 8439、ADR 0058 決定 5 の段 2a）。
+//
+// 定数時間（ADR 0058 決定 3）: ChaCha20 は加算・排他的論理和・回転（シフトと OR）だけで、
+// 添字・分岐・表引きは持たない。ブロック数・ラウンド数は公開の長さだけから決める。
+// Poly1305 は 26 ビット 5 語の桁（poly1305-donna の 32 ビット版）で h・r を持ち、各積和は
+// 63 ビットに収まる（h の語は 2^27 未満、r の語は 2^26 未満、5r の語は 2^29 未満で、
+// 5 項の和は 2^58 未満）。最後の p による減算は、選択のマスクで行い、分岐しない。
+// 鍵と一回限りの Poly1305 鍵・キーストリームは `Secret` に収め、破棄で消去する。
+// 作業中の 1 語ずつ（ローカルの Int）は X25519 と同じく、明示的な消去の対象にできない。
+// 平文は `Secret` の中身を `Bytes` へ複製せず、`data` を直接借りる。
+//
+// 内部の補助関数（ChaCha20 のブロック・XOR、Poly1305 の MAC）は公開しない。公開 API は
+// `ChaCha20Poly1305Key`・`chacha20_poly1305_seal`・`chacha20_poly1305_open` の 3 つで、
+// 型と形は AES-128-GCM と同じ（`Nonce96`・`AeadError` を共用する）。
+//
+// 長さの上限（RFC 8439 §2.8）: 平文は 2^32 − 1 ブロック（ブロックカウンタが 1 から始まるため
+// 274877906880 バイト）まで。AAD は 2^64 − 1 バイトまでで、`Int` の最大（2^63 − 1）が下回るため
+// 超える入力は作れない。超えると `InputTooLong`、タグ 16 バイト未満の入力は `InputTooShort`、
+// 鍵・nonce の長さ違反は型を作る入口が `InvalidKeyLength`・`InvalidNonceLength` で返す。
+// nonce の一意性の契約は AES-128-GCM と同じで、`seal` は nonce の値の所有権を取る。
+
+pub struct ChaCha20Poly1305Key {
+  key: Secret,
+}
+
+impl ChaCha20Poly1305Key {
+  // 範囲: 32 バイトの秘密を鍵として取り込む（所有権を取る）。長さが違えば誤り。
+  pub fn from_secret(key: Secret) -> Result<ChaCha20Poly1305Key, AeadError>
+    intent "32 バイトの秘密から ChaCha20-Poly1305 の鍵を作る"
+    requires none
+    ensures none
+    effects none
+  {
+    if key.byte_len() != 32 {
+      return Err(AeadError.InvalidKeyLength);
+    }
+    return Ok(ChaCha20Poly1305Key { key: key });
+  }
+}
+
+// 範囲: 4 バイトをリトルエンディアンの 32 ビット値として読む。`off` は公開の位置。
+fn chacha_le32(b: &Bytes, off: Int) -> Int
+  intent "バイト列の off から 4 バイトをリトルエンディアンで読む"
+  requires none
+  ensures none
+  effects none
+{
+  let b0 = b.get(off).map(|x| x + 0).unwrap_or(0);
+  let b1 = b.get(off + 1).map(|x| x + 0).unwrap_or(0);
+  let b2 = b.get(off + 2).map(|x| x + 0).unwrap_or(0);
+  let b3 = b.get(off + 3).map(|x| x + 0).unwrap_or(0);
+  return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+// 範囲: ChaCha20 のブロック関数（RFC 8439 §2.3）。20 ラウンド（偶奇の 2 ラウンドを 10 回）を
+// 固定の演算列で行い、64 バイトのキーストリームを消去される `Secret` で返す。
+fn chacha20_block(key: &Secret, nonce: &Bytes, counter: Int) -> Secret
+  intent "ChaCha20 のブロック関数で 64 バイトのキーストリームを作る"
+  requires none
+  ensures result.byte_len() == 64
+  effects none
+{
+  let i0 = 0x61707865;
+  let i1 = 0x3320646e;
+  let i2 = 0x79622d32;
+  let i3 = 0x6b206574;
+  let i4 = chacha_le32(&key.data, 0);
+  let i5 = chacha_le32(&key.data, 4);
+  let i6 = chacha_le32(&key.data, 8);
+  let i7 = chacha_le32(&key.data, 12);
+  let i8 = chacha_le32(&key.data, 16);
+  let i9 = chacha_le32(&key.data, 20);
+  let i10 = chacha_le32(&key.data, 24);
+  let i11 = chacha_le32(&key.data, 28);
+  let i12 = counter & 0xFFFFFFFF;
+  let i13 = chacha_le32(&nonce, 0);
+  let i14 = chacha_le32(&nonce, 4);
+  let i15 = chacha_le32(&nonce, 8);
+
+  let mut x0 = i0;
+  let mut x1 = i1;
+  let mut x2 = i2;
+  let mut x3 = i3;
+  let mut x4 = i4;
+  let mut x5 = i5;
+  let mut x6 = i6;
+  let mut x7 = i7;
+  let mut x8 = i8;
+  let mut x9 = i9;
+  let mut x10 = i10;
+  let mut x11 = i11;
+  let mut x12 = i12;
+  let mut x13 = i13;
+  let mut x14 = i14;
+  let mut x15 = i15;
+  let mut round = 0;
+  while round < 10 {
+    x0 = (x0 + x4) & 0xFFFFFFFF;
+    x12 = x12 ^ x0;
+    x12 = ((x12 << 16) | (x12 >> 16)) & 0xFFFFFFFF;
+    x8 = (x8 + x12) & 0xFFFFFFFF;
+    x4 = x4 ^ x8;
+    x4 = ((x4 << 12) | (x4 >> 20)) & 0xFFFFFFFF;
+    x0 = (x0 + x4) & 0xFFFFFFFF;
+    x12 = x12 ^ x0;
+    x12 = ((x12 << 8) | (x12 >> 24)) & 0xFFFFFFFF;
+    x8 = (x8 + x12) & 0xFFFFFFFF;
+    x4 = x4 ^ x8;
+    x4 = ((x4 << 7) | (x4 >> 25)) & 0xFFFFFFFF;
+    x1 = (x1 + x5) & 0xFFFFFFFF;
+    x13 = x13 ^ x1;
+    x13 = ((x13 << 16) | (x13 >> 16)) & 0xFFFFFFFF;
+    x9 = (x9 + x13) & 0xFFFFFFFF;
+    x5 = x5 ^ x9;
+    x5 = ((x5 << 12) | (x5 >> 20)) & 0xFFFFFFFF;
+    x1 = (x1 + x5) & 0xFFFFFFFF;
+    x13 = x13 ^ x1;
+    x13 = ((x13 << 8) | (x13 >> 24)) & 0xFFFFFFFF;
+    x9 = (x9 + x13) & 0xFFFFFFFF;
+    x5 = x5 ^ x9;
+    x5 = ((x5 << 7) | (x5 >> 25)) & 0xFFFFFFFF;
+    x2 = (x2 + x6) & 0xFFFFFFFF;
+    x14 = x14 ^ x2;
+    x14 = ((x14 << 16) | (x14 >> 16)) & 0xFFFFFFFF;
+    x10 = (x10 + x14) & 0xFFFFFFFF;
+    x6 = x6 ^ x10;
+    x6 = ((x6 << 12) | (x6 >> 20)) & 0xFFFFFFFF;
+    x2 = (x2 + x6) & 0xFFFFFFFF;
+    x14 = x14 ^ x2;
+    x14 = ((x14 << 8) | (x14 >> 24)) & 0xFFFFFFFF;
+    x10 = (x10 + x14) & 0xFFFFFFFF;
+    x6 = x6 ^ x10;
+    x6 = ((x6 << 7) | (x6 >> 25)) & 0xFFFFFFFF;
+    x3 = (x3 + x7) & 0xFFFFFFFF;
+    x15 = x15 ^ x3;
+    x15 = ((x15 << 16) | (x15 >> 16)) & 0xFFFFFFFF;
+    x11 = (x11 + x15) & 0xFFFFFFFF;
+    x7 = x7 ^ x11;
+    x7 = ((x7 << 12) | (x7 >> 20)) & 0xFFFFFFFF;
+    x3 = (x3 + x7) & 0xFFFFFFFF;
+    x15 = x15 ^ x3;
+    x15 = ((x15 << 8) | (x15 >> 24)) & 0xFFFFFFFF;
+    x11 = (x11 + x15) & 0xFFFFFFFF;
+    x7 = x7 ^ x11;
+    x7 = ((x7 << 7) | (x7 >> 25)) & 0xFFFFFFFF;
+    x0 = (x0 + x5) & 0xFFFFFFFF;
+    x15 = x15 ^ x0;
+    x15 = ((x15 << 16) | (x15 >> 16)) & 0xFFFFFFFF;
+    x10 = (x10 + x15) & 0xFFFFFFFF;
+    x5 = x5 ^ x10;
+    x5 = ((x5 << 12) | (x5 >> 20)) & 0xFFFFFFFF;
+    x0 = (x0 + x5) & 0xFFFFFFFF;
+    x15 = x15 ^ x0;
+    x15 = ((x15 << 8) | (x15 >> 24)) & 0xFFFFFFFF;
+    x10 = (x10 + x15) & 0xFFFFFFFF;
+    x5 = x5 ^ x10;
+    x5 = ((x5 << 7) | (x5 >> 25)) & 0xFFFFFFFF;
+    x1 = (x1 + x6) & 0xFFFFFFFF;
+    x12 = x12 ^ x1;
+    x12 = ((x12 << 16) | (x12 >> 16)) & 0xFFFFFFFF;
+    x11 = (x11 + x12) & 0xFFFFFFFF;
+    x6 = x6 ^ x11;
+    x6 = ((x6 << 12) | (x6 >> 20)) & 0xFFFFFFFF;
+    x1 = (x1 + x6) & 0xFFFFFFFF;
+    x12 = x12 ^ x1;
+    x12 = ((x12 << 8) | (x12 >> 24)) & 0xFFFFFFFF;
+    x11 = (x11 + x12) & 0xFFFFFFFF;
+    x6 = x6 ^ x11;
+    x6 = ((x6 << 7) | (x6 >> 25)) & 0xFFFFFFFF;
+    x2 = (x2 + x7) & 0xFFFFFFFF;
+    x13 = x13 ^ x2;
+    x13 = ((x13 << 16) | (x13 >> 16)) & 0xFFFFFFFF;
+    x8 = (x8 + x13) & 0xFFFFFFFF;
+    x7 = x7 ^ x8;
+    x7 = ((x7 << 12) | (x7 >> 20)) & 0xFFFFFFFF;
+    x2 = (x2 + x7) & 0xFFFFFFFF;
+    x13 = x13 ^ x2;
+    x13 = ((x13 << 8) | (x13 >> 24)) & 0xFFFFFFFF;
+    x8 = (x8 + x13) & 0xFFFFFFFF;
+    x7 = x7 ^ x8;
+    x7 = ((x7 << 7) | (x7 >> 25)) & 0xFFFFFFFF;
+    x3 = (x3 + x4) & 0xFFFFFFFF;
+    x14 = x14 ^ x3;
+    x14 = ((x14 << 16) | (x14 >> 16)) & 0xFFFFFFFF;
+    x9 = (x9 + x14) & 0xFFFFFFFF;
+    x4 = x4 ^ x9;
+    x4 = ((x4 << 12) | (x4 >> 20)) & 0xFFFFFFFF;
+    x3 = (x3 + x4) & 0xFFFFFFFF;
+    x14 = x14 ^ x3;
+    x14 = ((x14 << 8) | (x14 >> 24)) & 0xFFFFFFFF;
+    x9 = (x9 + x14) & 0xFFFFFFFF;
+    x4 = x4 ^ x9;
+    x4 = ((x4 << 7) | (x4 >> 25)) & 0xFFFFFFFF;
+    round = round + 1;
+  }
+  let mut out = Bytes.with_capacity(64);
+  out.push_u32_le((x0 + i0) & 0xFFFFFFFF);
+  out.push_u32_le((x1 + i1) & 0xFFFFFFFF);
+  out.push_u32_le((x2 + i2) & 0xFFFFFFFF);
+  out.push_u32_le((x3 + i3) & 0xFFFFFFFF);
+  out.push_u32_le((x4 + i4) & 0xFFFFFFFF);
+  out.push_u32_le((x5 + i5) & 0xFFFFFFFF);
+  out.push_u32_le((x6 + i6) & 0xFFFFFFFF);
+  out.push_u32_le((x7 + i7) & 0xFFFFFFFF);
+  out.push_u32_le((x8 + i8) & 0xFFFFFFFF);
+  out.push_u32_le((x9 + i9) & 0xFFFFFFFF);
+  out.push_u32_le((x10 + i10) & 0xFFFFFFFF);
+  out.push_u32_le((x11 + i11) & 0xFFFFFFFF);
+  out.push_u32_le((x12 + i12) & 0xFFFFFFFF);
+  out.push_u32_le((x13 + i13) & 0xFFFFFFFF);
+  out.push_u32_le((x14 + i14) & 0xFFFFFFFF);
+  out.push_u32_le((x15 + i15) & 0xFFFFFFFF);
+  return Secret.from_bytes(out);
+}
+
+// 範囲: ChaCha20 の暗号化（RFC 8439 §2.4）。カウンタ `counter` から 1 ずつ進め、`data` の各バイトに
+// キーストリームを XOR する。出力の長さは入力と同じ。呼び出し側が 32 ビットのカウンタの上限を守る。
+fn chacha20_xor(key: &Secret, nonce: &Bytes, counter: Int, data: &Bytes) -> Bytes
+  intent "ChaCha20 のキーストリームを data へ掛ける"
+  requires none
+  ensures result.byte_len() == data.byte_len()
+  effects none
+{
+  let mut out = Bytes.with_capacity(data.byte_len());
+  let blocks = (data.byte_len() + 63) / 64;
+  let mut b = 0;
+  while b < blocks {
+    let ks = chacha20_block(&key, &nonce, counter + b);
+    let mut j = 0;
+    while j < 64 {
+      let idx = b * 64 + j;
+      if idx < data.byte_len() {
+        out.push(data.get(idx).map(|x| x + 0).unwrap_or(0) ^ ks.data.get(j).map(|x| x + 0).unwrap_or(0));
+      }
+      j = j + 1;
+    }
+    b = b + 1;
+  }
+  return out;
+}
+
+// Poly1305 の作業領域（h と r、s の 5 語）は各語を 4 バイトで `Secret` に収め、破棄で消去する。
+fn poly_pack(v0: Int, v1: Int, v2: Int, v3: Int, v4: Int) -> Secret
+  intent "Poly1305 の 5 語を消去される作業領域へ格納する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut out = Bytes.with_capacity(20);
+  out.push_u32_be(v0);
+  out.push_u32_be(v1);
+  out.push_u32_be(v2);
+  out.push_u32_be(v3);
+  out.push_u32_be(v4);
+  return Secret.from_bytes(out);
+}
+
+fn poly_read(value: &Secret, i: Int) -> Int
+  intent "Poly1305 の作業領域から i 番目の語を読む"
+  requires none
+  ensures none
+  effects none
+{
+  return value.data.read_u32_be(i * 4).unwrap_or(0);
+}
+
+// 範囲: Poly1305 の 1 ブロック分の更新 h = (h + m) * r mod (2^130 - 5)（poly1305-donna の 32 ビット版）。
+// `blk` の `off` から 16 バイトを読み、`hibit` は満ブロックでは 2^24、最後の部分ブロックでは 0。
+fn poly1305_step(h: &Secret, r: &Secret, blk: &Bytes, off: Int, hibit: Int) -> Secret
+  intent "Poly1305 の状態を 1 ブロック分更新する"
+  requires none
+  ensures none
+  effects none
+{
+  let r0 = poly_read(&r, 0);
+  let r1 = poly_read(&r, 1);
+  let r2 = poly_read(&r, 2);
+  let r3 = poly_read(&r, 3);
+  let r4 = poly_read(&r, 4);
+  let s1 = r1 * 5;
+  let s2 = r2 * 5;
+  let s3 = r3 * 5;
+  let s4 = r4 * 5;
+  let h0 = poly_read(&h, 0) + (chacha_le32(&blk, off) & 0x3ffffff);
+  let h1 = poly_read(&h, 1) + ((chacha_le32(&blk, off + 3) >> 2) & 0x3ffffff);
+  let h2 = poly_read(&h, 2) + ((chacha_le32(&blk, off + 6) >> 4) & 0x3ffffff);
+  let h3 = poly_read(&h, 3) + ((chacha_le32(&blk, off + 9) >> 6) & 0x3ffffff);
+  let h4 = poly_read(&h, 4) + ((chacha_le32(&blk, off + 12) >> 8) | hibit);
+  let mut d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+  let mut d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+  let mut d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+  let mut d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+  let mut d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+  let mut c = d0 >> 26;
+  let mut n0 = d0 & 0x3ffffff;
+  d1 = d1 + c;
+  c = d1 >> 26;
+  let mut n1 = d1 & 0x3ffffff;
+  d2 = d2 + c;
+  c = d2 >> 26;
+  let n2 = d2 & 0x3ffffff;
+  d3 = d3 + c;
+  c = d3 >> 26;
+  let n3 = d3 & 0x3ffffff;
+  d4 = d4 + c;
+  c = d4 >> 26;
+  let n4 = d4 & 0x3ffffff;
+  n0 = n0 + c * 5;
+  c = n0 >> 26;
+  n0 = n0 & 0x3ffffff;
+  n1 = n1 + c;
+  return poly_pack(n0, n1, n2, n3, n4);
+}
+
+// 範囲: Poly1305 の MAC（RFC 8439 §2.5）。`key` の先頭 16 バイトが r（クランプする）、次の 16 バイトが s。
+// `msg` の長さだけでブロック数が決まる（公開）。最後の部分ブロックは 0x01 と 0 で 16 バイトに詰め、hibit を立てない。
+fn poly1305_mac(key: &Secret, msg: &Bytes) -> Bytes
+  intent "Poly1305 で 16 バイトのタグを計算する"
+  requires none
+  ensures result.byte_len() == 16
+  effects none
+{
+  let r = poly_pack(
+    chacha_le32(&key.data, 0) & 0x3ffffff,
+    (chacha_le32(&key.data, 3) >> 2) & 0x3ffff03,
+    (chacha_le32(&key.data, 6) >> 4) & 0x3ffc0ff,
+    (chacha_le32(&key.data, 9) >> 6) & 0x3f03fff,
+    (chacha_le32(&key.data, 12) >> 8) & 0x00fffff
+  );
+  let mut h = poly_pack(0, 0, 0, 0, 0);
+  let full = msg.byte_len() / 16;
+  let mut b = 0;
+  while b < full {
+    h = poly1305_step(&h, &r, &msg, b * 16, 16777216);
+    b = b + 1;
+  }
+  let rem = msg.byte_len() - full * 16;
+  if rem > 0 {
+    let mut last = Bytes.with_capacity(16);
+    let mut k = 0;
+    while k < 16 {
+      if k < rem {
+        last.push(msg.get(full * 16 + k).map(|x| x + 0).unwrap_or(0));
+      } else {
+        if k == rem {
+          last.push(1);
+        } else {
+          last.push(0);
+        }
+      }
+      k = k + 1;
+    }
+    h = poly1305_step(&h, &r, &last, 0, 0);
+  }
+  let mut h0 = poly_read(&h, 0);
+  let mut h1 = poly_read(&h, 1);
+  let mut h2 = poly_read(&h, 2);
+  let mut h3 = poly_read(&h, 3);
+  let mut h4 = poly_read(&h, 4);
+  let mut c = h1 >> 26;
+  h1 = h1 & 0x3ffffff;
+  h2 = h2 + c;
+  c = h2 >> 26;
+  h2 = h2 & 0x3ffffff;
+  h3 = h3 + c;
+  c = h3 >> 26;
+  h3 = h3 & 0x3ffffff;
+  h4 = h4 + c;
+  c = h4 >> 26;
+  h4 = h4 & 0x3ffffff;
+  h0 = h0 + c * 5;
+  c = h0 >> 26;
+  h0 = h0 & 0x3ffffff;
+  h1 = h1 + c;
+  let mut g0 = h0 + 5;
+  c = g0 >> 26;
+  g0 = g0 & 0x3ffffff;
+  let mut g1 = h1 + c;
+  c = g1 >> 26;
+  g1 = g1 & 0x3ffffff;
+  let mut g2 = h2 + c;
+  c = g2 >> 26;
+  g2 = g2 & 0x3ffffff;
+  let mut g3 = h3 + c;
+  c = g3 >> 26;
+  g3 = g3 & 0x3ffffff;
+  let mut g4 = h4 + c;
+  let pick = (g4 >> 26) & 1;
+  let mask = 0 - pick;
+  g4 = g4 & 0x3ffffff;
+  h0 = h0 ^ ((h0 ^ g0) & mask);
+  h1 = h1 ^ ((h1 ^ g1) & mask);
+  h2 = h2 ^ ((h2 ^ g2) & mask);
+  h3 = h3 ^ ((h3 ^ g3) & mask);
+  h4 = h4 ^ ((h4 ^ g4) & mask);
+  let w0 = (h0 | (h1 << 26)) & 0xFFFFFFFF;
+  let w1 = ((h1 >> 6) | (h2 << 20)) & 0xFFFFFFFF;
+  let w2 = ((h2 >> 12) | (h3 << 14)) & 0xFFFFFFFF;
+  let w3 = ((h3 >> 18) | (h4 << 8)) & 0xFFFFFFFF;
+  let mut f = w0 + chacha_le32(&key.data, 16);
+  let mut out = Bytes.with_capacity(16);
+  out.push_u32_le(f & 0xFFFFFFFF);
+  f = w1 + chacha_le32(&key.data, 20) + (f >> 32);
+  out.push_u32_le(f & 0xFFFFFFFF);
+  f = w2 + chacha_le32(&key.data, 24) + (f >> 32);
+  out.push_u32_le(f & 0xFFFFFFFF);
+  f = w3 + chacha_le32(&key.data, 28) + (f >> 32);
+  out.push_u32_le(f & 0xFFFFFFFF);
+  return out;
+}
+
+// 範囲: AEAD のタグ（RFC 8439 §2.8）。一回限りの Poly1305 鍵はカウンタ 0 のブロックの先頭 32 バイト。
+// MAC の入力は aad、0 埋め（16 の倍数へ）、暗号文、0 埋め、AAD の長さ（8 バイトのリトルエンディアン）、暗号文の長さ。
+fn chacha20_poly1305_tag(key: &Secret, nonce: &Bytes, aad: &Bytes, ct: &Bytes) -> Bytes
+  intent "ChaCha20-Poly1305 の認証タグ（16 バイト）を計算する"
+  requires none
+  ensures result.byte_len() == 16
+  effects none
+{
+  let pk = chacha20_block(&key, &nonce, 0);
+  let mut md = Bytes.with_capacity(aad.byte_len() + ct.byte_len() + 48);
+  md.extend(&aad);
+  let apad = (16 - aad.byte_len() % 16) % 16;
+  let mut i = 0;
+  while i < apad {
+    md.push(0);
+    i = i + 1;
+  }
+  md.extend(&ct);
+  let cpad = (16 - ct.byte_len() % 16) % 16;
+  let mut j = 0;
+  while j < cpad {
+    md.push(0);
+    j = j + 1;
+  }
+  md.push_u32_le(aad.byte_len() & 0xFFFFFFFF);
+  md.push_u32_le(aad.byte_len() >> 32);
+  md.push_u32_le(ct.byte_len() & 0xFFFFFFFF);
+  md.push_u32_le(ct.byte_len() >> 32);
+  return poly1305_mac(&pk, &md);
+}
+
+// 範囲: タグの照合。全バイトを処理する定数時間比較の結果（1 ビット）だけを返す。
+fn chacha20_poly1305_tag_matches(expected: &Bytes, got: &Bytes) -> Bool
+  intent "ChaCha20-Poly1305 のタグを定数時間で照合する"
+  requires none
+  ensures none
+  effects none
+{
+  return ct_eq(&expected, &got);
+}
+
+pub fn chacha20_poly1305_seal(key: &ChaCha20Poly1305Key, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>
+  intent "ChaCha20-Poly1305 で暗号化し、暗号文にタグ 16 バイトを連結して返す"
+  requires none
+  ensures none
+  effects none
+{
+  if plaintext.byte_len() > 274877906880 {
+    return Err(AeadError.InputTooLong);
+  }
+  let ct = chacha20_xor(&key.key, &nonce.bytes, 1, &plaintext.data);
+  let tag = chacha20_poly1305_tag(&key.key, &nonce.bytes, &aad, &ct);
+  let mut out = ct;
+  out.extend(&tag);
+  return Ok(out);
+}
+
+pub fn chacha20_poly1305_open(key: &ChaCha20Poly1305Key, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>
+  intent "ChaCha20-Poly1305 のタグを検証し、成功したときだけ復号した平文を返す"
+  requires none
+  ensures none
+  effects none
+{
+  if sealed.byte_len() < 16 {
+    return Err(AeadError.InputTooShort);
+  }
+  let ct_len = sealed.byte_len() - 16;
+  if ct_len > 274877906880 {
+    return Err(AeadError.InputTooLong);
+  }
+  let ct = sealed.slice(0, ct_len).unwrap_or(Bytes.new());
+  let got = sealed.slice(ct_len, sealed.byte_len()).unwrap_or(Bytes.new());
+  let want = chacha20_poly1305_tag(&key.key, &nonce.bytes, &aad, &ct);
+  if chacha20_poly1305_tag_matches(&want, &got) {
+    let pt = chacha20_xor(&key.key, &nonce.bytes, 1, &ct);
+    return Ok(Secret.from_bytes(pt));
+  }
+  return Err(AeadError.AuthenticationFailed);
+}
+
+// ---------------------------------------------------------------------------
 // X25519 (RFC 7748 §5)。秘密鍵は std.os_random.bytes で用意して Secret に
 // 取り込む。相手の u 座標は最上位ビットを無視し、非正規表現も受け付ける。
 

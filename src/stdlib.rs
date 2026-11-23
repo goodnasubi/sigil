@@ -72,6 +72,8 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("Aes128GcmKey", 0, Layer::Core),
     ("Nonce96", 0, Layer::Core),
     ("AeadError", 0, Layer::Core),
+    // ChaCha20-Poly1305 の鍵（ADR 0058 決定 2、段 2a）。nonce と誤りは AES-128-GCM と共用する。
+    ("ChaCha20Poly1305Key", 0, Layer::Core),
     // X25519 の鍵と誤り（ADR 0058 決定 2、段 1c）。実体は `std.crypto` に置く。
     ("X25519PrivateKey", 0, Layer::Core),
     ("X25519PublicKey", 0, Layer::Core),
@@ -509,6 +511,17 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
         "aes128_gcm_open(key: &Aes128GcmKey, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>",
         "none",
     ),
+    // ChaCha20-Poly1305（ADR 0058 決定 2、段 2a）。実体は `std.crypto` の Sigil 実装（埋め込み）。
+    (
+        Layer::Core,
+        "chacha20_poly1305_seal(key: &ChaCha20Poly1305Key, nonce: Nonce96, aad: &Bytes, plaintext: &Secret) -> Result<Bytes, AeadError>",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "chacha20_poly1305_open(key: &ChaCha20Poly1305Key, nonce: &Nonce96, aad: &Bytes, sealed: &Bytes) -> Result<Secret, AeadError>",
+        "none",
+    ),
     (
         Layer::Core,
         "x25519_public_key(private: &X25519PrivateKey) -> X25519PublicKey",
@@ -872,6 +885,14 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         Layer::Core,
         "Nonce96",
         &[("from_slice(b: &Bytes) -> Result<Nonce96, AeadError>", "none")],
+    ),
+    (
+        Layer::Core,
+        "ChaCha20Poly1305Key",
+        &[(
+            "from_secret(key: Secret) -> Result<ChaCha20Poly1305Key, AeadError>",
+            "none",
+        )],
     ),
     (
         Layer::Core,

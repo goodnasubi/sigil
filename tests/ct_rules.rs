@@ -111,6 +111,24 @@ const CT_FUNCTIONS: &[(&str, &[&str])] = &[
     ("std.crypto.aes128_gcm_tag_matches", &["got"]),
     ("std.crypto.aes128_gcm_seal", &["nonce", "aad"]),
     ("std.crypto.aes128_gcm_open", &["nonce", "aad", "sealed"]),
+    // ChaCha20-Poly1305（ADR 0058 決定 3、段 2a）。鍵・一回限りの Poly1305 鍵・キーストリーム・
+    // Poly1305 の作業領域（h・r・s）・平文は秘密。公開は nonce・AAD・受信した暗号文とタグ・メッセージ・
+    // データの長さ・ブロックの位置と固定の処理回数。ChaCha20 は加算・排他的論理和・回転だけ、
+    // Poly1305 は 26 ビット 5 語の積和とマスクによる選択だけで、秘密による分岐・添字・除算を持たない。
+    ("std.crypto.chacha_le32", &["off"]),
+    ("std.crypto.chacha20_block", &["nonce", "counter"]),
+    ("std.crypto.chacha20_xor", &["nonce", "counter"]),
+    ("std.crypto.poly_pack", &[]),
+    ("std.crypto.poly_read", &["i"]),
+    ("std.crypto.poly1305_step", &["blk", "off", "hibit"]),
+    ("std.crypto.poly1305_mac", &["msg"]),
+    ("std.crypto.chacha20_poly1305_tag", &["nonce", "aad", "ct"]),
+    ("std.crypto.chacha20_poly1305_tag_matches", &["got"]),
+    ("std.crypto.chacha20_poly1305_seal", &["nonce", "aad"]),
+    (
+        "std.crypto.chacha20_poly1305_open",
+        &["nonce", "aad", "sealed"],
+    ),
     ("from_secret", &[]),
     ("from_slice", &["b"]),
     // X25519（ADR 0058 決定 3、段 1c）。スカラー、体演算の中間値、
@@ -168,6 +186,7 @@ const CT_AHEAD: &[&str] = &[];
 const CT_PUBLIC_COMPARISONS: &[&str] = &[
     "std.crypto.verify_hmac_sha256",
     "std.crypto.aes128_gcm_tag_matches",
+    "std.crypto.chacha20_poly1305_tag_matches",
     "std.crypto.x25519_is_zero",
     "std.web.ct_bearer_signature",
 ];
@@ -696,7 +715,7 @@ fn probe() -> Int
   let p = pbkdf2_sha256(&s, &b, 4096, 32);
   let prk = hkdf_extract_sha256(None, &s);
   let okm = hkdf_expand_sha256(&prk, &b, 32);
-  let aead = aead_probe(&b);
+  let aead = aead_probe(&b) + chacha_probe(&b);
   let x25519_public = x25519_probe_public(&b);
   let x25519_shared = x25519_probe_shared(&b);
   let reply = respond(&s, &b, &b);
@@ -705,6 +724,39 @@ fn probe() -> Int
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
   if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + h.byte_len() + p.byte_len() + aead + x25519_public + x25519_shared; }
   return 0;
+}
+
+fn chacha_probe(b: &Bytes) -> Int
+  intent "ChaCha20-Poly1305 の入口を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  let s = Secret.from_bytes(b.clone());
+  match ChaCha20Poly1305Key.from_secret(Secret.from_bytes(s.expose())) {
+    Err(e) => { return 0; }
+    Ok(key) => {
+      match Nonce96.from_slice(&b) {
+        Err(e) => { return 0; }
+        Ok(nonce) => {
+          match Nonce96.from_slice(&b) {
+            Err(e) => { return 0; }
+            Ok(nonce2) => {
+              match chacha20_poly1305_seal(&key, nonce, &b, &s) {
+                Err(e) => { return 0; }
+                Ok(sealed) => {
+                  match chacha20_poly1305_open(&key, &nonce2, &b, &sealed) {
+                    Err(e) => { return 0; }
+                    Ok(opened) => { return opened.byte_len(); }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 fn aead_probe(b: &Bytes) -> Int
@@ -1408,14 +1460,31 @@ fn reach_branch_budget(program: &Program, reach: &[usize]) -> usize {
 ///    呼び出しは 2 つ、破棄は 1 つ）。
 #[test]
 fn clif_aes_gcm_entries_cover_all_callees() {
-    let program = corpus();
     let key = "match Aes128GcmKey.from_secret(Secret.from_bytes(Bytes.new())) { Err(e) => 0, Ok(key) => match Nonce96.from_slice(&Bytes.new()) { Err(e) => 0, Ok(nonce) => ";
     let seal = format!("{key}match aes128_gcm_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
     let open = format!("{key}match aes128_gcm_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
-    for (tag, entry, call) in [
+    check_aead_clif_entries(&[
         ("aesgcmseal", "std.crypto.aes128_gcm_seal", seal),
         ("aesgcmopen", "std.crypto.aes128_gcm_open", open),
-    ] {
+    ]);
+}
+
+/// ChaCha20-Poly1305（ADR 0058 段 2a）も同じ検査で、ChaCha20 のブロック関数・XOR、Poly1305 の
+/// 更新・MAC、タグの組み立て・照合まで、公開入口が推移的に呼ぶ全関数を覆う。
+#[test]
+fn clif_chacha20_poly1305_entries_cover_all_callees() {
+    let key = "match ChaCha20Poly1305Key.from_secret(Secret.from_bytes(Bytes.new())) { Err(e) => 0, Ok(key) => match Nonce96.from_slice(&Bytes.new()) { Err(e) => 0, Ok(nonce) => ";
+    let seal = format!("{key}match chacha20_poly1305_seal(&key, nonce, &Bytes.new(), &Secret.from_bytes(Bytes.new())) {{ Err(e) => 0, Ok(sealed) => sealed.byte_len() }} }} }}");
+    let open = format!("{key}match chacha20_poly1305_open(&key, &nonce, &Bytes.new(), &Bytes.new()) {{ Err(e) => 0, Ok(opened) => opened.byte_len() }} }} }}");
+    check_aead_clif_entries(&[
+        ("chachaseal", "std.crypto.chacha20_poly1305_seal", seal),
+        ("chachaopen", "std.crypto.chacha20_poly1305_open", open),
+    ]);
+}
+
+fn check_aead_clif_entries(cases: &[(&str, &str, String)]) {
+    let program = corpus();
+    for (tag, entry, call) in cases {
         let reach = reachable_funcs(&program, entry);
         let mut sir_div = 0usize;
         let budget = reach_branch_budget(&program, &reach);
@@ -1439,7 +1508,7 @@ fn clif_aes_gcm_entries_cover_all_callees() {
                 }
             }
         }
-        let delta = clif_delta(tag, "", &call);
+        let delta = clif_delta(tag, "", call);
         eprintln!(
             "{tag}: funcs={} sir_div={sir_div} budget={budget} {delta:?}",
             reach.len()

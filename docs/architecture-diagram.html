@@ -179,6 +179,8 @@
       .ops-group { margin-top: 16px; border: 2px solid var(--blue); border-radius: 12px; padding: 12px 14px 14px; background: linear-gradient(0deg, var(--blue-soft), var(--blue-soft)), var(--panel); }
       .ops-group h3 { margin: 0 0 10px; font-size: 14.5px; font-weight: 900; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
       .ops-group .node { background: var(--panel); }
+      .grid-ops { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      @media (max-width: 700px) { .grid-ops { grid-template-columns: 1fr; } }
       .sec-group h3 { margin: 0 0 10px; font-size: 14.5px; font-weight: 900; }
       .grid-sec { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
       @media (max-width: 700px) { .grid-sec { grid-template-columns: 1fr; } }
@@ -242,7 +244,7 @@
       <header class="top">
         <div>
           <h1>Sigil リポジトリ構成図</h1>
-          <p class="intro">プログラミング言語 <strong>Sigil</strong> と、その上で動くサーバー部品の一族、<strong>全23リポジトリ</strong>の構成図です。アプリケーション層に、動画配信に続いて SNS を追加しました。各部品を選ぶと、下に詳しい説明が表示されます。</p>
+          <p class="intro">プログラミング言語 <strong>Sigil</strong> と、その上で動くサーバー部品の一族、<strong>全24リポジトリ</strong>の構成図です。自律運用の判断を担う自前 LLM 部品 <strong>sigil-anima-llm</strong> を追加しました。各部品を選ぶと、下に詳しい説明が表示されます。</p>
         </div>
         <aside class="legend" aria-label="凡例">
           <h2>凡例（状態）</h2>
@@ -360,7 +362,7 @@
       <!-- 第4層 -->
       <section class="layer" aria-labelledby="l4">
         <div class="layer-head"><span class="layer-tag">LAYER 4</span><h2 class="layer-title" id="l4">横断する役割</h2></div>
-        <p class="layer-sub">特定の経路ではなく、全部品と横断的につながる役割です（点線の枠で示しています）。今回、AI が障害の復旧まで担う自律運用部品 sigil-vigil-ops を追加しました。</p>
+        <p class="layer-sub">特定の経路ではなく、全部品と横断的につながる役割です（点線の枠で示しています）。今回、自律運用 sigil-vigil-ops の判断を担う自前 LLM 部品 sigil-anima-llm を追加しました。</p>
         <div class="cross-band">
           <div class="grid-cross">
             <button type="button" class="node st-plan" data-id="observe" title="全部品のログ・メトリクスを常時監視">
@@ -377,11 +379,18 @@
             </button>
           </div>
           <div class="ops-group">
-            <h3>自律運用（今回追加）<span class="core-badge">新規追加</span></h3>
-            <button type="button" class="node st-plan" data-id="vigil" title="AI エージェントが障害の原因特定から復旧・検証までを担う自律運用部品">
-              <span class="nm">sigil-vigil-ops <span class="chip plan">計画のみ</span></span>
-              <span class="rl">AI が状況復旧まで担う（原因特定 → 復旧手順の実行 → 検証・記録）</span>
-            </button>
+            <h3>自律運用</h3>
+            <div class="grid-ops">
+              <button type="button" class="node st-plan" data-id="vigil" title="AI エージェントが障害の原因特定から復旧・検証までを担う自律運用部品">
+                <span class="nm">sigil-vigil-ops <span class="chip plan">計画のみ</span></span>
+                <span class="rl">AI が状況復旧まで担う（原因特定 → 復旧手順の実行 → 検証・記録）</span>
+              </button>
+              <button type="button" class="node st-plan" data-id="anima" title="自律運用 sigil-vigil-ops の判断を担う自前 LLM">
+                <span class="core-badge">新規追加</span>
+                <span class="nm">sigil-anima-llm <span class="chip plan">計画のみ</span></span>
+                <span class="rl">自前 LLM（sigil-vigil-ops の判断を担う）</span>
+              </button>
+            </div>
           </div>
           <div class="sec-group">
             <h3>セキュリティ・信頼系（3件）</h3>
@@ -478,12 +487,12 @@
         <details class="toggle">
           <summary>数について</summary>
           <div class="body">
-            <p style="margin:0">バックエンド部品は sigix を入れて<strong>16件</strong>（第3層に9件、第4層に7件）です。そこにアプリケーション層の <strong>sigil-lantern-stream</strong> と <strong>sigil-agora-post</strong> が2件加わり、土台の5件と合わせて、Sigil 一族は全部で<strong>23リポジトリ</strong>になります（計画下書きではバックエンド系18件として数えます）。</p>
+            <p style="margin:0">バックエンド部品は sigix を入れて<strong>17件</strong>（第3層に9件、第4層に8件）です。そこにアプリケーション層の <strong>sigil-lantern-stream</strong> と <strong>sigil-agora-post</strong> が2件加わり、土台の5件と合わせて、Sigil 一族は全部で<strong>24リポジトリ</strong>になります（計画下書きではバックエンド系19件として数えます）。</p>
           </div>
         </details>
       </div>
 
-      <footer class="note">状態は図を作成した時点のものです。バックエンド部品16件とアプリケーション層の2件（sigil-lantern-stream、sigil-agora-post）は、現在は計画・概念の段階です（いずれもリポジトリ作成済み、計画下書き §18・§19 に記録済み）。</footer>
+      <footer class="note">状態は図を作成した時点のものです。バックエンド部品17件とアプリケーション層の2件（sigil-lantern-stream、sigil-agora-post）は、現在は計画・概念の段階です（いずれもリポジトリ作成済み、計画下書き §18・§19 に記録済み。sigil-anima-llm は計画下書き §20 に記録済み）。</footer>
     </div>
 
     <script>
@@ -546,7 +555,10 @@
           links: "障害が起きる前に穴を直す役割で、起きたときに対応する <span class='mono'>sigil-vigil-ops</span> とは時間軸で分かれます。" },
         vigil: { name: "sigil-vigil-ops", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・横断する役割／自律運用）",
           desc: "AI エージェントが障害対応を担う自律運用部品です（vigil＝徹夜の見張り）。sigil-argus-observe が検知した異常を受けて、原因の特定、復旧手順（ランブック）の選択と実行、結果の検証と記録までを行い、平時は最適化も提案します。安全のため、最初は提案のみから始め、人間の承認後に実行する段階を経て、実績のある手順だけ自動実行を許す段階制で進めます。",
-          links: "検知は <span class='mono'>sigil-argus-observe</span> から受け取り、復旧の実手段は <span class='mono'>sigil-orchestra</span> と <span class='mono'>sigil-container</span> へ依頼します。起きる前に穴を直す <span class='mono'>sigil-seer-preempt</span> とは、起きたときに対応する役割で分かれます。" },
+          links: "検知は <span class='mono'>sigil-argus-observe</span> から受け取り、復旧の実手段は <span class='mono'>sigil-orchestra</span> と <span class='mono'>sigil-container</span> へ依頼します。起きる前に穴を直す <span class='mono'>sigil-seer-preempt</span> とは、起きたときに対応する役割で分かれます。判断は <span class='mono'>sigil-anima-llm</span> が担います。" },
+        anima: { name: "sigil-anima-llm", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・横断する役割／自律運用の判断）",
+          desc: "自律運用部品 sigil-vigil-ops の『判断』を担う、自前の LLM 部品です（anima＝魂・生命。機械仕掛けの部品群に、判断する魂を宿すという意味）。目的は賢さの最大化ではなく、障害の最中でも判断の層が外部 API や外部ネットワーク、利用枠に依存せず、自立して動き続けることです。最初はオープンウェイトモデルと既存の推論ランタイムを Sigil 側の接続層で包む形で始め、その後は分類の形式（System One 形式）の自前化と、Sigil ネイティブの推論基盤へ進めます。あわせて、AI エージェントの『状況 → 判断』の実例を訓練データとして蓄積し、小さいモデルを学習させる振る舞い蒸留でも自前モデルを育てます。推論は GPU なし＋量子化が前提です。",
+          links: "判断を使う側は <span class='mono'>sigil-vigil-ops</span> です。検知と収集は <span class='mono'>sigil-argus-observe</span>、復旧の実手段は <span class='mono'>sigil-orchestra</span> と <span class='mono'>sigil-container</span> が担います。具体化は <span class='mono'>sigil-vigil-ops</span> の設計文書（ADR）起草の段で、接続層の形式の論点として扱います。リポジトリ：<span class='mono'>goodnasubi/sigil-anima-llm</span>（計画下書き §20）。" },
         beacon: { name: "sigil-beacon-intel", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・セキュリティ・信頼系）",
           desc: "攻撃元などの脅威情報を全部品で共有する網です。",
           links: "情報の配布は <span class='mono'>sigil-herald-queue</span> 経由が想定されています。" },

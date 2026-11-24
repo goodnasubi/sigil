@@ -82,7 +82,6 @@ cargo test --test <変更範囲のテスト>
 
 - 全量の `cargo test` はローカルで回さない。CI に任せる。
 - `origin/main` にリベースしてから実行する。
-- `runtime/core`・`runtime/os` を変更した場合は各ディレクトリでも fmt と clippy を実行する（テストは変更範囲だけ）。
 - ツールチェーンが無い環境ではローカル確認を省略してよい。その場合は PR に「ローカル確認なし・CI に委任」と書く。
 - `scripts/*.sh` は bash 用で、Windows では Git Bash か WSL でのみ動く。ネイティブ出力は Linux x86-64 のみ。Windows ではその確認を CI に任せる。
 
@@ -98,9 +97,9 @@ cargo test --test <変更範囲のテスト>
 | B4 式・文 | `check/{stmt,expr,pattern,closure,call}`, `exhaustive` |
 | B5 効果・契約 | `check/{effects,fn_check}`, `effects`, `verify` |
 | C1 SIR | `lower`, `ir`, `ir_eval` |
-| C2 ネイティブ | `codegen/**`, `native`, `runtime/**` |
+| C2 ネイティブ | `codegen/**`, `native` |
 | D1 ツール | `lsp/**`, `project`, `modpath`, `main` |
-| D2 標準ライブラリ | `stdlib`, `runtime/core`, `runtime/os` |
+| D2 標準ライブラリ | `stdlib` |
 | E 文書 | `docs/**`, `examples/**`, `tests/**`（新規ファイルのみ） |
 
 ## 触ってはいけない・特別な扱いのファイル

@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
+    <title>Sigil リポジトリ構成図</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet" />
+    <style>
+      button, [role="button"], select, summary, input:not([type="checkbox"], [type="radio"]) { min-height: 2rem; }
+    </style>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f3f6fc;
+        --panel: #ffffff;
+        --ink: #17233c;
+        --muted: #51617e;
+        --line: #ccd7ea;
+        --blue: #1f4fd8;
+        --blue-strong: #173ea8;
+        --blue-soft: #e2eaff;
+        --green: #0b8a5f;
+        --green-soft: #dff4e9;
+        --amber: #9a5b00;
+        --amber-soft: #fdeeda;
+        --plan-border: #8fa1bd;
+        --plan-ink: #43536e;
+        --arrow: #64769c;
+        --ext-bg: #e8edf6;
+        --ext-border: #9db0cc;
+        --shadow: 0 10px 30px rgba(23, 35, 60, 0.10);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b1220;
+          --panel: #141f36;
+          --ink: #e9effc;
+          --muted: #a3b4d4;
+          --line: #2a3a5c;
+          --blue: #7ea4ff;
+          --blue-strong: #aec4ff;
+          --blue-soft: #1d2c52;
+          --green: #3ecf96;
+          --green-soft: #123527;
+          --amber: #f2b04a;
+          --amber-soft: #3a2a10;
+          --plan-border: #5f7396;
+          --plan-ink: #b9c7e2;
+          --arrow: #7d92b8;
+          --ext-bg: #1a2742;
+          --ext-border: #46597c;
+          --shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; }
+
+      header.top { display: flex; flex-wrap: wrap; gap: 18px 28px; align-items: flex-start; justify-content: space-between; }
+      h1 { font-size: clamp(26px, 4.5vw, 36px); font-weight: 900; margin: 0 0 8px; letter-spacing: 0.01em; }
+      .intro { margin: 0; color: var(--muted); max-width: 34em; font-size: 15px; }
+      .intro strong { color: var(--ink); }
+
+      .legend {
+        background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+        padding: 12px 16px; box-shadow: var(--shadow); min-width: 240px;
+      }
+      .legend h2 { font-size: 12px; margin: 0 0 8px; color: var(--muted); font-weight: 700; letter-spacing: 0.08em; }
+      .legend ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13.5px; }
+      .legend li { display: flex; align-items: center; gap: 9px; }
+      .sw { width: 18px; height: 18px; border-radius: 5px; flex: none; }
+      .sw.done { background: var(--green-soft); border: 2px solid var(--green); }
+      .sw.dev { background: var(--amber-soft); border: 2px solid var(--amber); }
+      .sw.plan { background: transparent; border: 2px dashed var(--plan-border); }
+      .sw.core { background: var(--blue-soft); border: 3px solid var(--blue); }
+
+      section.layer { margin-top: 34px; }
+      .layer-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+      .layer-tag {
+        font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; font-weight: 600;
+        background: var(--ink); color: var(--bg); border-radius: 6px; padding: 2px 9px;
+      }
+      h2.layer-title { font-size: clamp(19px, 3vw, 23px); font-weight: 900; margin: 0; }
+      .layer-sub { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+
+      /* ---------- nodes ---------- */
+      .node {
+        appearance: none; text-align: left; width: 100%; cursor: pointer;
+        background: var(--panel); color: var(--ink);
+        border: 2px solid var(--line); border-radius: 12px;
+        padding: 10px 12px 11px; font: inherit;
+        display: flex; flex-direction: column; gap: 3px;
+        transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+      }
+      .node:hover { box-shadow: var(--shadow); }
+      .node:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+      .node.selected { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft), var(--shadow); }
+      .node .nm {
+        font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+        font-weight: 600; font-size: 15.5px; line-height: 1.3; overflow-wrap: anywhere;
+        display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+      }
+      .node .rl { font-size: 13px; color: var(--muted); line-height: 1.45; }
+      .chip {
+        flex: none; font-family: "Zen Kaku Gothic New", sans-serif; font-size: 11px; font-weight: 700;
+        border-radius: 999px; padding: 1px 8px; line-height: 1.7; white-space: nowrap;
+      }
+      .chip.done { background: var(--green); color: #fff; }
+      .chip.dev { background: var(--amber-soft); color: var(--amber); border: 1px solid var(--amber); }
+      .chip.plan { background: transparent; color: var(--plan-ink); border: 1px dashed var(--plan-border); }
+      .chip.ext { background: var(--ext-bg); color: var(--muted); border: 1px solid var(--ext-border); }
+      @media (prefers-color-scheme: dark) { .chip.done { color: #06231a; } }
+
+      .node.st-done { border-color: var(--green); background: linear-gradient(0deg, var(--green-soft), var(--green-soft)), var(--panel); }
+      .node.st-dev { border-color: var(--amber); background: linear-gradient(0deg, var(--amber-soft), var(--amber-soft)), var(--panel); }
+      .node.st-plan { border-style: dashed; border-color: var(--plan-border); background: transparent; }
+      .node.st-ext { border-color: var(--ext-border); background: var(--ext-bg); border-style: solid; }
+
+      /* layer 1 */
+      .grid-foundation { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+      @media (max-width: 980px) { .grid-foundation { grid-template-columns: repeat(3, 1fr); } }
+      @media (max-width: 620px) { .grid-foundation { grid-template-columns: repeat(2, 1fr); } }
+
+      /* layer 2 */
+      .grid-prereq { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      @media (max-width: 700px) { .grid-prereq { grid-template-columns: 1fr; } }
+      .prereq-arrow { color: var(--amber); font-weight: 900; }
+
+      /* layer 3 flow */
+      .flow { position: relative; }
+      .flow svg.wires { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: visible; }
+      .wires path.wire { fill: none; stroke: var(--arrow); stroke-width: 2; }
+      .wires path.wire.main { stroke-width: 2.6; }
+      .wires marker path { fill: var(--arrow); }
+      .flow-grid {
+        position: relative; z-index: 1;
+        display: grid; gap: 42px 16px;
+        grid-template-columns: repeat(5, 1fr);
+        grid-template-areas:
+          "internet dns tls waf sigix"
+          ". . auth summon kv"
+          ". . . queue mail";
+      }
+      .n-internet { grid-area: internet; } .n-dns { grid-area: dns; } .n-tls { grid-area: tls; }
+      .n-waf { grid-area: waf; } .n-sigix { grid-area: sigix; } .n-auth { grid-area: auth; }
+      .n-summon { grid-area: summon; } .n-kv { grid-area: kv; } .n-queue { grid-area: queue; }
+      .n-mail { grid-area: mail; }
+      .node.core { border: 3px solid var(--blue); background: linear-gradient(0deg, var(--blue-soft), var(--blue-soft)), var(--panel); }
+      .node.core .nm { font-size: 19px; color: var(--blue-strong); }
+      .node.core .rl { color: var(--ink); font-size: 13.5px; }
+      .core-badge {
+        font-size: 11px; font-weight: 900; color: var(--bg); background: var(--blue);
+        border-radius: 6px; padding: 1px 8px; align-self: flex-start; letter-spacing: 0.06em;
+      }
+      @media (max-width: 920px) {
+        .flow { padding-right: 36px; }
+        .flow-grid { display: flex; flex-direction: column; gap: 20px; }
+        .n-internet { order: 1; } .n-dns { order: 2; } .n-tls { order: 3; } .n-waf { order: 4; }
+        .n-sigix { order: 5; } .n-auth { order: 6; } .n-summon { order: 7; } .n-queue { order: 8; }
+        .n-mail { order: 9; } .n-kv { order: 10; }
+      }
+
+      /* layer 4 */
+      .cross-band { border: 2px dashed var(--plan-border); border-radius: 16px; padding: 16px; }
+      .grid-cross { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+      @media (max-width: 700px) { .grid-cross { grid-template-columns: 1fr; } }
+      .sec-group { margin-top: 16px; border: 1.5px solid var(--line); border-radius: 12px; padding: 12px 14px 14px; background: var(--panel); }
+      .ops-group { margin-top: 16px; border: 2px solid var(--blue); border-radius: 12px; padding: 12px 14px 14px; background: linear-gradient(0deg, var(--blue-soft), var(--blue-soft)), var(--panel); }
+      .ops-group h3 { margin: 0 0 10px; font-size: 14.5px; font-weight: 900; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .ops-group .node { background: var(--panel); }
+      .sec-group h3 { margin: 0 0 10px; font-size: 14.5px; font-weight: 900; }
+      .grid-sec { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+      @media (max-width: 700px) { .grid-sec { grid-template-columns: 1fr; } }
+
+      /* layer 5 - application */
+      .app-band { border: 2px solid var(--blue); border-radius: 16px; padding: 16px; background: linear-gradient(0deg, var(--blue-soft), var(--blue-soft)), var(--panel); }
+      .app-band .node { background: var(--panel); }
+      .app-main { display: grid; grid-template-columns: 1.35fr 1fr; gap: 14px; }
+      .app-main + .app-main { margin-top: 14px; }
+      @media (max-width: 760px) { .app-main { grid-template-columns: 1fr; } }
+      .app-note { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; font-size: 13.5px; line-height: 1.65; }
+      .app-note strong { display: block; font-size: 13px; margin-bottom: 4px; }
+      .app-note ul { margin: 6px 0 0; padding-left: 1.2em; }
+      .app-note li { margin: 2px 0; }
+      .app-flow { margin-top: 12px; font-size: 13.5px; color: var(--muted); line-height: 1.9; }
+      .app-flow .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12.5px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+
+      /* detail panel */
+      .detail {
+        margin-top: 36px; background: var(--panel); border: 1px solid var(--line);
+        border-radius: 16px; padding: 20px 22px; box-shadow: var(--shadow);
+      }
+      .detail .d-label { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 6px; }
+      .d-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .d-head h3 {
+        margin: 0; font-family: "IBM Plex Mono", ui-monospace, monospace;
+        font-size: clamp(20px, 3.4vw, 26px); font-weight: 600; overflow-wrap: anywhere;
+      }
+      .d-kind { font-size: 13px; color: var(--muted); }
+      .d-desc { margin: 10px 0 0; font-size: 15.5px; max-width: 62em; }
+      .d-links { margin: 10px 0 0; font-size: 14px; color: var(--muted); }
+      .d-links strong { color: var(--ink); }
+      .d-links .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13.5px; }
+
+      /* supplements */
+      .supplements { margin-top: 30px; display: grid; gap: 14px; }
+      details.toggle {
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 4px 20px;
+      }
+      details.toggle summary {
+        cursor: pointer; font-weight: 900; font-size: 16.5px; padding: 12px 0;
+        display: flex; align-items: center; gap: 10px; list-style: none;
+      }
+      details.toggle summary::-webkit-details-marker { display: none; }
+      details.toggle summary::after { content: "＋"; margin-left: auto; color: var(--blue); font-weight: 900; }
+      details.toggle[open ] summary::after { content: "－"; }
+      details.toggle .body { padding: 0 0 16px; font-size: 15px; }
+      .order-flow { margin: 0; line-height: 2.1; }
+      .order-flow .step {
+        display: inline-block; background: var(--blue-soft); color: var(--ink);
+        border-radius: 8px; padding: 1px 10px; font-weight: 700; font-size: 14px; white-space: nowrap;
+      }
+      .order-flow .step .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; font-weight: 600; }
+      .order-flow .arr { color: var(--arrow); font-weight: 900; padding: 0 2px; }
+      footer.note { margin-top: 34px; color: var(--muted); font-size: 13px; }
+      @media (prefers-reduced-motion: reduce) { .node { transition: none; } }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <div>
+          <h1>Sigil リポジトリ構成図</h1>
+          <p class="intro">プログラミング言語 <strong>Sigil</strong> と、その上で動くサーバー部品の一族、<strong>全23リポジトリ</strong>の構成図です。アプリケーション層に、動画配信に続いて SNS を追加しました。各部品を選ぶと、下に詳しい説明が表示されます。</p>
+        </div>
+        <aside class="legend" aria-label="凡例">
+          <h2>凡例（状態）</h2>
+          <ul>
+            <li><span class="sw done"></span>実装あり</li>
+            <li><span class="sw dev"></span>開発中・着手したところ</li>
+            <li><span class="sw plan"></span>計画のみ（枠線だけの部品）</li>
+            <li><span class="sw core"></span>中心の部品（sigix）</li>
+          </ul>
+        </aside>
+      </header>
+
+      <!-- 第1層 -->
+      <section class="layer" aria-labelledby="l1">
+        <div class="layer-head"><span class="layer-tag">LAYER 1</span><h2 class="layer-title" id="l1">土台：言語と実行基盤</h2></div>
+        <p class="layer-sub">Sigil でものを作るための土台になる5リポジトリです。</p>
+        <div class="grid-foundation">
+          <button type="button" class="node st-dev" data-id="sigil" title="プログラミング言語 Sigil と標準ライブラリ">
+            <span class="nm">sigil <span class="chip dev">開発中</span></span>
+            <span class="rl">言語本体（Sigil と標準ライブラリ）</span>
+          </button>
+          <button type="button" class="node st-done" data-id="db" title="組み込み DB と PostgreSQL 互換サーバー">
+            <span class="nm">sigil-db <span class="chip done">実装あり</span></span>
+            <span class="rl">データベース</span>
+          </button>
+          <button type="button" class="node st-done" data-id="git" title="Git の仕組みの Sigil 実装">
+            <span class="nm">sigil-git <span class="chip done">実装あり</span></span>
+            <span class="rl">Git の仕組み</span>
+          </button>
+          <button type="button" class="node st-done" data-id="container" title="コンテナの実行基盤">
+            <span class="nm">sigil-container <span class="chip done">実装あり</span></span>
+            <span class="rl">コンテナ実行基盤</span>
+          </button>
+          <button type="button" class="node st-dev" data-id="os" title="OS 本体。起動まわりの作業中">
+            <span class="nm">sigil-os <span class="chip dev">着手</span></span>
+            <span class="rl">OS 本体</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 第2層 -->
+      <section class="layer" aria-labelledby="l2">
+        <div class="layer-head"><span class="layer-tag">LAYER 2</span><h2 class="layer-title" id="l2">言語側の前提（進行中）</h2></div>
+        <p class="layer-sub">バックエンド部品を作る前提として、言語（sigil）側で進めている2つの追加です。</p>
+        <div class="grid-prereq">
+          <button type="button" class="node st-dev" data-id="udp" title="sigil-atlas-dns と sigil-hourglass-time の前提">
+            <span class="nm">UDP ソケットの追加 <span class="chip dev">マージ済み</span></span>
+            <span class="rl"><span class="prereq-arrow">→</span> sigil-atlas-dns・sigil-hourglass-time の前提</span>
+          </button>
+          <button type="button" class="node st-dev" data-id="crypto" title="X25519・AES-GCM など。sigil-shield-tls の前提">
+            <span class="nm">TLS 1.3 向け暗号部品の追加 <span class="chip dev">ADR 0058 決定済み</span></span>
+            <span class="rl"><span class="prereq-arrow">→</span> sigil-shield-tls の前提（X25519・AES-GCM など）</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- 第3層 -->
+      <section class="layer" aria-labelledby="l3">
+        <div class="layer-head"><span class="layer-tag">LAYER 3</span><h2 class="layer-title" id="l3">バックエンド部品：リクエストの流れ</h2></div>
+        <p class="layer-sub">外部からのリクエストが、入口の部品を順に通って中心の sigix に届くまでの流れです。この層の9件はすべて「計画のみ」（リポジトリ作成済み・実装はこれから）です。</p>
+        <div class="flow" id="flow">
+          <svg class="wires" id="wires" aria-hidden="true" focusable="false">
+            <defs>
+              <marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z"></path>
+              </marker>
+            </defs>
+          </svg>
+          <div class="flow-grid">
+            <button type="button" class="node st-ext n-internet" id="n-internet" data-id="internet" title="リクエストの出発点（Sigil 一族の外側）">
+              <span class="nm">インターネット <span class="chip ext">外部</span></span>
+              <span class="rl">クライアント（ブラウザ）</span>
+            </button>
+            <button type="button" class="node st-plan n-dns" id="n-dns" data-id="dns" title="名前解決・ルーティングの基盤（DNS）">
+              <span class="nm">sigil-atlas-dns <span class="chip plan">計画のみ</span></span>
+              <span class="rl">名前解決（DNS）</span>
+            </button>
+            <button type="button" class="node st-plan n-tls" id="n-tls" data-id="tls" title="TLS の終端と証明書の管理">
+              <span class="nm">sigil-shield-tls <span class="chip plan">計画のみ</span></span>
+              <span class="rl">TLS 終端</span>
+            </button>
+            <button type="button" class="node st-plan n-waf" id="n-waf" data-id="waf" title="攻撃を検知して遮断する層">
+              <span class="nm">sigil-aegis-waf <span class="chip plan">計画のみ</span></span>
+              <span class="rl">攻撃の検知・遮断</span>
+            </button>
+            <button type="button" class="node core n-sigix" id="n-sigix" data-id="sigix" title="コアとなる Web サーバー・リバースプロキシ">
+              <span class="core-badge">中心</span>
+              <span class="nm">sigix <span class="chip plan">計画のみ</span></span>
+              <span class="rl">Web サーバー／リバースプロキシ</span>
+            </button>
+            <button type="button" class="node st-plan n-auth" id="n-auth" data-id="auth" title="ユーザー認証・トークンの発行・セッション管理">
+              <span class="nm">sigil-rune-auth <span class="chip plan">計画のみ</span></span>
+              <span class="rl">認証・トークンの検証</span>
+            </button>
+            <button type="button" class="node st-plan n-summon" id="n-summon" data-id="summon" title="イベント駆動の関数実行環境（サーバーレス）">
+              <span class="nm">sigil-summon-functions <span class="chip plan">計画のみ</span></span>
+              <span class="rl">関数実行（サーバーレス）</span>
+            </button>
+            <button type="button" class="node st-plan n-kv" id="n-kv" data-id="kv" title="高速な key-value ストア・キャッシュ">
+              <span class="nm">sigil-stash-kv <span class="chip plan">計画のみ</span></span>
+              <span class="rl">キャッシュ・状態保持</span>
+            </button>
+            <button type="button" class="node st-plan n-queue" id="n-queue" data-id="queue" title="非同期タスクの仲介・イベント配信">
+              <span class="nm">sigil-herald-queue <span class="chip plan">計画のみ</span></span>
+              <span class="rl">非同期メッセージキュー</span>
+            </button>
+            <button type="button" class="node st-plan n-mail" id="n-mail" data-id="mail" title="メールの送信・通知の配信">
+              <span class="nm">sigil-raven-mail <span class="chip plan">計画のみ</span></span>
+              <span class="rl">メール・通知の配信</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 第4層 -->
+      <section class="layer" aria-labelledby="l4">
+        <div class="layer-head"><span class="layer-tag">LAYER 4</span><h2 class="layer-title" id="l4">横断する役割</h2></div>
+        <p class="layer-sub">特定の経路ではなく、全部品と横断的につながる役割です（点線の枠で示しています）。今回、AI が障害の復旧まで担う自律運用部品 sigil-vigil-ops を追加しました。</p>
+        <div class="cross-band">
+          <div class="grid-cross">
+            <button type="button" class="node st-plan" data-id="observe" title="全部品のログ・メトリクスを常時監視">
+              <span class="nm">sigil-argus-observe <span class="chip plan">計画のみ</span></span>
+              <span class="rl">ログ・メトリクスの常時監視</span>
+            </button>
+            <button type="button" class="node st-plan" data-id="orchestra" title="全部品を統合制御する Web ダッシュボード（魔法陣 GUI）">
+              <span class="nm">sigil-orchestra <span class="chip plan">原型完成・本体は計画のみ</span></span>
+              <span class="rl">統合制御ダッシュボード（魔法陣 GUI）</span>
+            </button>
+            <button type="button" class="node st-plan" data-id="hourglass" title="全部品の時刻を揃える時刻同期（NTP）の土台">
+              <span class="nm">sigil-hourglass-time <span class="chip plan">計画のみ</span></span>
+              <span class="rl">時刻同期（NTP）の土台</span>
+            </button>
+          </div>
+          <div class="ops-group">
+            <h3>自律運用（今回追加）<span class="core-badge">新規追加</span></h3>
+            <button type="button" class="node st-plan" data-id="vigil" title="AI エージェントが障害の原因特定から復旧・検証までを担う自律運用部品">
+              <span class="nm">sigil-vigil-ops <span class="chip plan">計画のみ</span></span>
+              <span class="rl">AI が状況復旧まで担う（原因特定 → 復旧手順の実行 → 検証・記録）</span>
+            </button>
+          </div>
+          <div class="sec-group">
+            <h3>セキュリティ・信頼系（3件）</h3>
+            <div class="grid-sec">
+              <button type="button" class="node st-plan" data-id="seer" title="AI エージェントが攻撃者の視点で自分たちのコードを先回り監査">
+                <span class="nm">sigil-seer-preempt <span class="chip plan">計画のみ</span></span>
+                <span class="rl">先回り監査（攻撃者の視点）</span>
+              </button>
+              <button type="button" class="node st-plan" data-id="beacon" title="脅威情報を全部品で共有する網">
+                <span class="nm">sigil-beacon-intel <span class="chip plan">計画のみ</span></span>
+                <span class="rl">脅威情報の共有網</span>
+              </button>
+              <button type="button" class="node st-plan" data-id="forge" title="ビルド成果物への署名と出所・完全性の検証">
+                <span class="nm">sigil-forge-attest <span class="chip plan">計画のみ</span></span>
+                <span class="rl">署名と出所・完全性の検証</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 第5層 -->
+      <section class="layer" aria-labelledby="l5">
+        <div class="layer-head"><span class="layer-tag">LAYER 5</span><h2 class="layer-title" id="l5">アプリケーション層</h2></div>
+        <p class="layer-sub">インフラ層の上に乗る、部品群を使う側のアプリケーションです。動画配信に続いて、SNS が2件目として加わりました。どちらも部品群の実証（ドッグフーディング）を兼ね、動画配信は将来シジの動画の置き場にもなりえます。</p>
+        <div class="app-band">
+          <div class="app-main">
+            <button type="button" class="node st-plan" data-id="lantern" title="YouTube のような動画配信プラットフォーム。lantern は幻灯機（マジックランタン）">
+              <span class="nm">sigil-lantern-stream <span class="chip plan">計画のみ</span></span>
+              <span class="rl">動画配信プラットフォーム（YouTube型）— 動画の受け入れ・カタログ・変換の段取り・適応ビットレート配信の窓口・再生</span>
+            </button>
+            <div class="app-note">
+              <strong>今回の範囲に絞るもの</strong>
+              動画の受け入れ、メタデータとカタログ管理、変換パイプラインの段取り、HLS 等の適応ビットレート配信の窓口、再生の仕組みまで。
+              <ul>
+                <li>後段に回す：コメント・推薦・収益化・ライブ配信</li>
+                <li>名前の由来：lantern ＝ 幻灯機（マジックランタン）</li>
+              </ul>
+            </div>
+          </div>
+          <div class="app-main">
+            <button type="button" class="node st-plan" data-id="agora" title="SNS。agora は古代ギリシャで人々が集い語り合った広場、post は投稿">
+              <span class="nm">sigil-agora-post <span class="chip plan">計画のみ</span></span>
+              <span class="rl">SNS — 投稿・フォロー関係・タイムライン／フィード・反応・通知（コメントは初期範囲に含む）</span>
+            </button>
+            <div class="app-note">
+              <strong>今回の範囲に絞るもの</strong>
+              投稿、フォロー関係、タイムライン／フィード、反応、通知まで。コメントは初期範囲に含めます。
+              <ul>
+                <li>後段に回す：DM・検索・トレンド・収益化</li>
+                <li>名前の由来：agora ＝ 古代ギリシャの広場、post ＝ 投稿</li>
+              </ul>
+            </div>
+          </div>
+          <p class="app-flow">lantern-stream のつながり：変換の実行は <span class="mono">sigil-herald-queue</span> → <span class="mono">sigil-summon-functions</span>／<span class="mono">sigil-container</span>、保存と配信は <span class="mono">sigix</span> の静的配信、メタデータは <span class="mono">sigil-db</span>、認証は <span class="mono">sigil-rune-auth</span> が担います。</p>
+          <p class="app-flow" style="margin-top:4px">agora-post のつながり：認証は <span class="mono">sigil-rune-auth</span>、保存は <span class="mono">sigil-db</span>、通知の配送は <span class="mono">sigil-herald-queue</span> → <span class="mono">sigil-raven-mail</span>、メディアは <span class="mono">sigix</span> の静的配信が担います。</p>
+        </div>
+      </section>
+
+      <!-- 詳細パネル -->
+      <section class="detail" id="detail" aria-live="polite" aria-label="部品の説明">
+        <p class="d-label">部品の説明</p>
+        <div class="d-head">
+          <h3 id="d-name">sigix</h3>
+          <span class="chip plan" id="d-chip">計画のみ</span>
+          <span class="d-kind" id="d-kind"></span>
+        </div>
+        <p class="d-desc" id="d-desc"></p>
+        <p class="d-links" id="d-links"></p>
+      </section>
+
+      <!-- 補足トグル -->
+      <div class="supplements">
+        <details class="toggle">
+          <summary>作る順番の案</summary>
+          <div class="body">
+            <p class="order-flow">
+              <span class="step"><span class="mono">sigix</span></span><span class="arr">→</span>
+              <span class="step">監視・ログの形式の約束</span><span class="arr">→</span>
+              <span class="step">KV <span class="mono">(sigil-stash-kv)</span></span><span class="arr">→</span>
+              <span class="step">認証 <span class="mono">(sigil-rune-auth)</span></span><span class="arr">→</span>
+              <span class="step">TLS 終端 <span class="mono">(sigil-shield-tls)</span></span><span class="arr">→</span>
+              <span class="step">キュー <span class="mono">(sigil-herald-queue)</span></span><span class="arr">→</span>
+              <span class="step">監視の実装 <span class="mono">(sigil-argus-observe)</span></span><span class="arr">→</span>
+              <span class="step">DNS <span class="mono">(sigil-atlas-dns)</span></span><span class="arr">→</span>
+              <span class="step">メール <span class="mono">(sigil-raven-mail)</span></span><span class="arr">→</span>
+              <span class="step">オーケストレーション <span class="mono">(sigil-orchestra)</span></span><span class="arr">→</span>
+              <span class="step">サーバーレス <span class="mono">(sigil-summon-functions)</span></span><span class="arr">→</span>
+              <span class="step">動画配信 <span class="mono">(sigil-lantern-stream)</span></span><span class="arr">→</span>
+              <span class="step">SNS <span class="mono">(sigil-agora-post)</span></span>
+            </p>
+          </div>
+        </details>
+        <details class="toggle">
+          <summary>数について</summary>
+          <div class="body">
+            <p style="margin:0">バックエンド部品は sigix を入れて<strong>16件</strong>（第3層に9件、第4層に7件）です。そこにアプリケーション層の <strong>sigil-lantern-stream</strong> と <strong>sigil-agora-post</strong> が2件加わり、土台の5件と合わせて、Sigil 一族は全部で<strong>23リポジトリ</strong>になります（計画下書きではバックエンド系18件として数えます）。</p>
+          </div>
+        </details>
+      </div>
+
+      <footer class="note">状態は図を作成した時点のものです。バックエンド部品16件とアプリケーション層の2件（sigil-lantern-stream、sigil-agora-post）は、現在は計画・概念の段階です（いずれもリポジトリ作成済み、計画下書き §18・§19 に記録済み）。</footer>
+    </div>
+
+    <script>
+      var DETAILS = {
+        sigil: { name: "sigil", chip: "開発中", chipClass: "dev", kind: "リポジトリ（第1層・土台）",
+          desc: "プログラミング言語 Sigil そのものと標準ライブラリです。Sigil 一族すべての土台で、段階 P1〜P6 の計画に沿って開発が進んでいます。",
+          links: "第2層の2つの追加（UDP ソケット、TLS 1.3 向け暗号部品）も、この sigil 側の作業です。" },
+        db: { name: "sigil-db", chip: "実装あり", chipClass: "done", kind: "リポジトリ（第1層・土台）",
+          desc: "Sigil で書かれたデータベースです。アプリに組み込んで使う組み込み DB と、PostgreSQL の通信方式で話すサーバーとして使う形の両方に対応します。段階 P4 で実装されました。" },
+        git: { name: "sigil-git", chip: "実装あり", chipClass: "done", kind: "リポジトリ（第1層・土台）",
+          desc: "バージョン管理の仕組みである Git を Sigil で実装したものです。段階 P4 で実装されました。" },
+        container: { name: "sigil-container", chip: "実装あり", chipClass: "done", kind: "リポジトリ（第1層・土台）",
+          desc: "コンテナの実行基盤です。段階 P5 で実装されました。" },
+        os: { name: "sigil-os", chip: "着手", chipClass: "dev", kind: "リポジトリ（第1層・土台）",
+          desc: "Sigil で書く OS 本体です。段階 P6 で着手したところで、いまは起動まわりの作業を進めています。" },
+        udp: { name: "UDP ソケットの追加", chip: "マージ済み", chipClass: "dev", kind: "言語側の追加（第2層）",
+          desc: "言語 sigil の標準ライブラリへ UDP ソケットを追加する作業です。UDP を使う sigil-atlas-dns と sigil-hourglass-time の前提になります。設計文書（ADR）はマージ済みで、実装が進んでいます。" },
+        crypto: { name: "TLS 1.3 向け暗号部品の追加", chip: "ADR 0058 決定済み", chipClass: "dev", kind: "言語側の追加（第2層）",
+          desc: "TLS 1.3 の実装に要る暗号部品（X25519・AES-GCM など）を言語 sigil 側へ追加する作業です。sigil-shield-tls の前提になります。設計文書 ADR 0058 は決定済みです。" },
+        internet: { name: "インターネット／クライアント", chip: "外部", chipClass: "ext", kind: "Sigil 一族の外側",
+          desc: "Web ブラウザなどのクライアントからリクエストが送られてくる、出発点です。まず sigil-atlas-dns で名前解決を行います。" },
+        dns: { name: "sigil-atlas-dns", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "名前解決・ルーティングの基盤（DNS）です。リクエストの入口で、名前から接続先を引く役割を担います。",
+          links: "前提：言語側の <span class='mono'>UDP ソケットの追加</span>（第2層）。次は <span class='mono'>sigil-shield-tls</span> へつながります。" },
+        tls: { name: "sigil-shield-tls", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "TLS の終端と証明書の管理を担います。暗号化された通信をここで復号し、後段へ渡します。sigix 本体には持たせず、前段に置く専用部品にすることが決まっています。",
+          links: "前提：言語側の <span class='mono'>TLS 1.3 向け暗号部品の追加</span>（第2層、ADR 0058）。次は <span class='mono'>sigil-aegis-waf</span> へつながります。" },
+        waf: { name: "sigil-aegis-waf", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "Web アプリケーションへの攻撃を検知して遮断する層です。通信の中身を平文で検査するため、TLS 終端（sigil-shield-tls）の後段に置きます。",
+          links: "通過したリクエストは中心の <span class='mono'>sigix</span> へ届きます。" },
+        sigix: { name: "sigix", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品／中心）",
+          desc: "一族の中心となる Web サーバー・リバースプロキシです。作る順番は、まず静的ファイル配信、次にリバースプロキシの順で進めます。",
+          links: "前段に <span class='mono'>sigil-aegis-waf</span>。<span class='mono'>sigil-rune-auth</span> とは認証・トークンの検証で双方向にやり取りし、<span class='mono'>sigil-summon-functions</span>（関数実行）と <span class='mono'>sigil-stash-kv</span>（キャッシュ・状態保持）へ接続します。" },
+        auth: { name: "sigil-rune-auth", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "ユーザー認証・トークンの発行・セッション管理を担います。",
+          links: "<span class='mono'>sigix</span> とは、認証とトークンの検証のため双方向につながります。" },
+        summon: { name: "sigil-summon-functions", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "イベント駆動の関数実行環境（サーバーレス）です。",
+          links: "<span class='mono'>sigix</span> から呼び出され、非同期の続きは <span class='mono'>sigil-herald-queue</span> へ渡します。" },
+        kv: { name: "sigil-stash-kv", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "高速な key-value ストア・キャッシュです。sigix からのキャッシュや状態保持に加え、セッションの置き場にもなります。",
+          links: "<span class='mono'>sigix</span> から接続します。" },
+        queue: { name: "sigil-herald-queue", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "非同期タスクの仲介・イベント配信を担うメッセージキューです。",
+          links: "<span class='mono'>sigil-summon-functions</span> から受け取り、<span class='mono'>sigil-raven-mail</span> へつなぎます。脅威情報（<span class='mono'>sigil-beacon-intel</span>）の配布経路としても想定されています。" },
+        mail: { name: "sigil-raven-mail", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第3層・バックエンド部品）",
+          desc: "メールの送信・通知の配信を担います。",
+          links: "<span class='mono'>sigil-herald-queue</span> から非同期に受け取って届けます。" },
+        observe: { name: "sigil-argus-observe", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・横断する役割）",
+          desc: "全部品のログ・メトリクスを常時監視する役割です。特定の経路ではなく、図全体と横断的につながります。「何が起きたか」の検知と収集までを担います。",
+          links: "検知した異常は、復旧を担う <span class='mono'>sigil-vigil-ops</span> へ渡します。" },
+        orchestra: { name: "sigil-orchestra", chip: "原型完成・本体は計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・横断する役割）",
+          desc: "全部品を統合制御する Web ダッシュボード（魔法陣 GUI）です。ダッシュボードの原型は完成していますが、部品本体は計画のみです。",
+          links: "<span class='mono'>sigil-vigil-ops</span> が復旧を行うときの実手段の依頼先の一つです（もう一つは <span class='mono'>sigil-container</span>）。" },
+        hourglass: { name: "sigil-hourglass-time", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・横断する役割）",
+          desc: "全部品の時刻を揃える時刻同期（NTP）の土台です。",
+          links: "前提：言語側の <span class='mono'>UDP ソケットの追加</span>（第2層）。" },
+        seer: { name: "sigil-seer-preempt", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・セキュリティ・信頼系）",
+          desc: "AI エージェントが攻撃者の視点で自分たちのコードを先回り監査する、能動的サイバー防御の部品です。",
+          links: "障害が起きる前に穴を直す役割で、起きたときに対応する <span class='mono'>sigil-vigil-ops</span> とは時間軸で分かれます。" },
+        vigil: { name: "sigil-vigil-ops", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・横断する役割／自律運用）",
+          desc: "AI エージェントが障害対応を担う自律運用部品です（vigil＝徹夜の見張り）。sigil-argus-observe が検知した異常を受けて、原因の特定、復旧手順（ランブック）の選択と実行、結果の検証と記録までを行い、平時は最適化も提案します。安全のため、最初は提案のみから始め、人間の承認後に実行する段階を経て、実績のある手順だけ自動実行を許す段階制で進めます。",
+          links: "検知は <span class='mono'>sigil-argus-observe</span> から受け取り、復旧の実手段は <span class='mono'>sigil-orchestra</span> と <span class='mono'>sigil-container</span> へ依頼します。起きる前に穴を直す <span class='mono'>sigil-seer-preempt</span> とは、起きたときに対応する役割で分かれます。" },
+        beacon: { name: "sigil-beacon-intel", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・セキュリティ・信頼系）",
+          desc: "攻撃元などの脅威情報を全部品で共有する網です。",
+          links: "情報の配布は <span class='mono'>sigil-herald-queue</span> 経由が想定されています。" },
+        forge: { name: "sigil-forge-attest", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第4層・セキュリティ・信頼系）",
+          desc: "ビルド成果物への署名と、出所・完全性の検証を行う部品です。" },
+        lantern: { name: "sigil-lantern-stream", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第5層・アプリケーション層）",
+          desc: "YouTube のような動画配信プラットフォームです（lantern＝幻灯機マジックランタン）。インフラ層中心だった部品群で初めてのアプリケーション層の部品で、部品群を使う側の実証（ドッグフーディング）を兼ねます。将来はシジの動画の置き場にもなりえます。役割は動画の受け入れ、メタデータとカタログ管理、変換パイプラインの段取り、HLS 等の適応ビットレート配信の窓口、再生の仕組みに絞ります。コメント・推薦・収益化・ライブ配信は後段です。",
+          links: "変換の実行は <span class='mono'>sigil-herald-queue</span> → <span class='mono'>sigil-summon-functions</span>／<span class='mono'>sigil-container</span>、保存と配信は <span class='mono'>sigix</span> の静的配信、メタデータは <span class='mono'>sigil-db</span>、認証は <span class='mono'>sigil-rune-auth</span> が担います。リポジトリ：<span class='mono'>goodnasubi/sigil-lantern-stream</span>（計画下書き §18）。" },
+        agora: { name: "sigil-agora-post", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第5層・アプリケーション層）",
+          desc: "SNS です（agora＝古代ギリシャで人々が集い語り合った広場、post＝投稿）。アプリケーション層の2件目で、部品群を使う側の実証（ドッグフーディング）を兼ねます。役割は投稿、フォロー関係、タイムライン／フィード、反応、通知に絞り、コメントは初期範囲に含めます。DM・検索・トレンド・収益化は後段です。",
+          links: "認証は <span class='mono'>sigil-rune-auth</span>、保存は <span class='mono'>sigil-db</span>、通知の配送は <span class='mono'>sigil-herald-queue</span> → <span class='mono'>sigil-raven-mail</span>、メディアは <span class='mono'>sigix</span> の静的配信が担います。リポジトリ：<span class='mono'>goodnasubi/sigil-agora-post</span>（計画下書き §19）。" }
+      };
+
+      var detailEl = document.getElementById("detail");
+      var dName = document.getElementById("d-name");
+      var dChip = document.getElementById("d-chip");
+      var dKind = document.getElementById("d-kind");
+      var dDesc = document.getElementById("d-desc");
+      var dLinks = document.getElementById("d-links");
+      var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      function select(id, scroll) {
+        var d = DETAILS[id];
+        if (!d) return;
+        var nodes = document.querySelectorAll(".node");
+        for (var i = 0; i < nodes.length; i++) {
+          nodes[i].classList.toggle("selected", nodes[i].getAttribute("data-id") === id);
+        }
+        dName.textContent = d.name;
+        dChip.textContent = d.chip;
+        dChip.className = "chip " + d.chipClass;
+        dKind.textContent = d.kind || "";
+        dDesc.textContent = d.desc || "";
+        if (d.links) { dLinks.innerHTML = "<strong>つながり：</strong>" + d.links; dLinks.style.display = ""; }
+        else { dLinks.innerHTML = ""; dLinks.style.display = "none"; }
+        if (scroll) {
+          detailEl.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "nearest" });
+        }
+      }
+
+      var allNodes = document.querySelectorAll(".node");
+      for (var i = 0; i < allNodes.length; i++) {
+        allNodes[i].addEventListener("click", function () {
+          select(this.getAttribute("data-id"), true);
+        });
+      }
+      select("sigix", false);
+
+      /* ---------- arrows for layer 3 ---------- */
+      var CONNS = [
+        { f: "internet", t: "dns", main: true },
+        { f: "dns", t: "tls", main: true },
+        { f: "tls", t: "waf", main: true },
+        { f: "waf", t: "sigix", main: true },
+        { f: "sigix", t: "auth", both: true },
+        { f: "sigix", t: "summon", chan: 0 },
+        { f: "sigix", t: "kv", chan: 1 },
+        { f: "summon", t: "queue" },
+        { f: "queue", t: "mail" }
+      ];
+
+      function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+      function segHitsRect(x1, y1, x2, y2, r) {
+        if (x1 === x2) { // vertical
+          if (x1 <= r.l || x1 >= r.r) return false;
+          var lo = Math.min(y1, y2), hi = Math.max(y1, y2);
+          return hi > r.t && lo < r.b;
+        }
+        if (y1 === y2) { // horizontal
+          if (y1 <= r.t || y1 >= r.b) return false;
+          var lo2 = Math.min(x1, x2), hi2 = Math.max(x1, x2);
+          return hi2 > r.l && lo2 < r.r;
+        }
+        return false;
+      }
+
+      function pathClear(pts, blockers) {
+        for (var i = 0; i < pts.length - 1; i++) {
+          for (var j = 0; j < blockers.length; j++) {
+            if (segHitsRect(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], blockers[j])) return false;
+          }
+        }
+        return true;
+      }
+
+      function ptsToPath(pts) {
+        var d = "M" + pts[0][0].toFixed(1) + "," + pts[0][1].toFixed(1);
+        for (var i = 1; i < pts.length; i++) d += " L" + pts[i][0].toFixed(1) + "," + pts[i][1].toFixed(1);
+        return d;
+      }
+
+      function drawArrows() {
+        var flow = document.getElementById("flow");
+        var svg = document.getElementById("wires");
+        if (!flow || !svg) return;
+        var fr = flow.getBoundingClientRect();
+        if (fr.width < 10) return;
+        svg.setAttribute("viewBox", "0 0 " + fr.width + " " + fr.height);
+        while (svg.querySelectorAll("path.wire").length) {
+          var old = svg.querySelector("path.wire");
+          old.parentNode.removeChild(old);
+        }
+        var rects = {};
+        var ids = [];
+        var nodeEls = flow.querySelectorAll(".node");
+        for (var i = 0; i < nodeEls.length; i++) {
+          var key = nodeEls[i].getAttribute("data-id");
+          var r = nodeEls[i].getBoundingClientRect();
+          rects[key] = {
+            l: r.left - fr.left, t: r.top - fr.top, r: r.right - fr.left, b: r.bottom - fr.top,
+            cx: r.left - fr.left + r.width / 2, cy: r.top - fr.top + r.height / 2
+          };
+          ids.push(key);
+        }
+        var SVGNS = "http://www.w3.org/2000/svg";
+        for (var c = 0; c < CONNS.length; c++) {
+          var conn = CONNS[c];
+          var a = rects[conn.f], b = rects[conn.t];
+          if (!a || !b) continue;
+          var blockers = [];
+          for (var k = 0; k < ids.length; k++) {
+            if (ids[k] !== conn.f && ids[k] !== conn.t) {
+              var br = rects[ids[k]];
+              blockers.push({ l: br.l + 3, t: br.t + 3, r: br.r - 3, b: br.b - 3 });
+            }
+          }
+          var pts = null;
+          var overlapY = Math.min(a.b, b.b) - Math.max(a.t, b.t);
+          if (b.l >= a.r - 2 && overlapY > 6) {
+            // side by side: horizontal arrow
+            var y = (Math.max(a.t, b.t) + Math.min(a.b, b.b)) / 2;
+            pts = [[a.r, y], [b.l, y]];
+          } else if (b.t >= a.b - 2) {
+            // target below: try Z path through the gap
+            var exitX = clamp(b.cx, a.l + 16, a.r - 16);
+            var midY = (a.b + b.t) / 2;
+            var z = Math.abs(exitX - b.cx) < 3
+              ? [[exitX, a.b], [exitX, b.t]]
+              : [[exitX, a.b], [exitX, midY], [b.cx, midY], [b.cx, b.t]];
+            if (pathClear(z, blockers)) {
+              pts = z;
+            } else {
+              // right-side channel (mobile stacking)
+              var chX = fr.width - 8 - (conn.chan || 0) * 15;
+              pts = [[a.r, a.cy], [chX, a.cy], [chX, b.cy], [b.r, b.cy]];
+            }
+          } else if (b.r <= a.l + 2 && overlapY > 6) {
+            var y2 = (Math.max(a.t, b.t) + Math.min(a.b, b.b)) / 2;
+            pts = [[a.l, y2], [b.r, y2]];
+          }
+          if (!pts) continue;
+          var p = document.createElementNS(SVGNS, "path");
+          p.setAttribute("d", ptsToPath(pts));
+          p.setAttribute("class", "wire" + (conn.main ? " main" : ""));
+          p.setAttribute("marker-end", "url(#arr)");
+          if (conn.both) p.setAttribute("marker-start", "url(#arr)");
+          svg.appendChild(p);
+        }
+      }
+
+      var resizeTimer = null;
+      window.addEventListener("resize", function () {
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(drawArrows, 120);
+      });
+      window.addEventListener("load", drawArrows);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawArrows);
+      drawArrows();
+    </script>
+  </body>
+</html>

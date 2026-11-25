@@ -2,7 +2,7 @@ module std.crypto
   targets bare, browser, server
   trust none
 
-// 暗号の基本部品（ADR 0024、PR 6-1b・6-1c・6-1d）。秘密を型で隔離する
+// 暗号の基本部品（ADR 0024、PR 6-1b・6-1c・6-1d。ECDSA P-256 署名は ADR 0064）。秘密を型で隔離する
 // `Secret` とその入口の関数、SHA-256（ストリーミング型 `Sha256` と
 // ワンショット関数 `sha256`、内部の圧縮関数 `sha256_compress`）、
 // HMAC-SHA-256（`hmac_sha256` と照合の `verify_hmac_sha256`）、
@@ -2906,4 +2906,1866 @@ pub fn x25519_shared_secret(private: &X25519PrivateKey, peer: &X25519PublicKey) 
     return Err(X25519Error { invalid_key_length: false });
   }
   return Ok(secret);
+}
+fn p256_fe_read(value: &Secret, i: Int) -> Int
+  intent "作業領域の指定した体の語を読む"
+  requires none
+  ensures none
+  effects none
+{
+
+  return value.data.read_u32_be(i * 4).unwrap_or(0);
+}
+
+fn p256_fe_pack(h0: Int, h1: Int, h2: Int, h3: Int, h4: Int, h5: Int, h6: Int, h7: Int, h8: Int, h9: Int) -> Secret
+  intent "体の 10 語を消去される作業領域へ格納する"
+  requires none
+  ensures none
+  effects none
+{
+
+  let mut out = Bytes.with_capacity(40);
+  out.push_u32_be(h0);
+  out.push_u32_be(h1);
+  out.push_u32_be(h2);
+  out.push_u32_be(h3);
+  out.push_u32_be(h4);
+  out.push_u32_be(h5);
+  out.push_u32_be(h6);
+  out.push_u32_be(h7);
+  out.push_u32_be(h8);
+  out.push_u32_be(h9);
+  return Secret.from_bytes(out);
+}
+
+fn p256_fe_decode(data: &Bytes) -> Secret
+  intent "ビッグエンディアンの 32 バイトを 26 ビット 10 語に読む"
+  requires none
+  ensures none
+  effects none
+{
+
+  let b0 = data.get(31).map(|b| b + 0).unwrap_or(0);
+  let b1 = data.get(30).map(|b| b + 0).unwrap_or(0);
+  let b2 = data.get(29).map(|b| b + 0).unwrap_or(0);
+  let b3 = data.get(28).map(|b| b + 0).unwrap_or(0);
+  let b4 = data.get(27).map(|b| b + 0).unwrap_or(0);
+  let b5 = data.get(26).map(|b| b + 0).unwrap_or(0);
+  let b6 = data.get(25).map(|b| b + 0).unwrap_or(0);
+  let b7 = data.get(24).map(|b| b + 0).unwrap_or(0);
+  let b8 = data.get(23).map(|b| b + 0).unwrap_or(0);
+  let b9 = data.get(22).map(|b| b + 0).unwrap_or(0);
+  let b10 = data.get(21).map(|b| b + 0).unwrap_or(0);
+  let b11 = data.get(20).map(|b| b + 0).unwrap_or(0);
+  let b12 = data.get(19).map(|b| b + 0).unwrap_or(0);
+  let b13 = data.get(18).map(|b| b + 0).unwrap_or(0);
+  let b14 = data.get(17).map(|b| b + 0).unwrap_or(0);
+  let b15 = data.get(16).map(|b| b + 0).unwrap_or(0);
+  let b16 = data.get(15).map(|b| b + 0).unwrap_or(0);
+  let b17 = data.get(14).map(|b| b + 0).unwrap_or(0);
+  let b18 = data.get(13).map(|b| b + 0).unwrap_or(0);
+  let b19 = data.get(12).map(|b| b + 0).unwrap_or(0);
+  let b20 = data.get(11).map(|b| b + 0).unwrap_or(0);
+  let b21 = data.get(10).map(|b| b + 0).unwrap_or(0);
+  let b22 = data.get(9).map(|b| b + 0).unwrap_or(0);
+  let b23 = data.get(8).map(|b| b + 0).unwrap_or(0);
+  let b24 = data.get(7).map(|b| b + 0).unwrap_or(0);
+  let b25 = data.get(6).map(|b| b + 0).unwrap_or(0);
+  let b26 = data.get(5).map(|b| b + 0).unwrap_or(0);
+  let b27 = data.get(4).map(|b| b + 0).unwrap_or(0);
+  let b28 = data.get(3).map(|b| b + 0).unwrap_or(0);
+  let b29 = data.get(2).map(|b| b + 0).unwrap_or(0);
+  let b30 = data.get(1).map(|b| b + 0).unwrap_or(0);
+  let b31 = data.get(0).map(|b| b + 0).unwrap_or(0);
+  let h0 = (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) & 0x3ffffff;
+  let h1 = ((b3 >> 2) | (b4 << 6) | (b5 << 14) | (b6 << 22)) & 0x3ffffff;
+  let h2 = ((b6 >> 4) | (b7 << 4) | (b8 << 12) | (b9 << 20)) & 0x3ffffff;
+  let h3 = ((b9 >> 6) | (b10 << 2) | (b11 << 10) | (b12 << 18)) & 0x3ffffff;
+  let h4 = (b13 | (b14 << 8) | (b15 << 16) | (b16 << 24)) & 0x3ffffff;
+  let h5 = ((b16 >> 2) | (b17 << 6) | (b18 << 14) | (b19 << 22)) & 0x3ffffff;
+  let h6 = ((b19 >> 4) | (b20 << 4) | (b21 << 12) | (b22 << 20)) & 0x3ffffff;
+  let h7 = ((b22 >> 6) | (b23 << 2) | (b24 << 10) | (b25 << 18)) & 0x3ffffff;
+  let h8 = (b26 | (b27 << 8) | (b28 << 16) | (b29 << 24)) & 0x3ffffff;
+  let h9 = ((b29 >> 2) | (b30 << 6) | (b31 << 14)) & 0x3ffffff;
+  return p256_fe_pack(h0, h1, h2, h3, h4, h5, h6, h7, h8, h9);
+}
+
+fn p256_fe_encode(value: &Secret) -> Bytes
+  intent "26 ビット 10 語の体の元を 32 バイトのビッグエンディアンに書く"
+  requires none
+  ensures result.byte_len() == 32
+  effects none
+{
+
+  let a0 = p256_fe_read(&value, 0);
+  let a1 = p256_fe_read(&value, 1);
+  let a2 = p256_fe_read(&value, 2);
+  let a3 = p256_fe_read(&value, 3);
+  let a4 = p256_fe_read(&value, 4);
+  let a5 = p256_fe_read(&value, 5);
+  let a6 = p256_fe_read(&value, 6);
+  let a7 = p256_fe_read(&value, 7);
+  let a8 = p256_fe_read(&value, 8);
+  let a9 = p256_fe_read(&value, 9);
+  let mut out = Bytes.with_capacity(32);
+  out.push((a9 >> 14) & 255);
+  out.push((a9 >> 6) & 255);
+  out.push(((a8 >> 24) | (a9 << 2)) & 255);
+  out.push((a8 >> 16) & 255);
+  out.push((a8 >> 8) & 255);
+  out.push(a8 & 255);
+  out.push((a7 >> 18) & 255);
+  out.push((a7 >> 10) & 255);
+  out.push((a7 >> 2) & 255);
+  out.push(((a6 >> 20) | (a7 << 6)) & 255);
+  out.push((a6 >> 12) & 255);
+  out.push((a6 >> 4) & 255);
+  out.push(((a5 >> 22) | (a6 << 4)) & 255);
+  out.push((a5 >> 14) & 255);
+  out.push((a5 >> 6) & 255);
+  out.push(((a4 >> 24) | (a5 << 2)) & 255);
+  out.push((a4 >> 16) & 255);
+  out.push((a4 >> 8) & 255);
+  out.push(a4 & 255);
+  out.push((a3 >> 18) & 255);
+  out.push((a3 >> 10) & 255);
+  out.push((a3 >> 2) & 255);
+  out.push(((a2 >> 20) | (a3 << 6)) & 255);
+  out.push((a2 >> 12) & 255);
+  out.push((a2 >> 4) & 255);
+  out.push(((a1 >> 22) | (a2 << 4)) & 255);
+  out.push((a1 >> 14) & 255);
+  out.push((a1 >> 6) & 255);
+  out.push(((a0 >> 24) | (a1 << 2)) & 255);
+  out.push((a0 >> 16) & 255);
+  out.push((a0 >> 8) & 255);
+  out.push(a0 & 255);
+  return out;
+}
+
+fn p256_fe_select(left: &Secret, right: &Secret, bit: Int) -> Secret
+  intent "秘密分岐を使わずに体の元を選ぶ（bit が 1 なら left）"
+  requires none
+  ensures none
+  effects none
+{
+
+  let mask = 0 - bit;
+  let a0 = p256_fe_read(&left, 0);
+  let b0 = p256_fe_read(&right, 0);
+  let a1 = p256_fe_read(&left, 1);
+  let b1 = p256_fe_read(&right, 1);
+  let a2 = p256_fe_read(&left, 2);
+  let b2 = p256_fe_read(&right, 2);
+  let a3 = p256_fe_read(&left, 3);
+  let b3 = p256_fe_read(&right, 3);
+  let a4 = p256_fe_read(&left, 4);
+  let b4 = p256_fe_read(&right, 4);
+  let a5 = p256_fe_read(&left, 5);
+  let b5 = p256_fe_read(&right, 5);
+  let a6 = p256_fe_read(&left, 6);
+  let b6 = p256_fe_read(&right, 6);
+  let a7 = p256_fe_read(&left, 7);
+  let b7 = p256_fe_read(&right, 7);
+  let a8 = p256_fe_read(&left, 8);
+  let b8 = p256_fe_read(&right, 8);
+  let a9 = p256_fe_read(&left, 9);
+  let b9 = p256_fe_read(&right, 9);
+  return p256_fe_pack(b0 ^ ((a0 ^ b0) & mask), b1 ^ ((a1 ^ b1) & mask), b2 ^ ((a2 ^ b2) & mask), b3 ^ ((a3 ^ b3) & mask), b4 ^ ((a4 ^ b4) & mask), b5 ^ ((a5 ^ b5) & mask), b6 ^ ((a6 ^ b6) & mask), b7 ^ ((a7 ^ b7) & mask), b8 ^ ((a8 ^ b8) & mask), b9 ^ ((a9 ^ b9) & mask));
+}
+
+fn p256_fp_mul(left: &Secret, right: &Secret) -> Secret
+  intent "法の体（p）でモンゴメリ乗算を行う"
+  requires none
+  ensures none
+  effects none
+{
+
+  let a0 = p256_fe_read(&left, 0);
+  let b0 = p256_fe_read(&right, 0);
+  let a1 = p256_fe_read(&left, 1);
+  let b1 = p256_fe_read(&right, 1);
+  let a2 = p256_fe_read(&left, 2);
+  let b2 = p256_fe_read(&right, 2);
+  let a3 = p256_fe_read(&left, 3);
+  let b3 = p256_fe_read(&right, 3);
+  let a4 = p256_fe_read(&left, 4);
+  let b4 = p256_fe_read(&right, 4);
+  let a5 = p256_fe_read(&left, 5);
+  let b5 = p256_fe_read(&right, 5);
+  let a6 = p256_fe_read(&left, 6);
+  let b6 = p256_fe_read(&right, 6);
+  let a7 = p256_fe_read(&left, 7);
+  let b7 = p256_fe_read(&right, 7);
+  let a8 = p256_fe_read(&left, 8);
+  let b8 = p256_fe_read(&right, 8);
+  let a9 = p256_fe_read(&left, 9);
+  let b9 = p256_fe_read(&right, 9);
+  let mut c0 = a0 * b0;
+  let mut c1 = a0 * b1 + a1 * b0;
+  let mut c2 = a0 * b2 + a1 * b1 + a2 * b0;
+  let mut c3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0;
+  let mut c4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
+  let mut c5 = a0 * b5 + a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1 + a5 * b0;
+  let mut c6 = a0 * b6 + a1 * b5 + a2 * b4 + a3 * b3 + a4 * b2 + a5 * b1 + a6 * b0;
+  let mut c7 = a0 * b7 + a1 * b6 + a2 * b5 + a3 * b4 + a4 * b3 + a5 * b2 + a6 * b1 + a7 * b0;
+  let mut c8 = a0 * b8 + a1 * b7 + a2 * b6 + a3 * b5 + a4 * b4 + a5 * b3 + a6 * b2 + a7 * b1 + a8 * b0;
+  let mut c9 = a0 * b9 + a1 * b8 + a2 * b7 + a3 * b6 + a4 * b5 + a5 * b4 + a6 * b3 + a7 * b2 + a8 * b1 + a9 * b0;
+  let mut c10 = a1 * b9 + a2 * b8 + a3 * b7 + a4 * b6 + a5 * b5 + a6 * b4 + a7 * b3 + a8 * b2 + a9 * b1;
+  let mut c11 = a2 * b9 + a3 * b8 + a4 * b7 + a5 * b6 + a6 * b5 + a7 * b4 + a8 * b3 + a9 * b2;
+  let mut c12 = a3 * b9 + a4 * b8 + a5 * b7 + a6 * b6 + a7 * b5 + a8 * b4 + a9 * b3;
+  let mut c13 = a4 * b9 + a5 * b8 + a6 * b7 + a7 * b6 + a8 * b5 + a9 * b4;
+  let mut c14 = a5 * b9 + a6 * b8 + a7 * b7 + a8 * b6 + a9 * b5;
+  let mut c15 = a6 * b9 + a7 * b8 + a8 * b7 + a9 * b6;
+  let mut c16 = a7 * b9 + a8 * b8 + a9 * b7;
+  let mut c17 = a8 * b9 + a9 * b8;
+  let mut c18 = a9 * b9;
+  let mut c19 = 0;
+  let q0 = ((c0 & 0x3ffffff) * 1) & 0x3ffffff;
+  c0 = c0 + q0 * 67108863;
+  c1 = c1 + q0 * 67108863;
+  c2 = c2 + q0 * 67108863;
+  c3 = c3 + q0 * 262143;
+  c7 = c7 + q0 * 1024;
+  c8 = c8 + q0 * 67043328;
+  c9 = c9 + q0 * 4194303;
+  c1 = c1 + (c0 >> 26);
+  let q1 = ((c1 & 0x3ffffff) * 1) & 0x3ffffff;
+  c1 = c1 + q1 * 67108863;
+  c2 = c2 + q1 * 67108863;
+  c3 = c3 + q1 * 67108863;
+  c4 = c4 + q1 * 262143;
+  c8 = c8 + q1 * 1024;
+  c9 = c9 + q1 * 67043328;
+  c10 = c10 + q1 * 4194303;
+  c2 = c2 + (c1 >> 26);
+  let q2 = ((c2 & 0x3ffffff) * 1) & 0x3ffffff;
+  c2 = c2 + q2 * 67108863;
+  c3 = c3 + q2 * 67108863;
+  c4 = c4 + q2 * 67108863;
+  c5 = c5 + q2 * 262143;
+  c9 = c9 + q2 * 1024;
+  c10 = c10 + q2 * 67043328;
+  c11 = c11 + q2 * 4194303;
+  c3 = c3 + (c2 >> 26);
+  let q3 = ((c3 & 0x3ffffff) * 1) & 0x3ffffff;
+  c3 = c3 + q3 * 67108863;
+  c4 = c4 + q3 * 67108863;
+  c5 = c5 + q3 * 67108863;
+  c6 = c6 + q3 * 262143;
+  c10 = c10 + q3 * 1024;
+  c11 = c11 + q3 * 67043328;
+  c12 = c12 + q3 * 4194303;
+  c4 = c4 + (c3 >> 26);
+  let q4 = ((c4 & 0x3ffffff) * 1) & 0x3ffffff;
+  c4 = c4 + q4 * 67108863;
+  c5 = c5 + q4 * 67108863;
+  c6 = c6 + q4 * 67108863;
+  c7 = c7 + q4 * 262143;
+  c11 = c11 + q4 * 1024;
+  c12 = c12 + q4 * 67043328;
+  c13 = c13 + q4 * 4194303;
+  c5 = c5 + (c4 >> 26);
+  let q5 = ((c5 & 0x3ffffff) * 1) & 0x3ffffff;
+  c5 = c5 + q5 * 67108863;
+  c6 = c6 + q5 * 67108863;
+  c7 = c7 + q5 * 67108863;
+  c8 = c8 + q5 * 262143;
+  c12 = c12 + q5 * 1024;
+  c13 = c13 + q5 * 67043328;
+  c14 = c14 + q5 * 4194303;
+  c6 = c6 + (c5 >> 26);
+  let q6 = ((c6 & 0x3ffffff) * 1) & 0x3ffffff;
+  c6 = c6 + q6 * 67108863;
+  c7 = c7 + q6 * 67108863;
+  c8 = c8 + q6 * 67108863;
+  c9 = c9 + q6 * 262143;
+  c13 = c13 + q6 * 1024;
+  c14 = c14 + q6 * 67043328;
+  c15 = c15 + q6 * 4194303;
+  c7 = c7 + (c6 >> 26);
+  let q7 = ((c7 & 0x3ffffff) * 1) & 0x3ffffff;
+  c7 = c7 + q7 * 67108863;
+  c8 = c8 + q7 * 67108863;
+  c9 = c9 + q7 * 67108863;
+  c10 = c10 + q7 * 262143;
+  c14 = c14 + q7 * 1024;
+  c15 = c15 + q7 * 67043328;
+  c16 = c16 + q7 * 4194303;
+  c8 = c8 + (c7 >> 26);
+  let q8 = ((c8 & 0x3ffffff) * 1) & 0x3ffffff;
+  c8 = c8 + q8 * 67108863;
+  c9 = c9 + q8 * 67108863;
+  c10 = c10 + q8 * 67108863;
+  c11 = c11 + q8 * 262143;
+  c15 = c15 + q8 * 1024;
+  c16 = c16 + q8 * 67043328;
+  c17 = c17 + q8 * 4194303;
+  c9 = c9 + (c8 >> 26);
+  let q9 = ((c9 & 0x3ffffff) * 1) & 0x3ffffff;
+  c9 = c9 + q9 * 67108863;
+  c10 = c10 + q9 * 67108863;
+  c11 = c11 + q9 * 67108863;
+  c12 = c12 + q9 * 262143;
+  c16 = c16 + q9 * 1024;
+  c17 = c17 + q9 * 67043328;
+  c18 = c18 + q9 * 4194303;
+  c10 = c10 + (c9 >> 26);
+  let u0 = c10 + 0;
+  let r0 = u0 & 0x3ffffff;
+  let u1 = c11 + (u0 >> 26);
+  let r1 = u1 & 0x3ffffff;
+  let u2 = c12 + (u1 >> 26);
+  let r2 = u2 & 0x3ffffff;
+  let u3 = c13 + (u2 >> 26);
+  let r3 = u3 & 0x3ffffff;
+  let u4 = c14 + (u3 >> 26);
+  let r4 = u4 & 0x3ffffff;
+  let u5 = c15 + (u4 >> 26);
+  let r5 = u5 & 0x3ffffff;
+  let u6 = c16 + (u5 >> 26);
+  let r6 = u6 & 0x3ffffff;
+  let u7 = c17 + (u6 >> 26);
+  let r7 = u7 & 0x3ffffff;
+  let u8 = c18 + (u7 >> 26);
+  let r8 = u8 & 0x3ffffff;
+  let u9 = c19 + (u8 >> 26);
+  let r9 = u9;
+  let to0 = r0 - 67108863;
+  let borrow0 = to0 >> 63;
+  let do0 = to0 & 0x3ffffff;
+  let to1 = r1 - 67108863 - borrow0;
+  let borrow1 = to1 >> 63;
+  let do1 = to1 & 0x3ffffff;
+  let to2 = r2 - 67108863 - borrow1;
+  let borrow2 = to2 >> 63;
+  let do2 = to2 & 0x3ffffff;
+  let to3 = r3 - 262143 - borrow2;
+  let borrow3 = to3 >> 63;
+  let do3 = to3 & 0x3ffffff;
+  let to4 = r4 - 0 - borrow3;
+  let borrow4 = to4 >> 63;
+  let do4 = to4 & 0x3ffffff;
+  let to5 = r5 - 0 - borrow4;
+  let borrow5 = to5 >> 63;
+  let do5 = to5 & 0x3ffffff;
+  let to6 = r6 - 0 - borrow5;
+  let borrow6 = to6 >> 63;
+  let do6 = to6 & 0x3ffffff;
+  let to7 = r7 - 1024 - borrow6;
+  let borrow7 = to7 >> 63;
+  let do7 = to7 & 0x3ffffff;
+  let to8 = r8 - 67043328 - borrow7;
+  let borrow8 = to8 >> 63;
+  let do8 = to8 & 0x3ffffff;
+  let to9 = r9 - 4194303 - borrow8;
+  let borrow9 = to9 >> 63;
+  let do9 = to9 & 0x3ffffff;
+  let keepo = 0 - borrow9;
+  let o0 = do0 ^ ((do0 ^ r0) & keepo);
+  let o1 = do1 ^ ((do1 ^ r1) & keepo);
+  let o2 = do2 ^ ((do2 ^ r2) & keepo);
+  let o3 = do3 ^ ((do3 ^ r3) & keepo);
+  let o4 = do4 ^ ((do4 ^ r4) & keepo);
+  let o5 = do5 ^ ((do5 ^ r5) & keepo);
+  let o6 = do6 ^ ((do6 ^ r6) & keepo);
+  let o7 = do7 ^ ((do7 ^ r7) & keepo);
+  let o8 = do8 ^ ((do8 ^ r8) & keepo);
+  let o9 = do9 ^ ((do9 ^ r9) & keepo);
+  return p256_fe_pack(o0, o1, o2, o3, o4, o5, o6, o7, o8, o9);
+}
+
+fn p256_fp_add(left: &Secret, right: &Secret) -> Secret
+  intent "法の体（p）で加算する"
+  requires none
+  ensures none
+  effects none
+{
+
+  let a0 = p256_fe_read(&left, 0);
+  let b0 = p256_fe_read(&right, 0);
+  let a1 = p256_fe_read(&left, 1);
+  let b1 = p256_fe_read(&right, 1);
+  let a2 = p256_fe_read(&left, 2);
+  let b2 = p256_fe_read(&right, 2);
+  let a3 = p256_fe_read(&left, 3);
+  let b3 = p256_fe_read(&right, 3);
+  let a4 = p256_fe_read(&left, 4);
+  let b4 = p256_fe_read(&right, 4);
+  let a5 = p256_fe_read(&left, 5);
+  let b5 = p256_fe_read(&right, 5);
+  let a6 = p256_fe_read(&left, 6);
+  let b6 = p256_fe_read(&right, 6);
+  let a7 = p256_fe_read(&left, 7);
+  let b7 = p256_fe_read(&right, 7);
+  let a8 = p256_fe_read(&left, 8);
+  let b8 = p256_fe_read(&right, 8);
+  let a9 = p256_fe_read(&left, 9);
+  let b9 = p256_fe_read(&right, 9);
+  let u0 = a0 + b0;
+  let r0 = u0 & 0x3ffffff;
+  let u1 = a1 + b1 + (u0 >> 26);
+  let r1 = u1 & 0x3ffffff;
+  let u2 = a2 + b2 + (u1 >> 26);
+  let r2 = u2 & 0x3ffffff;
+  let u3 = a3 + b3 + (u2 >> 26);
+  let r3 = u3 & 0x3ffffff;
+  let u4 = a4 + b4 + (u3 >> 26);
+  let r4 = u4 & 0x3ffffff;
+  let u5 = a5 + b5 + (u4 >> 26);
+  let r5 = u5 & 0x3ffffff;
+  let u6 = a6 + b6 + (u5 >> 26);
+  let r6 = u6 & 0x3ffffff;
+  let u7 = a7 + b7 + (u6 >> 26);
+  let r7 = u7 & 0x3ffffff;
+  let u8 = a8 + b8 + (u7 >> 26);
+  let r8 = u8 & 0x3ffffff;
+  let u9 = a9 + b9 + (u8 >> 26);
+  let r9 = u9;
+  let to0 = r0 - 67108863;
+  let borrow0 = to0 >> 63;
+  let do0 = to0 & 0x3ffffff;
+  let to1 = r1 - 67108863 - borrow0;
+  let borrow1 = to1 >> 63;
+  let do1 = to1 & 0x3ffffff;
+  let to2 = r2 - 67108863 - borrow1;
+  let borrow2 = to2 >> 63;
+  let do2 = to2 & 0x3ffffff;
+  let to3 = r3 - 262143 - borrow2;
+  let borrow3 = to3 >> 63;
+  let do3 = to3 & 0x3ffffff;
+  let to4 = r4 - 0 - borrow3;
+  let borrow4 = to4 >> 63;
+  let do4 = to4 & 0x3ffffff;
+  let to5 = r5 - 0 - borrow4;
+  let borrow5 = to5 >> 63;
+  let do5 = to5 & 0x3ffffff;
+  let to6 = r6 - 0 - borrow5;
+  let borrow6 = to6 >> 63;
+  let do6 = to6 & 0x3ffffff;
+  let to7 = r7 - 1024 - borrow6;
+  let borrow7 = to7 >> 63;
+  let do7 = to7 & 0x3ffffff;
+  let to8 = r8 - 67043328 - borrow7;
+  let borrow8 = to8 >> 63;
+  let do8 = to8 & 0x3ffffff;
+  let to9 = r9 - 4194303 - borrow8;
+  let borrow9 = to9 >> 63;
+  let do9 = to9 & 0x3ffffff;
+  let keepo = 0 - borrow9;
+  let o0 = do0 ^ ((do0 ^ r0) & keepo);
+  let o1 = do1 ^ ((do1 ^ r1) & keepo);
+  let o2 = do2 ^ ((do2 ^ r2) & keepo);
+  let o3 = do3 ^ ((do3 ^ r3) & keepo);
+  let o4 = do4 ^ ((do4 ^ r4) & keepo);
+  let o5 = do5 ^ ((do5 ^ r5) & keepo);
+  let o6 = do6 ^ ((do6 ^ r6) & keepo);
+  let o7 = do7 ^ ((do7 ^ r7) & keepo);
+  let o8 = do8 ^ ((do8 ^ r8) & keepo);
+  let o9 = do9 ^ ((do9 ^ r9) & keepo);
+  return p256_fe_pack(o0, o1, o2, o3, o4, o5, o6, o7, o8, o9);
+}
+
+fn p256_fp_sub(left: &Secret, right: &Secret) -> Secret
+  intent "法の体（p）で減算する"
+  requires none
+  ensures none
+  effects none
+{
+
+  let a0 = p256_fe_read(&left, 0);
+  let b0 = p256_fe_read(&right, 0);
+  let a1 = p256_fe_read(&left, 1);
+  let b1 = p256_fe_read(&right, 1);
+  let a2 = p256_fe_read(&left, 2);
+  let b2 = p256_fe_read(&right, 2);
+  let a3 = p256_fe_read(&left, 3);
+  let b3 = p256_fe_read(&right, 3);
+  let a4 = p256_fe_read(&left, 4);
+  let b4 = p256_fe_read(&right, 4);
+  let a5 = p256_fe_read(&left, 5);
+  let b5 = p256_fe_read(&right, 5);
+  let a6 = p256_fe_read(&left, 6);
+  let b6 = p256_fe_read(&right, 6);
+  let a7 = p256_fe_read(&left, 7);
+  let b7 = p256_fe_read(&right, 7);
+  let a8 = p256_fe_read(&left, 8);
+  let b8 = p256_fe_read(&right, 8);
+  let a9 = p256_fe_read(&left, 9);
+  let b9 = p256_fe_read(&right, 9);
+  let t0 = a0 - b0;
+  let borrow0 = t0 >> 63;
+  let d0 = t0 & 0x3ffffff;
+  let t1 = a1 - b1 - borrow0;
+  let borrow1 = t1 >> 63;
+  let d1 = t1 & 0x3ffffff;
+  let t2 = a2 - b2 - borrow1;
+  let borrow2 = t2 >> 63;
+  let d2 = t2 & 0x3ffffff;
+  let t3 = a3 - b3 - borrow2;
+  let borrow3 = t3 >> 63;
+  let d3 = t3 & 0x3ffffff;
+  let t4 = a4 - b4 - borrow3;
+  let borrow4 = t4 >> 63;
+  let d4 = t4 & 0x3ffffff;
+  let t5 = a5 - b5 - borrow4;
+  let borrow5 = t5 >> 63;
+  let d5 = t5 & 0x3ffffff;
+  let t6 = a6 - b6 - borrow5;
+  let borrow6 = t6 >> 63;
+  let d6 = t6 & 0x3ffffff;
+  let t7 = a7 - b7 - borrow6;
+  let borrow7 = t7 >> 63;
+  let d7 = t7 & 0x3ffffff;
+  let t8 = a8 - b8 - borrow7;
+  let borrow8 = t8 >> 63;
+  let d8 = t8 & 0x3ffffff;
+  let t9 = a9 - b9 - borrow8;
+  let borrow9 = t9 >> 63;
+  let d9 = t9 & 0x3ffffff;
+  let fix = 0 - borrow9;
+  let v0 = d0 + ((67108863) & fix);
+  let v1 = d1 + ((67108863) & fix) + (v0 >> 26);
+  let v2 = d2 + ((67108863) & fix) + (v1 >> 26);
+  let v3 = d3 + ((262143) & fix) + (v2 >> 26);
+  let v4 = d4 + ((0) & fix) + (v3 >> 26);
+  let v5 = d5 + ((0) & fix) + (v4 >> 26);
+  let v6 = d6 + ((0) & fix) + (v5 >> 26);
+  let v7 = d7 + ((1024) & fix) + (v6 >> 26);
+  let v8 = d8 + ((67043328) & fix) + (v7 >> 26);
+  let v9 = d9 + ((4194303) & fix) + (v8 >> 26);
+  return p256_fe_pack(v0 & 0x3ffffff, v1 & 0x3ffffff, v2 & 0x3ffffff, v3 & 0x3ffffff, v4 & 0x3ffffff, v5 & 0x3ffffff, v6 & 0x3ffffff, v7 & 0x3ffffff, v8 & 0x3ffffff, v9 & 0x3ffffff);
+}
+
+fn p256_fn_mul(left: &Secret, right: &Secret) -> Secret
+  intent "法の体（n）でモンゴメリ乗算を行う"
+  requires none
+  ensures none
+  effects none
+{
+
+  let a0 = p256_fe_read(&left, 0);
+  let b0 = p256_fe_read(&right, 0);
+  let a1 = p256_fe_read(&left, 1);
+  let b1 = p256_fe_read(&right, 1);
+  let a2 = p256_fe_read(&left, 2);
+  let b2 = p256_fe_read(&right, 2);
+  let a3 = p256_fe_read(&left, 3);
+  let b3 = p256_fe_read(&right, 3);
+  let a4 = p256_fe_read(&left, 4);
+  let b4 = p256_fe_read(&right, 4);
+  let a5 = p256_fe_read(&left, 5);
+  let b5 = p256_fe_read(&right, 5);
+  let a6 = p256_fe_read(&left, 6);
+  let b6 = p256_fe_read(&right, 6);
+  let a7 = p256_fe_read(&left, 7);
+  let b7 = p256_fe_read(&right, 7);
+  let a8 = p256_fe_read(&left, 8);
+  let b8 = p256_fe_read(&right, 8);
+  let a9 = p256_fe_read(&left, 9);
+  let b9 = p256_fe_read(&right, 9);
+  let mut c0 = a0 * b0;
+  let mut c1 = a0 * b1 + a1 * b0;
+  let mut c2 = a0 * b2 + a1 * b1 + a2 * b0;
+  let mut c3 = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0;
+  let mut c4 = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
+  let mut c5 = a0 * b5 + a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1 + a5 * b0;
+  let mut c6 = a0 * b6 + a1 * b5 + a2 * b4 + a3 * b3 + a4 * b2 + a5 * b1 + a6 * b0;
+  let mut c7 = a0 * b7 + a1 * b6 + a2 * b5 + a3 * b4 + a4 * b3 + a5 * b2 + a6 * b1 + a7 * b0;
+  let mut c8 = a0 * b8 + a1 * b7 + a2 * b6 + a3 * b5 + a4 * b4 + a5 * b3 + a6 * b2 + a7 * b1 + a8 * b0;
+  let mut c9 = a0 * b9 + a1 * b8 + a2 * b7 + a3 * b6 + a4 * b5 + a5 * b4 + a6 * b3 + a7 * b2 + a8 * b1 + a9 * b0;
+  let mut c10 = a1 * b9 + a2 * b8 + a3 * b7 + a4 * b6 + a5 * b5 + a6 * b4 + a7 * b3 + a8 * b2 + a9 * b1;
+  let mut c11 = a2 * b9 + a3 * b8 + a4 * b7 + a5 * b6 + a6 * b5 + a7 * b4 + a8 * b3 + a9 * b2;
+  let mut c12 = a3 * b9 + a4 * b8 + a5 * b7 + a6 * b6 + a7 * b5 + a8 * b4 + a9 * b3;
+  let mut c13 = a4 * b9 + a5 * b8 + a6 * b7 + a7 * b6 + a8 * b5 + a9 * b4;
+  let mut c14 = a5 * b9 + a6 * b8 + a7 * b7 + a8 * b6 + a9 * b5;
+  let mut c15 = a6 * b9 + a7 * b8 + a8 * b7 + a9 * b6;
+  let mut c16 = a7 * b9 + a8 * b8 + a9 * b7;
+  let mut c17 = a8 * b9 + a9 * b8;
+  let mut c18 = a9 * b9;
+  let mut c19 = 0;
+  let q0 = ((c0 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c0 = c0 + q0 * 6497617;
+  c1 = c1 + q0 * 41070783;
+  c2 = c2 + q0 * 32001851;
+  c3 = c3 + q0 * 45522014;
+  c4 = c4 + q0 * 62711546;
+  c5 = c5 + q0 * 67108863;
+  c6 = c6 + q0 * 67108863;
+  c7 = c7 + q0 * 1023;
+  c8 = c8 + q0 * 67043328;
+  c9 = c9 + q0 * 4194303;
+  c1 = c1 + (c0 >> 26);
+  let q1 = ((c1 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c1 = c1 + q1 * 6497617;
+  c2 = c2 + q1 * 41070783;
+  c3 = c3 + q1 * 32001851;
+  c4 = c4 + q1 * 45522014;
+  c5 = c5 + q1 * 62711546;
+  c6 = c6 + q1 * 67108863;
+  c7 = c7 + q1 * 67108863;
+  c8 = c8 + q1 * 1023;
+  c9 = c9 + q1 * 67043328;
+  c10 = c10 + q1 * 4194303;
+  c2 = c2 + (c1 >> 26);
+  let q2 = ((c2 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c2 = c2 + q2 * 6497617;
+  c3 = c3 + q2 * 41070783;
+  c4 = c4 + q2 * 32001851;
+  c5 = c5 + q2 * 45522014;
+  c6 = c6 + q2 * 62711546;
+  c7 = c7 + q2 * 67108863;
+  c8 = c8 + q2 * 67108863;
+  c9 = c9 + q2 * 1023;
+  c10 = c10 + q2 * 67043328;
+  c11 = c11 + q2 * 4194303;
+  c3 = c3 + (c2 >> 26);
+  let q3 = ((c3 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c3 = c3 + q3 * 6497617;
+  c4 = c4 + q3 * 41070783;
+  c5 = c5 + q3 * 32001851;
+  c6 = c6 + q3 * 45522014;
+  c7 = c7 + q3 * 62711546;
+  c8 = c8 + q3 * 67108863;
+  c9 = c9 + q3 * 67108863;
+  c10 = c10 + q3 * 1023;
+  c11 = c11 + q3 * 67043328;
+  c12 = c12 + q3 * 4194303;
+  c4 = c4 + (c3 >> 26);
+  let q4 = ((c4 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c4 = c4 + q4 * 6497617;
+  c5 = c5 + q4 * 41070783;
+  c6 = c6 + q4 * 32001851;
+  c7 = c7 + q4 * 45522014;
+  c8 = c8 + q4 * 62711546;
+  c9 = c9 + q4 * 67108863;
+  c10 = c10 + q4 * 67108863;
+  c11 = c11 + q4 * 1023;
+  c12 = c12 + q4 * 67043328;
+  c13 = c13 + q4 * 4194303;
+  c5 = c5 + (c4 >> 26);
+  let q5 = ((c5 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c5 = c5 + q5 * 6497617;
+  c6 = c6 + q5 * 41070783;
+  c7 = c7 + q5 * 32001851;
+  c8 = c8 + q5 * 45522014;
+  c9 = c9 + q5 * 62711546;
+  c10 = c10 + q5 * 67108863;
+  c11 = c11 + q5 * 67108863;
+  c12 = c12 + q5 * 1023;
+  c13 = c13 + q5 * 67043328;
+  c14 = c14 + q5 * 4194303;
+  c6 = c6 + (c5 >> 26);
+  let q6 = ((c6 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c6 = c6 + q6 * 6497617;
+  c7 = c7 + q6 * 41070783;
+  c8 = c8 + q6 * 32001851;
+  c9 = c9 + q6 * 45522014;
+  c10 = c10 + q6 * 62711546;
+  c11 = c11 + q6 * 67108863;
+  c12 = c12 + q6 * 67108863;
+  c13 = c13 + q6 * 1023;
+  c14 = c14 + q6 * 67043328;
+  c15 = c15 + q6 * 4194303;
+  c7 = c7 + (c6 >> 26);
+  let q7 = ((c7 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c7 = c7 + q7 * 6497617;
+  c8 = c8 + q7 * 41070783;
+  c9 = c9 + q7 * 32001851;
+  c10 = c10 + q7 * 45522014;
+  c11 = c11 + q7 * 62711546;
+  c12 = c12 + q7 * 67108863;
+  c13 = c13 + q7 * 67108863;
+  c14 = c14 + q7 * 1023;
+  c15 = c15 + q7 * 67043328;
+  c16 = c16 + q7 * 4194303;
+  c8 = c8 + (c7 >> 26);
+  let q8 = ((c8 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c8 = c8 + q8 * 6497617;
+  c9 = c9 + q8 * 41070783;
+  c10 = c10 + q8 * 32001851;
+  c11 = c11 + q8 * 45522014;
+  c12 = c12 + q8 * 62711546;
+  c13 = c13 + q8 * 67108863;
+  c14 = c14 + q8 * 67108863;
+  c15 = c15 + q8 * 1023;
+  c16 = c16 + q8 * 67043328;
+  c17 = c17 + q8 * 4194303;
+  c9 = c9 + (c8 >> 26);
+  let q9 = ((c9 & 0x3ffffff) * 33602639) & 0x3ffffff;
+  c9 = c9 + q9 * 6497617;
+  c10 = c10 + q9 * 41070783;
+  c11 = c11 + q9 * 32001851;
+  c12 = c12 + q9 * 45522014;
+  c13 = c13 + q9 * 62711546;
+  c14 = c14 + q9 * 67108863;
+  c15 = c15 + q9 * 67108863;
+  c16 = c16 + q9 * 1023;
+  c17 = c17 + q9 * 67043328;
+  c18 = c18 + q9 * 4194303;
+  c10 = c10 + (c9 >> 26);
+  let u0 = c10 + 0;
+  let r0 = u0 & 0x3ffffff;
+  let u1 = c11 + (u0 >> 26);
+  let r1 = u1 & 0x3ffffff;
+  let u2 = c12 + (u1 >> 26);
+  let r2 = u2 & 0x3ffffff;
+  let u3 = c13 + (u2 >> 26);
+  let r3 = u3 & 0x3ffffff;
+  let u4 = c14 + (u3 >> 26);
+  let r4 = u4 & 0x3ffffff;
+  let u5 = c15 + (u4 >> 26);
+  let r5 = u5 & 0x3ffffff;
+  let u6 = c16 + (u5 >> 26);
+  let r6 = u6 & 0x3ffffff;
+  let u7 = c17 + (u6 >> 26);
+  let r7 = u7 & 0x3ffffff;
+  let u8 = c18 + (u7 >> 26);
+  let r8 = u8 & 0x3ffffff;
+  let u9 = c19 + (u8 >> 26);
+  let r9 = u9;
+  let to0 = r0 - 6497617;
+  let borrow0 = to0 >> 63;
+  let do0 = to0 & 0x3ffffff;
+  let to1 = r1 - 41070783 - borrow0;
+  let borrow1 = to1 >> 63;
+  let do1 = to1 & 0x3ffffff;
+  let to2 = r2 - 32001851 - borrow1;
+  let borrow2 = to2 >> 63;
+  let do2 = to2 & 0x3ffffff;
+  let to3 = r3 - 45522014 - borrow2;
+  let borrow3 = to3 >> 63;
+  let do3 = to3 & 0x3ffffff;
+  let to4 = r4 - 62711546 - borrow3;
+  let borrow4 = to4 >> 63;
+  let do4 = to4 & 0x3ffffff;
+  let to5 = r5 - 67108863 - borrow4;
+  let borrow5 = to5 >> 63;
+  let do5 = to5 & 0x3ffffff;
+  let to6 = r6 - 67108863 - borrow5;
+  let borrow6 = to6 >> 63;
+  let do6 = to6 & 0x3ffffff;
+  let to7 = r7 - 1023 - borrow6;
+  let borrow7 = to7 >> 63;
+  let do7 = to7 & 0x3ffffff;
+  let to8 = r8 - 67043328 - borrow7;
+  let borrow8 = to8 >> 63;
+  let do8 = to8 & 0x3ffffff;
+  let to9 = r9 - 4194303 - borrow8;
+  let borrow9 = to9 >> 63;
+  let do9 = to9 & 0x3ffffff;
+  let keepo = 0 - borrow9;
+  let o0 = do0 ^ ((do0 ^ r0) & keepo);
+  let o1 = do1 ^ ((do1 ^ r1) & keepo);
+  let o2 = do2 ^ ((do2 ^ r2) & keepo);
+  let o3 = do3 ^ ((do3 ^ r3) & keepo);
+  let o4 = do4 ^ ((do4 ^ r4) & keepo);
+  let o5 = do5 ^ ((do5 ^ r5) & keepo);
+  let o6 = do6 ^ ((do6 ^ r6) & keepo);
+  let o7 = do7 ^ ((do7 ^ r7) & keepo);
+  let o8 = do8 ^ ((do8 ^ r8) & keepo);
+  let o9 = do9 ^ ((do9 ^ r9) & keepo);
+  return p256_fe_pack(o0, o1, o2, o3, o4, o5, o6, o7, o8, o9);
+}
+
+fn p256_fn_add(left: &Secret, right: &Secret) -> Secret
+  intent "法の体（n）で加算する"
+  requires none
+  ensures none
+  effects none
+{
+
+  let a0 = p256_fe_read(&left, 0);
+  let b0 = p256_fe_read(&right, 0);
+  let a1 = p256_fe_read(&left, 1);
+  let b1 = p256_fe_read(&right, 1);
+  let a2 = p256_fe_read(&left, 2);
+  let b2 = p256_fe_read(&right, 2);
+  let a3 = p256_fe_read(&left, 3);
+  let b3 = p256_fe_read(&right, 3);
+  let a4 = p256_fe_read(&left, 4);
+  let b4 = p256_fe_read(&right, 4);
+  let a5 = p256_fe_read(&left, 5);
+  let b5 = p256_fe_read(&right, 5);
+  let a6 = p256_fe_read(&left, 6);
+  let b6 = p256_fe_read(&right, 6);
+  let a7 = p256_fe_read(&left, 7);
+  let b7 = p256_fe_read(&right, 7);
+  let a8 = p256_fe_read(&left, 8);
+  let b8 = p256_fe_read(&right, 8);
+  let a9 = p256_fe_read(&left, 9);
+  let b9 = p256_fe_read(&right, 9);
+  let u0 = a0 + b0;
+  let r0 = u0 & 0x3ffffff;
+  let u1 = a1 + b1 + (u0 >> 26);
+  let r1 = u1 & 0x3ffffff;
+  let u2 = a2 + b2 + (u1 >> 26);
+  let r2 = u2 & 0x3ffffff;
+  let u3 = a3 + b3 + (u2 >> 26);
+  let r3 = u3 & 0x3ffffff;
+  let u4 = a4 + b4 + (u3 >> 26);
+  let r4 = u4 & 0x3ffffff;
+  let u5 = a5 + b5 + (u4 >> 26);
+  let r5 = u5 & 0x3ffffff;
+  let u6 = a6 + b6 + (u5 >> 26);
+  let r6 = u6 & 0x3ffffff;
+  let u7 = a7 + b7 + (u6 >> 26);
+  let r7 = u7 & 0x3ffffff;
+  let u8 = a8 + b8 + (u7 >> 26);
+  let r8 = u8 & 0x3ffffff;
+  let u9 = a9 + b9 + (u8 >> 26);
+  let r9 = u9;
+  let to0 = r0 - 6497617;
+  let borrow0 = to0 >> 63;
+  let do0 = to0 & 0x3ffffff;
+  let to1 = r1 - 41070783 - borrow0;
+  let borrow1 = to1 >> 63;
+  let do1 = to1 & 0x3ffffff;
+  let to2 = r2 - 32001851 - borrow1;
+  let borrow2 = to2 >> 63;
+  let do2 = to2 & 0x3ffffff;
+  let to3 = r3 - 45522014 - borrow2;
+  let borrow3 = to3 >> 63;
+  let do3 = to3 & 0x3ffffff;
+  let to4 = r4 - 62711546 - borrow3;
+  let borrow4 = to4 >> 63;
+  let do4 = to4 & 0x3ffffff;
+  let to5 = r5 - 67108863 - borrow4;
+  let borrow5 = to5 >> 63;
+  let do5 = to5 & 0x3ffffff;
+  let to6 = r6 - 67108863 - borrow5;
+  let borrow6 = to6 >> 63;
+  let do6 = to6 & 0x3ffffff;
+  let to7 = r7 - 1023 - borrow6;
+  let borrow7 = to7 >> 63;
+  let do7 = to7 & 0x3ffffff;
+  let to8 = r8 - 67043328 - borrow7;
+  let borrow8 = to8 >> 63;
+  let do8 = to8 & 0x3ffffff;
+  let to9 = r9 - 4194303 - borrow8;
+  let borrow9 = to9 >> 63;
+  let do9 = to9 & 0x3ffffff;
+  let keepo = 0 - borrow9;
+  let o0 = do0 ^ ((do0 ^ r0) & keepo);
+  let o1 = do1 ^ ((do1 ^ r1) & keepo);
+  let o2 = do2 ^ ((do2 ^ r2) & keepo);
+  let o3 = do3 ^ ((do3 ^ r3) & keepo);
+  let o4 = do4 ^ ((do4 ^ r4) & keepo);
+  let o5 = do5 ^ ((do5 ^ r5) & keepo);
+  let o6 = do6 ^ ((do6 ^ r6) & keepo);
+  let o7 = do7 ^ ((do7 ^ r7) & keepo);
+  let o8 = do8 ^ ((do8 ^ r8) & keepo);
+  let o9 = do9 ^ ((do9 ^ r9) & keepo);
+  return p256_fe_pack(o0, o1, o2, o3, o4, o5, o6, o7, o8, o9);
+}
+
+fn p256_const_one_p() -> Secret
+  intent "モンゴメリ表現の 1（p 上）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(16, 0, 0, 62914560, 67108863, 67108863, 67108863, 67092479, 1048575, 0);
+}
+
+fn p256_const_zero() -> Secret
+  intent "0"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+fn p256_const_b() -> Secret
+  intent "曲線の定数 b（モンゴメリ表現）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(4972029, 58558631, 9492636, 53092620, 47120476, 8698714, 35695607, 34407784, 31279220, 3194904);
+}
+
+fn p256_const_r2_p() -> Secret
+  intent "R^2 mod p"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(768, 0, 66060288, 67108863, 67108859, 67108799, 67108863, 66584575, 16777215, 1);
+}
+
+fn p256_const_r2_n() -> Secret
+  intent "R^2 mod n"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(40747962, 24314746, 64528516, 6596633, 22376891, 50009688, 52662966, 8325398, 22665558, 3689317);
+}
+
+fn p256_const_one_n() -> Secret
+  intent "モンゴメリ表現の 1（n 上）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(30255856, 13956110, 24841286, 9845272, 3248213, 1, 0, 67092480, 1048575, 0);
+}
+
+fn p256_const_raw_one() -> Secret
+  intent "整数 1"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+}
+
+fn p256_const_gx() -> Secret
+  intent "基点の X（モンゴメリ表現）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(43074497, 12800098, 33651175, 51641197, 56338783, 25728065, 57879415, 24222334, 57365365, 2244989);
+}
+
+fn p256_const_gy() -> Secret
+  intent "基点の Y（モンゴメリ表現）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(22372520, 21847866, 6086130, 17729145, 11840398, 8899734, 8816861, 56710330, 25843845, 1427452);
+}
+
+fn p256_const_n() -> Secret
+  intent "位数 n（通常の表現）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(6497617, 41070783, 32001851, 45522014, 62711546, 67108863, 67108863, 1023, 67043328, 4194303);
+}
+
+fn p256_const_p() -> Secret
+  intent "素数 p（通常の表現）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return p256_fe_pack(67108863, 67108863, 67108863, 262143, 0, 0, 0, 1024, 67043328, 4194303);
+}
+
+fn p256_const_pm2() -> Bytes
+  intent "指数 p - 2 の 32 バイト"
+  requires none
+  ensures result.byte_len() == 32
+  effects none
+{
+
+  let mut out = Bytes.with_capacity(32);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(1);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(253);
+  return out;
+}
+
+fn p256_const_nm2() -> Bytes
+  intent "指数 n - 2 の 32 バイト"
+  requires none
+  ensures result.byte_len() == 32
+  effects none
+{
+
+  let mut out = Bytes.with_capacity(32);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(0);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(255);
+  out.push(188);
+  out.push(230);
+  out.push(250);
+  out.push(173);
+  out.push(167);
+  out.push(23);
+  out.push(158);
+  out.push(132);
+  out.push(243);
+  out.push(185);
+  out.push(202);
+  out.push(194);
+  out.push(252);
+  out.push(99);
+  out.push(37);
+  out.push(79);
+  return out;
+}
+
+fn p256_fp_pow(base: &Secret, e: &Bytes) -> Secret
+  intent "公開の固定指数でべき乗する（左から右）"
+  requires none
+  ensures none
+  effects none
+{
+
+  let mut acc = p256_const_one_p();
+  let mut i = 0;
+  while i < 256 {
+    let byte = e.get(i >> 3).map(|b| b + 0).unwrap_or(0);
+    let bit = (byte >> (7 - (i & 7))) & 1;
+    acc = p256_fp_mul(&acc, &acc);
+    let times = p256_fp_mul(&acc, &base);
+    acc = p256_fe_select(&times, &acc, bit);
+    i = i + 1;
+  }
+  return acc;
+}
+
+fn p256_fn_pow(base: &Secret, e: &Bytes) -> Secret
+  intent "公開の固定指数でべき乗する（左から右）"
+  requires none
+  ensures none
+  effects none
+{
+
+  let mut acc = p256_const_one_n();
+  let mut i = 0;
+  while i < 256 {
+    let byte = e.get(i >> 3).map(|b| b + 0).unwrap_or(0);
+    let bit = (byte >> (7 - (i & 7))) & 1;
+    acc = p256_fn_mul(&acc, &acc);
+    let times = p256_fn_mul(&acc, &base);
+    acc = p256_fe_select(&times, &acc, bit);
+    i = i + 1;
+  }
+  return acc;
+}
+
+struct P256Point {
+  x: Secret,
+  y: Secret,
+  z: Secret,
+}
+
+fn p256_pt_add(p: &P256Point, q: &P256Point) -> P256Point
+  intent "完全な射影加算（Renes-Costello-Batina、a = -3）"
+  requires none
+  ensures none
+  effects none
+{
+
+  let bm = p256_const_b();
+  let mut t0 = p256_fp_mul(&p.x, &q.x);
+  let mut t1 = p256_fp_mul(&p.y, &q.y);
+  let mut t2 = p256_fp_mul(&p.z, &q.z);
+  let mut t3 = p256_fp_add(&p.x, &p.y);
+  let mut t4 = p256_fp_add(&q.x, &q.y);
+  t3 = p256_fp_mul(&t3, &t4);
+  t4 = p256_fp_add(&t0, &t1);
+  t3 = p256_fp_sub(&t3, &t4);
+  t4 = p256_fp_add(&p.y, &p.z);
+  let mut x3 = p256_fp_add(&q.y, &q.z);
+  t4 = p256_fp_mul(&t4, &x3);
+  x3 = p256_fp_add(&t1, &t2);
+  t4 = p256_fp_sub(&t4, &x3);
+  x3 = p256_fp_add(&p.x, &p.z);
+  let mut y3 = p256_fp_add(&q.x, &q.z);
+  x3 = p256_fp_mul(&x3, &y3);
+  y3 = p256_fp_add(&t0, &t2);
+  y3 = p256_fp_sub(&x3, &y3);
+  let mut z3 = p256_fp_mul(&bm, &t2);
+  x3 = p256_fp_sub(&y3, &z3);
+  z3 = p256_fp_add(&x3, &x3);
+  x3 = p256_fp_add(&x3, &z3);
+  z3 = p256_fp_sub(&t1, &x3);
+  x3 = p256_fp_add(&t1, &x3);
+  y3 = p256_fp_mul(&bm, &y3);
+  t1 = p256_fp_add(&t2, &t2);
+  t2 = p256_fp_add(&t1, &t2);
+  y3 = p256_fp_sub(&y3, &t2);
+  y3 = p256_fp_sub(&y3, &t0);
+  t1 = p256_fp_add(&y3, &y3);
+  y3 = p256_fp_add(&t1, &y3);
+  t1 = p256_fp_add(&t0, &t0);
+  t0 = p256_fp_add(&t1, &t0);
+  t0 = p256_fp_sub(&t0, &t2);
+  t1 = p256_fp_mul(&t4, &y3);
+  t2 = p256_fp_mul(&t0, &y3);
+  y3 = p256_fp_mul(&x3, &z3);
+  y3 = p256_fp_add(&y3, &t2);
+  x3 = p256_fp_mul(&t3, &x3);
+  x3 = p256_fp_sub(&x3, &t1);
+  z3 = p256_fp_mul(&t4, &z3);
+  t1 = p256_fp_mul(&t3, &t0);
+  z3 = p256_fp_add(&z3, &t1);
+  return P256Point { x: x3, y: y3, z: z3 };
+}
+
+fn p256_pt_dbl(p: &P256Point) -> P256Point
+  intent "完全な射影倍算（Renes-Costello-Batina、a = -3）"
+  requires none
+  ensures none
+  effects none
+{
+
+  let bm = p256_const_b();
+  let mut t0 = p256_fp_mul(&p.x, &p.x);
+  let mut t1 = p256_fp_mul(&p.y, &p.y);
+  let mut t2 = p256_fp_mul(&p.z, &p.z);
+  let mut t3 = p256_fp_mul(&p.x, &p.y);
+  t3 = p256_fp_add(&t3, &t3);
+  let mut z3 = p256_fp_mul(&p.x, &p.z);
+  z3 = p256_fp_add(&z3, &z3);
+  let mut y3 = p256_fp_mul(&bm, &t2);
+  y3 = p256_fp_sub(&y3, &z3);
+  let mut x3 = p256_fp_add(&y3, &y3);
+  y3 = p256_fp_add(&x3, &y3);
+  x3 = p256_fp_sub(&t1, &y3);
+  y3 = p256_fp_add(&t1, &y3);
+  y3 = p256_fp_mul(&x3, &y3);
+  x3 = p256_fp_mul(&x3, &t3);
+  t3 = p256_fp_add(&t2, &t2);
+  t2 = p256_fp_add(&t2, &t3);
+  z3 = p256_fp_mul(&bm, &z3);
+  z3 = p256_fp_sub(&z3, &t2);
+  z3 = p256_fp_sub(&z3, &t0);
+  t3 = p256_fp_add(&z3, &z3);
+  z3 = p256_fp_add(&z3, &t3);
+  t3 = p256_fp_add(&t0, &t0);
+  t0 = p256_fp_add(&t3, &t0);
+  t0 = p256_fp_sub(&t0, &t2);
+  t0 = p256_fp_mul(&t0, &z3);
+  y3 = p256_fp_add(&y3, &t0);
+  t0 = p256_fp_mul(&p.y, &p.z);
+  t0 = p256_fp_add(&t0, &t0);
+  z3 = p256_fp_mul(&t0, &z3);
+  x3 = p256_fp_sub(&x3, &z3);
+  z3 = p256_fp_mul(&t0, &t1);
+  z3 = p256_fp_add(&z3, &z3);
+  z3 = p256_fp_add(&z3, &z3);
+  return P256Point { x: x3, y: y3, z: z3 };
+}
+
+fn p256_pt_select(left: &P256Point, right: &P256Point, bit: Int) -> P256Point
+  intent "秘密分岐を使わずに点を選ぶ（bit が 1 なら left）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return P256Point { x: p256_fe_select(&left.x, &right.x, bit), y: p256_fe_select(&left.y, &right.y, bit), z: p256_fe_select(&left.z, &right.z, bit) };
+}
+
+fn p256_pt_identity() -> P256Point
+  intent "無限遠点（0 : 1 : 0）"
+  requires none
+  ensures none
+  effects none
+{
+
+  return P256Point { x: p256_const_zero(), y: p256_const_one_p(), z: p256_const_zero() };
+}
+
+fn p256_pt_base() -> P256Point
+  intent "基点 G"
+  requires none
+  ensures none
+  effects none
+{
+
+  return P256Point { x: p256_const_gx(), y: p256_const_gy(), z: p256_const_one_p() };
+}
+
+fn p256_scalar_mult(scalar: &Secret, base: &P256Point) -> P256Point
+  intent "スカラー倍算を固定 256 回の反復で行う"
+  requires none
+  ensures none
+  effects none
+{
+
+  let mut acc = p256_pt_identity();
+  let mut i = 0;
+  while i < 256 {
+    let byte = scalar.data.get(i >> 3).map(|b| b + 0).unwrap_or(0);
+    let bit = (byte >> (7 - (i & 7))) & 1;
+    let doubled = p256_pt_dbl(&acc);
+    let summed = p256_pt_add(&doubled, &base);
+    acc = p256_pt_select(&summed, &doubled, bit);
+    i = i + 1;
+  }
+  return acc;
+}
+
+
+// ---------------------------------------------------------------------------
+// ECDSA P-256（ADR 0064 決定 1・決定 2）。SHA-256 とＲＦＣ 6979 の決定的な nonce。
+//
+// 体の元は 26 ビット 10 語（2^260 を基数とするモンゴメリ表現、各語は 4 バイトで
+// `Secret` に収める）。p と n の 2 つの体で、乗算・加減算とも常に [0, m) の
+// 標準形を返す（乗算は 2m 未満の結果へ条件付き減算を 1 回、マスクで行う）。
+// 点は射影座標で、加算・倍算は Renes-Costello-Batina の完全な式（a = -3）なので、
+// 無限遠点・同じ点・逆の点の例外を分岐で扱わない。スカラー倍算は 256 回固定の
+// 反復で、倍算の後に必ず加算を行い、ビットで結果をマスク選択する。
+// 公開のものは添字・反復回数・指数（p-2、n-2）・公開鍵・署名・メッセージ。
+//
+// nonce は RFC 6979 の HMAC-DRBG を使う。候補は 4 つ分を常に同じ演算列で処理し、
+// 範囲違反・r = 0・s = 0 はマスクで扱う。最初に有効な組を選ぶ。
+
+pub enum EcdsaP256Error {
+  InvalidPrivateKey,
+  InvalidPublicKey,
+  InvalidSignature,
+  SigningFailed,
+}
+
+pub struct EcdsaP256PrivateKey {
+  key: Secret,
+}
+
+pub struct EcdsaP256PublicKey {
+  bytes: Bytes,
+}
+
+pub struct EcdsaP256Signature {
+  r: Bytes,
+  s: Bytes,
+}
+
+struct P256Candidate {
+  r: Secret,
+  s: Secret,
+  ok: Int,
+}
+
+struct P256Drbg {
+  k: Bytes,
+  v: Bytes,
+}
+
+struct P256DerInt {
+  ok: Bool,
+  value: Bytes,
+  next: Int,
+}
+
+fn p256_lt(left: &Secret, right: &Secret) -> Int
+  intent "借りの連鎖で left < right かを 0 または 1 で返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut borrow = 0;
+  let mut i = 0;
+  while i < 10 {
+    let t = p256_fe_read(&left, i) - p256_fe_read(&right, i) - borrow;
+    borrow = t >> 63;
+    i = i + 1;
+  }
+  return borrow;
+}
+
+fn p256_nonzero(value: &Secret) -> Int
+  intent "全語を調べて 0 でないかを 0 または 1 で返す"
+  requires none
+  ensures none
+  effects none
+{
+  let mut acc = 0;
+  let mut i = 0;
+  while i < 10 {
+    acc = acc | p256_fe_read(&value, i);
+    i = i + 1;
+  }
+  return ((0 - acc) >> 63) & 1;
+}
+
+fn p256_scalar_ok(value: &Secret) -> Bool
+  intent "スカラーが 1 以上 n 未満かを調べる（結果は公開）"
+  requires none
+  ensures none
+  effects none
+{
+  let order = p256_const_n();
+  return (p256_lt(&value, &order) & p256_nonzero(&value)) == 1;
+}
+
+fn p256_accepted(flag: Int) -> Bool
+  intent "署名候補が選ばれたかの最終結果を公開する"
+  requires none
+  ensures none
+  effects none
+{
+  return flag == 1;
+}
+
+fn p256_affine_x(pt: &P256Point) -> Secret
+  intent "射影の点から標準形のアフィン X を求める"
+  requires none
+  ensures none
+  effects none
+{
+  let pm2 = p256_const_pm2();
+  let one = p256_const_raw_one();
+  let zi = p256_fp_pow(&pt.z, &pm2);
+  let xm = p256_fp_mul(&pt.x, &zi);
+  return p256_fp_mul(&xm, &one);
+}
+
+fn p256_affine_y(pt: &P256Point) -> Secret
+  intent "射影の点から標準形のアフィン Y を求める"
+  requires none
+  ensures none
+  effects none
+{
+  let pm2 = p256_const_pm2();
+  let one = p256_const_raw_one();
+  let zi = p256_fp_pow(&pt.z, &pm2);
+  let ym = p256_fp_mul(&pt.y, &zi);
+  return p256_fp_mul(&ym, &one);
+}
+
+// 候補の後半（r と s の計算と有効性）。`xa` はアフィン X（標準形）、`ks` は選んだスカラー、
+// `valid` は範囲検査の結果（0 または 1）。試験が r = 0・s = 0 を作れるよう分けてある。
+fn p256_finish(xa: &Secret, ks: &Secret, valid: Int, e_m: &Secret, d_m: &Secret) -> P256Candidate
+  intent "アフィン X から r と s を計算し、候補の有効性をマスクで求める"
+  requires none
+  ensures none
+  effects none
+{
+  let one = p256_const_raw_one();
+  let zero = p256_const_zero();
+  let r = p256_fn_add(&xa, &zero);
+  let r2n = p256_const_r2_n();
+  let km = p256_fn_mul(&ks, &r2n);
+  let nm2 = p256_const_nm2();
+  let kinv = p256_fn_pow(&km, &nm2);
+  let rm = p256_fn_mul(&r, &r2n);
+  let rd = p256_fn_mul(&rm, &d_m);
+  let sum = p256_fn_add(&e_m, &rd);
+  let sm = p256_fn_mul(&kinv, &sum);
+  let s = p256_fn_mul(&sm, &one);
+  let ok = valid & p256_nonzero(&r) & p256_nonzero(&s);
+  return P256Candidate { r: r, s: s, ok: ok };
+}
+
+fn p256_candidate(k_bytes: &Bytes, e_m: &Secret, d_m: &Secret) -> P256Candidate
+  intent "nonce の候補 1 つ分の署名を固定の演算列で計算する"
+  requires none
+  ensures none
+  effects none
+{
+  let kk = p256_fe_decode(&k_bytes);
+  let order = p256_const_n();
+  let valid = p256_lt(&kk, &order) & p256_nonzero(&kk);
+  let one = p256_const_raw_one();
+  let ks = p256_fe_select(&kk, &one, valid);
+  let scalar = Secret.from_bytes(p256_fe_encode(&ks));
+  let base = p256_pt_base();
+  let pt = p256_scalar_mult(&scalar, &base);
+  let xa = p256_affine_x(&pt);
+  return p256_finish(&xa, &ks, valid, &e_m, &d_m);
+}
+
+struct P256Pick {
+  r: Secret,
+  s: Secret,
+  taken: Int,
+}
+
+fn p256_pick(pick: P256Pick, cand: &P256Candidate) -> P256Pick
+  intent "最初に有効な候補だけをマスクで選ぶ"
+  requires none
+  ensures none
+  effects none
+{
+  let take = cand.ok & (1 - pick.taken);
+  let r = p256_fe_select(&cand.r, &pick.r, take);
+  let s = p256_fe_select(&cand.s, &pick.s, take);
+  return P256Pick { r: r, s: s, taken: pick.taken | cand.ok };
+}
+
+fn p256_signature_from(pick: &P256Pick) -> Result<EcdsaP256Signature, EcdsaP256Error>
+  intent "選んだ候補から署名を作り、1 つも選ばれていなければ署名生成失敗を返す"
+  requires none
+  ensures none
+  effects none
+{
+  let rb = p256_fe_encode(&pick.r);
+  let sb = p256_fe_encode(&pick.s);
+  if !p256_accepted(pick.taken) {
+    return Err(EcdsaP256Error.SigningFailed);
+  }
+  return Ok(EcdsaP256Signature { r: rb, s: sb });
+}
+
+fn p256_drbg_init(x: &Bytes, h1: &Bytes) -> P256Drbg
+  intent "RFC 6979 §3.2 の手順 b〜g で K と V を初期化する"
+  requires none
+  ensures none
+  effects none
+{
+  let mut k0 = Bytes.with_capacity(32);
+  let mut v0 = Bytes.with_capacity(32);
+  let mut i = 0;
+  while i < 32 {
+    k0.push(0);
+    v0.push(1);
+    i = i + 1;
+  }
+  let mut m1 = v0.clone();
+  m1.push(0);
+  m1.extend(&x);
+  m1.extend(&h1);
+  let k1 = hmac_any_key(&k0, &m1);
+  let v1 = hmac_any_key(&k1, &v0);
+  let mut m2 = v1.clone();
+  m2.push(1);
+  m2.extend(&x);
+  m2.extend(&h1);
+  let k2 = hmac_any_key(&k1, &m2);
+  let v2 = hmac_any_key(&k2, &v1);
+  let k0_wipe = Secret.from_bytes(k0);
+  let v0_wipe = Secret.from_bytes(v0);
+  let m1_wipe = Secret.from_bytes(m1);
+  let k1_wipe = Secret.from_bytes(k1);
+  let v1_wipe = Secret.from_bytes(v1);
+  let m2_wipe = Secret.from_bytes(m2);
+  return P256Drbg { k: k2, v: v2 };
+}
+
+fn p256_drbg_next(st: P256Drbg) -> P256Drbg
+  intent "V = HMAC(K, V) を計算して候補の元にする（RFC 6979 §3.2 の手順 h.2）"
+  requires none
+  ensures none
+  effects none
+{
+  let next_v = hmac_any_key(&st.k, &st.v);
+  let v_wipe = Secret.from_bytes(st.v);
+  return P256Drbg { k: st.k, v: next_v };
+}
+
+fn p256_drbg_step(st: P256Drbg) -> P256Drbg
+  intent "候補が使われた後の K と V の更新（RFC 6979 §3.2 の手順 h.3）"
+  requires none
+  ensures none
+  effects none
+{
+  let mut m = st.v.clone();
+  m.push(0);
+  let k1 = hmac_any_key(&st.k, &m);
+  let v1 = hmac_any_key(&k1, &st.v);
+  let k_wipe = Secret.from_bytes(st.k);
+  let v_wipe = Secret.from_bytes(st.v);
+  let m_wipe = Secret.from_bytes(m);
+  return P256Drbg { k: k1, v: v1 };
+}
+
+pub fn ecdsa_p256_sign(private: &EcdsaP256PrivateKey, message: &Bytes) -> Result<EcdsaP256Signature, EcdsaP256Error>
+  intent "メッセージを SHA-256 でハッシュし、RFC 6979 の決定的な nonce で署名する"
+  requires none
+  ensures none
+  effects none
+{
+  let digest = sha256(&message);
+  let zero = p256_const_zero();
+  let r2n = p256_const_r2_n();
+  let z = p256_fe_decode(&digest);
+  let e = p256_fn_add(&z, &zero);
+  let em = p256_fn_mul(&e, &r2n);
+  let d = p256_fe_decode(&private.key.data);
+  let dm = p256_fn_mul(&d, &r2n);
+  let xb = private.key.expose();
+  let h1 = p256_fe_encode(&e);
+  let mut st = p256_drbg_init(&xb, &h1);
+  let mut pick = P256Pick { r: p256_const_zero(), s: p256_const_zero(), taken: 0 };
+  let mut j = 0;
+  while j < 4 {
+    st = p256_drbg_next(st);
+    let cand = p256_candidate(&st.v, &em, &dm);
+    pick = p256_pick(pick, &cand);
+    st = p256_drbg_step(st);
+    j = j + 1;
+  }
+  let signed = p256_signature_from(&pick);
+  let xb_wipe = Secret.from_bytes(xb);
+  let h1_wipe = Secret.from_bytes(h1);
+  let k_wipe = Secret.from_bytes(st.k);
+  let v_wipe = Secret.from_bytes(st.v);
+  return signed;
+}
+
+// 公開鍵の取り込み: 65 バイトの非圧縮点。座標は p 未満、曲線上にあること。
+// 検査は公開の入力だけを扱う。
+fn p256_point_on_curve(x: &Secret, y: &Secret) -> Bool
+  intent "標準形の座標 (x, y) が曲線 y^2 = x^3 - 3x + b 上にあるか調べる"
+  requires none
+  ensures none
+  effects none
+{
+  let r2p = p256_const_r2_p();
+  let xm = p256_fp_mul(&x, &r2p);
+  let ym = p256_fp_mul(&y, &r2p);
+  let lhs = p256_fp_mul(&ym, &ym);
+  let x2 = p256_fp_mul(&xm, &xm);
+  let x3 = p256_fp_mul(&x2, &xm);
+  let twice = p256_fp_add(&xm, &xm);
+  let three = p256_fp_add(&twice, &xm);
+  let diff = p256_fp_sub(&x3, &three);
+  let bm = p256_const_b();
+  let rhs = p256_fp_add(&diff, &bm);
+  let lb = p256_fe_encode(&lhs);
+  let rb = p256_fe_encode(&rhs);
+  return ct_eq(&lb, &rb);
+}
+
+fn p256_slice32(data: &Bytes, start: Int) -> Bytes
+  intent "指定位置から 32 バイトを取り出す"
+  requires none
+  ensures none
+  effects none
+{
+  return data.slice(start, start + 32).unwrap_or(Bytes.new());
+}
+
+impl EcdsaP256PrivateKey {
+  pub fn from_secret(key: Secret) -> Result<EcdsaP256PrivateKey, EcdsaP256Error>
+    intent "32 バイトの秘密を 1 以上 n 未満のスカラーとして取り込む"
+    requires none
+    ensures none
+    effects none
+  {
+    if key.byte_len() != 32 {
+      return Err(EcdsaP256Error.InvalidPrivateKey);
+    }
+    let limbs = p256_fe_decode(&key.data);
+    if !p256_scalar_ok(&limbs) {
+      return Err(EcdsaP256Error.InvalidPrivateKey);
+    }
+    return Ok(EcdsaP256PrivateKey { key: key });
+  }
+}
+
+fn p256_public_from_bytes(encoded: &Bytes) -> Result<EcdsaP256PublicKey, EcdsaP256Error>
+  intent "SEC 1 の非圧縮点（65 バイト）を検査して公開鍵として取り込む（入力は公開）"
+  requires none
+  ensures none
+  effects none
+{
+  if encoded.byte_len() != 65 {
+    return Err(EcdsaP256Error.InvalidPublicKey);
+  }
+  if encoded.get(0).map(|b| b + 0).unwrap_or(0) != 4 {
+    return Err(EcdsaP256Error.InvalidPublicKey);
+  }
+  let x = p256_fe_decode(&p256_slice32(&encoded, 1));
+  let y = p256_fe_decode(&p256_slice32(&encoded, 33));
+  let prime = p256_const_p();
+  if p256_lt(&x, &prime) != 1 || p256_lt(&y, &prime) != 1 {
+    return Err(EcdsaP256Error.InvalidPublicKey);
+  }
+  if !p256_point_on_curve(&x, &y) {
+    return Err(EcdsaP256Error.InvalidPublicKey);
+  }
+  return Ok(EcdsaP256PublicKey { bytes: encoded.clone() });
+}
+
+impl EcdsaP256PublicKey {
+  pub fn from_bytes(encoded: &Bytes) -> Result<EcdsaP256PublicKey, EcdsaP256Error>
+    intent "SEC 1 の非圧縮点（65 バイト）を検査して公開鍵として取り込む"
+    requires none
+    ensures none
+    effects none
+  {
+    return p256_public_from_bytes(&encoded);
+  }
+
+  pub fn to_bytes(self: &EcdsaP256PublicKey) -> Bytes
+    intent "公開鍵を SEC 1 の非圧縮点（65 バイト）で返す"
+    requires none
+    ensures result.byte_len() == 65
+    effects none
+  {
+    return self.bytes.clone();
+  }
+}
+
+pub fn ecdsa_p256_public_key(private: &EcdsaP256PrivateKey) -> EcdsaP256PublicKey
+  intent "秘密鍵から公開鍵を導出する"
+  requires none
+  ensures none
+  effects none
+{
+  let base = p256_pt_base();
+  let pt = p256_scalar_mult(&private.key, &base);
+  let x = p256_affine_x(&pt);
+  let y = p256_affine_y(&pt);
+  let mut out = Bytes.with_capacity(65);
+  out.push(4);
+  out.extend(&p256_fe_encode(&x));
+  out.extend(&p256_fe_encode(&y));
+  return EcdsaP256PublicKey { bytes: out };
+}
+
+// DER: SEQUENCE { INTEGER r, INTEGER s }。最短の長さ・整数表現だけを受理する。
+fn p256_der_int(value: &Bytes) -> Bytes
+  intent "32 バイトの整数を最短の DER INTEGER にする"
+  requires none
+  ensures none
+  effects none
+{
+  let mut start = 0;
+  let mut scanning = true;
+  while scanning {
+    if start >= 31 {
+      scanning = false;
+    } else {
+      let lead = value.get(start).map(|b| b + 0).unwrap_or(0);
+      if lead == 0 {
+        start = start + 1;
+      } else {
+        scanning = false;
+      }
+    }
+  }
+  let first = value.get(start).map(|b| b + 0).unwrap_or(0);
+  let len = 32 - start;
+  let mut out = Bytes.with_capacity(35);
+  out.push(2);
+  if first >= 128 {
+    out.push(len + 1);
+    out.push(0);
+  } else {
+    out.push(len);
+  }
+  let mut i = start;
+  while i < 32 {
+    out.push(value.get(i).map(|b| b + 0).unwrap_or(0));
+    i = i + 1;
+  }
+  return out;
+}
+
+fn p256_der_fail() -> P256DerInt
+  intent "DER の整数の読み取り失敗を表す"
+  requires none
+  ensures none
+  effects none
+{
+  return P256DerInt { ok: false, value: Bytes.new(), next: 0 };
+}
+
+fn p256_der_read(data: &Bytes, off: Int) -> P256DerInt
+  intent "位置 off の DER INTEGER を 1 以上 n 未満の 32 バイトとして読む"
+  requires none
+  ensures none
+  effects none
+{
+  let total = data.byte_len();
+  if off + 2 > total {
+    return p256_der_fail();
+  }
+  if data.get(off).map(|b| b + 0).unwrap_or(0) != 2 {
+    return p256_der_fail();
+  }
+  let len = data.get(off + 1).map(|b| b + 0).unwrap_or(0);
+  if len < 1 || len > 33 || off + 2 + len > total {
+    return p256_der_fail();
+  }
+  let first = data.get(off + 2).map(|b| b + 0).unwrap_or(0);
+  if first >= 128 {
+    return p256_der_fail();
+  }
+  let mut skip = 0;
+  if len > 1 && first == 0 {
+    let second = data.get(off + 3).map(|b| b + 0).unwrap_or(0);
+    if second < 128 {
+      return p256_der_fail();
+    }
+    skip = 1;
+  }
+  let body = len - skip;
+  if body > 32 {
+    return p256_der_fail();
+  }
+  let mut value = Bytes.with_capacity(32);
+  let mut pad = 32 - body;
+  while pad > 0 {
+    value.push(0);
+    pad = pad - 1;
+  }
+  let mut i = 0;
+  while i < body {
+    value.push(data.get(off + 2 + skip + i).map(|b| b + 0).unwrap_or(0));
+    i = i + 1;
+  }
+  let limbs = p256_fe_decode(&value);
+  if !p256_scalar_ok(&limbs) {
+    return p256_der_fail();
+  }
+  return P256DerInt { ok: true, value: value, next: off + 2 + len };
+}
+
+fn p256_signature_from_der(encoded: &Bytes) -> Result<EcdsaP256Signature, EcdsaP256Error>
+  intent "DER の署名を厳密に読み、r と s が 1 以上 n 未満であることを確かめる（入力は公開）"
+  requires none
+  ensures none
+  effects none
+{
+  let total = encoded.byte_len();
+  if total < 8 || total > 72 {
+    return Err(EcdsaP256Error.InvalidSignature);
+  }
+  if encoded.get(0).map(|b| b + 0).unwrap_or(0) != 48 {
+    return Err(EcdsaP256Error.InvalidSignature);
+  }
+  if encoded.get(1).map(|b| b + 0).unwrap_or(0) != total - 2 {
+    return Err(EcdsaP256Error.InvalidSignature);
+  }
+  let first = p256_der_read(&encoded, 2);
+  if !first.ok {
+    return Err(EcdsaP256Error.InvalidSignature);
+  }
+  let second = p256_der_read(&encoded, first.next);
+  if !second.ok {
+    return Err(EcdsaP256Error.InvalidSignature);
+  }
+  if second.next != total {
+    return Err(EcdsaP256Error.InvalidSignature);
+  }
+  return Ok(EcdsaP256Signature { r: first.value, s: second.value });
+}
+
+fn p256_signature_der(r: &Bytes, s: &Bytes) -> Bytes
+  intent "r と s（各 32 バイト）を最短の DER で返す（入力は公開）"
+  requires none
+  ensures result.byte_len() <= 72
+  effects none
+{
+  let mut body = p256_der_int(&r);
+  body.extend(&p256_der_int(&s));
+  let mut out = Bytes.with_capacity(72);
+  out.push(48);
+  out.push(body.byte_len());
+  out.extend(&body);
+  return out;
+}
+
+impl EcdsaP256Signature {
+  pub fn from_der(encoded: &Bytes) -> Result<EcdsaP256Signature, EcdsaP256Error>
+    intent "DER の署名を厳密に読み、r と s が 1 以上 n 未満であることを確かめる"
+    requires none
+    ensures none
+    effects none
+  {
+    return p256_signature_from_der(&encoded);
+  }
+
+  pub fn to_der(self: &EcdsaP256Signature) -> Bytes
+    intent "署名を最短の DER（最大 72 バイト）で返す"
+    requires none
+    ensures result.byte_len() <= 72
+    effects none
+  {
+    return p256_signature_der(&self.r, &self.s);
+  }
+}
+
+pub fn ecdsa_p256_verify(public: &EcdsaP256PublicKey, message: &Bytes, signature: &EcdsaP256Signature) -> Bool
+  intent "署名を検証する（形が正しくても照合に失敗すれば false）"
+  requires none
+  ensures none
+  effects none
+{
+  let zero = p256_const_zero();
+  let r2n = p256_const_r2_n();
+  let r2p = p256_const_r2_p();
+  let one = p256_const_raw_one();
+  let r = p256_fe_decode(&signature.r);
+  let s = p256_fe_decode(&signature.s);
+  let digest = sha256(&message);
+  let z = p256_fe_decode(&digest);
+  let e = p256_fn_add(&z, &zero);
+  let em = p256_fn_mul(&e, &r2n);
+  let rm = p256_fn_mul(&r, &r2n);
+  let sm = p256_fn_mul(&s, &r2n);
+  let nm2 = p256_const_nm2();
+  let w = p256_fn_pow(&sm, &nm2);
+  let u1m = p256_fn_mul(&em, &w);
+  let u2m = p256_fn_mul(&rm, &w);
+  let u1 = p256_fn_mul(&u1m, &one);
+  let u2 = p256_fn_mul(&u2m, &one);
+  let scalar1 = Secret.from_bytes(p256_fe_encode(&u1));
+  let scalar2 = Secret.from_bytes(p256_fe_encode(&u2));
+  let qx = p256_fe_decode(&p256_slice32(&public.bytes, 1));
+  let qy = p256_fe_decode(&p256_slice32(&public.bytes, 33));
+  let q = P256Point {
+    x: p256_fp_mul(&qx, &r2p),
+    y: p256_fp_mul(&qy, &r2p),
+    z: p256_const_one_p(),
+  };
+  let base = p256_pt_base();
+  let first = p256_scalar_mult(&scalar1, &base);
+  let second = p256_scalar_mult(&scalar2, &q);
+  let sum = p256_pt_add(&first, &second);
+  if p256_nonzero(&sum.z) != 1 {
+    return false;
+  }
+  let xa = p256_affine_x(&sum);
+  let reduced = p256_fn_add(&xa, &zero);
+  let got = p256_fe_encode(&reduced);
+  return ct_eq(&got, &signature.r);
 }

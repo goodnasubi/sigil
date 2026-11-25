@@ -84,6 +84,11 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("X25519PrivateKey", 0, Layer::Core),
     ("X25519PublicKey", 0, Layer::Core),
     ("X25519Error", 0, Layer::Core),
+    // ECDSA P-256 の鍵・署名・誤り（ADR 0064 決定 1）。実体は `std.crypto` に置く。
+    ("EcdsaP256PrivateKey", 0, Layer::Core),
+    ("EcdsaP256PublicKey", 0, Layer::Core),
+    ("EcdsaP256Signature", 0, Layer::Core),
+    ("EcdsaP256Error", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -229,6 +234,14 @@ pub const AEAD_ERROR_ARMS: &[&str] = &[
     "InputTooShort",
     "InputTooLong",
     "AuthenticationFailed",
+];
+
+/// `EcdsaP256Error` の腕（ADR 0064 決定 1）。並びは `std.crypto` の宣言と同じ。
+pub const ECDSA_P256_ERROR_ARMS: &[&str] = &[
+    "InvalidPrivateKey",
+    "InvalidPublicKey",
+    "InvalidSignature",
+    "SigningFailed",
 ];
 
 /// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ。
@@ -559,6 +572,22 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (
         Layer::Core,
         "x25519_shared_secret(private: &X25519PrivateKey, peer: &X25519PublicKey) -> Result<Secret, X25519Error>",
+        "none",
+    ),
+    // ECDSA P-256（ADR 0064 決定 1）。実体は `std.crypto` の Sigil 実装（埋め込み）。
+    (
+        Layer::Core,
+        "ecdsa_p256_public_key(private: &EcdsaP256PrivateKey) -> EcdsaP256PublicKey",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "ecdsa_p256_sign(private: &EcdsaP256PrivateKey, message: &Bytes) -> Result<EcdsaP256Signature, EcdsaP256Error>",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "ecdsa_p256_verify(public: &EcdsaP256PublicKey, message: &Bytes, signature: &EcdsaP256Signature) -> Bool",
         "none",
     ),
 ];
@@ -954,6 +983,27 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         &[
             ("is_invalid_key_length(self: &X25519Error) -> Bool", "none"),
             ("is_all_zero_shared_secret(self: &X25519Error) -> Bool", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "EcdsaP256PrivateKey",
+        &[("from_secret(key: Secret) -> Result<EcdsaP256PrivateKey, EcdsaP256Error>", "none")],
+    ),
+    (
+        Layer::Core,
+        "EcdsaP256PublicKey",
+        &[
+            ("from_bytes(encoded: &Bytes) -> Result<EcdsaP256PublicKey, EcdsaP256Error>", "none"),
+            ("to_bytes(self: &EcdsaP256PublicKey) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "EcdsaP256Signature",
+        &[
+            ("from_der(encoded: &Bytes) -> Result<EcdsaP256Signature, EcdsaP256Error>", "none"),
+            ("to_der(self: &EcdsaP256Signature) -> Bytes", "none"),
         ],
     ),
     (

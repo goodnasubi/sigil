@@ -142,6 +142,17 @@ impl Ck {
                     .collect(),
             },
         );
+        // `EcdsaP256Error` も腕を `match` できる列挙（ADR 0064 決定 1）。`AeadError` と同じ作法。
+        self.types.insert(
+            "EcdsaP256Error".into(),
+            TypeDef::Enum {
+                params: vec![],
+                variants: crate::stdlib::ECDSA_P256_ERROR_ARMS
+                    .iter()
+                    .map(|a| ((*a).to_string(), vec![]))
+                    .collect(),
+            },
+        );
         // `UdpReceiveError` も腕を `match` できる列挙（ADR 0057 決定 2）。`NetError` と同じ作法。
         self.types.insert(
             "UdpReceiveError".into(),

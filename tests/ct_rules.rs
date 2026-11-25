@@ -110,6 +110,57 @@ fn x25519_probe_shared(b: &Bytes) -> Int
 }
 "#;
 
+const ECDSA_PROBES: &str = r#"
+fn ecdsa_probe_public(b: &Bytes) -> Int
+  intent "ECDSA P-256 の公開鍵導出を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  match EcdsaP256PrivateKey.from_secret(Secret.from_bytes(b.clone())) {
+    Err(_) => { return 0; }
+    Ok(key) => { return ecdsa_p256_public_key(&key).to_bytes().byte_len(); }
+  }
+}
+
+fn ecdsa_probe_sign(b: &Bytes) -> Int
+  intent "ECDSA P-256 の署名を探査する"
+  requires none
+  ensures none
+  effects none
+{
+  match EcdsaP256PrivateKey.from_secret(Secret.from_bytes(b.clone())) {
+    Err(_) => { return 0; }
+    Ok(key) => {
+      match ecdsa_p256_sign(&key, &b) {
+        Err(_) => { return 0; }
+        Ok(sig) => { return sig.to_der().byte_len(); }
+      }
+    }
+  }
+}
+
+fn ecdsa_probe_verify(b: &Bytes) -> Int
+  intent "ECDSA P-256 の検証と入力の取り込みを探査する"
+  requires none
+  ensures none
+  effects none
+{
+  match EcdsaP256PublicKey.from_bytes(&b) {
+    Err(_) => { return 0; }
+    Ok(public) => {
+      match EcdsaP256Signature.from_der(&b) {
+        Err(_) => { return 0; }
+        Ok(sig) => {
+          if ecdsa_p256_verify(&public, &b, &sig) { return 1; }
+          return 2;
+        }
+      }
+    }
+  }
+}
+"#;
+
 /// 標準ライブラリを含むプログラム（コーパス）を 1 つ組み立てる。
 /// 入口から届かない関数も含めて、標準ライブラリの関数がすべて SIR に現れる。
 fn corpus() -> Program {
@@ -137,11 +188,14 @@ fn probe() -> Int
   let aead = aead_probe(&b) + aead256_probe(&b) + chacha_probe(&b);
   let x25519_public = x25519_probe_public(&b);
   let x25519_shared = x25519_probe_shared(&b);
+  let ecdsa_public = ecdsa_probe_public(&b);
+  let ecdsa_signed = ecdsa_probe_sign(&b);
+  let ecdsa_verified = ecdsa_probe_verify(&b);
   let reply = respond(&s, &b, &b);
   let checked = verify(&s, &b);
   let initial = first(&b);
   let bearer = web.verify_bearer(&s, &"api", &b, 0);
-  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + d384.byte_len() + okm384.byte_len() + h.byte_len() + p.byte_len() + aead + x25519_public + x25519_shared; }
+  if ct_eq(&inner, &b) && ok { return s.byte_len() + d.byte_len() + d384.byte_len() + okm384.byte_len() + h.byte_len() + p.byte_len() + aead + x25519_public + x25519_shared + ecdsa_public + ecdsa_signed + ecdsa_verified; }
   return 0;
 }
 
@@ -249,7 +303,7 @@ fn aead256_probe(b: &Bytes) -> Int
         embedded_extra: vec![(
             "std.pg_scram".into(),
             format!(
-                "{}\n{probe}\n{X25519_PROBES}",
+                "{}\n{probe}\n{X25519_PROBES}\n{ECDSA_PROBES}",
                 include_str!("../src/stdlib/pg_scram.sigil")
             ),
         )],
@@ -922,4 +976,144 @@ fn clif_x25519_entries_cover_all_callees() {
             delta.branch
         );
     }
+}
+
+/// ECDSA P-256（ADR 0064 決定 2）の公開入口（鍵の取り込み・公開鍵導出・署名・検証）から届く
+/// 体演算・点演算・nonce 生成を含め、ネイティブ生成が SIR にない分岐と除算・剰余を
+/// 持ち込んでいないことを確認する。
+#[test]
+fn clif_ecdsa_p256_entries_cover_all_callees() {
+    let program = corpus();
+    for (tag, probe) in [
+        ("ecdsapublic", "ecdsa_probe_public"),
+        ("ecdsasign", "ecdsa_probe_sign"),
+        ("ecdsaverify", "ecdsa_probe_verify"),
+    ] {
+        let reach = reachable_funcs(&program, &format!("std.pg_scram.{probe}"));
+        let budget = reach_branch_budget(&program, &reach);
+        let mut sir_div = 0usize;
+        for id in &reach {
+            let f = &program.funcs[*id];
+            for b in &f.blocks {
+                if let Term::CheckedOp {
+                    op: ArithOp::Div | ArithOp::Rem,
+                    b: divisor,
+                    ..
+                } = &b.term
+                {
+                    sir_div += 1;
+                    if f.name.starts_with("std.crypto.") {
+                        assert!(
+                            matches!(divisor, Operand::Const(_)),
+                            "{} に定数でない除数の除算・剰余がある",
+                            f.name
+                        );
+                    }
+                }
+            }
+        }
+        let delta = clif_delta(tag, ECDSA_PROBES, &format!("{probe}(&Bytes.new())"));
+        eprintln!(
+            "{tag}: funcs={} sir_div={sir_div} budget={budget} {delta:?}",
+            reach.len()
+        );
+        assert!(
+            delta.div <= sir_div,
+            "{tag} の CLIF の除算 {} が SIR の {sir_div} を超えた: {delta:?}",
+            delta.div
+        );
+        assert!(
+            delta.branch <= budget,
+            "{tag} の CLIF 分岐 {} が SIR の予算 {budget} を超えた: {delta:?}",
+            delta.branch
+        );
+    }
+}
+
+/// ECDSA の補助関数でも、秘密に依存した分岐・添字・除算・剰余の違反を検出できる
+/// （体演算の戻り値や秘密の領域を経由しても、テイントが落ちない）。
+#[test]
+fn static_ecdsa_p256_secret_dependent_use_is_detected() {
+    let bad = r#"
+pub fn p256_bad_branch(key: &Secret) -> Int
+  intent "秘密で分岐する"
+  requires none
+  ensures none
+  effects none
+{
+  let limbs = p256_fe_decode(&key.data);
+  let doubled = p256_fp_add(&limbs, &limbs);
+  if p256_nonzero(&doubled) == 1 {
+    return 1;
+  }
+  return 0;
+}
+
+pub fn p256_bad_index(key: &Secret, table: &Bytes) -> Int
+  intent "秘密で添字を決める"
+  requires none
+  ensures none
+  effects none
+{
+  let limbs = p256_fe_decode(&key.data);
+  let product = p256_fp_mul(&limbs, &limbs);
+  let i = p256_fe_read(&product, 0);
+  return table.get(i).unwrap_or(0);
+}
+
+pub fn p256_bad_rem(key: &Secret) -> Int
+  intent "秘密で剰余を取る"
+  requires none
+  ensures none
+  effects none
+{
+  let limbs = p256_fe_decode(&key.data);
+  let i = p256_fe_read(&limbs, 1);
+  return 1000 % i;
+}
+
+pub fn p256_bad_entry() -> Int
+  intent "探査の入口"
+  requires none
+  ensures none
+  effects none
+{
+  let s = Secret.from_bytes(Bytes.new());
+  return p256_bad_branch(&s) + p256_bad_index(&s, &Bytes.new()) + p256_bad_rem(&s);
+}
+"#;
+    let src = "module ctprobe\n  targets server\n  trust none\npub fn main() -> Int\n  intent \"探査\"\n  requires none\n  ensures none\n  effects none\n{ return 0; }\n";
+    let opts = sigil::effects::Options {
+        embedded_extra: vec![(
+            "std.crypto".into(),
+            format!("{}\n{bad}", include_str!("../src/stdlib/crypto.sigil")),
+        )],
+        embedded_roots: vec!["std.crypto".into()],
+        ..Default::default()
+    };
+    let program = sigil::ir_eval::lower_sources_opts(&[src], "std.crypto.p256_bad_entry", &opts)
+        .expect("探査の組み立てに失敗");
+    let mut table: Vec<(&str, &[&str])> = CT_FUNCTIONS.to_vec();
+    table.push(("std.crypto.p256_bad_branch", &[]));
+    table.push(("std.crypto.p256_bad_index", &["table"]));
+    table.push(("std.crypto.p256_bad_rem", &[]));
+    let v = analyze_with_table(&program, &table);
+    assert!(
+        rules_of(&v, "std.crypto.p256_bad_branch").contains(&Rule::R1Branch),
+        "体演算を経由した R1 を検出できない: {v:?}"
+    );
+    assert!(
+        rules_of(&v, "std.crypto.p256_bad_index").contains(&Rule::R2Index),
+        "体演算を経由した R2 を検出できない: {v:?}"
+    );
+    assert!(
+        rules_of(&v, "std.crypto.p256_bad_rem").contains(&Rule::R3Div),
+        "体演算を経由した R3 を検出できない: {v:?}"
+    );
+    // 実装本体の関数には違反が出ない。
+    let real: Vec<_> = v
+        .iter()
+        .filter(|(n, _)| !n.starts_with("std.crypto.p256_bad_"))
+        .collect();
+    assert!(real.is_empty(), "ECDSA の実装に違反がある: {real:?}");
 }

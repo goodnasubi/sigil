@@ -400,6 +400,148 @@ fn measure_target(target: CmpTarget, name: &str, iters: usize, samples: usize) -
     t
 }
 
+/// ADR 0064 決定 2。両組で同じネイティブ実行ファイルを使い、同じ長さの
+/// 秘密鍵を環境変数で渡す。各半バイトを ASCII 0x40〜0x4f に写す。
+/// 署名は固定のメッセージに対して 1 回行い、公開鍵導出も同じ秘密鍵で行う。
+fn ecdsa_p256_program(iters: usize) -> String {
+    format!(
+        r#"module {{MODULE}}
+  targets server
+  trust none
+
+fn main() -> Int
+  intent "ECDSA P-256 の公開鍵導出と署名を計測する"
+  requires none
+  ensures none
+  effects env
+{{
+  let key_env = env.get(&"SIGIL_CT_ECDSA_KEY");
+  let control_env = env.get(&"SIGIL_CT_ECDSA_CONTROL");
+  let encoded = key_env.unwrap_or("").as_bytes();
+  let control = control_env.unwrap_or("") == "1";
+  if encoded.byte_len() != 64 {{ return 1; }}
+  let mut raw_key = Bytes.new();
+  let mut i = 0;
+  while i < 32 {{
+    let hi = encoded.get(2 * i).unwrap_or(0) & 15;
+    let lo = encoded.get(2 * i + 1).unwrap_or(0) & 15;
+    raw_key.push((hi << 4) | lo);
+    i = i + 1;
+  }}
+  // 陽性対照だけで、秘密鍵のビットに仕事量を依存させる。
+  let extra = control && (raw_key.get(1).unwrap_or(0) & 8) != 0;
+  let mut message = Bytes.new();
+  message.push(0x73);
+  message.push(0x69);
+  message.push(0x67);
+  match EcdsaP256PrivateKey.from_secret(Secret.from_bytes(raw_key)) {{
+    Err(_) => {{ return 2; }}
+    Ok(key) => {{
+      let mut acc = 0;
+      let mut n = 0;
+      while n < {iters} {{
+        let public_key = ecdsa_p256_public_key(&key);
+        acc = acc + public_key.to_bytes().byte_len();
+        match ecdsa_p256_sign(&key, &message) {{
+          Err(_) => {{ return 3; }}
+          Ok(sig) => {{ acc = acc + 1; }}
+        }}
+        if extra {{
+          match ecdsa_p256_sign(&key, &message) {{
+            Err(_) => {{ return 4; }}
+            Ok(again) => {{ acc = acc + 1; }}
+          }}
+        }}
+        n = n + 1;
+      }}
+      return match acc >= {iters} * 66 {{ true => 0, false => 5 }};
+    }}
+  }}
+}}
+"#
+    )
+}
+
+fn ecdsa_p256_key_env(key: &[u8; 32]) -> String {
+    x25519_scalar_env(key)
+}
+
+fn measure_ecdsa_p256(exe: &PathBuf, samples: usize, control: bool) -> f64 {
+    let fixed = ecdsa_p256_key_env(&[1; 32]);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut a = Vec::with_capacity(samples);
+    let mut b = Vec::with_capacity(samples);
+    let timed = |key: &str, measurements: &mut Vec<f64>| {
+        let mut cmd = Command::new(exe);
+        cmd.env("SIGIL_CT_ECDSA_KEY", key)
+            .env("SIGIL_CT_ECDSA_CONTROL", if control { "1" } else { "0" });
+        let start = Instant::now();
+        let output = cmd.output().expect("ECDSA 計測用プログラムを実行できない");
+        measurements.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(
+            output.status.success() && output.stdout == b"0\n",
+            "ECDSA 計測用プログラムが失敗: {} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for _ in 0..samples {
+        let mut key: [u8; 32] = std::array::from_fn(|_| next() as u8);
+        key[0] &= 0x7f; // n 未満を保証する
+        if control {
+            key[1] |= 8;
+        }
+        let varied = ecdsa_p256_key_env(&key);
+        if next() & 1 == 0 {
+            timed(&fixed, &mut a);
+            timed(&varied, &mut b);
+        } else {
+            timed(&varied, &mut b);
+            timed(&fixed, &mut a);
+        }
+    }
+    welch_t(&a, &b)
+}
+
+/// ECDSA P-256 の定数時間計測（ADR 0064 決定 2、ADR 0058 決定 3）。
+/// 同一実行ファイルに環境変数で秘密鍵を渡すことでバイナリ配置差を回避している。
+/// 計測の境界は「秘密鍵の取り込み・公開鍵導出・署名（DER 符号化前の署名生成まで）」で、
+/// 固定鍵（全バイト 0x01）と乱数鍵を比べる。
+///
+/// 感度の限界: 陽性対照は署名 1 回追加（仕事量の大きな増分）で検出できることを確認するもので、
+/// 語単位の微小な値依存の差は検出できない可能性がある。合格は「大きな差は見つからなかった」ことを意味する。
+#[test]
+#[ignore = "手動計測（ADR 0064 決定 2）。cargo test --release --test ct_measure ct_measure_ecdsa_p256 -- --ignored --nocapture"]
+fn ct_measure_ecdsa_p256() {
+    let iters = 1;
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let (dir, exe) = build_exe("ecdsa_p256", &ecdsa_p256_program(iters));
+    let control = measure_ecdsa_p256(&exe, samples, true);
+    let t = measure_ecdsa_p256(&exe, samples, false);
+    let _ = std::fs::remove_dir_all(&dir);
+    let cpu_info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let cpu = cpu_info
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| (key.trim() == "model name").then_some(value.trim()))
+        .unwrap_or("不明");
+    println!(
+        "ECDSA P-256 ({cpu}, Cranelift opt_level=none, 各組 {samples} 標本 × {iters} 回): 陽性対照 t = {control:.2}, 対象 t = {t:.2}"
+    );
+    assert!(
+        control.abs() >= 4.5,
+        "ECDSA P-256 の陽性対照で差が出なかった: t = {control:.2}"
+    );
+    assert!(t.abs() < 4.5, "ECDSA P-256 に時間の差が出た: t = {t:.2}");
+}
+
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_positive_control() {

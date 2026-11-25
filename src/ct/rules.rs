@@ -27,6 +27,8 @@ pub const PUBLIC_COMPARISONS: &[&str] = &[
     "std.crypto.aes256_gcm_tag_matches",
     "std.crypto.chacha20_poly1305_tag_matches",
     "std.crypto.x25519_is_zero",
+    "std.crypto.p256_scalar_ok",
+    "std.crypto.p256_accepted",
     "std.web.ct_bearer_signature",
 ];
 

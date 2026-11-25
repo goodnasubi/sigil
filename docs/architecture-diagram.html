@@ -128,7 +128,7 @@
       .node.st-ext { border-color: var(--ext-border); background: var(--ext-bg); border-style: solid; }
 
       /* layer 1 */
-      .grid-foundation { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+      .grid-foundation { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
       @media (max-width: 980px) { .grid-foundation { grid-template-columns: repeat(3, 1fr); } }
       @media (max-width: 620px) { .grid-foundation { grid-template-columns: repeat(2, 1fr); } }
 
@@ -244,7 +244,7 @@
       <header class="top">
         <div>
           <h1>Sigil リポジトリ構成図</h1>
-          <p class="intro">プログラミング言語 <strong>Sigil</strong> と、その上で動くサーバー部品の一族、<strong>全24リポジトリ</strong>の構成図です。自律運用の判断を担う自前 LLM 部品 <strong>sigil-anima-llm</strong> を追加しました。各部品を選ぶと、下に詳しい説明が表示されます。</p>
+          <p class="intro">プログラミング言語 <strong>Sigil</strong> と、その上で動くサーバー部品の一族、<strong>全25リポジトリ</strong>の構成図です。汎用OS（製品名 Machi）の <strong>sigil-polis-os</strong> を追加しました。各部品を選ぶと、下に詳しい説明が表示されます。</p>
         </div>
         <aside class="legend" aria-label="凡例">
           <h2>凡例（状態）</h2>
@@ -260,7 +260,7 @@
       <!-- 第1層 -->
       <section class="layer" aria-labelledby="l1">
         <div class="layer-head"><span class="layer-tag">LAYER 1</span><h2 class="layer-title" id="l1">土台：言語と実行基盤</h2></div>
-        <p class="layer-sub">Sigil でものを作るための土台になる5リポジトリです。</p>
+        <p class="layer-sub">Sigil でものを作るための土台になる6リポジトリです。今回、汎用OS（製品名 Machi）の sigil-polis-os を追加しました。</p>
         <div class="grid-foundation">
           <button type="button" class="node st-dev" data-id="sigil" title="プログラミング言語 Sigil と標準ライブラリ">
             <span class="nm">sigil <span class="chip dev">開発中</span></span>
@@ -281,6 +281,11 @@
           <button type="button" class="node st-dev" data-id="os" title="OS 本体。起動まわりの作業中">
             <span class="nm">sigil-os <span class="chip dev">着手</span></span>
             <span class="rl">OS 本体</span>
+          </button>
+          <button type="button" class="node st-plan" data-id="polis" title="sigil-os の起動契約と最小カーネルを土台にする汎用OS（製品名 Machi）">
+            <span class="core-badge">新規追加</span>
+            <span class="nm">sigil-polis-os <span class="chip plan">計画のみ</span></span>
+            <span class="rl">汎用OS（製品名 Machi）</span>
           </button>
         </div>
       </section>
@@ -386,7 +391,6 @@
                 <span class="rl">AI が状況復旧まで担う（原因特定 → 復旧手順の実行 → 検証・記録）</span>
               </button>
               <button type="button" class="node st-plan" data-id="anima" title="自律運用 sigil-vigil-ops の判断を担う自前 LLM">
-                <span class="core-badge">新規追加</span>
                 <span class="nm">sigil-anima-llm <span class="chip plan">計画のみ</span></span>
                 <span class="rl">自前 LLM（sigil-vigil-ops の判断を担う）</span>
               </button>
@@ -487,12 +491,12 @@
         <details class="toggle">
           <summary>数について</summary>
           <div class="body">
-            <p style="margin:0">バックエンド部品は sigix を入れて<strong>17件</strong>（第3層に9件、第4層に8件）です。そこにアプリケーション層の <strong>sigil-lantern-stream</strong> と <strong>sigil-agora-post</strong> が2件加わり、土台の5件と合わせて、Sigil 一族は全部で<strong>24リポジトリ</strong>になります（計画下書きではバックエンド系19件として数えます）。</p>
+            <p style="margin:0">バックエンド部品は sigix を入れて<strong>17件</strong>（第3層に9件、第4層に8件）です。そこにアプリケーション層の <strong>sigil-lantern-stream</strong> と <strong>sigil-agora-post</strong> が2件加わり、土台の6件と合わせて、Sigil 一族は全部で<strong>25リポジトリ</strong>になります（計画下書きではバックエンド系19件として数えます）。</p>
           </div>
         </details>
       </div>
 
-      <footer class="note">状態は図を作成した時点のものです。バックエンド部品17件とアプリケーション層の2件（sigil-lantern-stream、sigil-agora-post）は、現在は計画・概念の段階です（いずれもリポジトリ作成済み、計画下書き §18・§19 に記録済み。sigil-anima-llm は計画下書き §20 に記録済み）。</footer>
+      <footer class="note">状態は図を作成した時点のものです。バックエンド部品17件とアプリケーション層の2件（sigil-lantern-stream、sigil-agora-post）は、現在は計画・概念の段階です（いずれもリポジトリ作成済み、計画下書き §18・§19 に記録済み。sigil-anima-llm は計画下書き §20、sigil-polis-os は計画下書き §21 に記録済み）。</footer>
     </div>
 
     <script>
@@ -508,6 +512,9 @@
           desc: "コンテナの実行基盤です。段階 P5 で実装されました。" },
         os: { name: "sigil-os", chip: "着手", chipClass: "dev", kind: "リポジトリ（第1層・土台）",
           desc: "Sigil で書く OS 本体です。段階 P6 で着手したところで、いまは起動まわりの作業を進めています。" },
+        polis: { name: "sigil-polis-os", chip: "計画のみ", chipClass: "plan", kind: "リポジトリ（第1層・土台）",
+          desc: "Sigil で作る汎用OSです（製品名は Machi、正式表記は Sigil Machi。polis＝古代ギリシャの都市で、『アプリたちが暮らす街』という汎用OS の姿を表します）。広い機器対応、アプリケーションの互換性、GUI など、sigil-os が設計文書 ADR 0054 で明示的に対象外とした要求をこちらが担います。sigil-os と別リポジトリにしたのは、sigil-os の核である『信頼基盤の小ささ』が、要求が正反対の汎用OS と混ざると崩れるためです。土台は再利用し、起動契約（UEFI ローダーと boot-info）と最小カーネルは sigil-os の成果を使い、その上に汎用OS としての層を積みます。詳細な設計は今後 ADR で定めます。",
+          links: "土台は <span class='mono'>sigil-os</span>（起動契約と最小カーネル）を再利用します。リポジトリ：<span class='mono'>goodnasubi/sigil-polis-os</span>（計画下書き §21）。" },
         udp: { name: "UDP ソケットの追加", chip: "マージ済み", chipClass: "dev", kind: "言語側の追加（第2層）",
           desc: "言語 sigil の標準ライブラリへ UDP ソケットを追加する作業です。UDP を使う sigil-atlas-dns と sigil-hourglass-time の前提になります。設計文書（ADR）はマージ済みで、実装が進んでいます。" },
         crypto: { name: "TLS 1.3 向け暗号部品の追加", chip: "ADR 0058 決定済み", chipClass: "dev", kind: "言語側の追加（第2層）",

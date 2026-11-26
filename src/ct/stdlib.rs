@@ -158,8 +158,15 @@ pub const STDLIB_TARGETS: &[(&str, &[&str])] = &[
     ("std.crypto.ecdsa_p256_sign", &["message"]),
     ("std.crypto.p256_point_on_curve", &["x", "y"]),
     ("std.crypto.p256_slice32", &["data", "start"]),
+    ("std.crypto.p256_public_valid", &["encoded"]),
     ("std.crypto.p256_public_from_bytes", &["encoded"]),
+    ("std.crypto.p256_ecdh_public_from_bytes", &["encoded"]),
+    ("std.crypto.p256_public_bytes", &[]),
     ("std.crypto.ecdsa_p256_public_key", &[]),
+    // P-256 の ECDH（ADR 0065 決定 3）。秘密のスカラー、共有点の全ての中間値、共有値は秘密。
+    // 公開は受け取る点（公開鍵）、公開鍵の出力、受理結果。
+    ("std.crypto.ecdh_p256_public_key", &[]),
+    ("std.crypto.ecdh_p256_shared_secret", &["peer"]),
     ("std.crypto.p256_der_int", &["value"]),
     ("std.crypto.p256_der_fail", &[]),
     ("std.crypto.p256_der_read", &["data", "off"]),

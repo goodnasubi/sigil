@@ -130,10 +130,20 @@ impl<'p> M<'p> {
         })
     }
 
-    fn exec(&mut self, locals: &[Slot], s: &Stmt) {
+    fn exec(&mut self, locals: &[Slot], decls: &[Local], s: &Stmt) {
         match s {
             Stmt::Assign(pl, rv) => {
-                let v = self.rvalue(locals, rv);
+                let v = match rv {
+                    // 値型の場所へ参照をそのまま入れると、借用元を破棄したあとに失われる
+                    // （腕で束縛した `Int` を直接 `return` する場合など）。参照先を読み取る。
+                    Rvalue::Use(op)
+                        if pl.proj.is_empty()
+                            && !matches!(decls[pl.base].ty, Ty::Ref(_) | Ty::MutRef(_)) =>
+                    {
+                        self.owned(locals, op)
+                    }
+                    _ => self.rvalue(locals, rv),
+                };
                 self.write(locals, pl, v);
             }
             Stmt::Drop(pl) => {

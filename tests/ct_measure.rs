@@ -542,6 +542,209 @@ fn ct_measure_ecdsa_p256() {
     assert!(t.abs() < 4.5, "ECDSA P-256 に時間の差が出た: t = {t:.2}");
 }
 
+/// ADR 0065 決定 2。両組で同じネイティブ実行ファイルを使い、同じ長さのスカラーを環境変数で渡す。
+/// 各半バイトを ASCII 0x40〜0x4f に写す。相手の公開点は固定（RFC 外の独立実装で作った点）で、
+/// 共有値の計算（256 回の点演算）だけを計測する。
+fn ecdh_p256_program(iters: usize) -> String {
+    format!(
+        r#"module {{MODULE}}
+  targets server
+  trust none
+
+fn main() -> Int
+  intent "ECDH P-256 の共有値の計算を計測する"
+  requires none
+  ensures none
+  effects env
+{{
+  let key_env = env.get(&"SIGIL_CT_ECDH_KEY");
+  let control_env = env.get(&"SIGIL_CT_ECDH_CONTROL");
+  let encoded = key_env.unwrap_or("").as_bytes();
+  let control = control_env.unwrap_or("") == "1";
+  if encoded.byte_len() != 64 {{ return 1; }}
+  let mut raw_key = Bytes.new();
+  let mut i = 0;
+  while i < 32 {{
+    let hi = encoded.get(2 * i).unwrap_or(0) & 15;
+    let lo = encoded.get(2 * i + 1).unwrap_or(0) & 15;
+    raw_key.push((hi << 4) | lo);
+    i = i + 1;
+  }}
+  // 陽性対照だけで、スカラーのビットに仕事量を依存させる。
+  let extra = control && (raw_key.get(1).unwrap_or(0) & 8) != 0;
+  let mut peer_raw = Bytes.new();
+  peer_raw.push(4);
+  peer_raw.push(186);
+  peer_raw.push(142);
+  peer_raw.push(234);
+  peer_raw.push(252);
+  peer_raw.push(223);
+  peer_raw.push(140);
+  peer_raw.push(97);
+  peer_raw.push(240);
+  peer_raw.push(48);
+  peer_raw.push(130);
+  peer_raw.push(80);
+  peer_raw.push(223);
+  peer_raw.push(71);
+  peer_raw.push(46);
+  peer_raw.push(93);
+  peer_raw.push(77);
+  peer_raw.push(88);
+  peer_raw.push(29);
+  peer_raw.push(178);
+  peer_raw.push(88);
+  peer_raw.push(88);
+  peer_raw.push(30);
+  peer_raw.push(95);
+  peer_raw.push(67);
+  peer_raw.push(148);
+  peer_raw.push(18);
+  peer_raw.push(58);
+  peer_raw.push(201);
+  peer_raw.push(27);
+  peer_raw.push(236);
+  peer_raw.push(87);
+  peer_raw.push(112);
+  peer_raw.push(193);
+  peer_raw.push(183);
+  peer_raw.push(56);
+  peer_raw.push(103);
+  peer_raw.push(99);
+  peer_raw.push(197);
+  peer_raw.push(204);
+  peer_raw.push(233);
+  peer_raw.push(160);
+  peer_raw.push(140);
+  peer_raw.push(223);
+  peer_raw.push(119);
+  peer_raw.push(11);
+  peer_raw.push(81);
+  peer_raw.push(156);
+  peer_raw.push(186);
+  peer_raw.push(2);
+  peer_raw.push(247);
+  peer_raw.push(171);
+  peer_raw.push(59);
+  peer_raw.push(245);
+  peer_raw.push(93);
+  peer_raw.push(238);
+  peer_raw.push(124);
+  peer_raw.push(7);
+  peer_raw.push(3);
+  peer_raw.push(202);
+  peer_raw.push(19);
+  peer_raw.push(230);
+  peer_raw.push(55);
+  peer_raw.push(202);
+  peer_raw.push(39);
+  match EcdhP256PublicKey.from_bytes(&peer_raw) {{
+    Err(_) => {{ return 2; }}
+    Ok(peer) => {{
+      match EcdhP256PrivateKey.from_secret(Secret.from_bytes(raw_key)) {{
+        Err(_) => {{ return 3; }}
+        Ok(key) => {{
+          let mut acc = 0;
+          let mut n = 0;
+          while n < {iters} {{
+            let shared = ecdh_p256_shared_secret(&key, &peer);
+            acc = acc + shared.byte_len();
+            if extra {{
+              let again = ecdh_p256_shared_secret(&key, &peer);
+              acc = acc + again.byte_len();
+            }}
+            n = n + 1;
+          }}
+          return match acc >= {iters} * 32 {{ true => 0, false => 5 }};
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+    )
+}
+
+fn ecdh_p256_key_env(key: &[u8; 32]) -> String {
+    x25519_scalar_env(key)
+}
+
+fn measure_ecdh_p256(exe: &PathBuf, samples: usize, control: bool) -> f64 {
+    let fixed = ecdh_p256_key_env(&[1; 32]);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut a = Vec::with_capacity(samples);
+    let mut b = Vec::with_capacity(samples);
+    let timed = |key: &str, measurements: &mut Vec<f64>| {
+        let mut cmd = Command::new(exe);
+        cmd.env("SIGIL_CT_ECDH_KEY", key)
+            .env("SIGIL_CT_ECDH_CONTROL", if control { "1" } else { "0" });
+        let start = Instant::now();
+        let output = cmd.output().expect("ECDH 計測用プログラムを実行できない");
+        measurements.push(start.elapsed().as_secs_f64() * 1000.0);
+        assert!(
+            output.status.success() && output.stdout == b"0\n",
+            "ECDH 計測用プログラムが失敗: {} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for _ in 0..samples {
+        let mut key: [u8; 32] = std::array::from_fn(|_| next() as u8);
+        key[0] &= 0x7f; // n 未満を保証する
+        if control {
+            key[1] |= 8;
+        }
+        let varied = ecdh_p256_key_env(&key);
+        if next() & 1 == 0 {
+            timed(&fixed, &mut a);
+            timed(&varied, &mut b);
+        } else {
+            timed(&varied, &mut b);
+            timed(&fixed, &mut a);
+        }
+    }
+    welch_t(&a, &b)
+}
+
+/// ECDH P-256 の定数時間計測（ADR 0065 決定 2、ADR 0058 決定 3）。
+/// 同一実行ファイルに環境変数でスカラーを渡すことでバイナリ配置差を回避している。
+/// 計測の境界は「スカラーの取り込み・共有値の計算」で、
+/// 固定スカラー（全バイト 0x01）と乱数スカラーを比べる。相手の公開点は固定。
+///
+/// 感度の限界: 陽性対照は共有値の計算を 1 回追加（仕事量の大きな増分）で検出できることを確認するもので、
+/// 語単位の微小な値依存の差は検出できない可能性がある。合格は「大きな差は見つからなかった」ことを意味する。
+#[test]
+#[ignore = "手動計測（ADR 0065 決定 2）。cargo test --release --test ct_measure ct_measure_ecdh_p256 -- --ignored --nocapture"]
+fn ct_measure_ecdh_p256() {
+    let iters = 1;
+    let samples = get_samples(DEFAULT_HMAC_SAMPLES);
+    let (dir, exe) = build_exe("ecdh_p256", &ecdh_p256_program(iters));
+    let control = measure_ecdh_p256(&exe, samples, true);
+    let t = measure_ecdh_p256(&exe, samples, false);
+    let _ = std::fs::remove_dir_all(&dir);
+    let cpu_info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let cpu = cpu_info
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| (key.trim() == "model name").then_some(value.trim()))
+        .unwrap_or("不明");
+    println!(
+        "ECDH P-256 ({cpu}, Cranelift opt_level=none, 各組 {samples} 標本 × {iters} 回): 陽性対照 t = {control:.2}, 対象 t = {t:.2}"
+    );
+    assert!(
+        control.abs() >= 4.5,
+        "ECDH P-256 の陽性対照で差が出なかった: t = {control:.2}"
+    );
+    assert!(t.abs() < 4.5, "ECDH P-256 に時間の差が出た: t = {t:.2}");
+}
+
 #[test]
 #[ignore = "手動計測（ADR 0024 決定 3-4、ADR 0020 決定 1）。cargo test -- --ignored で実行"]
 fn ct_measure_positive_control() {

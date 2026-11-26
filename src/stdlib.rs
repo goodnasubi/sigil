@@ -89,6 +89,10 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("EcdsaP256PublicKey", 0, Layer::Core),
     ("EcdsaP256Signature", 0, Layer::Core),
     ("EcdsaP256Error", 0, Layer::Core),
+    // P-256 の ECDH の鍵・誤り（ADR 0065 決定 1）。実体は `std.crypto` に置く。
+    ("EcdhP256PrivateKey", 0, Layer::Core),
+    ("EcdhP256PublicKey", 0, Layer::Core),
+    ("EcdhP256Error", 0, Layer::Core),
     // 並行処理の前置き型（ADR 0026 の決定 3）。性質の導出は検査器が型名ごとに持つ
     // （`check` の `holds`）。API の部品の登録は PR 4-2c、本 PR（4-2a）は型だけ。
     ("Scope", 0, Layer::Core),
@@ -243,6 +247,9 @@ pub const ECDSA_P256_ERROR_ARMS: &[&str] = &[
     "InvalidSignature",
     "SigningFailed",
 ];
+
+/// `EcdhP256Error` の腕（ADR 0065 決定 1）。並びは `std.crypto` の宣言と同じ。
+pub const ECDH_P256_ERROR_ARMS: &[&str] = &["InvalidPrivateKey", "InvalidPublicKey"];
 
 /// `NetError` の腕（ADR 0031 決定 3-3、判断点 B）。並びは `std.os.net` の宣言と同じ。
 pub const NET_ERROR_ARMS: &[&str] = &["AddrInUse", "PermissionDenied", "Closed", "Other"];
@@ -588,6 +595,17 @@ pub const FREE_FNS: &[(Layer, &str, &str)] = &[
     (
         Layer::Core,
         "ecdsa_p256_verify(public: &EcdsaP256PublicKey, message: &Bytes, signature: &EcdsaP256Signature) -> Bool",
+        "none",
+    ),
+    // P-256 の ECDH（ADR 0065 決定 1）。実体は `std.crypto` の Sigil 実装（埋め込み）。
+    (
+        Layer::Core,
+        "ecdh_p256_public_key(private: &EcdhP256PrivateKey) -> EcdhP256PublicKey",
+        "none",
+    ),
+    (
+        Layer::Core,
+        "ecdh_p256_shared_secret(private: &EcdhP256PrivateKey, peer: &EcdhP256PublicKey) -> Secret",
         "none",
     ),
 ];
@@ -996,6 +1014,19 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         &[
             ("from_bytes(encoded: &Bytes) -> Result<EcdsaP256PublicKey, EcdsaP256Error>", "none"),
             ("to_bytes(self: &EcdsaP256PublicKey) -> Bytes", "none"),
+        ],
+    ),
+    (
+        Layer::Core,
+        "EcdhP256PrivateKey",
+        &[("from_secret(key: Secret) -> Result<EcdhP256PrivateKey, EcdhP256Error>", "none")],
+    ),
+    (
+        Layer::Core,
+        "EcdhP256PublicKey",
+        &[
+            ("from_bytes(encoded: &Bytes) -> Result<EcdhP256PublicKey, EcdhP256Error>", "none"),
+            ("to_bytes(self: &EcdhP256PublicKey) -> Bytes", "none"),
         ],
     ),
     (

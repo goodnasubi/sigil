@@ -563,7 +563,7 @@ impl<'p> M<'p> {
                 // 後始末の基本ブロック（異常停止の巻き戻し）での破棄は、持っていた `Lock` を壊す。
                 UNWINDING.with(|c| c.set(fr.pending.is_some()));
                 for s in &blk.stmts {
-                    self.exec(&fr.locals, s);
+                    self.exec(&fr.locals, &p.funcs[fr.fid].locals, s);
                 }
                 UNWINDING.with(|c| c.set(false));
                 let locals = &fr.locals;

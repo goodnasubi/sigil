@@ -84,3 +84,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0062](0062-os-effects-categories.md) | OS カーネル向け効果カテゴリ（アドレス空間操作・割り込み制御・機器 I/O） | 提案（予約: Issue #744、正式判定は未実施・問いを ADR 内に記録） |
 | [0063](0063-shield-tls.md) | TLS 終端（sigil-shield-tls） | 提案（予約: Issue #749、正式判定を ADR 内に記録） |
 | [0064](0064-ecdsa-p256.md) | std.crypto の ECDSA P-256 署名 | 提案（予約: Issue #752、正式判定を ADR 内に記録） |
+| [0065](0065-ecdh-p256.md) | std.crypto の P-256 ECDH | 提案（予約: Issue #759、正式判定は未実施・問いを ADR 内に記録） |

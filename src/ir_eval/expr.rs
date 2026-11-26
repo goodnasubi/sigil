@@ -121,7 +121,28 @@ impl<'p> M<'p> {
                 }
             }
             Rvalue::Aggregate(k, ops) => {
-                let f: Vec<Val> = ops.iter().map(|o| self.read(locals, o)).collect();
+                let fields = match k {
+                    AggKind::Variant(t, i) => match &self.p.types[*t].kind {
+                        TypeKind::Enum { variants } => variants[*i].fields.as_slice(),
+                        _ => &[],
+                    },
+                    _ => &[],
+                };
+                let f = ops
+                    .iter()
+                    .enumerate()
+                    .map(|(i, op)| {
+                        // 値の欄は腕を抜けて借用元を破棄する前に読み取る。
+                        if fields
+                            .get(i)
+                            .is_some_and(|ty| !matches!(ty, Ty::Ref(_) | Ty::MutRef(_)))
+                        {
+                            self.owned(locals, op)
+                        } else {
+                            self.read(locals, op)
+                        }
+                    })
+                    .collect();
                 Val::Agg(Box::new(Agg {
                     tag: self.canon_tag(k),
                     f,

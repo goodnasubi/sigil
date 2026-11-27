@@ -87,3 +87,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0065](0065-ecdh-p256.md) | std.crypto の P-256 ECDH | 提案（予約: Issue #759、正式判定は未実施・問いを ADR 内に記録） |
 | [0066](0066-herald-queue.md) | メッセージキュー（sigil-herald-queue） | 提案（予約: Issue #768、問いを ADR 内に記録） |
 | [0067](0067-argus-observe.md) | 監視・ログ収集（sigil-argus-observe） | 提案（予約: Issue #771、問いを ADR 内に記録） |
+| [0068](0068-aegis-waf.md) | Web アプリケーション・ファイアウォール（sigil-aegis-waf） | 提案（予約: Issue #775、正式判定を ADR 内に記録） |

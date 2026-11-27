@@ -711,13 +711,16 @@ impl<'a> L<'a> {
                     || r.name == "net.udp_bind"
                     || r.name == "net.udp_open"
                     || r.name == "random.bytes"
-                    || r.name == "clock.unix_seconds"
+                    || matches!(
+                        r.name.as_str(),
+                        "clock.unix_seconds" | "clock.monotonic_nanos"
+                    )
                 {
                     self.core_only = false;
                     let full = if r.name == "random.bytes" {
                         format!("{}.bytes", crate::stdlib::embedded::RANDOM_MODULE)
-                    } else if r.name == "clock.unix_seconds" {
-                        format!("{}.unix_seconds", crate::stdlib::embedded::CLOCK_MODULE)
+                    } else if let Some(f) = r.name.strip_prefix("clock.") {
+                        format!("{}.{f}", crate::stdlib::embedded::CLOCK_MODULE)
                     } else {
                         format!(
                             "{}.{}",

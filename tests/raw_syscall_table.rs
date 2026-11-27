@@ -356,10 +356,10 @@ fn recvfrom_and_sendto_buffers_and_flags_are_checked() {
 }
 
 #[test]
-fn clock_gettime_realtime_restrictions_and_execution() {
-    // CLOCK_REALTIME (0) 以外は拒否。
+fn clock_gettime_restrictions_and_realtime_execution() {
+    // CLOCK_REALTIME (0)・CLOCK_MONOTONIC (1) 以外は拒否。
     stops(
-        "  let ts = raw.alloc(16, 8);\n  return raw.syscall(228, 1, raw.addr_to_int(ts), 0, 0, 0, 0);",
+        "  let ts = raw.alloc(16, 8);\n  return raw.syscall(228, 2, raw.addr_to_int(ts), 0, 0, 0, 0);",
         "clock_gettime",
     );
     // 領域不足は拒否。

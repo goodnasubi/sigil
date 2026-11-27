@@ -716,6 +716,7 @@ pub const NAMESPACED_FNS: &[(Layer, &str, &str, &str)] = &[
     (Layer::Os, "random", "bytes(len: Int) -> Option<Bytes>", "random"),
     // ADR 0037 段階 6-6a: 最小壁時計入口。
     (Layer::Os, "clock", "unix_seconds() -> Option<Int>", "clock"),
+    (Layer::Os, "clock", "monotonic_nanos() -> Option<Int>", "clock"),
     (Layer::Os, "pg", "config(host: String, port: Int, user: String, database: String, password: Secret) -> Result<PgConfig, PgError>", "none"),
     (Layer::Os, "pg", "default_connect_limits() -> PgConnectLimits", "none"),
     (Layer::Os, "pg", "default_query_limits() -> PgQueryLimits", "none"),
@@ -1760,6 +1761,7 @@ mod tests {
             "random.bytes",
             // ADR 0037 段階 6-6a。
             "clock.unix_seconds",
+            "clock.monotonic_nanos",
             // ADR 0033 E・I・J（Issue #460）。
             "web.verify_bearer",
             "web.load_config",

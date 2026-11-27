@@ -44,3 +44,31 @@ pub fn unix_seconds() -> Option<Int>
   }
 }
 
+// I/O スケジューラと公開 API が共有する実時間の時計取得。
+// スケジューラ内部の効果は従来どおり。アプリの clock 効果は公開 API の名前空間表で検査する。
+pub fn monotonic_nanos() -> Option<Int>
+  intent "clock_gettime(CLOCK_MONOTONIC = 1) の時刻を整数ナノ秒で返す。取得失敗または Int の範囲外は None"
+  requires none
+  ensures none
+  effects none
+  unchecked "16 バイトの timespec 領域を確保して clock_gettime(1, ts) を発行する。成功時だけ 2 語を読み、どちらの経路でも領域を解放する"
+{
+  let ts = raw.alloc(16, 8);
+  let addr = raw.addr_to_int(ts);
+  let r = raw.syscall(228, 1, addr, 0, 0, 0, 0);
+  if r != 0 {
+    raw.free(ts, 16, 8);
+    return None;
+  }
+  let sec = raw.load_i64(ts);
+  let nanos = raw.load_i64(raw.int_to_addr(addr + 8));
+  raw.free(ts, 16, 8);
+  if sec < 0 || sec > 9223372036 || nanos < 0 || nanos >= 1000000000 {
+    return None;
+  }
+  let whole = sec * 1000000000;
+  if nanos > 9223372036854775807 - whole {
+    return None;
+  }
+  return Some(whole + nanos);
+}

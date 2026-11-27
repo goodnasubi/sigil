@@ -1224,7 +1224,9 @@ impl<'p> M<'p> {
                 let a4 = self.read_int(locals, &args[5]);
                 let a5 = self.read_int(locals, &args[6]);
                 self.check_syscall(n, [a0, a1, a2, a3, a4, a5], loc)?;
-                let ret = if let (SYS_CLOCK_GETTIME, Some(injected)) = (n, self.wall_clock) {
+                let ret = if let (SYS_CLOCK_GETTIME, CLOCK_REALTIME, Some(injected)) =
+                    (n, a0, self.wall_clock)
+                {
                     match injected {
                         Ok(sec) => {
                             let tp = a1 as usize as *mut i64;
@@ -1560,10 +1562,12 @@ impl<'p> M<'p> {
                 self.check_raw_access(addr_of(a[0], "buf")?, a[1] as usize, loc)?;
             }
             SYS_CLOCK_GETTIME => {
-                if a[0] != CLOCK_REALTIME || a[2] != 0 || a[3] != 0 || a[4] != 0 || a[5] != 0 {
+                if !matches!(a[0], CLOCK_REALTIME | CLOCK_MONOTONIC)
+                    || a[2..].iter().any(|&arg| arg != 0)
+                {
                     return Err(self.syscall_stop(
                         loc,
-                        "raw.syscall clock_gettime: CLOCK_REALTIME (0) のみ許可（未使用引数は 0）",
+                        "raw.syscall clock_gettime: CLOCK_REALTIME (0) と CLOCK_MONOTONIC (1) のみ許可（未使用引数は 0）",
                     ));
                 }
                 self.check_raw_access(addr_of(a[1], "tp")?, 16, loc)?;
@@ -2504,6 +2508,7 @@ const SYS_GETSOCKOPT: i64 = 55;
 const SYS_GETRANDOM: i64 = 318;
 const SYS_CLOCK_GETTIME: i64 = 228;
 const CLOCK_REALTIME: i64 = 0;
+const CLOCK_MONOTONIC: i64 = 1;
 const SYS_SENDTO: i64 = 44;
 const SYS_RECVFROM: i64 = 45;
 const SYS_SHUTDOWN: i64 = 48;

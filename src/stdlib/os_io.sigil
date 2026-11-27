@@ -2,6 +2,8 @@ module std.os.io
   targets server
   trust base
 
+use std.os.clock.monotonic_nanos;
+
 // 入出力の準備完了と時間の待機（ADR 0030 決定 3、PR 5-2f）。ネイティブの実体。評価器は呼ばない（評価器は I/O スレッドを
 // 動かせない。`std.os.thread` などと同じ作法）。**機構だけ**で、ソケットなどの言語の API は段階 6 で決める。暗黙には結ばない
 // （`use` した試験や、後続の PR が結ぶ）。`std.os.thread` に依らないので、スレッドの本体（`io_loop`）は呼び出し側が
@@ -135,13 +137,9 @@ fn clock_ns() -> Int
   requires none
   ensures none
   effects none
-  unchecked "clock_gettime(CLOCK_MONOTONIC, ts) だけを発行する。ts は自分で確保した 16 バイトで、すぐ返す"
 {
-  let ts = rec(2);
-  raw.syscall(228, 1, ts, 0, 0, 0, 0);
-  let t = ld(ts, 0) * 1000000000 + ld(ts, 1);
-  rec_free(ts, 2);
-  return t;
+  // I/O スケジューラの既存の失敗値を保つ。
+  return monotonic_nanos().unwrap_or(0);
 }
 
 fn ep_ctl(ep: Int, op: Int, fd: Int, events: Int, token: Int, gen: Int) -> Int

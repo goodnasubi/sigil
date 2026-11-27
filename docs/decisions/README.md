@@ -85,3 +85,4 @@ Sigil の設計上の決定を、1 件 1 ファイルで記録します。
 | [0063](0063-shield-tls.md) | TLS 終端（sigil-shield-tls） | 提案（予約: Issue #749、正式判定を ADR 内に記録） |
 | [0064](0064-ecdsa-p256.md) | std.crypto の ECDSA P-256 署名 | 提案（予約: Issue #752、正式判定を ADR 内に記録） |
 | [0065](0065-ecdh-p256.md) | std.crypto の P-256 ECDH | 提案（予約: Issue #759、正式判定は未実施・問いを ADR 内に記録） |
+| [0066](0066-herald-queue.md) | メッセージキュー（sigil-herald-queue） | 提案（予約: Issue #768、問いを ADR 内に記録） |

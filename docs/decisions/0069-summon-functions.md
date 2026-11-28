@@ -1,6 +1,6 @@
 # 0069: サーバーレス関数実行環境（sigil-summon-functions）
 
-- **状態**: 提案（正式判定は未実施。問いを末尾に記録）。実装の着手・完了、外部公開の承認を意味しない
+- **状態**: 提案（typesafe-ai 正式判定済み。末尾に記録）。実装の着手・完了、外部公開の承認を意味しない
 - **日付**: 2026-11-28（JST）
 - **対象**: [Issue #785](https://github.com/goodnasubi/sigil/issues/785)、レーン E
 - **仕様基準**: sigil の `main`、`fd1cc86`
@@ -130,17 +130,21 @@ ADR のマージ後、独立リポジトリで次の順に進める。各段で�
 
 ## 人間の判断が要る点
 
-- 正式判定は未実施（下記）。見張りまたは `TYPESAFE_API_KEY` のある環境での判定を待つ。
+- 正式判定は実施済み（下記。5 問すべてで起草者の案が選ばれ、決定 1〜7 の改訂は不要）。判断がつかず所有者への提示が必要な問いはない。
 - 本 ADR は `src/limits.rs`・CODEOWNERS・CI の変更を含まず、権限も与えない。
 
 ## 正式判定の記録
 
-起草セッションには判定 API の認証キー `TYPESAFE_API_KEY` が無く、起草時点では判定を実施できなかった（ADR 0044・0060 と同じ）。理念（ADR 0001・0005・0020・0053、いまは外部公開しない、小さいサービス向け）に照らして起草者の案を決め、次の問いを記録する。評価軸（`state` の冒頭）は ADR 0001・0005、ADR 0020 の最小権限・資源上限・段階的な公開、ADR 0044 決定 4 のリポジトリ分離、ADR 0053 の既定拒否とする。
+起草セッションには判定 API の認証キー `TYPESAFE_API_KEY` が無く、起草時点では判定を実施できなかった（ADR 0044・0060 と同じ）。そのため問いと評価軸を先に記録し、見張りが 2026-11-28（JST）に typesafe-ai の `jev-1.13.0` で判定した（[PR #786 のコメント](https://github.com/goodnasubi/sigil/pull/786#issuecomment-7234070425)）。**5 問すべてで起草者の案が選ばれ、いずれも接戦ではなかった。決定の改訂は不要。**
 
-| 問い | 起草者の案 | 比較案 |
-|---|---|---|
-| 持ち方（決定 1） | `layer_on_container`: container の上の制御層 | `standalone_runtime`: 独立した実行部品 |
-| 起動（決定 1） | `fresh_each`: 呼び出しごとに新規・使い捨て | `warm_reuse`: 使い終えた環境を再利用 |
-| 非同期（決定 6） | `queue_only`: herald-queue だけを通す | `own_queue`: Summon 内部のキュー |
-| 登録（決定 2） | `digest_image`: digest 固定の OCI イメージ | `source_upload`: ソースを受け取りビルド |
-| 対象範囲（決定 3） | `trusted_operators`: 認証済み運用者の登録に限る | `multi_tenant`: 第三者の登録も受ける |
+評価軸（`state` の冒頭）: ADR 0001・0005、ADR 0020 の最小権限・資源上限・段階的な公開、ADR 0044 決定 4 のリポジトリ分離、ADR 0053 の既定拒否、所有者の明示方針（小さいサービス向け、段階的に進める）。判定は typesafe-ai のみで行った。
+
+| 問い | 採用案（確率） | 比較案 | confidence |
+|---|---|---|---|
+| 持ち方（決定 1） | `layer_on_container`: container の上の制御層（0.99） | `standalone_runtime`: 独立した実行部品 | 0.98 |
+| 起動（決定 1） | `fresh_each`: 呼び出しごとに新規・使い捨て（1.00） | `warm_reuse`: 使い終えた環境を再利用 | 1.00 |
+| 非同期（決定 6） | `queue_only`: herald-queue だけを通す（1.00） | `own_queue`: Summon 内部のキュー | 1.00 |
+| 登録（決定 2） | `digest_image`: digest 固定の OCI イメージ（0.99） | `source_upload`: ソースを受け取りビルド | 0.98 |
+| 対象範囲（決定 3） | `trusted_operators`: 認証済み運用者の登録に限る（0.99） | `multi_tenant`: 第三者の登録も受ける | 0.98 |
+
+判定の入出力は、見張りが `hidden_files/` に保管している（`typesafe-adr0069-q1-holding-20261128` ほか `q2-startup`・`q3-async`・`q4-registration`・`q5-scope` の入力と出力。リポジトリには含めない。ADR 0044 と同じ運用）。

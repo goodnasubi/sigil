@@ -310,3 +310,113 @@ fn verified_request_head_get_options_chunked() {
     );
     assert_eq!(value(&src), "300");
 }
+
+/// 空クエリ（`?` だけ）とクエリなしを区別し、元の request-target および `head.bytes()` で `?` が保持されることの確認（ADR 0032 契約準拠）
+#[test]
+fn verified_request_head_empty_query_preserves_target() {
+    let src = prog(
+        "",
+        r#"  let lim = http.default_limits();
+
+  // 1. 空クエリ（/items?）: ? が失われず head.target() および head.bytes() に保持される
+  let mut p1 = http.parser(&lim);
+  let empty_q = "GET /items? HTTP/1.1\r\nHost: example.com\r\n\r\n".as_bytes();
+  match p1.feed(&empty_q, 0) {
+    Ok(HttpProgress.Done(req, _)) => {
+      let head = req.head();
+      if head.target() != "/items?".as_bytes() { return 0 - 1; }
+      if head.path() != "/items".as_bytes() { return 0 - 2; }
+      if head.query().byte_len() != 0 { return 0 - 3; }
+
+      let wire = head.bytes();
+      let mut p1_check = http.parser(&lim);
+      match p1_check.feed(&wire, 0) {
+        Ok(HttpProgress.Done(req_wire, _)) => {
+          let head_wire = req_wire.head();
+          if head_wire.target() != "/items?".as_bytes() { return 0 - 4; }
+          if head_wire.path() != "/items".as_bytes() { return 0 - 5; }
+          if head_wire.query().byte_len() != 0 { return 0 - 6; }
+        }
+        _ => { return 0 - 7; }
+      }
+    }
+    _ => { return 0 - 8; }
+  }
+
+  // 2. クエリなし（/items）: ? は付与されず head.target() および head.bytes() に保持される
+  let mut p2 = http.parser(&lim);
+  let no_q = "GET /items HTTP/1.1\r\nHost: example.com\r\n\r\n".as_bytes();
+  match p2.feed(&no_q, 0) {
+    Ok(HttpProgress.Done(req, _)) => {
+      let head = req.head();
+      if head.target() != "/items".as_bytes() { return 0 - 10; }
+      if head.path() != "/items".as_bytes() { return 0 - 11; }
+      if head.query().byte_len() != 0 { return 0 - 12; }
+
+      let wire = head.bytes();
+      let mut p2_check = http.parser(&lim);
+      match p2_check.feed(&wire, 0) {
+        Ok(HttpProgress.Done(req_wire, _)) => {
+          let head_wire = req_wire.head();
+          if head_wire.target() != "/items".as_bytes() { return 0 - 13; }
+          if head_wire.path() != "/items".as_bytes() { return 0 - 14; }
+          if head_wire.query().byte_len() != 0 { return 0 - 15; }
+        }
+        _ => { return 0 - 16; }
+      }
+    }
+    _ => { return 0 - 17; }
+  }
+
+  // 3. 通常クエリ（/items?k=v）
+  let mut p3 = http.parser(&lim);
+  let has_q = "GET /items?k=v HTTP/1.1\r\nHost: example.com\r\n\r\n".as_bytes();
+  match p3.feed(&has_q, 0) {
+    Ok(HttpProgress.Done(req, _)) => {
+      let head = req.head();
+      if head.target() != "/items?k=v".as_bytes() { return 0 - 20; }
+      if head.path() != "/items".as_bytes() { return 0 - 21; }
+      if head.query() != "k=v".as_bytes() { return 0 - 22; }
+
+      let wire = head.bytes();
+      let mut p3_check = http.parser(&lim);
+      match p3_check.feed(&wire, 0) {
+        Ok(HttpProgress.Done(req_wire, _)) => {
+          let head_wire = req_wire.head();
+          if head_wire.target() != "/items?k=v".as_bytes() { return 0 - 23; }
+          if head_wire.path() != "/items".as_bytes() { return 0 - 24; }
+          if head_wire.query() != "k=v".as_bytes() { return 0 - 25; }
+        }
+        _ => { return 0 - 26; }
+      }
+    }
+    _ => { return 0 - 27; }
+  }
+
+  // 4. OPTIONS * 要求の target()
+  let mut p4 = http.parser(&lim);
+  let opt_q = "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n".as_bytes();
+  match p4.feed(&opt_q, 0) {
+    Ok(HttpProgress.Done(req, _)) => {
+      let head = req.head();
+      if head.target() != "*".as_bytes() { return 0 - 30; }
+      if head.path() != "*".as_bytes() { return 0 - 31; }
+
+      let wire = head.bytes();
+      let mut p4_check = http.parser(&lim);
+      match p4_check.feed(&wire, 0) {
+        Ok(HttpProgress.Done(req_wire, _)) => {
+          let head_wire = req_wire.head();
+          if head_wire.target() != "*".as_bytes() { return 0 - 32; }
+        }
+        _ => { return 0 - 33; }
+      }
+    }
+    _ => { return 0 - 34; }
+  }
+
+  return 400;"#,
+        "none",
+    );
+    assert_eq!(value(&src), "400");
+}

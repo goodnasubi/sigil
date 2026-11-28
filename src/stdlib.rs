@@ -1481,6 +1481,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         "HttpRequest",
         &[
             ("method(self: &HttpRequest) -> String", "none"),
+            ("target(self: &HttpRequest) -> Bytes", "none"),
             ("path(self: &HttpRequest) -> Bytes", "none"),
             ("query(self: &HttpRequest) -> Bytes", "none"),
             ("version(self: &HttpRequest) -> Int", "none"),
@@ -1500,6 +1501,7 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
         "HttpRequestHead",
         &[
             ("method(self: &HttpRequestHead) -> String", "none"),
+            ("target(self: &HttpRequestHead) -> Bytes", "none"),
             ("path(self: &HttpRequestHead) -> Bytes", "none"),
             ("query(self: &HttpRequestHead) -> Bytes", "none"),
             ("version(self: &HttpRequestHead) -> Int", "none"),
@@ -1929,6 +1931,7 @@ mod tests {
             "HttpProgress",
             "HttpRequest",
             "HttpRequest.method",
+            "HttpRequest.target",
             "HttpRequest.path",
             "HttpRequest.query",
             "HttpRequest.version",
@@ -1940,6 +1943,7 @@ mod tests {
             "HttpRequest.request_head",
             "HttpRequestHead",
             "HttpRequestHead.method",
+            "HttpRequestHead.target",
             "HttpRequestHead.path",
             "HttpRequestHead.query",
             "HttpRequestHead.version",

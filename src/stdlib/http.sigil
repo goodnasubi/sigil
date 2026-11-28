@@ -43,6 +43,7 @@ pub struct HttpHeader {
 
 pub struct HttpRequestHead {
   head_method: String,
+  head_target: Bytes,
   head_path: Bytes,
   head_query: Bytes,
   head_version: Int,
@@ -51,6 +52,7 @@ pub struct HttpRequestHead {
 
 pub struct HttpRequest {
   req_method: String,
+  req_target: Bytes,
   req_path: Bytes,
   req_query: Bytes,
   req_version: Int,
@@ -120,6 +122,7 @@ pub struct HttpParser {
   count: Int,
   stored: Int,
   method: String,
+  target: Bytes,
   path: Bytes,
   query: Bytes,
   version: Int,
@@ -170,6 +173,7 @@ pub fn parser(limits: &HttpLimits) -> HttpParser
     count: 0,
     stored: 0,
     method: "",
+    target: Bytes.new(),
     path: Bytes.new(),
     query: Bytes.new(),
     version: 0,
@@ -419,6 +423,7 @@ impl HttpParser {
     if self.in_body() {
       return Some(HttpRequestHead {
         head_method: self.method.clone(),
+        head_target: self.target.clone(),
         head_path: self.path.clone(),
         head_query: self.query.clone(),
         head_version: self.version,
@@ -445,6 +450,7 @@ impl HttpParser {
   {
     let req = HttpRequest {
       req_method: self.method.clone(),
+      req_target: self.target.clone(),
       req_path: self.path.clone(),
       req_query: self.query.clone(),
       req_version: self.version,
@@ -471,6 +477,7 @@ impl HttpParser {
     self.count = 0;
     self.stored = 0;
     self.method = "";
+    self.target = Bytes.new();
     self.path = Bytes.new();
     self.query = Bytes.new();
     self.version = 0;
@@ -733,9 +740,11 @@ impl HttpParser {
       if s2 != s1 + 2 || m != "OPTIONS".as_bytes() {
         return 400;
       }
+      self.target = "*".as_bytes();
       self.path = "*".as_bytes();
       self.query = Bytes.new();
     } else if first == 47 {
+      self.target = self.line.slice(s1 + 1, s2).unwrap_or(Bytes.new());
       let mut q = s2;
       i = s1 + 1;
       while i < s2 && q == s2 {
@@ -761,7 +770,7 @@ impl HttpParser {
         return 400;
       }
     }
-    self.stored = self.method.byte_len() + self.path.byte_len() + self.query.byte_len();
+    self.stored = self.method.byte_len() + self.target.byte_len() + self.path.byte_len() + self.query.byte_len();
     return 0;
   }
 
@@ -957,6 +966,15 @@ impl HttpRequest {
     return self.req_method.clone();
   }
 
+  pub fn target(self: &HttpRequest) -> Bytes
+    intent "要求対象（request-target。正規化せずそのまま。`OPTIONS *` は `*`）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.req_target.clone();
+  }
+
   pub fn path(self: &HttpRequest) -> Bytes
     intent "対象の `?` の前（百分率の符号は解かず、正規化もしない。`OPTIONS *` は `*`）"
     requires none
@@ -1042,6 +1060,7 @@ impl HttpRequest {
   {
     return HttpRequestHead {
       head_method: self.req_method.clone(),
+      head_target: self.req_target.clone(),
       head_path: self.req_path.clone(),
       head_query: self.req_query.clone(),
       head_version: self.req_version,
@@ -1067,6 +1086,15 @@ impl HttpRequestHead {
     effects none
   {
     return self.head_method.clone();
+  }
+
+  pub fn target(self: &HttpRequestHead) -> Bytes
+    intent "要求対象（request-target。正規化せずそのまま。`OPTIONS *` は `*`）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head_target.clone();
   }
 
   pub fn path(self: &HttpRequestHead) -> Bytes
@@ -1136,11 +1164,7 @@ impl HttpRequestHead {
   {
     let mut out = self.head_method.as_bytes();
     out.push(32);
-    out.extend(&self.head_path);
-    if self.head_query.byte_len() > 0 {
-      out.push(63);
-      out.extend(&self.head_query);
-    }
+    out.extend(&self.head_target);
     if self.head_version == 11 {
       let v = " HTTP/1.1\r\n".as_bytes();
       out.extend(&v);

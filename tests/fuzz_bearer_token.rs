@@ -44,7 +44,7 @@ fn options() -> Options {
         let mut name = "Authorization"; if i % 2 == 1 { name = "AUTHORIZATION"; }
         hs.push(HttpHeader { h_name: name, h_value: value.clone() }); i = i + 1;
       }
-      return Ok(HttpProgress.Done(HttpRequest { req_method: "GET", req_path: "/private".as_bytes(), req_query: Bytes.new(), req_version: 11, req_headers: hs, req_body: Bytes.new() }, 0));
+      return Ok(HttpProgress.Done(HttpRequest { req_method: "GET", req_target: "/private".as_bytes(), req_query_pos: -1, req_version: 11, req_headers: hs, req_body: Bytes.new() }, 0));
     }"#;
     let http = format!("{}{}{}", &http[..body + 1], replacement, &http[end..]);
     let clock = include_str!("../src/stdlib/os_clock.sigil")

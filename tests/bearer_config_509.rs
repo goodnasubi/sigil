@@ -248,7 +248,7 @@ fn direct_http() -> String {
       let mut headers = List.new();
       headers.push(HttpHeader { h_name: "Authorization", h_value: "Bearer invalid".as_bytes() });
       headers.push(HttpHeader { h_name: "AUTHORIZATION", h_value: "Bearer invalid".as_bytes() });
-      return Ok(HttpProgress.Done(HttpRequest { req_method: "GET", req_path: "/private".as_bytes(), req_query: Bytes.new(), req_version: 11, req_headers: headers, req_body: Bytes.new() }, 0));
+      return Ok(HttpProgress.Done(HttpRequest { req_method: "GET", req_target: "/private".as_bytes(), req_query_pos: -1, req_version: 11, req_headers: headers, req_body: Bytes.new() }, 0));
     }"#;
     format!("{}{}{}", &http[..body + 1], replacement, &http[end..])
 }

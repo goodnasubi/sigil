@@ -190,6 +190,7 @@ impl<'a, 'p> Fx<'a, 'p> {
                             def.name.as_str(),
                             "std.http.HttpHeader"
                                 | "std.http.HttpRequest"
+                                | "std.http.HttpRequestHead"
                                 | "std.http.HttpParser"
                                 | "std.http.HttpBuf"
                                 | "std.web.AppRequest"

@@ -157,6 +157,10 @@ pub struct Options {
     /// `Some(Ok(sec))` なら固定の Unix 秒、`Some(Err(errno))` なら時計取得の失敗を注入する。
     /// `None`（既定）のときは実 OS の clock_gettime を呼ぶ。
     pub wall_clock: Option<Result<i64, i64>>,
+    /// 評価器の単調時計のテスト用の差し替え（Issue #779）。
+    /// `Some(Ok(nanos))` なら固定のナノ秒、`Some(Err(errno))` なら時計取得の失敗を注入する。
+    /// `None`（既定）のときは実 OS の CLOCK_MONOTONIC を読む。
+    pub monotonic_clock: Option<Result<i64, i64>>,
 }
 
 impl Options {
@@ -185,6 +189,7 @@ impl Default for Options {
             embedded_extra: Vec::new(),
             embedded_roots: Vec::new(),
             wall_clock: None,
+            monotonic_clock: None,
         }
     }
 }

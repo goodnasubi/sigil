@@ -420,6 +420,7 @@ fn show_agg(ts: &[TypeDef], a: &Agg) -> String {
                 def.name.as_str(),
                 "std.http.HttpHeader"
                     | "std.http.HttpRequest"
+                    | "std.http.HttpRequestHead"
                     | "std.http.HttpParser"
                     | "std.http.HttpBuf"
                     | "std.web.AppRequest"

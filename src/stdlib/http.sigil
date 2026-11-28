@@ -41,6 +41,14 @@ pub struct HttpHeader {
   h_value: Bytes,
 }
 
+pub struct HttpRequestHead {
+  head_method: String,
+  head_path: Bytes,
+  head_query: Bytes,
+  head_version: Int,
+  head_headers: List<HttpHeader>,
+}
+
 pub struct HttpRequest {
   req_method: String,
   req_path: Bytes,
@@ -400,6 +408,33 @@ impl HttpParser {
     effects none
   {
     return self.expect == 1 && self.version == 11 && self.in_body();
+  }
+
+  pub fn request_head(self: &HttpParser) -> Option<HttpRequestHead>
+    intent "パーサーが検証した要求ヘッド（リクエスト行・ヘッダー）を取り出す（見出し検証完了前は None）"
+    requires none
+    ensures none
+    effects none
+  {
+    if self.in_body() {
+      return Some(HttpRequestHead {
+        head_method: self.method.clone(),
+        head_path: self.path.clone(),
+        head_query: self.query.clone(),
+        head_version: self.version,
+        head_headers: self.headers.clone()
+      });
+    }
+    return None;
+  }
+
+  pub fn head(self: &HttpParser) -> Option<HttpRequestHead>
+    intent "パーサーが検証した要求ヘッド（リクエスト行・ヘッダー）を取り出す（見出し検証完了前は None）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.request_head();
   }
 
   fn finish(self: &mut HttpParser, next: Int) -> HttpProgress
@@ -997,6 +1032,141 @@ impl HttpRequest {
     effects none
   {
     return self.req_body.byte_len();
+  }
+
+  pub fn head(self: &HttpRequest) -> HttpRequestHead
+    intent "検証済みの要求ヘッド（リクエスト行・ヘッダー）を取り出す"
+    requires none
+    ensures none
+    effects none
+  {
+    return HttpRequestHead {
+      head_method: self.req_method.clone(),
+      head_path: self.req_path.clone(),
+      head_query: self.req_query.clone(),
+      head_version: self.req_version,
+      head_headers: self.req_headers.clone()
+    };
+  }
+
+  pub fn request_head(self: &HttpRequest) -> HttpRequestHead
+    intent "検証済みの要求ヘッド（リクエスト行・ヘッダー）を取り出す"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head();
+  }
+}
+
+impl HttpRequestHead {
+  pub fn method(self: &HttpRequestHead) -> String
+    intent "メソッド（token。大文字小文字はそのまま）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head_method.clone();
+  }
+
+  pub fn path(self: &HttpRequestHead) -> Bytes
+    intent "対象の `?` の前（百分率の符号は解かず、正規化もしない。`OPTIONS *` は `*`）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head_path.clone();
+  }
+
+  pub fn query(self: &HttpRequestHead) -> Bytes
+    intent "対象の最初の `?` の後（無ければ空）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head_query.clone();
+  }
+
+  pub fn version(self: &HttpRequestHead) -> Int
+    intent "版（HTTP/1.0 は 10、HTTP/1.1 は 11）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head_version;
+  }
+
+  pub fn headers(self: &HttpRequestHead) -> List<HttpHeader>
+    intent "見出しの並び（届いた順。名前は小文字。トレーラーは含まない）"
+    requires none
+    ensures none
+    effects none
+  {
+    return self.head_headers.clone();
+  }
+
+  pub fn header(self: &HttpRequestHead, name: &String) -> Option<Bytes>
+    intent "名前（大文字小文字を区別しない）が一致する最初の見出しの値"
+    requires none
+    ensures none
+    effects none
+  {
+    let want = name.as_bytes();
+    let key = lower_of(&want, 0, want.byte_len());
+    let mut i = 0;
+    while i < self.head_headers.len() {
+      match self.head_headers.get(i) {
+        Some(h) => {
+          if h.h_name.as_bytes() == key {
+            return Some(h.h_value.clone());
+          }
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    return None;
+  }
+
+  pub fn bytes(self: &HttpRequestHead) -> Bytes
+    intent "リクエスト行と全見出しをワイヤ形式のバイト列として返す"
+    requires none
+    ensures none
+    effects none
+  {
+    let mut out = self.head_method.as_bytes();
+    out.push(32);
+    out.extend(&self.head_path);
+    if self.head_query.byte_len() > 0 {
+      out.push(63);
+      out.extend(&self.head_query);
+    }
+    if self.head_version == 11 {
+      let v = " HTTP/1.1\r\n".as_bytes();
+      out.extend(&v);
+    } else {
+      let v = " HTTP/1.0\r\n".as_bytes();
+      out.extend(&v);
+    }
+    let mut i = 0;
+    while i < self.head_headers.len() {
+      match self.head_headers.get(i) {
+        Some(h) => {
+          let name_bytes = h.h_name.as_bytes();
+          out.extend(&name_bytes);
+          let sep = ": ".as_bytes();
+          out.extend(&sep);
+          out.extend(&h.h_value);
+          let crlf = "\r\n".as_bytes();
+          out.extend(&crlf);
+        }
+        None => {}
+      }
+      i = i + 1;
+    }
+    let crlf = "\r\n".as_bytes();
+    out.extend(&crlf);
+    return out;
   }
 }
 

@@ -252,6 +252,7 @@ const PRELUDE_TYPES: &[&str] = &[
     "HttpConn",
     "HttpProgress",
     "HttpRequest",
+    "HttpRequestHead",
     "HttpHeader",
     "HttpResponse",
     "HttpError",

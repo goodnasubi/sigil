@@ -146,6 +146,7 @@ pub const OPAQUE_TYPES: &[(&str, usize, Layer)] = &[
     ("HttpConn", 0, Layer::Os),
     ("HttpProgress", 0, Layer::Os),
     ("HttpRequest", 0, Layer::Os),
+    ("HttpRequestHead", 0, Layer::Os),
     ("HttpHeader", 0, Layer::Os),
     ("HttpResponse", 0, Layer::Os),
     ("HttpError", 0, Layer::Os),
@@ -296,6 +297,7 @@ pub const HTTP_TYPES: &[&str] = &[
     "HttpConn",
     "HttpProgress",
     "HttpRequest",
+    "HttpRequestHead",
     "HttpHeader",
     "HttpResponse",
     "HttpError",
@@ -1467,6 +1469,11 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ("held(self: &HttpParser) -> Int", "none"),
             ("in_body(self: &HttpParser) -> Bool", "none"),
             ("wants_continue(self: &HttpParser) -> Bool", "none"),
+            (
+                "request_head(self: &HttpParser) -> Option<HttpRequestHead>",
+                "none",
+            ),
+            ("head(self: &HttpParser) -> Option<HttpRequestHead>", "none"),
         ],
     ),
     (
@@ -1484,6 +1491,24 @@ pub const IMPLS: &[(Layer, &str, &[Entry])] = &[
             ),
             ("body(self: &HttpRequest) -> Bytes", "none"),
             ("body_len(self: &HttpRequest) -> Int", "none"),
+            ("head(self: &HttpRequest) -> HttpRequestHead", "none"),
+            ("request_head(self: &HttpRequest) -> HttpRequestHead", "none"),
+        ],
+    ),
+    (
+        Layer::Os,
+        "HttpRequestHead",
+        &[
+            ("method(self: &HttpRequestHead) -> String", "none"),
+            ("path(self: &HttpRequestHead) -> Bytes", "none"),
+            ("query(self: &HttpRequestHead) -> Bytes", "none"),
+            ("version(self: &HttpRequestHead) -> Int", "none"),
+            ("headers(self: &HttpRequestHead) -> List<HttpHeader>", "none"),
+            (
+                "header(self: &HttpRequestHead, name: &String) -> Option<Bytes>",
+                "none",
+            ),
+            ("bytes(self: &HttpRequestHead) -> Bytes", "none"),
         ],
     ),
     (
@@ -1899,6 +1924,8 @@ mod tests {
             "HttpParser.held",
             "HttpParser.in_body",
             "HttpParser.wants_continue",
+            "HttpParser.request_head",
+            "HttpParser.head",
             "HttpProgress",
             "HttpRequest",
             "HttpRequest.method",
@@ -1909,6 +1936,16 @@ mod tests {
             "HttpRequest.header",
             "HttpRequest.body",
             "HttpRequest.body_len",
+            "HttpRequest.head",
+            "HttpRequest.request_head",
+            "HttpRequestHead",
+            "HttpRequestHead.method",
+            "HttpRequestHead.path",
+            "HttpRequestHead.query",
+            "HttpRequestHead.version",
+            "HttpRequestHead.headers",
+            "HttpRequestHead.header",
+            "HttpRequestHead.bytes",
             "HttpHeader",
             "HttpHeader.name",
             "HttpHeader.value",
@@ -2104,6 +2141,7 @@ mod tests {
                         | "HttpParser"
                         | "HttpProgress"
                         | "HttpRequest"
+                        | "HttpRequestHead"
                         | "HttpHeader"
                         | "HttpResponse"
                         | "HttpError"

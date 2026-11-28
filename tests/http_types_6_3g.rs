@@ -35,6 +35,7 @@ fn value(src: &str) -> String {
 fn http_types_cannot_be_declared_or_forged() {
     for t in [
         "HttpRequest",
+        "HttpRequestHead",
         "HttpHeader",
         "HttpResponse",
         "HttpParser",

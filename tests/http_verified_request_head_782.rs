@@ -420,3 +420,49 @@ fn verified_request_head_empty_query_preserves_target() {
     );
     assert_eq!(value(&src), "400");
 }
+
+/// 要求対象（target）の内容が path / query と二重保持されず、ADR 0032 の「保持量は要求行・見出し・本文の上限の和を超えない」契約を満たすことの確認
+#[test]
+fn verified_request_head_memory_bound_held_no_duplication() {
+    let src = prog(
+        "",
+        r#"  let lim = http.default_limits();
+  let mut p = http.parser(&lim);
+
+  // 長い request-target: GET / + 'a'*29 + " HTTP/1.1\r\n"
+  // target は 30 バイト ("/aaaaaaaaaaaaaaaaaaaaaaaaaaaaa")、method は 3 バイト ("GET")
+  let line = "GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1\r\n".as_bytes();
+  match p.feed(&line, 0) {
+    Ok(_) => {}
+    Err(_) => { return 0 - 1; }
+  }
+
+  // 二重保持されていれば 3 + 30 + 30 = 63 になるが、
+  // target と分割位置のみの保持であれば 3 + 30 = 33 に抑えられる
+  let held = p.held();
+  if held != 33 {
+    return 0 - 2;
+  }
+
+  // 見出し終了まで進める（GET 要求なので \r\n\r\n で Done になる）
+  let head_end = "Host: example.com\r\n\r\n".as_bytes();
+  match p.feed(&head_end, 0) {
+    Ok(pr) => {
+      match pr {
+        HttpProgress.Done(req, _) => {
+          let head = req.head();
+          if head.target() != "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes() { return 0 - 4; }
+          if head.path() != "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaa".as_bytes() { return 0 - 5; }
+          if head.query().byte_len() != 0 { return 0 - 6; }
+        }
+        _ => { return 0 - 7; }
+      }
+    }
+    Err(_) => { return 0 - 3; }
+  }
+
+  return 500;"#,
+        "none",
+    );
+    assert_eq!(value(&src), "500");
+}

@@ -44,8 +44,7 @@ pub struct HttpHeader {
 pub struct HttpRequestHead {
   head_method: String,
   head_target: Bytes,
-  head_path: Bytes,
-  head_query: Bytes,
+  head_query_pos: Int,
   head_version: Int,
   head_headers: List<HttpHeader>,
 }
@@ -53,8 +52,7 @@ pub struct HttpRequestHead {
 pub struct HttpRequest {
   req_method: String,
   req_target: Bytes,
-  req_path: Bytes,
-  req_query: Bytes,
+  req_query_pos: Int,
   req_version: Int,
   req_headers: List<HttpHeader>,
   req_body: Bytes,
@@ -123,8 +121,7 @@ pub struct HttpParser {
   stored: Int,
   method: String,
   target: Bytes,
-  path: Bytes,
-  query: Bytes,
+  query_pos: Int,
   version: Int,
   headers: List<HttpHeader>,
   body: Bytes,
@@ -174,8 +171,7 @@ pub fn parser(limits: &HttpLimits) -> HttpParser
     stored: 0,
     method: "",
     target: Bytes.new(),
-    path: Bytes.new(),
-    query: Bytes.new(),
+    query_pos: -1,
     version: 0,
     headers: List.new(),
     body: Bytes.new(),
@@ -424,8 +420,7 @@ impl HttpParser {
       return Some(HttpRequestHead {
         head_method: self.method.clone(),
         head_target: self.target.clone(),
-        head_path: self.path.clone(),
-        head_query: self.query.clone(),
+        head_query_pos: self.query_pos,
         head_version: self.version,
         head_headers: self.headers.clone()
       });
@@ -451,8 +446,7 @@ impl HttpParser {
     let req = HttpRequest {
       req_method: self.method.clone(),
       req_target: self.target.clone(),
-      req_path: self.path.clone(),
-      req_query: self.query.clone(),
+      req_query_pos: self.query_pos,
       req_version: self.version,
       req_headers: self.headers.clone(),
       req_body: self.body.clone()
@@ -478,8 +472,7 @@ impl HttpParser {
     self.stored = 0;
     self.method = "";
     self.target = Bytes.new();
-    self.path = Bytes.new();
-    self.query = Bytes.new();
+    self.query_pos = -1;
     self.version = 0;
     self.headers = List.new();
     self.body = Bytes.new();
@@ -741,24 +734,18 @@ impl HttpParser {
         return 400;
       }
       self.target = "*".as_bytes();
-      self.path = "*".as_bytes();
-      self.query = Bytes.new();
+      self.query_pos = -1;
     } else if first == 47 {
       self.target = self.line.slice(s1 + 1, s2).unwrap_or(Bytes.new());
-      let mut q = s2;
-      i = s1 + 1;
-      while i < s2 && q == s2 {
-        if self.line.get(i).unwrap_or(0) == 63 {
+      let mut q = -1;
+      i = 0;
+      while i < self.target.byte_len() && q < 0 {
+        if self.target.get(i).unwrap_or(0) == 63 {
           q = i;
         }
         i = i + 1;
       }
-      self.path = self.line.slice(s1 + 1, q).unwrap_or(Bytes.new());
-      if q < s2 {
-        self.query = self.line.slice(q + 1, s2).unwrap_or(Bytes.new());
-      } else {
-        self.query = Bytes.new();
-      }
+      self.query_pos = q;
     } else {
       return 400;
     }
@@ -770,7 +757,7 @@ impl HttpParser {
         return 400;
       }
     }
-    self.stored = self.method.byte_len() + self.target.byte_len() + self.path.byte_len() + self.query.byte_len();
+    self.stored = self.method.byte_len() + self.target.byte_len();
     return 0;
   }
 
@@ -981,7 +968,10 @@ impl HttpRequest {
     ensures none
     effects none
   {
-    return self.req_path.clone();
+    if self.req_query_pos < 0 {
+      return self.req_target.clone();
+    }
+    return self.req_target.slice(0, self.req_query_pos).unwrap_or(Bytes.new());
   }
 
   pub fn query(self: &HttpRequest) -> Bytes
@@ -990,7 +980,10 @@ impl HttpRequest {
     ensures none
     effects none
   {
-    return self.req_query.clone();
+    if self.req_query_pos < 0 {
+      return Bytes.new();
+    }
+    return self.req_target.slice(self.req_query_pos + 1, self.req_target.byte_len()).unwrap_or(Bytes.new());
   }
 
   pub fn version(self: &HttpRequest) -> Int
@@ -1061,8 +1054,7 @@ impl HttpRequest {
     return HttpRequestHead {
       head_method: self.req_method.clone(),
       head_target: self.req_target.clone(),
-      head_path: self.req_path.clone(),
-      head_query: self.req_query.clone(),
+      head_query_pos: self.req_query_pos,
       head_version: self.req_version,
       head_headers: self.req_headers.clone()
     };
@@ -1103,7 +1095,10 @@ impl HttpRequestHead {
     ensures none
     effects none
   {
-    return self.head_path.clone();
+    if self.head_query_pos < 0 {
+      return self.head_target.clone();
+    }
+    return self.head_target.slice(0, self.head_query_pos).unwrap_or(Bytes.new());
   }
 
   pub fn query(self: &HttpRequestHead) -> Bytes
@@ -1112,7 +1107,10 @@ impl HttpRequestHead {
     ensures none
     effects none
   {
-    return self.head_query.clone();
+    if self.head_query_pos < 0 {
+      return Bytes.new();
+    }
+    return self.head_target.slice(self.head_query_pos + 1, self.head_target.byte_len()).unwrap_or(Bytes.new());
   }
 
   pub fn version(self: &HttpRequestHead) -> Int

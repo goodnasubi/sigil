@@ -81,7 +81,7 @@ Subject: <モチーフの説明>
 
 ---
 
-## モチーフ一覧表（全25リポジトリ）
+## モチーフ一覧表（全27リポジトリ）
 
 | リポジトリ | モチーフ |
 |---|---|
@@ -110,6 +110,8 @@ Subject: <モチーフの説明>
 | sigil-agora-post | 吹き出しが集まる広場の掲示板キャラ（SNS） |
 | sigil-mirror-pane | 鏡のキャラ（白雪姫の魔法の鏡。ブラウザ、製品名 Kagami）。キービジュアル6点（候補A〜E・G）を同フォルダに `sigil-mirror-pane-kv-*.png` として保持 |
 | sigil-atelier-desk | 設計図の巻物を抱えた見習いキャラ（IDE、製品名 Atelier）。キービジュアル3点（候補A〜C）を同フォルダに `sigil-atelier-desk-kv-*.png` として保持 |
+| sigil-polis-os | 家々の屋根並みを帽子にした子のキャラ（汎用OS、製品名 Machi）。キービジュアル3点（候補A・B・D）を同フォルダに `sigil-polis-os-kv-*.png` として保持 |
+| sigil-anima-llm | 青い魂の炎の精霊キャラ（LLM）。キービジュアル3点（候補B〜D）を同フォルダに `sigil-anima-llm-kv-*.png` として保持 |
 
 ## 生成状況（2026-11-23 時点）
 

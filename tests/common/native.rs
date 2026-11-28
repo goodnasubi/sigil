@@ -545,6 +545,7 @@ fn check_impl(
             embedded_extra: opts.embedded_extra.clone(),
             embedded_roots: opts.embedded_roots.clone(),
             wall_clock: opts.wall_clock,
+            monotonic_clock: opts.monotonic_clock,
         };
         // common のラッパーには戻らない。元の小スタックでの停止結果も書き換えない。
         recovered = match sigil::ir_eval::run_sources_with(srcs, func, &args, &replay_opts) {

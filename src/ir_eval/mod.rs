@@ -90,6 +90,7 @@ struct M<'p> {
     globals: Vec<Slot>,
     /// 壁時計取得のテスト用の差し替え（ADR 0037 段階 6-6a）。
     wall_clock: Option<Result<i64, i64>>,
+    monotonic_clock: Option<Result<i64, i64>>,
     /// 確保済みチャンクの境界情報（番地 -> 塊。由来タグ付き。ADR 0025 補足 A-3）。
     /// スケジューラ内の全ハンドル（Lock 等）や大域変数が破棄された後に解放されるよう末尾に置く。
     chunks: BTreeMap<usize, Chunk>,
@@ -481,6 +482,7 @@ fn execute_roots(
         argv: &opts.argv,
         exit_drops: Vec::new(),
         wall_clock: opts.wall_clock,
+        monotonic_clock: opts.monotonic_clock,
         opt: find("Option"),
         res: find("Result"),
         io: find("IoError"),

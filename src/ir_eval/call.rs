@@ -1224,26 +1224,31 @@ impl<'p> M<'p> {
                 let a4 = self.read_int(locals, &args[5]);
                 let a5 = self.read_int(locals, &args[6]);
                 self.check_syscall(n, [a0, a1, a2, a3, a4, a5], loc)?;
-                let ret = if let (SYS_CLOCK_GETTIME, CLOCK_REALTIME, Some(injected)) =
-                    (n, a0, self.wall_clock)
-                {
+                let clock = match (n, a0) {
+                    (SYS_CLOCK_GETTIME, CLOCK_REALTIME) => {
+                        self.wall_clock.map(|t| t.map(|sec| (sec, 0)))
+                    }
+                    (SYS_CLOCK_GETTIME, CLOCK_MONOTONIC) => self.monotonic_clock.map(|t| {
+                        t.map(|nanos| {
+                            (
+                                nanos.div_euclid(1_000_000_000),
+                                nanos.rem_euclid(1_000_000_000),
+                            )
+                        })
+                    }),
+                    _ => None,
+                };
+                let ret = if let Some(injected) = clock {
                     match injected {
-                        Ok(sec) => {
+                        Ok((sec, nanos)) => {
                             let tp = a1 as usize as *mut i64;
                             unsafe {
                                 tp.write(sec);
-                                tp.add(1).write(0);
+                                tp.add(1).write(nanos);
                             }
                             0
                         }
-                        Err(err) => {
-                            let code = err.abs();
-                            if code == 0 {
-                                -1
-                            } else {
-                                -code
-                            }
-                        }
+                        Err(err) => -err.saturating_abs().max(1),
                     }
                 } else if (self.fs.is_some() || self.fs_bytes.is_some())
                     && matches!(
